@@ -103,6 +103,12 @@ pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
     SETTINGS.iter().map(|s| s.0).find(|label| flat(label) == flat(name))
 }
 
+/// The quick box (Super+H): its width, the room under its content for the
+/// closing hint, and its least height — design pixels.
+const QUICK_W: f32 = 620.0;
+const QUICK_FOOT: f32 = 44.0;
+const QUICK_MIN_H: f32 = 170.0;
+
 /// How long the settings and the modules take to trade places.
 const PANEL_SWAP_SECS: f32 = 0.30;
 
@@ -592,9 +598,76 @@ pub(crate) struct Panel {
     /// [`crate::controls`]'; `control_ask`: it wants reading.
     control: Option<ControlView>,
     control_ask: bool,
+    /// ONE setting in a box of its own (the quick controls' box, Super+H):
+    /// no field of pills, only the open setting.
+    solo: bool,
 }
 
 impl Panel {
+    /// A panel that only ever shows one open setting, in a box of its own
+    /// (see `fast_launch.rs`, the quick controls). Its standings are the
+    /// settings panel's: it keeps none.
+    pub(crate) fn solo() -> Self {
+        Self { items: &SETTINGS, solo: true, ..Self::default() }
+    }
+
+    /// Open `label` in the solo box, growing out of `from` (field-relative).
+    pub(crate) fn open_solo(&mut self, label: &str, from: Rect) -> bool {
+        let Some(i) = self.pills.iter().position(|p| p.label == label) else {
+            return false;
+        };
+        self.open = Some(OpenBox { pill: i, k: 0.0, want: 1.0, from });
+        self.control = None;
+        self.control_ask = crate::controls::is_control(self.pills[i].label);
+        if is_display_setting(self.pills[i].label) {
+            self.display_at = Some(Instant::now());
+        }
+        true
+    }
+
+    /// Fold the solo box away.
+    pub(crate) fn close_solo(&mut self) {
+        if let Some(open) = &mut self.open {
+            open.want = 0.0;
+        }
+    }
+
+    /// Whether a setting is (still) on show, and whether it is folding.
+    pub(crate) fn solo_up(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// How open the box is, 0..1.
+    pub(crate) fn solo_k(&self) -> f32 {
+        self.open.as_ref().map_or(0.0, |o| o.k)
+    }
+
+    /// How tall the open setting's content is, from the field's top.
+    pub(crate) fn open_height(&self) -> Option<f32> {
+        let label = self.pills[self.open.as_ref()?.pill].label;
+        Some(self.open_content(label)?.foot_y)
+    }
+
+    /// How much a setting is used (the game's score, fading with time), as
+    /// a whole number to rank by; and one more use of it.
+    pub(crate) fn use_count(&self, label: &str) -> u32 {
+        self.usage.settings.get(label).map_or(0, |st| (st.score_at(now_secs()) * 100.0) as u32)
+    }
+
+    pub(crate) fn note_use(&mut self, label: &'static str) {
+        match self.pills.iter().position(|p| p.label == label) {
+            Some(i) => self.record_use(i, now_secs()),
+            None => {
+                let now = now_secs();
+                let st = self.usage.settings.entry(label.to_owned()).or_default();
+                *st = Standing { layer: st.layer, score: st.score_at(now) + 1.0, at: now };
+                if let Some(path) = &self.store {
+                    crate::persist::write_json("control panel", path, &self.usage);
+                }
+            }
+        }
+    }
+
     /// The panel with its saved arrangement (`control-panel.json`).
     pub(crate) fn load() -> Self {
         Self::load_with(&SETTINGS, false, "control-panel.json")
@@ -938,6 +1011,16 @@ impl Panel {
     pub(crate) fn open_control_label(&self) -> Option<&'static str> {
         let label = self.pills[self.open.as_ref()?.pill].label;
         (!self.modules && crate::controls::is_control(label)).then_some(label)
+    }
+
+    /// The names of the settings that have real content, in the panel's
+    /// order: what the quick controls search.
+    pub(crate) fn real_settings() -> Vec<(&'static str, &'static str)> {
+        SETTINGS
+            .iter()
+            .filter(|s| is_display_setting(s.0) || crate::controls::is_control(s.0))
+            .map(|s| (s.0, s.2))
+            .collect()
     }
 
     /// The open setting as last read.
@@ -1457,7 +1540,7 @@ impl Panel {
         self.clock += dt;
         self.pointer = pointer;
         if let Some(open) = &mut self.open {
-            if open.want == 0.0 {
+            if open.want == 0.0 && !self.solo {
                 // Fold back into where the pill is now: the game may have
                 // moved it to another layer while it was open.
                 let p = &self.pills[open.pill];
@@ -1537,6 +1620,10 @@ impl Panel {
         };
         order.sort_by_key(|&i| rank(&self.pills[i]));
 
+        // (One setting in a box of its own: no field behind it.)
+        if self.solo {
+            order.clear();
+        }
         for i in order {
             let p = &self.pills[i];
             let d = p.drawn as usize;
@@ -2383,7 +2470,7 @@ impl App {
                 Some(PanelAction::Mode { w, h, hz }) => self.set_display_mode(w, h, hz),
                 Some(PanelAction::Keep) => self.keep_display(),
                 Some(PanelAction::Revert) => self.revert_display(),
-                Some(PanelAction::Pick { group, index }) => self.control_pick(group, index),
+                Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, false),
                 None => {}
             }
             self.schedule_frame();
@@ -2421,7 +2508,8 @@ impl App {
     fn on_control_event(&mut self, ev: ControlEvent) {
         match ev {
             ControlEvent::View(view) => {
-                if self.settings_panel_mut().set_control(view) {
+                // The settings field's open setting, or the quick box's.
+                if self.settings_panel_mut().set_control(view.clone()) || self.quick.set_control(view) {
                     self.schedule_frame();
                 }
             }
@@ -2435,6 +2523,8 @@ impl App {
                 info!("control panel: the shell speaks another language from now");
                 self.panel.relabel();
                 self.panel_parked.relabel();
+                self.quick.relabel();
+                self.quick.control_ask = true;
                 // The open setting was read in the old language.
                 self.settings_panel_mut().control_ask = true;
                 self.schedule_frame();
@@ -2451,15 +2541,23 @@ impl App {
                 view.groups.iter().map(|g| format!("{}×{}", g.key, g.choices.len())).collect();
             info!("control panel: {} · {:?} · groups {shape:?}", view.label, view.subtitle);
         }
-        self.control_pick(group, index);
+        // (The quick box's setting, when that is what is up.)
+        let quick = self.fast.boxed.is_some();
+        if quick {
+            if let Some(view) = self.quick.control_view() {
+                info!("quick controls: {} · {:?}", view.label, view.subtitle);
+            }
+        }
+        self.control_pick(group, index, quick);
         self.schedule_frame();
     }
 
     /// A choice of an open setting was clicked: the ones that are this
     /// thread's to make are made here, the rest go to the worker; either
     /// way the setting is read again.
-    fn control_pick(&mut self, group: u8, index: u8) {
-        let Some((label, key, value)) = self.panel.control_pick(group, index) else {
+    fn control_pick(&mut self, group: u8, index: u8, quick: bool) {
+        let panel = if quick { &mut self.quick } else { &mut self.panel };
+        let Some((label, key, value)) = panel.control_pick(group, index) else {
             return;
         };
         info!("control panel: {label}: {key} = {value}");
@@ -2486,8 +2584,13 @@ impl App {
                     "bat" => PageKind::Battery,
                     _ => PageKind::Gear,
                 };
-                // The card folds away and the gear box takes over.
-                self.handle_command(Command::Collapse);
+                // The card (or the quick box) folds away and the gear box
+                // takes over.
+                if quick {
+                    self.close_fast_launch();
+                } else {
+                    self.handle_command(Command::Collapse);
+                }
                 if !self.stats_show_page(kind) {
                     info!("control panel: this machine has no {value} page");
                 }
@@ -2497,6 +2600,100 @@ impl App {
         }
         let ui = self.ui_facts();
         self.controls_send(ControlCommand::Read(label, ui));
+    }
+
+    /// THE QUICK BOX (Super+H, see `fast_launch.rs`): one setting in a box
+    /// of its own mid-screen. Opens `label` growing out of `from` (the quick
+    /// controls' card, in surface coordinates).
+    pub(crate) fn quick_open(&mut self, label: &'static str, from: Rect) {
+        let rect = self.quick_rect();
+        self.quick_ensure(rect);
+        let from = Rect::new(from.x - rect.x, from.y - rect.y, from.w, from.h);
+        if self.quick.open_solo(label, from) {
+            self.settings_panel_mut().note_use(label);
+            info!("quick controls: opening {label}");
+        }
+        self.schedule_frame();
+    }
+
+    /// Where the quick box is: centred where the quick controls' card is, as
+    /// wide as a setting needs and as tall as the one that is open.
+    pub(crate) fn quick_rect(&self) -> Rect {
+        let s = self.options_scale();
+        let g = self.fast_geometry();
+        let (sw, sh) = (self.buffer_size.0 as f32, self.buffer_size.1 as f32);
+        let w = (QUICK_W * s).min(sw - 40.0 * s).max(200.0);
+        let h = (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(sh - 20.0 * s);
+        let (cx, cy) = (g.card.x + g.card.w / 2.0, g.card.y + g.card.h / 2.0);
+        let y = (cy - h / 2.0).clamp(10.0 * s, (sh - h - 10.0 * s).max(10.0 * s));
+        Rect::new(cx - w / 2.0, y, w, h)
+    }
+
+    fn quick_ensure(&mut self, rect: Rect) {
+        let scale = self.options_scale();
+        let pill_h = self.options_pill_h();
+        if let Some(r) = self.renderer.as_mut() {
+            let mut measure = |t: &str, px: f32| r.measure_text(t, px, TEXT_FONT);
+            // (Laid out for the box's WIDTH only: its height follows the
+            // setting, and a new height must not lay the field out again.)
+            self.quick.ensure((rect.w, QUICK_MIN_H * scale), scale, pill_h, &mut measure);
+        }
+        self.quick.field = rect;
+    }
+
+    /// One frame of the quick box: its rect, how present it is (0..1) and
+    /// what it draws. `None`: no box.
+    pub(crate) fn quick_frame(&mut self, dt: f32, paint: PanelPaint) -> Option<(Rect, f32, PanelDraw)> {
+        if !self.quick.solo_up() {
+            return None;
+        }
+        let rect = self.quick_rect();
+        self.quick_ensure(rect);
+        if self.quick.display_due() {
+            let view = self.display_view();
+            self.quick.set_display(view);
+        }
+        self.quick.keep_left = self.display_keep_left();
+        if let Some(label) = self.quick.control_due() {
+            let ui = self.ui_facts();
+            self.controls_send(ControlCommand::Read(label, ui));
+        }
+        let pointer = self.pointer_pos;
+        self.quick.step(dt, pointer);
+        let k = self.quick.solo_k();
+        // Folded all the way: the quick controls are over.
+        if !self.quick.solo_up() {
+            if self.fast.boxed.take().is_some() && self.fast.open {
+                self.close_fast_launch();
+            }
+            return None;
+        }
+        let draw = self.quick.draw(paint);
+        Some((rect, smoothstep((k / 0.6).clamp(0.0, 1.0)), draw))
+    }
+
+    /// A click while the quick box is up: a choice is picked; the box's own
+    /// empty space does nothing; anywhere else closes it.
+    pub(crate) fn quick_click(&mut self, pos: (f32, f32)) {
+        let rect = self.quick_rect();
+        if !rect.contains(pos) {
+            self.quick.close_solo();
+            self.schedule_frame();
+            return;
+        }
+        let Some(label) = self.quick.open.as_ref().map(|o| self.quick.pills[o.pill].label) else {
+            return;
+        };
+        if let Some(Some(action)) = self.quick.open_hit(label, pos) {
+            match action {
+                PanelAction::Scale(scale) => self.set_display_scale(scale),
+                PanelAction::Mode { w, h, hz } => self.set_display_mode(w, h, hz),
+                PanelAction::Keep => self.keep_display(),
+                PanelAction::Revert => self.revert_display(),
+                PanelAction::Pick { group, index } => self.control_pick(group, index, true),
+            }
+        }
+        self.schedule_frame();
     }
 
     /// Open the control panel on the setting `label`, from wherever the

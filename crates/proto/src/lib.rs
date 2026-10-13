@@ -242,6 +242,9 @@ pub enum Command {
     /// Open (or close) FAST LAUNCH: one bubble mid-screen, an apps-only
     /// search that launches a new instance in a few letters (Super+Alt+Space).
     FastLaunch,
+    /// Super+H: the quick controls — fast launch for the control panel's
+    /// settings; Enter opens the one in front in a box mid-screen.
+    FastControls,
 }
 
 impl fmt::Display for Command {
@@ -302,6 +305,7 @@ impl fmt::Display for Command {
             Command::MinDel(a) => write!(f, "min-del {a}"),
             Command::WindowPlaced(a) => write!(f, "window-placed {a}"),
             Command::FastLaunch => f.write_str("fast-launch"),
+            Command::FastControls => f.write_str("fast-controls"),
         }
     }
 }
@@ -390,6 +394,7 @@ impl FromStr for Command {
             )),
             "control-panel" | "settings" => Ok(Command::ControlPanel),
             "fast-launch" => Ok(Command::FastLaunch),
+            "fast-controls" => Ok(Command::FastControls),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -581,7 +586,8 @@ mod tests {
                 | Command::MinAdd(_)
                 | Command::MinDel(_)
                 | Command::WindowPlaced(_)
-                | Command::FastLaunch => (),
+                | Command::FastLaunch
+                | Command::FastControls => (),
             }
         }
         vec![

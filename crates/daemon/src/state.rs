@@ -233,7 +233,7 @@ impl UiState {
             | Command::MinAdd(_)
             | Command::MinDel(_)
             | Command::WindowPlaced(_)
-            | Command::FastLaunch => false,
+            | Command::FastLaunch | Command::FastControls => false,
         }
     }
 

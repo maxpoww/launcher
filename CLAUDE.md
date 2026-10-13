@@ -218,6 +218,19 @@ The big daemon files are cohesive but long — go straight to the function:
   counted from 0; a pick of a place that is not there logs what is). ⚠ in a test rig these picks
   are REAL for what is not the compositor's: never pick volume, Wi-Fi, Bluetooth, dark mode or a
   power mode from a rig that can reach the live session's PipeWire or buses.
+- QUICK CONTROLS (Max, 2026-10-13, Super+H → `waverunner-ctl fast-controls`): FAST LAUNCH for the
+  control panel's settings — the same card, motion and ranking (`fast_launch.rs`,
+  `FastLaunch::controls`): it opens on the three settings used most, each a round pill with its
+  sign (`control_glyph`) where an app's icon would be, the front one's name written under it with
+  what was typed bright; names match in the shell's language and in English, then by keyword; ties
+  go to the setting used most (the settings panel's own standings, `Panel::use_count`). Enter (or a
+  click) opens the one in front IN A BOX OF ITS OWN mid-screen (`fast.boxed`, `App::quick_open`):
+  a third `Panel` in solo mode (`Panel::solo` — no field of pills, only the open setting, drawn by
+  the same `open_content`/`draw_open`), growing out of the card, as tall as its content
+  (`quick_rect`), on the dock's colour nearly solid (`content::QuickDraw`). A click on a choice
+  picks it (`quick_click` → the same `control_pick`); Escape, a click outside or Super+H again
+  folds it. Pointer-free: `fast-controls`, `debug-query <letters>` types, `debug-query <letters>!`
+  also presses Enter, `display pick <group> <n>` picks in the box.
 - `i18n.rs` + `tools/i18n/` — THE SHELL'S LANGUAGES (2026-10-13). Every visible string goes
   through `tr("English")`, a sentence with values through `fill(tr("… {name} …"), &[("name",
   &v)])`; the catalogue is `assets/i18n/<tag>.json`, built into the binary (Spanish is whole).

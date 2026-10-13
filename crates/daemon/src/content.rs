@@ -619,6 +619,24 @@ pub struct DockOverflow {
     pub max_off: f32,
 }
 
+/// The QUICK BOX (Super+H, `panel.rs`): one setting in a box of its own
+/// mid-screen — where, how present (0..1), and what the panel drew for it.
+#[derive(Clone, Copy)]
+pub struct QuickDraw<'a> {
+    pub rect: Rect,
+    pub a: f32,
+    pub draw: &'a crate::panel::PanelDraw,
+}
+
+impl std::fmt::Debug for QuickDraw<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "QuickDraw {{ rect: {:?}, a: {} }}", self.rect, self.a)
+    }
+}
+
+/// How solid the quick box is at least.
+const QUICK_FILL: f32 = 0.93;
+
 /// What FAST LAUNCH draws this frame (see `fast_launch.rs`).
 #[derive(Debug, Clone, Copy)]
 pub struct FastDraw<'a> {
@@ -629,6 +647,9 @@ pub struct FastDraw<'a> {
     pub a: f32,
     /// The bare icons in draw order (the front one last): entry, rect.
     pub icons: &'a [(usize, Rect)],
+    /// QUICK CONTROLS: in the icons' places, a round pill each with its
+    /// setting's sign (the front one last).
+    pub glyphs: &'a [(&'static str, Rect)],
     /// The word: what you typed (bright) then the rest of the name
     /// (dimmed), their shaped widths, the box it is centred in.
     pub typed: &'a str,
@@ -1404,6 +1425,7 @@ pub struct FrameInput<'a> {
     pub control_modules: &'a [bool],
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
+    pub quick: Option<QuickDraw<'a>>,
     /// AGUA stretch factor (1.0 at rest): dock icons slosh vertically
     /// about their baseline with the card's motion — on the dock
     /// reveal, and at the top of the card as an open lands.
@@ -1679,6 +1701,7 @@ pub fn scene(
         control_lift,
         control_modules,
         fast,
+        quick,
         stretch,
         dock_tooltip,
         alpha,
@@ -3277,6 +3300,35 @@ pub fn scene(
                 plate: NO_PLATE, // the card is its plate
             });
         }
+        // QUICK CONTROLS: a round pill each, the bar's own (a wash of the
+        // ink, its sign in the middle); the front one, drawn last, stronger.
+        for (n, &(glyph, rect)) in f.glyphs.iter().enumerate() {
+            let front = n + 1 == f.glyphs.len();
+            let side = rect.w.min(rect.h) * if front { 0.86 } else { 0.8 };
+            let pill = Rect::new(rect.x + (rect.w - side) / 2.0, rect.y + (rect.h - side) / 2.0, side, side);
+            let wash = if front { 0.22 } else { 0.13 };
+            scene.rects.push(RectInst {
+                rect: pill,
+                radius: side / 2.0,
+                color: [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * wash * a],
+                glass: 0.0,
+                border: 0.0,
+            });
+            let px = side * 0.46;
+            scene.labels.push(Label {
+                text: glyph.to_owned(),
+                pos: (pill.x + side / 2.0, pill.y + (side - px * 1.2) / 2.0),
+                max_w: side,
+                font_px: px,
+                line_px: px * 1.2,
+                centered: true,
+                dim: false,
+                cache: false,
+                family: Some(crate::options::NERD),
+                color: Some([dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * if front { 0.95 } else { 0.6 } * a]),
+                clip: None,
+            });
+        }
         // The whole word centred (it never jumps as you type: "sp" already
         // sits where "Spotify" will be), and always whole (Max, 2026-10-02:
         // "the titles dont show complete"): the card widens round a long
@@ -3322,6 +3374,29 @@ pub fn scene(
         let ink = |k: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * a];
         word(f.typed, left, ink(0.95));
         word(f.rest, left + f.typed_w, ink(0.4));
+    }
+
+    // THE QUICK BOX: one setting mid-screen. The dock's own colour, nearly
+    // solid — its words must read over whatever window is behind — with the
+    // rim the plates wear; the panel's drawing on it.
+    if let Some(q) = quick.filter(|q| q.a > 0.0) {
+        let mut fill = dock_bg;
+        fill[3] = fill[3].max(QUICK_FILL) * q.a;
+        let radius = BOX_CORNER_RADIUS;
+        scene.rects.push(RectInst { rect: q.rect, radius, color: fill, glass: 0.0, border: 0.0 });
+        scene.rects.push(RectInst { rect: q.rect, radius, color: plate_rim(fill), glass: 0.0, border: 1.0 });
+        for r in &q.draw.rects {
+            let mut r = *r;
+            r.color[3] *= q.a;
+            scene.rects.push(r);
+        }
+        for l in &q.draw.labels {
+            let mut l = l.clone();
+            if let Some(c) = &mut l.color {
+                c[3] *= q.a;
+            }
+            scene.labels.push(l);
+        }
     }
 
     // Ghost of a box member being reordered, following the pointer (topmost).

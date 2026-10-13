@@ -212,6 +212,44 @@ pub(crate) struct FastLaunch {
     /// opening's watch from a previous one's.
     pub touched: Option<std::time::Instant>,
     pub idle_gen: u32,
+    /// QUICK CONTROLS (Max, 2026-10-13, Super+H): the same card, searching
+    /// the control panel's settings instead of the apps — `matches` and the
+    /// places then hold places in [`crate::panel::Panel::real_settings`],
+    /// each drawn as a round pill with its sign. Enter opens the one in
+    /// front in a box of its own mid-screen (`boxed`: which, while it is up;
+    /// the card is away meanwhile and the keys are the box's).
+    pub controls: bool,
+    pub boxed: Option<&'static str>,
+}
+
+/// A setting's sign on its round pill (the icon font), by its name.
+pub(crate) fn control_glyph(label: &str) -> &'static str {
+    match label {
+        "Resolution" => "\u{f108}",
+        "Scale" => "\u{f00e}",
+        "Wi-Fi" => "\u{f1eb}",
+        "Sound output" => "\u{f028}",
+        "Dark mode" => "\u{f186}",
+        "Brightness" => "\u{f185}",
+        "Bluetooth" => "\u{f294}",
+        "Volume" => "\u{f027}",
+        "Wallpaper" => "\u{f03e}",
+        "Night light" => "\u{f0eb}",
+        "Notifications" => "\u{f0f3}",
+        "Keyboard layout" => "\u{f11c}",
+        "Power mode" => "\u{f0e7}",
+        "Touchpad speed" => "\u{f245}",
+        "Language" => "\u{f1ab}",
+        "Time zone" => "\u{f017}",
+        "Natural scrolling" => "\u{f07d}",
+        "Updates" => "\u{f021}",
+        "About Golem" => "\u{f05a}",
+        "Microphone" => "\u{f130}",
+        "Battery" => "\u{f240}",
+        "Default apps" => "\u{f009}",
+        "Privacy" => "\u{f023}",
+        _ => "\u{f013}",
+    }
 }
 
 /// How long the bubble stays up with nothing happening (3 s; 2 s was tried and taken back).
@@ -484,8 +522,29 @@ pub(crate) fn geometry(surface: (f32, f32), screen_h: f32, scale: f32) -> Geo {
 }
 
 impl App {
+    /// Super+H: the quick controls — the bubble over the control panel's
+    /// settings. Up already as that: closed; up as the launcher: it turns.
+    pub(crate) fn toggle_fast_controls(&mut self) {
+        if self.fast.open && self.fast.controls {
+            self.close_fast_launch();
+            return;
+        }
+        if self.fast.open {
+            self.fast.open = false;
+        }
+        self.toggle_fast_launch();
+        self.fast.controls = true;
+        self.fast.sel = 0;
+        self.fast_rematch();
+    }
+
     /// Super+Alt+Space: open the bubble, or close it if it is up.
     pub(crate) fn toggle_fast_launch(&mut self) {
+        if self.fast.open && self.fast.controls {
+            // The quick controls are up: the launcher takes their place.
+            self.fast.open = false;
+            self.quick.close_solo();
+        }
         if self.fast.open {
             self.close_fast_launch();
             return;
@@ -529,7 +588,8 @@ impl App {
                 return calloop::timer::TimeoutAction::Drop;
             }
             let idle = app.fast.touched.map_or(IDLE_CLOSE, |t| t.elapsed());
-            if idle >= IDLE_CLOSE && app.fast.enter.is_none() {
+            // (A setting open in its box stays until it is closed.)
+            if idle >= IDLE_CLOSE && app.fast.enter.is_none() && app.fast.boxed.is_none() {
                 app.close_fast_launch();
                 return calloop::timer::TimeoutAction::Drop;
             }
@@ -551,6 +611,8 @@ impl App {
             return;
         }
         self.fast.open = false;
+        self.fast.boxed = None;
+        self.quick.close_solo();
         if self.interactive && self.ui.target() != crate::state::Target::Open {
             self.begin_keyboard_handback(KbSurface::Launcher, None);
             crate::surface::set_interactive(&self.layer, false);
@@ -563,6 +625,32 @@ impl App {
     /// Re-rank for the current query: apps only, the real ones (no catalog
     /// webapps, no Apps button / control panel / Bin, no transients).
     pub(crate) fn fast_rematch(&mut self) {
+        if self.fast.controls {
+            // The settings, ranked as the apps are: by their name in the
+            // shell's language or in English, then by a word they are
+            // looked for by; ties to the one used most.
+            let all = crate::panel::Panel::real_settings();
+            let q = self.fast.query.trim().to_lowercase();
+            let mut hits: Vec<(u8, u32, usize, usize)> = all
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (label, keywords))| {
+                    let shown = crate::i18n::tr(label).to_lowercase();
+                    let tier = if q.is_empty() {
+                        1
+                    } else {
+                        let by_word = q.chars().count() >= ANYWHERE_FROM
+                            && (keywords.contains(&q) || crate::i18n::tr(keywords).contains(&q));
+                        match_tier(&shown, &q).max(match_tier(&label.to_lowercase(), &q)).max(u8::from(by_word))
+                    };
+                    (tier > 0).then(|| (tier, self.settings_panel().use_count(label), shown.len(), i))
+                })
+                .collect();
+            hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+            self.fast.matches = hits.into_iter().map(|(.., i)| i).collect();
+            self.fast.sel = self.fast.sel.min(self.fast.shown().len().saturating_sub(1));
+            return;
+        }
         let candidates: Vec<usize> = (0..self.base_len.min(self.entries.len()))
             .filter(|&i| {
                 self.kinds.get(i) == Some(&apps::EntryKind::App)
@@ -583,6 +671,14 @@ impl App {
     /// A key while the bubble is open: it takes every key.
     pub(crate) fn fast_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
         self.fast_touch();
+        // A setting is open in its box: Escape folds it; nothing is typed.
+        if self.fast.boxed.is_some() {
+            if keysym == Keysym::Escape {
+                self.quick.close_solo();
+                self.schedule_frame();
+            }
+            return;
+        }
 
         match keysym {
             Keysym::Escape => self.close_fast_launch(),
@@ -659,6 +755,17 @@ impl App {
         let Some(idx) = pick else {
             return;
         };
+        if self.fast.controls {
+            // The setting in front opens in its box, growing out of the card.
+            let Some(&(label, _)) = crate::panel::Panel::real_settings().get(idx) else {
+                return;
+            };
+            let from = self.fast.view(&self.fast_geometry()).card;
+            self.fast.boxed = Some(label);
+            self.fast.enter = None;
+            self.quick_open(label, from);
+            return;
+        }
         self.fast.open = false;
         // Always a NEW instance — the box's rule: you asked to launch.
         self.activate(idx, LaunchFrom::Box);
@@ -779,6 +886,11 @@ impl App {
 
     /// The word in the card (see [`words`]).
     pub(crate) fn fast_words(&self) -> (String, String) {
+        if self.fast.controls {
+            let all = crate::panel::Panel::real_settings();
+            let name = self.fast.places[0].entry.and_then(|e| all.get(e)).map(|s| crate::i18n::tr(s.0));
+            return words(name, &self.fast.query);
+        }
         let name = self.fast.places[0].entry.and_then(|e| self.entries.get(e)).map(|e| e.name.as_str());
         words(name, &self.fast.query)
     }

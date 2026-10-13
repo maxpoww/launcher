@@ -826,6 +826,7 @@ fn main() -> anyhow::Result<()> {
         panel: panel::Panel::load(),
         controls: None,
         module_job: None,
+        quick: panel::Panel::solo(),
         panel_parked: panel::Panel::load_modules(),
         panel_swap_t: 1.0,
         panel_mix: 0.0,
@@ -1944,6 +1945,8 @@ pub struct App {
     controls: Option<controls::ControlsHandle>,
     /// The module whose Apply is on its way through the rebuild.
     module_job: Option<modules::ModuleJob>,
+    /// The quick controls' box (Super+H): one setting, mid-screen.
+    quick: panel::Panel,
     /// The field not on show: the card shows one field at a time — the
     /// settings or the MODULES — and `panel_switch` trades them.
     panel_parked: panel::Panel,
@@ -2839,6 +2842,18 @@ impl App {
             }
             // While FAST LAUNCH is up the query is typed into its bubble.
             Command::DebugQuery(query) if self.fast.open => {
+                // (A query ending in "!" also presses Enter on the front one:
+                // the quick controls' box without a keyboard.)
+                let enter = query.ends_with('!');
+                let query = query.trim_end_matches('!').to_owned();
+                if enter {
+                    self.fast.query = query;
+                    self.fast.sel = 0;
+                    self.fast_rematch();
+                    self.fast_launch_pick(None);
+                    self.schedule_frame();
+                    return;
+                }
                 self.fast.query = query;
                 self.fast.sel = 0;
                 self.fast_rematch();
@@ -3086,6 +3101,10 @@ impl App {
             // window memory notes its new size and place now.
             Command::FastLaunch => {
                 self.toggle_fast_launch();
+                return;
+            }
+            Command::FastControls => {
+                self.toggle_fast_controls();
                 return;
             }
             Command::WindowPlaced(addr) => {
@@ -7279,7 +7298,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             wl_pointer::Event::Button { button, state, .. } if button == BTN_LEFT && app.fast.open => {
                 if state == WEnum::Value(wl_pointer::ButtonState::Released) {
                     if let Some(pos) = app.pointer_pos {
-                        app.fast_click(pos);
+                        if app.fast.boxed.is_some() {
+                            app.quick_click(pos);
+                        } else {
+                            app.fast_click(pos);
+                        }
                     }
                 }
             }

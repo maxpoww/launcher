@@ -1299,11 +1299,32 @@ impl App {
             fit_animating = true;
         }
         let fast_view = self.fast.view(&fast_geo);
-        let fast_draw = self.fast.visible().then_some(content::FastDraw {
+        // QUICK CONTROLS: the same card with the settings' round pills in the
+        // icons' places; and, once one is opened, its box instead of the card.
+        let fast_glyphs: Vec<(&'static str, content::Rect)> = if self.fast.controls {
+            let all = crate::panel::Panel::real_settings();
+            fast_view
+                .icons
+                .iter()
+                .filter_map(|&(i, r)| all.get(i).map(|s| (crate::fast_launch::control_glyph(s.0), r)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let quick = {
+            let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+            self.quick_frame(dt, crate::panel::PanelPaint { ink: dock_ink, bright })
+        };
+        if quick.is_some() {
+            fit_animating = true;
+        }
+        let quick_draw = quick.as_ref().map(|(rect, a, draw)| content::QuickDraw { rect: *rect, a: *a, draw });
+        let fast_draw = (self.fast.visible() && self.fast.boxed.is_none()).then_some(content::FastDraw {
             card: fast_view.card,
             radius: fast_geo.radius,
             a: fast_view.card_a,
-            icons: &fast_view.icons,
+            icons: if self.fast.controls { &[] } else { &fast_view.icons },
+            glyphs: &fast_glyphs,
             typed: &fast_typed,
             rest: &fast_rest,
             typed_w: fast_typed_w,
@@ -1334,6 +1355,7 @@ impl App {
                 query_px,
                 search_pill,
                 fast: fast_draw,
+                quick: quick_draw,
                 controls: &self.search.controls,
                 control_modules: &self.search.control_modules,
                 control_lift: &self.search.control_lift,
