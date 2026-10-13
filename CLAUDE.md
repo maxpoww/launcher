@@ -769,7 +769,17 @@ The big daemon files are cohesive but long — go straight to the function:
   another app's to it; over the DOCK it is "ours" (`Filer::dragging` in `desktop_drag_dock_pos`,
   `desktop_dnd_enter`, `desktop_dnd_drop`): the bin opens and takes it. Rig verbs: `files band
   <x0> <y0> <x1> <y1>`, `unband`, `drop <n|-> <path…>` (the bringing-in only — the wire itself
-  needs a real pointer). NOT BUILT: the bin as a place, a drag's auto-scroll and spring-open. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
+  needs a real pointer). THE BIN is a place (`bin_root` =
+  `Trash/files`, read through the trash's own records — `list_bin`: the names things had, newest
+  first; `Win::in_bin` → `InBin`): its menu is Open · Put back · Delete for good, the ground's
+  Empty the bin (`Action::PutBack|Erase|EmptyBin`; what cannot be undone is asked once — the row
+  turns to "Click again to delete", `Win::armed`; a thing is never put back over one that took
+  its place); nothing is made, named or pasted there. A drag can be let go ON A PLACE
+  (`Win::drop_place`), and into the bin — its place or its window — means thrown away
+  (`filer_bring`). THE TILE: `materialize_entry` writes `golem-files.desktop` ("Golem Files",
+  `Exec=<the ctl beside the daemon> files`, `StartupWMClass=golem-files`) at start; it claims no
+  file type. NOT BUILT: a drag's auto-scroll and spring-open, list view, search,
+  `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
   <px>|hidden|menu [<n>]|pick <row>|copy|cut|paste|newfolder|rename <n>|bin|props <n>|close|state`

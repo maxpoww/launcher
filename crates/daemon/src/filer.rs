@@ -113,6 +113,37 @@ const WASH_HERE: [f32; 4] = [1.0, 1.0, 1.0, 0.12];
 const WASH_SELECTED: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
 const SCROLL_THUMB: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
 
+/// The app's own launcher, written where the dock's index finds it: a tile
+/// in the grid that opens a window on Home (`waverunner-ctl files`, the ctl
+/// that sits beside this daemon), and the class by which the dock knows
+/// the windows for it. It claims no file type: opening folders from other
+/// apps stays the system file manager's until this one takes that over.
+/// Written only when it changes, as the webapps' launchers are.
+pub(crate) fn materialize_entry() {
+    let dir = crate::webapps::applications_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let ctl = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join("waverunner-ctl")))
+        .filter(|p| p.exists())
+        .map_or_else(|| "waverunner-ctl".to_owned(), |p| p.to_string_lossy().into_owned());
+    let contents = format!(
+        "[Desktop Entry]\nType=Application\nName=Golem Files\nName[es]=Archivos de Golem\n\
+         Comment=Your folders, in a window\nComment[es]=Tus carpetas, en una ventana\n\
+         Exec={ctl} files\nIcon=system-file-manager\nStartupWMClass={APP_ID}\n\
+         Categories=System;FileManager;\nTerminal=false\n"
+    );
+    let path = dir.join(format!("{APP_ID}.desktop"));
+    if std::fs::read_to_string(&path).is_ok_and(|c| c == contents) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, contents) {
+        warn!("files: cannot write {}: {e}", path.display());
+    }
+}
+
 /// One of the places down the side.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Place {

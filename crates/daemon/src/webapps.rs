@@ -196,7 +196,7 @@ fn config_dir() -> PathBuf {
 }
 
 /// `$XDG_DATA_HOME/applications` (falling back to `~/.local/share`).
-fn applications_dir() -> PathBuf {
+pub(crate) fn applications_dir() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

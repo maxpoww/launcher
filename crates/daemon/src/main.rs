@@ -447,6 +447,8 @@ fn main() -> anyhow::Result<()> {
     // them; whether each shows on the grid or only in the Install section is
     // decided at runtime by managed-webapps membership.
     webapps::materialize_catalog();
+    // (And the file manager's own tile.)
+    filer::materialize_entry();
     // Icon-plate mode is a process-wide switch read by the tile producers on
     // several worker threads; set it before any of them start.
     apps::set_icon_plate(config.theme.icon_plate);
