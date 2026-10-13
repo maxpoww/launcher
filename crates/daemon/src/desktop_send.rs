@@ -207,14 +207,110 @@ pub(crate) fn inside(dir: &Path, src: &Path) -> bool {
 /// Copy a file, or a folder with all that is in it, to `dest`. Links are
 /// followed, but never round a loop: a folder already entered on this copy
 /// (a link back to an ancestor, Wine's `z:` → `/`) is refused.
+#[cfg(test)]
 pub(crate) fn copy_all(src: &Path, dest: &Path) -> std::io::Result<()> {
+    copy_all_metered(src, dest, None)
+}
+
+/// A long copy telling of itself as it goes (the bar's task pill —
+/// `tasks.rs`): how many bytes of how many, and whether its owner has
+/// called it off.
+pub(crate) struct Meter<'a> {
+    done: u64,
+    total: u64,
+    tell: &'a dyn Fn(u64, u64),
+    stopped: &'a dyn Fn() -> bool,
+}
+
+impl<'a> Meter<'a> {
+    pub fn new(total: u64, tell: &'a dyn Fn(u64, u64), stopped: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            done: 0,
+            total,
+            tell,
+            stopped,
+        }
+    }
+
+    fn add(&mut self, bytes: u64) {
+        self.done += bytes;
+        // (Never "all done" before it is: a file that grew since it was weighed.)
+        (self.tell)(self.done.min(self.total.saturating_sub(1)), self.total);
+    }
+
+    pub fn stopped(&self) -> bool {
+        (self.stopped)()
+    }
+}
+
+/// How many bytes `paths` hold, folders walked.
+pub(crate) fn weigh(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .map(|p| match std::fs::metadata(p) {
+            Ok(m) if m.is_dir() => crate::desktop_props::folder_size(p).0,
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// Whether bringing `paths` into `dir` will COPY bytes (and so take time):
+/// always when they are to stay where they are, and for a move across
+/// disks — on one disk a move is a rename.
+pub(crate) fn will_copy(paths: &[PathBuf], dir: &Path, moving: bool) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if !moving {
+        return paths.iter().any(|p| p.parent() != Some(dir));
+    }
+    let Ok(here) = std::fs::metadata(dir).map(|m| m.dev()) else {
+        return false;
+    };
+    paths
+        .iter()
+        .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.dev() != here))
+}
+
+/// [`copy_all`], measured.
+pub(crate) fn copy_all_metered(src: &Path, dest: &Path, meter: Option<&mut Meter>) -> std::io::Result<()> {
     if dest.parent().is_some_and(|d| inside(d, src)) {
         return Err(std::io::Error::other(tr("a folder cannot be copied into itself")));
     }
-    copy_into(src, dest, &mut Vec::new())
+    let mut meter = meter;
+    copy_into(src, dest, &mut Vec::new(), &mut meter)
 }
 
-fn copy_into(src: &Path, dest: &Path, entered: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// One file, a megabyte at a time, so the copy can say how far it is and
+/// be called off between two of them.
+fn copy_counted(src: &Path, dest: &Path, meter: &mut Meter) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::File::create(dest)?;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        if meter.stopped() {
+            return Err(std::io::Error::other("called off"));
+        }
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        to.write_all(&buf[..n])?;
+        meter.add(n as u64);
+    }
+    // (What `fs::copy` would have carried over; a phone's storage refuses.)
+    if let Ok(meta) = from.metadata() {
+        let _ = to.set_permissions(meta.permissions());
+    }
+    Ok(())
+}
+
+fn copy_into(
+    src: &Path,
+    dest: &Path,
+    entered: &mut Vec<PathBuf>,
+    meter: &mut Option<&mut Meter>,
+) -> std::io::Result<()> {
     if std::fs::metadata(src)?.is_dir() {
         let real = std::fs::canonicalize(src)?;
         if entered.contains(&real) {
@@ -224,10 +320,12 @@ fn copy_into(src: &Path, dest: &Path, entered: &mut Vec<PathBuf>) -> std::io::Re
         std::fs::create_dir_all(dest)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
-            copy_into(&entry.path(), &dest.join(entry.file_name()), entered)?;
+            copy_into(&entry.path(), &dest.join(entry.file_name()), entered, meter)?;
         }
         entered.pop();
         Ok(())
+    } else if let Some(meter) = meter.as_deref_mut() {
+        copy_counted(src, dest, meter)
     } else {
         // `fs::copy` also carries the file's permissions over, which a
         // phone's storage (MTP, through gvfs) refuses: there the bytes
@@ -245,9 +343,23 @@ fn copy_into(src: &Path, dest: &Path, entered: &mut Vec<PathBuf>) -> std::io::Re
 /// `take`, each one is taken away from where it was once it has arrived —
 /// a move. The copies' paths, and how many could not be brought.
 pub(crate) fn put(paths: &[PathBuf], dir: &Path, take: bool) -> (Vec<PathBuf>, usize) {
+    put_metered(paths, dir, take, None)
+}
+
+/// [`put`], measured — and stopped where it is when its owner calls it off
+/// (what was not reached is neither brought nor failed).
+pub(crate) fn put_metered(
+    paths: &[PathBuf],
+    dir: &Path,
+    take: bool,
+    mut meter: Option<&mut Meter>,
+) -> (Vec<PathBuf>, usize) {
     let mut brought = Vec::new();
     let mut failed = 0;
     for src in paths {
+        if meter.as_ref().is_some_and(|m| m.stopped()) {
+            break;
+        }
         let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
             failed += 1;
             continue;
@@ -264,7 +376,7 @@ pub(crate) fn put(paths: &[PathBuf], dir: &Path, take: bool) -> (Vec<PathBuf>, u
             brought.push(dest);
             continue;
         }
-        match copy_all(src, &dest) {
+        match copy_all_metered(src, &dest, meter.as_deref_mut()) {
             Ok(()) => {
                 // …and ON the other disk, not only in this one's memory: a
                 // stick pulled or a phone that ran out of room must not
@@ -308,6 +420,9 @@ pub(crate) fn put(paths: &[PathBuf], dir: &Path, take: bool) -> (Vec<PathBuf>, u
                 } else {
                     std::fs::remove_file(&dest)
                 };
+                if meter.as_ref().is_some_and(|m| m.stopped()) {
+                    break; // called off: not a failure
+                }
                 failed += 1;
             }
         }
@@ -505,4 +620,40 @@ tmpfs /run/user/1000 tmpfs rw 0 0
             "2 files could not be sent to Pixel 8"
         );
     }
+    #[test]
+    fn a_measured_copy_says_how_far_it_is_and_stops_when_called_off() {
+        use std::cell::Cell;
+        let d = std::env::temp_dir().join(format!("waverunner-meter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src/sub")).unwrap();
+        std::fs::create_dir_all(d.join("to")).unwrap();
+        std::fs::write(d.join("src/a.bin"), vec![7u8; 3 << 20]).unwrap();
+        std::fs::write(d.join("src/sub/b.bin"), vec![9u8; 1 << 20]).unwrap();
+        let total = weigh(&[d.join("src")]);
+        assert_eq!(total, 4 << 20);
+        // Told as it goes, never more than there is, and whole at the end.
+        let seen = Cell::new(0u64);
+        let tell = |done: u64, of: u64| {
+            assert!(done <= of && done >= seen.get());
+            seen.set(done);
+        };
+        let never = || false;
+        let mut meter = Meter::new(total, &tell, &never);
+        let (brought, failed) = put_metered(&[d.join("src")], &d.join("to"), false, Some(&mut meter));
+        assert_eq!((brought.len(), failed), (1, 0));
+        assert!(seen.get() >= total - 1);
+        assert_eq!(std::fs::read(d.join("to/src/sub/b.bin")).unwrap().len(), 1 << 20);
+        // Called off: nothing half-made is left, and it is not a failure.
+        let always = || true;
+        let mut meter = Meter::new(total, &tell, &always);
+        std::fs::create_dir_all(d.join("to2")).unwrap();
+        let (brought, failed) = put_metered(&[d.join("src/a.bin")], &d.join("to2"), false, Some(&mut meter));
+        assert_eq!((brought.len(), failed), (0, 0));
+        assert!(!d.join("to2/a.bin").exists());
+        // On one disk a move is a rename: no bytes to wait for; a copy always has.
+        assert!(!will_copy(&[d.join("src/a.bin")], &d.join("to"), true));
+        assert!(will_copy(&[d.join("src/a.bin")], &d.join("to"), false));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
 }

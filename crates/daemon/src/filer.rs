@@ -102,6 +102,12 @@ const TYPE_PAUSE: Duration = Duration::from_millis(900);
 /// A wheel's notch (15 units from the compositor) in pixels of scroll.
 const WHEEL_STEP: f32 = 4.0;
 
+/// A drag held this near the field's top or bottom scrolls the folder, at
+/// most this many pixels a tick (faster the nearer the edge).
+const EDGE_ZONE: f32 = 44.0;
+const EDGE_SPEED: f32 = 18.0;
+const EDGE_TICK: Duration = Duration::from_millis(16);
+
 /// How far a press travels before it is a drag (or a rubber band).
 const DRAG_START: f32 = 6.0;
 /// The rubber band: a faint fill and a hairline (the desktop's).
@@ -438,6 +444,30 @@ struct Rename {
     all: bool,
 }
 
+/// What a right click was made on: what its menu is made from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Asked {
+    /// On a thing (else on the folder's own ground)…
+    pub on_item: bool,
+    /// …that is one of several selected.
+    pub many: bool,
+    /// Files are on the clipboard.
+    pub paste: bool,
+    pub bin: InBin,
+    /// The folder is arranged by hand.
+    pub by_hand: bool,
+    /// The thing is an archive (a zip, a tarball…).
+    pub archive: bool,
+}
+
+/// Whether `name` is an archive the system's archiver opens.
+pub(crate) fn is_archive(name: &str) -> bool {
+    let name = name.to_lowercase();
+    [".zip", ".tar", ".tgz", ".gz", ".xz", ".txz", ".zst", ".bz2", ".tbz2", ".7z", ".rar"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
 /// Where a window is with respect to the bin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InBin {
@@ -478,7 +508,15 @@ fn list_bin() -> Vec<Item> {
 /// The rows of a right click: on one thing, on one of `many` selected, or
 /// on the folder itself (`paste`: files are on the clipboard) — and in the
 /// bin, what the bin is for.
-pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool, bin: InBin, by_hand: bool) -> Vec<Row> {
+pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
+    let Asked {
+        on_item,
+        many,
+        paste,
+        bin,
+        by_hand,
+        archive,
+    } = asked;
     let row = |label: &'static str, action: Action| Row::Item {
         label,
         action,
@@ -516,23 +554,29 @@ pub(crate) fn menu_rows(on_item: bool, many: bool, paste: bool, bin: InBin, by_h
             row(tr("Cut"), Action::Cut),
             row(tr("Copy"), Action::Copy),
             Row::Sep,
+            row(tr("Compress"), Action::Compress),
+            Row::Sep,
             bin,
         ]
     } else if on_item {
-        vec![
-            row(tr("Open"), Action::Open),
-            row(tr("Open in terminal"), Action::OpenTerminal),
+        let mut rows = vec![row(tr("Open"), Action::Open), row(tr("Open in terminal"), Action::OpenTerminal)];
+        if archive {
+            rows.push(row(tr("Extract here"), Action::Extract));
+        }
+        rows.extend([
             Row::Sep,
             row(tr("Cut"), Action::Cut),
             row(tr("Copy"), Action::Copy),
             Row::Sep,
             row(tr("Rename"), Action::Rename),
+            row(tr("Compress"), Action::Compress),
             Row::Sep,
             bin,
             Row::Sep,
             // Last, and opened by HOVER, as on the desktop.
             row(tr("Properties"), Action::Properties),
-        ]
+        ]);
+        rows
     } else {
         let mut rows = Vec::new();
         if paste {
@@ -631,6 +675,13 @@ struct Win {
     armed: Option<Action>,
     /// The place a hovering drag would be let go onto.
     drop_place: Option<usize>,
+    /// A hovering drag is near the field's top (< 0) or bottom (> 0) edge:
+    /// how fast the folder scrolls for it, −1..1; where the drag is (real
+    /// pixels), to read again what is under it as the folder moves; and
+    /// whether the timer that does it is running.
+    edge: f32,
+    edge_at: (f32, f32),
+    edge_timer: bool,
     /// Where each thing is drawn, as a display slot (its own place in the
     /// list at rest; easing to make room while a drag is over the window).
     slide: Vec<f32>,
@@ -1165,6 +1216,9 @@ impl App {
             rename_next: None,
             armed: None,
             drop_place: None,
+            edge: 0.0,
+            edge_at: (0.0, 0.0),
+            edge_timer: false,
             slide: Vec::new(),
             gap: None,
             press: None,
@@ -1282,6 +1336,7 @@ impl App {
         win.band = None;
         win.drop_on = None;
         win.gap = None;
+        win.edge = 0.0;
         win.slide.clear();
         win.selected.clear();
         win.cursor = None;
@@ -1471,7 +1526,17 @@ impl App {
             _ => win.selected.clear(),
         }
         let many = path.is_some() && win.selected.len() > 1;
-        let rows = menu_rows(path.is_some(), many, paste, win.in_bin(), by_hand);
+        let archive = item
+            .and_then(|i| win.items.get(i))
+            .is_some_and(|it| it.kind == Kind::File && is_archive(&it.name));
+        let rows = menu_rows(Asked {
+            on_item: path.is_some(),
+            many,
+            paste,
+            bin: win.in_bin(),
+            by_hand,
+            archive,
+        });
         if rows.is_empty() {
             return;
         }
@@ -1495,7 +1560,13 @@ impl App {
         if bin != InBin::No
             && matches!(
                 action,
-                Action::Cut | Action::Paste | Action::Rename | Action::MoveToBin | Action::NewFolder
+                Action::Cut
+                    | Action::Paste
+                    | Action::Rename
+                    | Action::MoveToBin
+                    | Action::NewFolder
+                    | Action::Extract
+                    | Action::Compress
             )
         {
             return;
@@ -1595,6 +1666,23 @@ impl App {
                     self.trash_file(&path); // the folder's watch takes it off the window
                 }
             }
+            // Archives are the system archiver's work (File Roller, which
+            // Golem ships): it shows how far it is and asks what it must.
+            Action::Extract | Action::Compress => {
+                if selected.is_empty() {
+                    return;
+                }
+                let files: Vec<String> = selected.iter().map(|p| launch::shell_quote(p)).collect();
+                let exec = if action == Action::Extract {
+                    format!("file-roller --extract-here {}", files.join(" "))
+                } else {
+                    format!("file-roller --add {}", files.join(" "))
+                };
+                info!("files: {exec}");
+                if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+                    error!("files: the archiver could not be started: {e:#}");
+                }
+            }
             Action::NewFolder => self.filer_new_folder(id),
             Action::CleanUp => {
                 info!("files: {} is in order of name again", dir.display());
@@ -1620,9 +1708,22 @@ impl App {
             return;
         };
         let into = dir.clone();
+        let task = self.filer_copy_task(&paths, &dir, cut, cut);
         self.desktop_off_loop(
-            move || crate::desktop_send::put(&paths, &into, cut),
+            move || {
+                use crate::desktop_send::{put_metered, weigh, Meter};
+                let total = task.as_ref().map_or(0, |_| weigh(&paths));
+                let tell = |done, total| {
+                    if let Some(task) = task.as_ref() {
+                        task.set(done, total);
+                    }
+                };
+                let stopped = || task.as_ref().is_some_and(|t| t.cancelled());
+                let mut meter = Meter::new(total, &tell, &stopped);
+                put_metered(&paths, &into, cut, task.is_some().then_some(&mut meter))
+            },
             move |app, (brought, failed)| {
+                app.filer_say_failed(failed);
                 info!(
                     "files: pasted {} into {} ({}; {failed} failed)",
                     brought.len(),
@@ -1641,6 +1742,47 @@ impl App {
                 }
             },
         );
+    }
+
+    /// A task on the bar for bringing `paths` into `dir`, when bytes will be
+    /// copied (`moving`: a move is asked for — on one disk that is a rename
+    /// and no task; `says_move`: the words say "Moving"). The worker
+    /// reports to it and reads its Cancel.
+    fn filer_copy_task(
+        &mut self,
+        paths: &[PathBuf],
+        dir: &Path,
+        moving: bool,
+        says_move: bool,
+    ) -> Option<crate::tasks::TaskHandle> {
+        if !crate::desktop_send::will_copy(paths, dir, moving) {
+            return None;
+        }
+        let what = match paths {
+            [one] => file_name(one),
+            many => crate::i18n::fill(tr("{n} things"), &[("n", &many.len())]),
+        };
+        let place = self
+            .filer
+            .wins
+            .iter()
+            .flat_map(|w| w.places.iter())
+            .find(|p| p.path == dir)
+            .map_or_else(|| file_name(dir), |p| p.name.clone());
+        let words = if says_move {
+            tr("Moving {what} to {where}")
+        } else {
+            tr("Copying {what} to {where}")
+        };
+        Some(self.task_begin(&crate::i18n::fill(words, &[("what", &what), ("where", &place)])))
+    }
+
+    /// Some things could not be copied: said once, as a notification.
+    fn filer_say_failed(&mut self, failed: usize) {
+        if failed > 0 {
+            let body = crate::i18n::fill(tr("{n} could not be copied"), &[("n", &failed)]);
+            std::thread::spawn(move || crate::desktop_send_notify(&body));
+        }
     }
 
     /// A new, empty folder here, named `untitled folder` (then `untitled
@@ -2864,6 +3006,7 @@ impl App {
         for id in ids {
             if let Some(w) = self.filer.win_mut(id) {
                 w.gap = None;
+                w.edge = 0.0;
             }
             self.filer_request_draw(id);
         }
@@ -2940,12 +3083,63 @@ impl App {
         } else {
             Some(gap_at(d, fx, gap_now, n, m))
         };
+        // Near the top or the bottom of the field: the folder scrolls.
+        win.edge_at = (x, y);
+        win.edge = if place.is_some() || !layout.body.contains(at) {
+            0.0
+        } else if at.1 < layout.body.y + EDGE_ZONE {
+            -((layout.body.y + EDGE_ZONE - at.1) / EDGE_ZONE).min(1.0)
+        } else if at.1 > layout.body.y + layout.body.h - EDGE_ZONE {
+            ((at.1 - (layout.body.y + layout.body.h - EDGE_ZONE)) / EDGE_ZONE).min(1.0)
+        } else {
+            0.0
+        };
+        let scrolls = win.edge != 0.0 && layout.max_scroll(win.items.len()) > 0.0 && !win.edge_timer;
         if onto != win.drop_on || place != win.drop_place || gap != win.gap {
             win.drop_on = onto;
             win.drop_place = place;
             win.gap = gap;
             self.filer_request_draw(id);
         }
+        if scrolls {
+            self.filer_edge_tick(id);
+        }
+    }
+
+    /// Scroll window `id` a step for the drag held at its edge, and again
+    /// in a moment for as long as it is held there.
+    fn filer_edge_tick(&mut self, id: u32) {
+        let icon_scale = self.icon_scale();
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        win.edge_timer = false;
+        if win.edge == 0.0 {
+            return;
+        }
+        let max = win.layout(icon_scale).max_scroll(win.items.len());
+        let to = (win.scroll_to + win.edge * EDGE_SPEED).clamp(0.0, max);
+        if to == win.scroll_to {
+            return; // the end of the folder
+        }
+        win.scroll_to = to;
+        win.scroll = to;
+        let at = win.edge_at;
+        let timer = calloop::timer::Timer::from_duration(EDGE_TICK);
+        win.edge_timer = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                // (What is under the drag changed as the folder moved.)
+                if app.filer.win(id).is_some_and(|w| w.edge != 0.0) {
+                    app.filer_drag_over(id, at.0, at.1);
+                    app.filer_edge_tick(id);
+                } else if let Some(win) = app.filer.win_mut(id) {
+                    win.edge_timer = false;
+                }
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        self.filer_request_draw(id);
     }
 
     /// The drag left for elsewhere — unless it has just been dropped here:
@@ -2964,6 +3158,7 @@ impl App {
                 win.drop_on = None;
                 win.drop_place = None;
                 win.gap = None;
+        win.edge = 0.0;
             }
             self.filer_request_draw(dnd.win);
         }
@@ -2993,6 +3188,7 @@ impl App {
         // folder is arranged by hand from now on (its names, in order, with
         // the place what comes goes to).
         let arrange = win.arrangement(&dir, &carried);
+        win.edge = 0.0;
         win.drop_on = None;
         self.filer_request_draw(id);
         // The live offer (the one kept since `enter` is a snapshot).
@@ -3072,9 +3268,26 @@ impl App {
         }
         let into = dir.clone();
         let mut then = Some(then);
+        // (Across disks a drop is a copy: what was dragged stays where it was.)
+        let task = self.filer_copy_task(&paths, &dir, may_move, false);
         self.desktop_off_loop(
-            move || crate::desktop::import(&paths, &into, may_move),
-            move |app, brought| {
+            move || {
+                use crate::desktop_send::{weigh, Meter};
+                let total = task.as_ref().map_or(0, |_| weigh(&paths));
+                let tell = |done, total| {
+                    if let Some(task) = task.as_ref() {
+                        task.set(done, total);
+                    }
+                };
+                let stopped = || task.as_ref().is_some_and(|t| t.cancelled());
+                let mut meter = Meter::new(total, &tell, &stopped);
+                let brought =
+                    crate::desktop::import_metered(&paths, &into, may_move, task.is_some().then_some(&mut meter));
+                let failed = if stopped() { 0 } else { paths.len() - brought.len().min(paths.len()) };
+                (brought, failed)
+            },
+            move |app, (brought, failed)| {
+                app.filer_say_failed(failed);
                 info!("files: {} thing(s) brought into {}", brought.len(), dir.display());
                 if let Some(then) = then.take() {
                     then();
@@ -3470,6 +3683,7 @@ impl App {
                     _ => {
                         if let Some(win) = self.filer.win_mut(id) {
                             win.gap = None;
+        win.edge = 0.0;
                             win.drop_on = None;
                             win.drop_place = None;
                         }
@@ -3700,6 +3914,14 @@ mod tests {
 
     #[test]
     fn the_menu_offers_what_makes_sense_for_what_was_clicked() {
+        let asked = |on_item, many| Asked {
+            on_item,
+            many,
+            paste: false,
+            bin: InBin::No,
+            by_hand: false,
+            archive: false,
+        };
         let actions = |rows: Vec<Row>| -> Vec<Action> {
             rows.into_iter()
                 .filter_map(|r| match r {
@@ -3708,24 +3930,29 @@ mod tests {
                 })
                 .collect()
         };
-        let one = actions(menu_rows(true, false, true, InBin::No, false));
+        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false }));
         assert_eq!(one.first(), Some(&Action::Open));
         // Properties is last: it is the row the menu turns into a box from.
         assert_eq!(one.last(), Some(&Action::Properties));
         assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
         // A group: nothing that is about ONE thing.
-        let many = actions(menu_rows(true, true, false, InBin::No, false));
+        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false }));
         assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
         assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
         // The folder itself: Paste only with files on the clipboard.
-        assert_eq!(actions(menu_rows(false, false, true, InBin::No, false)).first(), Some(&Action::Paste));
-        assert_eq!(actions(menu_rows(false, false, false, InBin::No, false)).first(), Some(&Action::NewFolder));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false })).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false })).first(), Some(&Action::NewFolder));
+        // An archive can be opened out; anything can be packed.
+        let zip = actions(menu_rows(Asked { archive: true, ..asked(true, false) }));
+        assert!(zip.contains(&Action::Extract) && zip.contains(&Action::Compress));
+        assert!(!one.contains(&Action::Extract) && many.contains(&Action::Compress));
+        assert!(is_archive("Fotos.ZIP") && is_archive("a.tar.gz") && !is_archive("zip.txt"));
         // In the bin: back or gone, and the bin emptied; never a new thing.
-        let binned = actions(menu_rows(true, false, true, InBin::Top, false));
+        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false }));
         assert!(binned.contains(&Action::PutBack) && binned.contains(&Action::Erase));
         assert!(!binned.contains(&Action::Rename) && !binned.contains(&Action::MoveToBin));
-        assert_eq!(actions(menu_rows(false, false, true, InBin::Top, false)), [Action::EmptyBin]);
-        assert!(menu_rows(false, false, true, InBin::Deeper, false).is_empty());
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false })), [Action::EmptyBin]);
+        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false }).is_empty());
     }
 
     #[test]

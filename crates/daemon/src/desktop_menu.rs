@@ -75,6 +75,10 @@ pub(crate) enum Action {
     PutBack,
     Erase,
     EmptyBin,
+    /// A file manager window: an archive's contents out beside it, and the
+    /// selection into an archive.
+    Extract,
+    Compress,
 }
 
 /// One row: an action, or a rule between groups.

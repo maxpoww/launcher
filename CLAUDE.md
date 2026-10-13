@@ -791,7 +791,16 @@ The big daemon files are cohesive but long — go straight to the function:
   listing, newcomers last; a rename keeps its place) — also how things of one window are put in
   order by dragging. The ground's menu gets "Clean up" = by name again. Never in the bin. Rig:
   `files over <x> <y>` (a drag hovering there; alone: gone), then `files drop - <path…>` lands
-  in the room made. NOT BUILT: a drag's auto-scroll and spring-open, list view, search,
+  in the room made. LONG COPIES are TASKS on the bar
+  (`filer_copy_task` → `task_begin`, only when bytes will be copied — `desktop_send::will_copy`:
+  a move on one disk is a rename): the worker weighs first (`weigh`), copies a megabyte at a time
+  (`Meter`, `copy_counted`, `put_metered` / `desktop::import_metered` — the old `put`/`import`
+  are these with no meter), reports, and stops between two megabytes when Cancel is pressed
+  (half a copy is taken away, and that is not a failure); what could not be copied is said once
+  as a notification (`filer_say_failed`). A drag held near the field's top or bottom SCROLLS the
+  folder (`EDGE_ZONE`, `filer_edge_tick`). ARCHIVES: "Extract here" on one, "Compress" on any
+  selection = File Roller (`file-roller --extract-here` / `--add`, `Action::Extract|Compress`,
+  `is_archive`). `menu_rows` takes an `Asked`. NOT BUILT: a drag's spring-open, list view, search,
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll

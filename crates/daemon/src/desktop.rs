@@ -1671,18 +1671,36 @@ fn unique_dest(dir: &Path, name: &str) -> PathBuf {
 /// Bring `src` to `dest`: a move where one filesystem allows it, else a
 /// copy (a file from another volume stays there too — what a desktop does
 /// with a file from a stick).
-fn bring(src: &Path, dest: &Path, may_move: bool) -> std::io::Result<()> {
+fn bring(
+    src: &Path,
+    dest: &Path,
+    may_move: bool,
+    meter: Option<&mut crate::desktop_send::Meter>,
+) -> std::io::Result<()> {
     if may_move && std::fs::rename(src, dest).is_ok() {
         return Ok(());
     }
-    crate::desktop_send::copy_all(src, dest)
+    crate::desktop_send::copy_all_metered(src, dest, meter)
 }
 
 /// Bring every file of `paths` into `dir` (one already there stays as it
 /// is); the paths they now have, in order.
 pub(crate) fn import(paths: &[PathBuf], dir: &Path, may_move: bool) -> Vec<PathBuf> {
+    import_metered(paths, dir, may_move, None)
+}
+
+/// [`import`], measured, and stopped where it is when called off.
+pub(crate) fn import_metered(
+    paths: &[PathBuf],
+    dir: &Path,
+    may_move: bool,
+    mut meter: Option<&mut crate::desktop_send::Meter>,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for src in paths {
+        if meter.as_ref().is_some_and(|m| m.stopped()) {
+            break;
+        }
         let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -1699,7 +1717,7 @@ pub(crate) fn import(paths: &[PathBuf], dir: &Path, may_move: bool) -> Vec<PathB
             continue;
         }
         let dest = unique_dest(dir, name);
-        match bring(src, &dest, may_move) {
+        match bring(src, &dest, may_move, meter.as_deref_mut()) {
             Ok(()) => {
                 info!("desktop: {} → {}", src.display(), dest.display());
                 out.push(dest);
@@ -2975,7 +2993,7 @@ impl App {
             // (Turning the page is the release handler's: the menu stays up.)
             Action::MoveTo | Action::Back => {}
             // (The bin's rows are the file manager's: `filer.rs`.)
-            Action::PutBack | Action::Erase | Action::EmptyBin => {}
+            Action::PutBack | Action::Erase | Action::EmptyBin | Action::Extract | Action::Compress => {}
             Action::Camera => self.desktop_camera_use(item),
             // (Pages of the bar's phone pill's box.)
             Action::CameraSettings | Action::HelpDebugging | Action::HelpFiles => self.phone_pill_show(action),
