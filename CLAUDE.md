@@ -814,8 +814,13 @@ The big daemon files are cohesive but long — go straight to the function:
   only what holds the words (`Win::find`, `Win::all`, `found`, `filer_find`; Escape puts it
   away, Enter opens the first found, the walking keys go on to what is found); not into
   sub-folders. The head's icons are the bar's font (`options::NERD`). Rig: `files view
-  list|icons`, `sort name|size|date [up]`, `find <words>|-`. NOT BUILT: a drag's spring-open,
-  search into sub-folders,
+  list|icons`, `sort name|size|date [up]`, `find <words>|-`. SHIFT with a click or an
+  arrow selects from where the selection began (`Win::anchor`, `select_to`, `span`). A drag HELD
+  on a folder `SPRING` opens it under the drag (`Win::spring`, a timer from `filer_drag_over`).
+  THE SESSION: the open windows' folders are noted in the runtime dir (`session_path`,
+  `filer_note_session`) and a dock started again within the login opens them again
+  (`filer_restore_session`, from `main` just before the loop) — where each stood is the
+  compositor's to give. NOT BUILT: search into sub-folders,
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll

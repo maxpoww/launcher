@@ -181,6 +181,8 @@ pub(crate) fn sorted(mut items: Vec<Item>, meta: &HashMap<String, Meta>, key: So
 const EDGE_ZONE: f32 = 44.0;
 const EDGE_SPEED: f32 = 18.0;
 const EDGE_TICK: Duration = Duration::from_millis(16);
+/// How long a drag is held on a folder before it opens (the dock's own).
+const SPRING: Duration = Duration::from_millis(650);
 
 /// How far a press travels before it is a drag (or a rubber band).
 const DRAG_START: f32 = 6.0;
@@ -553,6 +555,20 @@ impl Orders {
     }
 }
 
+/// Where the open windows' folders are noted, so a dock that is started
+/// again (an update, a crash) brings them back: the runtime dir, which a
+/// new login starts empty.
+fn session_path() -> PathBuf {
+    PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned()))
+        .join("waverunner-files-session.json")
+}
+
+/// The things from `anchor` to `to`, whichever comes first: what Shift
+/// with a click or an arrow selects.
+pub(crate) fn span(anchor: usize, to: usize) -> std::ops::RangeInclusive<usize> {
+    anchor.min(to)..=anchor.max(to)
+}
+
 /// A name being typed in place.
 #[derive(Debug, Clone, PartialEq)]
 struct Rename {
@@ -771,6 +787,11 @@ struct Win {
     selected: HashSet<String>,
     /// Where the keys are (the last item clicked or walked to).
     cursor: Option<usize>,
+    /// Where a selection began: Shift selects from here to the keys.
+    anchor: Option<usize>,
+    /// A drag held on a folder: which, and since when — held long enough,
+    /// the folder opens under it.
+    spring: Option<(usize, Instant)>,
     /// A path to select and bring into view once it is listed (the folder
     /// just come out of).
     reveal: Option<String>,
@@ -908,7 +929,25 @@ impl Win {
         if let Some(item) = self.items.get(i) {
             self.selected.insert(item.path.clone());
             self.cursor = Some(i);
+            self.anchor = Some(i);
         }
+    }
+
+    /// Shift: everything from where the selection began to `i` (added to
+    /// what is selected when `keep`); the keys go to `i`.
+    fn select_to(&mut self, i: usize, keep: bool) {
+        if i >= self.items.len() {
+            return;
+        }
+        let anchor = self.anchor.or(self.cursor).unwrap_or(i).min(self.items.len() - 1);
+        if !keep {
+            self.selected.clear();
+        }
+        for it in &self.items[span(anchor, i)] {
+            self.selected.insert(it.path.clone());
+        }
+        self.anchor = Some(anchor);
+        self.cursor = Some(i);
     }
 }
 
@@ -1331,6 +1370,8 @@ impl App {
             names: (0.0, Vec::new()),
             selected: HashSet::new(),
             cursor: None,
+            anchor: None,
+            spring: None,
             reveal: None,
             scroll: 0.0,
             scroll_to: 0.0,
@@ -1379,6 +1420,7 @@ impl App {
             self.filer.keys = None;
         }
         info!("files: window {id} closed");
+        self.filer_note_session();
     }
 
     /// The places, read again for every window (something was plugged in or
@@ -1480,6 +1522,8 @@ impl App {
         win.all.clear();
         win.selected.clear();
         win.cursor = None;
+        win.anchor = None;
+        win.spring = None;
         win.click = None;
         win.scroll = 0.0;
         win.scroll_to = 0.0;
@@ -1507,6 +1551,34 @@ impl App {
         }
         self.filer_list(id);
         self.filer_request_draw(id);
+        self.filer_note_session();
+    }
+
+    /// Note which folders stand open (see `session_path`).
+    fn filer_note_session(&self) {
+        let mut wins: Vec<(u32, String)> = self
+            .filer
+            .wins
+            .iter()
+            .map(|w| (w.id, w.dir.to_string_lossy().into_owned()))
+            .collect();
+        wins.sort();
+        let dirs: Vec<String> = wins.into_iter().map(|(_, d)| d).collect();
+        crate::persist::write_json("files-session", &session_path(), &dirs);
+    }
+
+    /// The dock was started again within one login: the windows that stood
+    /// open come back on their folders. (Where each stood on the screen is
+    /// the compositor's to give; a new login starts with none.)
+    pub(crate) fn filer_restore_session(&mut self) {
+        let dirs: Vec<String> = crate::persist::read_json(&session_path()).unwrap_or_default();
+        for dir in dirs.into_iter().take(12) {
+            let dir = PathBuf::from(dir);
+            if dir.is_dir() {
+                info!("files: back on {}", dir.display());
+                self.filer_open(dir);
+            }
+        }
     }
 
     /// The folder changed on disk: read it again in a moment, once for a
@@ -3458,6 +3530,11 @@ impl App {
             0.0
         };
         let scrolls = win.edge != 0.0 && layout.max_scroll(win.items.len()) > 0.0 && !win.edge_timer;
+        // Onto another folder: the hold on it starts now.
+        let sprung = (onto != win.drop_on).then_some(onto).flatten();
+        if onto != win.drop_on {
+            win.spring = onto.map(|i| (i, Instant::now()));
+        }
         if onto != win.drop_on || place != win.drop_place || gap != win.gap {
             win.drop_on = onto;
             win.drop_place = place;
@@ -3466,6 +3543,24 @@ impl App {
         }
         if scrolls {
             self.filer_edge_tick(id);
+        }
+        // Held there `SPRING`, the folder opens under the drag (macOS's
+        // spring-loaded folders; the dock's tiles do the same).
+        if let Some(i) = sprung {
+            let timer = calloop::timer::Timer::from_duration(SPRING);
+            let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+                let open = app.filer.win(id).and_then(|w| {
+                    let (on, since) = w.spring?;
+                    (on == i && w.drop_on == Some(i) && since.elapsed() >= SPRING - Duration::from_millis(30))
+                        .then(|| w.items.get(i).map(|it| PathBuf::from(&it.path)))
+                        .flatten()
+                });
+                if let Some(dir) = open.filter(|_| app.filer.dnd_active()) {
+                    info!("files: a drag held on {} opens it", dir.display());
+                    app.filer_go(id, dir);
+                }
+                calloop::timer::TimeoutAction::Drop
+            });
         }
     }
 
@@ -3673,7 +3768,7 @@ impl App {
 
     /// A left press.
     fn filer_click(&mut self, id: u32, serial: u32) {
-        let ctrl = self.modifiers.ctrl;
+        let (ctrl, shift) = (self.modifiers.ctrl, self.modifiers.shift);
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -3708,13 +3803,17 @@ impl App {
                 win.click = Some((now, path.clone()));
                 // One of several selected: the group stays for a drag, and
                 // the release decides (see `filer_button`).
-                let of_group = !ctrl && win.selected.len() > 1 && win.selected.contains(&path);
-                if ctrl {
+                let of_group = !ctrl && !shift && win.selected.len() > 1 && win.selected.contains(&path);
+                if shift {
+                    // From where the selection began to here.
+                    win.select_to(i, ctrl);
+                } else if ctrl {
                     // One more, or one fewer.
                     if !win.selected.remove(&path) {
                         win.selected.insert(path.clone());
                     }
                     win.cursor = Some(i);
+                    win.anchor = Some(i);
                 } else if !of_group {
                     win.select_only(i);
                 }
@@ -3768,13 +3867,19 @@ impl App {
     /// Put the keys on item `i` (it alone selected) and bring it into view.
     fn filer_walk_to(&mut self, id: u32, i: usize) {
         let icon_scale = self.icon_scale();
+        // (With Shift the selection stretches to where the keys go.)
+        let shift = self.modifiers.shift;
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         if i >= win.items.len() {
             return;
         }
-        win.select_only(i);
+        if shift {
+            win.select_to(i, false);
+        } else {
+            win.select_only(i);
+        }
         win.scroll_to = win.layout(icon_scale).reveal(i, win.scroll_to, win.items.len());
         self.filer_request_draw(id);
     }
@@ -4504,6 +4609,13 @@ mod tests {
         assert_eq!(names(SortKey::Size, true), ["zdir", "big", "small"]);
         assert_eq!(names(SortKey::Size, false), ["zdir", "small", "big"]);
         assert_eq!(names(SortKey::Name, true), ["small", "zdir", "big"]);
+    }
+
+    #[test]
+    fn shift_selects_from_where_it_began_either_way() {
+        assert_eq!(span(2, 5), 2..=5);
+        assert_eq!(span(5, 2), 2..=5);
+        assert_eq!(span(3, 3), 3..=3);
     }
 
     #[test]
