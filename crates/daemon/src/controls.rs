@@ -1071,17 +1071,23 @@ pub(crate) fn wallpaper_pause(paused: bool) {
     });
 }
 
-/// End whatever is playing a moving wallpaper. Asked first; one that has
-/// not gone a moment later is ended outright — a player whose picture is
-/// covered may not be listening, and it would play on under the next one
-/// (seen in the test compositor, 2026-10-13). None playing is no failure.
-fn end_players() {
-    let Some(found) = out("pgrep", &["-f", PLAYERS]) else {
+/// The players of moving wallpapers running now, by process id.
+fn players() -> Vec<String> {
+    out("pgrep", &["-f", PLAYERS]).map(|found| found.split_whitespace().map(str::to_owned).collect()).unwrap_or_default()
+}
+
+/// End these players. Asked first; one that has not gone a moment later is
+/// ended outright — a player whose picture is covered may not be listening,
+/// and it would play on under the next one (seen in the test compositor,
+/// 2026-10-13).
+fn end_players(pids: &[String]) {
+    if pids.is_empty() {
         return;
-    };
-    let pids: Vec<&str> = found.split_whitespace().collect();
-    run("pkill", &["-f", PLAYERS]);
+    }
     let alive = |pid: &str| std::path::Path::new("/proc").join(pid).exists();
+    for pid in pids {
+        run("kill", &[pid]);
+    }
     for _ in 0..15 {
         if !pids.iter().any(|p| alive(p)) {
             return;
@@ -1093,18 +1099,71 @@ fn end_players() {
     }
 }
 
+/// A STILL of the moving wallpaper at `path` — its first frame, no wider
+/// than a full-HD screen — for the picture program to hold UNDER the
+/// player (see `show_wallpaper`). Made once and kept, named by the file and
+/// when it last changed. `None`: it could not be made.
+fn poster(path: &str) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.bytes().chain(meta.len().to_le_bytes()).chain(changed.to_le_bytes()) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))?;
+    let dir = cache.join("waverunner/posters");
+    let file = dir.join(format!("{h:016x}.png"));
+    let name = file.to_string_lossy().into_owned();
+    if file.is_file() {
+        return Some(name);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let tmp = dir.join(format!("{h:016x}.tmp.png"));
+    let tmp_name = tmp.to_string_lossy().into_owned();
+    let made = run("ffmpegthumbnailer", &["-i", path, "-o", &tmp_name, "-s", "1920", "-t", "0"])
+        && std::fs::rename(&tmp, &file).is_ok();
+    if !made {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    Some(name)
+}
+
+/// Hand a still to the picture program: `fade` with its second-long fade,
+/// else at once.
+fn show_still(tool: &str, path: &str, fade: bool) -> bool {
+    let mut cmd = Command::new(tool);
+    cmd.args(["img", path, "--transition-type"]);
+    if fade {
+        cmd.args(["fade", "--transition-duration", "1"]);
+    } else {
+        cmd.arg("none");
+    }
+    finish_within(cmd, false, WALLPAPER_PATIENCE).is_some()
+}
+
 /// Put the wallpaper at `path` on the desktop. A still goes through the
 /// picture program (`fade`: with its second-long fade). What MOVES — a
-/// video, and a GIF too — is played by `mpvpaper`, looping and silent, over
-/// whatever picture is there: it scales on the graphics card and starts at
-/// once, where the picture program makes every frame of a GIF the screen's
-/// size on the processor first (9 s for a 92-frame GIF on a small screen,
-/// far more on a big one, and a cache of hundreds of megabytes — Max,
-/// 2026-10-13: "takes for ever"). Only a GIF on a computer without
-/// `mpvpaper` still goes the slow way. Whatever was playing is ended
-/// first. Returns whether it was put: call it from a thread that may wait.
+/// video, and a GIF too — is played by `mpvpaper`, looping and silent, OVER
+/// the picture program's picture: it scales on the graphics card and
+/// starts at once, where the picture program makes every frame of a GIF
+/// the screen's size on the processor first (9 s for a 92-frame GIF on a
+/// small screen — Max, 2026-10-13: "takes for ever"). Only a GIF on a
+/// computer without `mpvpaper` still goes the slow way.
+///
+/// NOTHING ELSE IS EVER SEEN IN BETWEEN (Max, 2026-10-13: "suele haber
+/// algún wallpaper random en el medio del salto"): the picture under a
+/// player was whichever still had been chosen last, and ending the old
+/// player before the new one was up showed it. So the new one is up
+/// BEFORE the old one goes — a new player starts over the old one, a new
+/// still is laid under the old player and only then is that ended — and
+/// under every player lies its own first frame (`poster`), so even a
+/// player that dies leaves its own picture, not somebody else's.
+/// Returns whether it was put: call it from a thread that may wait.
 fn show_wallpaper(path: &str, fade: bool) -> bool {
-    end_players();
+    let old = players();
     if wallpaper_moves(path) {
         if let Some(player) = video_tool() {
             // `-f`: it forks and plays on; `*`: every screen. The graphics
@@ -1117,7 +1176,19 @@ fn show_wallpaper(path: &str, fade: bool) -> bool {
                 let _ = std::fs::remove_file(&socket);
                 how.push_str(&format!(" input-ipc-server={}", socket.display()));
             }
-            return run(&player, &["-f", "-o", &how, "*", path]);
+            if !run(&player, &["-f", "-o", &how, "*", path]) {
+                return false;
+            }
+            // Its first frame is on the screen in a moment; then the old
+            // player goes, and its own still is laid under it.
+            if !old.is_empty() {
+                std::thread::sleep(PLAYER_UP);
+                end_players(&old);
+            }
+            if let (Some(tool), Some(still)) = (wallpaper_tool(), poster(path)) {
+                show_still(tool, &still, false);
+            }
+            return true;
         }
         if wallpaper_is_video(path) {
             return false;
@@ -1126,15 +1197,16 @@ fn show_wallpaper(path: &str, fade: bool) -> bool {
     let Some(tool) = wallpaper_tool() else {
         return false;
     };
-    let mut cmd = Command::new(tool);
-    cmd.args(["img", path, "--transition-type"]);
-    if fade {
-        cmd.args(["fade", "--transition-duration", "1"]);
-    } else {
-        cmd.arg("none");
-    }
-    finish_within(cmd, false, WALLPAPER_PATIENCE).is_some()
+    // Under a player the still is laid unseen (no fade to see), and shows
+    // when the player goes.
+    let shown = show_still(tool, path, fade && old.is_empty());
+    end_players(&old);
+    shown
 }
+
+/// How long a player just started is given to put its first frame up
+/// before the one it replaces is ended.
+const PLAYER_UP: std::time::Duration = std::time::Duration::from_millis(450);
 
 /// A wallpaper was picked: it is put up on a thread of its own, so a GIF's
 /// seconds of preparation hold up neither the settings nor a later pick,
@@ -1144,6 +1216,13 @@ fn pick_wallpaper(path: String) {
     static WALLPAPER_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mine = WALLPAPER_PICK.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let spawned = std::thread::Builder::new().name("wallpaper".into()).spawn(move || {
+        // One at a time (two hand-overs at once would each leave a player
+        // up); a pick overtaken while it waited is not put up at all.
+        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        if WALLPAPER_PICK.load(std::sync::atomic::Ordering::SeqCst) != mine {
+            return;
+        }
         let shown = show_wallpaper(&path, true);
         if !shown {
             warn!("controls: the wallpaper {path:?} could not be put up");
@@ -1670,10 +1749,18 @@ pub(crate) fn reassert() {
         if s.language.is_some() || s.time_zone.is_some() {
             assert_session_env(&s);
         }
-        // The session puts ITS picture up as it starts (Golem's hyprland.lua);
-        // the owner's goes over it once that has settled.
+        // The session starts with no picture at all (the compositor's bare
+        // grey): the owner's goes up as soon as the picture program answers
+        // — it is started beside us, so a few tries may pass first.
         if let Some(picture) = &s.wallpaper {
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Some(tool) = wallpaper_tool() {
+                for _ in 0..40 {
+                    if run(tool, &["query"]) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
             if std::path::Path::new(picture).is_file() {
                 show_wallpaper(picture, false);
             }
