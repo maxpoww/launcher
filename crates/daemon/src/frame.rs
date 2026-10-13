@@ -1327,7 +1327,15 @@ impl App {
             .map(|(_, _, _, draw)| draw.images.clone())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|(r, file)| self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape)))
+            .filter_map(|(r, file)| {
+                // What moves, moves here too (Max, 2026-10-13: "mostrar un
+                // prev de las imágenes animadas en la caja") — while the
+                // box is the one in use, not on its way out.
+                if self.fast.boxed.is_some() && crate::controls::wallpaper_moves(&file) {
+                    self.picture_play(&file);
+                }
+                self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape))
+            })
             .collect();
         // A picture with no preview (yet, or — a video where none can be
         // made — ever) shows its name instead.

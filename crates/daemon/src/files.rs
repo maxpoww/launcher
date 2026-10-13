@@ -48,6 +48,9 @@ pub(crate) fn file_asset_name(name: &str) -> &'static str {
     }
 }
 
+/// The most moving previews held at once (each is some twelve megabytes).
+const MOVING_CAP: usize = 12;
+
 impl App {
     /// Append one transient Files-section entry (kind File, an icon by
     /// type — or its thumbnail once one is ready) and return its index.
@@ -168,6 +171,54 @@ impl App {
         match ev {
             crate::thumbs::Event::Thumb { path, pixels } => self.on_thumb_pixels(path, pixels),
             crate::thumbs::Event::AudioOnly { path } => self.on_audio_only(path),
+            crate::thumbs::Event::Moving { path, frames } => {
+                // (Asked for by a box that is gone by now: not kept.)
+                if self.moving_pending.remove(&path) && !frames.is_empty() {
+                    self.moving.insert(path, (frames, usize::MAX));
+                    self.schedule_frame();
+                }
+            }
+        }
+    }
+
+    /// A picture that MOVES is on show (the wallpapers' box): play its
+    /// preview — the loop's frame for this moment goes onto the texture
+    /// its still is on. The first call asks for the loop; until it is in
+    /// (and where none can be made) the still stays.
+    pub(crate) fn picture_play(&mut self, path: &str) {
+        let Some(&(slot, _)) = self.thumb_map.get(path) else {
+            return;
+        };
+        let Some((frames, shown)) = self.moving.get_mut(path) else {
+            if self.moving.len() + self.moving_pending.len() < MOVING_CAP
+                && crate::thumbs::can_move()
+                && self.moving_pending.insert(path.to_owned())
+            {
+                self.thumbs.request_moving(path);
+            }
+            return;
+        };
+        let at = (self.moving_since.elapsed().as_secs_f32() * crate::thumbs::MOVING_FPS as f32) as usize % frames.len();
+        if *shown == at {
+            return;
+        }
+        *shown = at;
+        let chain = crate::apps::with_mips(frames[at].clone());
+        let layer = self.pkg_layer_base + (crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP) as u32 + slot as u32;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.update_icon_layer(layer, &chain);
+        }
+    }
+
+    /// The box of moving pictures was left: their loops are let go (they
+    /// are tens of megabytes) and each texture gets its still back.
+    pub(crate) fn pictures_rest(&mut self) {
+        self.moving_pending.clear();
+        let base = self.thumb_layer_base();
+        for (path, _) in std::mem::take(&mut self.moving) {
+            if let (Some((slot, pixels)), Some(renderer)) = (self.thumb_map.get(&path), self.renderer.as_mut()) {
+                renderer.update_icon_layer(base + *slot as u32, pixels);
+            }
         }
     }
 

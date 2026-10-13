@@ -2977,6 +2977,7 @@ impl App {
     /// The quick box of `label` was left.
     pub(crate) fn quick_left(&mut self, label: &'static str) {
         if label == "Wallpaper" {
+            self.pictures_rest();
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Set { label, key: "wallpaper-leave", value: String::new(), ui });
         }

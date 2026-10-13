@@ -807,6 +807,9 @@ fn main() -> anyhow::Result<()> {
         thumb_map: HashMap::new(),
         thumb_next: 0,
         thumb_pending: HashSet::new(),
+        moving: HashMap::new(),
+        moving_pending: HashSet::new(),
+        moving_since: std::time::Instant::now(),
         audio_paths: HashSet::new(),
         nix,
         pkg_hits: Vec::new(),
@@ -1884,6 +1887,12 @@ pub struct App {
     thumb_next: usize,
     /// Paths with a thumbnail job in flight (request deduplication).
     thumb_pending: HashSet<String>,
+    /// MOVING previews (the wallpapers' box): each GIF's or video's loop —
+    /// its frames, and which one is on its texture now — kept only while
+    /// that box is up; the ones asked for; and the clock they all play by.
+    moving: HashMap<String, (Vec<Vec<u8>>, usize)>,
+    moving_pending: HashSet<String>,
+    moving_since: std::time::Instant,
     /// Files classified as video by extension but found to be audio-only
     /// (no video stream): shown with the audio icon, never re-requested.
     audio_paths: HashSet<String>,
