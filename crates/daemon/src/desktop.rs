@@ -3574,6 +3574,10 @@ impl App {
     /// A key while the desktop holds the keyboard: a file manager's
     /// shortcuts, on what is selected.
     pub(crate) fn desktop_shortcut(&mut self, keysym: Keysym) {
+        // (No letter is typed on the desktop: the left hand's keys walk,
+        // open and go back as the arrows, Enter and Escape do. With Ctrl
+        // they stay what they were — Ctrl+A, Ctrl+X…)
+        let keysym = if self.modifiers.ctrl { keysym } else { crate::panel::left_hand(keysym) };
         let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
         // A menu or a box up: Escape puts it away; nothing else is for it.
         if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() {

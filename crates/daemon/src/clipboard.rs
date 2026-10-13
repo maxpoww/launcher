@@ -3410,7 +3410,8 @@ impl App {
     pub(crate) fn clip_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
         // The detail view owns the box while it is up: only its way out.
         if self.clip.detail_open {
-            if keysym == Keysym::Escape {
+            // (Nothing is typed in it: Q is the way back too.)
+            if crate::panel::left_hand(keysym) == Keysym::Escape {
                 self.close_clip_detail();
             }
             return;

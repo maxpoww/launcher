@@ -566,6 +566,24 @@ struct OpenBox {
     shown: f32,
 }
 
+/// THE LEFT HAND (Max, 2026-10-13: "en todos los lugares que no haya type
+/// to search se pueda navegar con las flechas pero también con A S W D,
+/// E (enter) y Q (back)"): where no letter is ever typed, W A S D walk as
+/// the arrows do, E is Enter and Q is the way back (Escape) — the mouse
+/// hand stays on the mouse. Where letters ARE typed (a search, a name)
+/// this is not used; the file windows take the same keys with Alt held.
+pub(crate) fn left_hand(keysym: Keysym) -> Keysym {
+    match keysym {
+        Keysym::w | Keysym::W => Keysym::Up,
+        Keysym::a | Keysym::A => Keysym::Left,
+        Keysym::s | Keysym::S => Keysym::Down,
+        Keysym::d | Keysym::D => Keysym::Right,
+        Keysym::e | Keysym::E => Keysym::Return,
+        Keysym::q | Keysym::Q => Keysym::Escape,
+        other => other,
+    }
+}
+
 /// THE COMPOSITOR'S OWN WINDOW MOTION, for a box that stands mid-screen
 /// like a window (Max, 2026-10-13: "las animaciones de las cajas son
 /// diferentes a las de hyprland. se ve raro. necesitamos que se vea
@@ -3021,8 +3039,10 @@ impl App {
     /// A key while the quick box is up: the arrows and Tab walk its
     /// choices, Enter or Space picks, Escape closes it — the box and the
     /// quick controls under it, at once (Max, 2026-10-13: "esc debería
-    /// cerrar todo").
+    /// cerrar todo"). Nothing is typed here, so the left hand's keys are
+    /// keys too (`left_hand`).
     pub(crate) fn quick_key(&mut self, keysym: Keysym) {
+        let keysym = if self.modifiers.ctrl { keysym } else { left_hand(keysym) };
         if !self.panel_keys(keysym, true) && keysym == Keysym::Escape {
             self.close_fast_launch();
         }
@@ -3134,6 +3154,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_left_hand_walks_opens_and_goes_back() {
+        assert_eq!(left_hand(Keysym::w), Keysym::Up);
+        assert_eq!(left_hand(Keysym::A), Keysym::Left);
+        assert_eq!(left_hand(Keysym::s), Keysym::Down);
+        assert_eq!(left_hand(Keysym::D), Keysym::Right);
+        assert_eq!(left_hand(Keysym::e), Keysym::Return);
+        assert_eq!(left_hand(Keysym::q), Keysym::Escape);
+        // Every other key is itself.
+        assert_eq!(left_hand(Keysym::Tab), Keysym::Tab);
+        assert_eq!(left_hand(Keysym::x), Keysym::x);
+    }
 
     /// A panel laid out at bar scale 1 over a typical card field, with
     /// estimated label widths (no text shaper in tests).

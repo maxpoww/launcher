@@ -869,6 +869,13 @@ impl App {
                     "down" => Keysym::Down,
                     "tab" => Keysym::Tab,
                     "escape" => Keysym::Escape,
+                    // (The left hand's keys, as letters: `panel::left_hand`.)
+                    "w" => Keysym::w,
+                    "a" => Keysym::a,
+                    "s" => Keysym::s,
+                    "d" => Keysym::d,
+                    "e" => Keysym::e,
+                    "q" => Keysym::q,
                     _ => Keysym::Return,
                 };
                 if self.fast.boxed.is_some() {
