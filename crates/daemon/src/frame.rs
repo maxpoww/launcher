@@ -242,10 +242,11 @@ impl App {
                     .position(|&e| self.entries.get(e).is_some_and(|x| x.id == aid))
                     .and_then(|sl| layout.dock_slots.get(sl))
                     .map(|&dock_rect| {
-                        // A second dock over the dock: its slots, its
-                        // band's height, a gap over the dock's plate.
-                        let slot = content::DOCK_SLOT * scale;
-                        let band = self.config.window.input_bar_height as f32 * scale;
+                        // A second dock over the dock, a gap over its
+                        // plate: its members a size up, their names under.
+                        let slot = content::STACK_CELL_W * scale;
+                        let band = content::stack_cell_h(scale);
+                        let dock_h = self.config.window.input_bar_height as f32 * scale;
                         let m = content::DRAG_MARGIN_X + content::DOCK_PAD_X * scale;
                         let area = content::Rect::new(
                             m,
@@ -253,7 +254,7 @@ impl App {
                             (self.buffer_size.0 as f32 - 2.0 * m).max(slot),
                             layout.card_top,
                         );
-                        let plate = content::Rect::new(dock_rect.x, layout.card_top, dock_rect.w, band);
+                        let plate = content::Rect::new(dock_rect.x, layout.card_top, dock_rect.w, dock_h);
                         content::row_box(plate, n, (slot, band), area, content::BOX_GAP)
                     })
             } else {

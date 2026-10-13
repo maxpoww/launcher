@@ -1190,6 +1190,20 @@ pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
     })
 }
 
+/// A dock stack's members (Max, 2026-10-13: "from the dock I want the names
+/// under the icons… a little bigger and apart"): the dock's icons a size
+/// up, in cells wide enough for a name under each.
+pub const STACK_ICON: f32 = 46.0;
+pub const STACK_CELL_W: f32 = 78.0;
+const STACK_ICON_TOP: f32 = 8.0;
+const STACK_BOTTOM_PAD: f32 = 6.0;
+
+/// A dock stack's cell height at `icon_scale`: the icon, its name (which
+/// doesn't scale) and the air around them.
+pub fn stack_cell_h(icon_scale: f32) -> f32 {
+    (STACK_ICON_TOP + STACK_ICON + STACK_BOTTOM_PAD) * icon_scale + GRID_LABEL_GAP + LABEL_LINE_PX
+}
+
 /// Gap between a dock folder's open box and its icon: the page dots sit
 /// in it.
 pub const BOX_GAP: f32 = 12.0;
@@ -1745,8 +1759,8 @@ pub fn scene(
             Some(Rect::new(vp.x, to.y, vp.w, to.h * group_expand.clamp(0.0, 1.0)))
         }
         // Over the dock: the same run upwards, from its bottom edge — the
-        // one next to its icon. A plate like the dock's: its slots, and
-        // the dock's own padding at the ends.
+        // one next to its icon. A plate like the dock's, with the dock's
+        // own padding at the ends.
         (false, Some(_), Some(to)) => {
             let h = to.h * group_expand.clamp(0.0, 1.0);
             let pad = DOCK_PAD_X * icon_scale;
@@ -3126,16 +3140,13 @@ pub fn scene(
         // mid-glide — the reflow itself is computed in `draw`, shared
         // with the grid): positions lerp between the cell centers of the
         // two neighboring slots, pages included.
-        // Each member stands as its neighbours do: over the dock a dock
-        // icon in a dock slot, no name under it (its name shows on hover,
-        // like the dock's); in the grid a grid icon in a grid cell, on the
-        // grid's columns, its name under it.
-        let member_icon = if box_over_dock { dock_icon } else { grid_icon };
-        let icon_cy = if box_over_dock {
-            cell_h / 2.0 + dock_slot.min(cell_h) / 2.0 - dock_icon / 2.0
-        } else {
-            grid_icon_top + grid_icon / 2.0
-        };
+        // Each member stands as its neighbours do, its name under it: over
+        // the dock a dock icon a size up, in a cell just wide enough for
+        // the name; in the grid a grid icon in a grid cell, on the grid's
+        // columns.
+        let member_icon = if box_over_dock { STACK_ICON * icon_scale } else { grid_icon };
+        let icon_cy = if box_over_dock { STACK_ICON_TOP * icon_scale } else { grid_icon_top } + member_icon / 2.0;
+        let name_w = cell - if box_over_dock { 6.0 } else { 12.0 };
         let place = |di: usize| -> (f32, f32) {
             let cap = layout.open_box_cap.max(1);
             let slot = di % cap;
@@ -3146,7 +3157,6 @@ pub fn scene(
                 members_rect.y + row as f32 * cell_h + icon_cy,
             )
         };
-        let mut hovered_member: Option<(usize, f32)> = None;
         for (m, &idx) in open_box_members.iter().enumerate() {
             if box_drag.is_some_and(|(h, _, _)| h == idx) {
                 continue; // dragged member: a ghost, not in the grid
@@ -3165,9 +3175,6 @@ pub fn scene(
                 continue;
             }
             let (cx, cy, size) = (open_cx, open_cy, member_icon);
-            if box_over_dock && hover == Some(Hit::OpenBoxCell(d0 % layout.open_box_cap.max(1))) && frac <= f32::EPSILON {
-                hovered_member = Some((idx, cx));
-            }
             boxgrid.icons.push(IconInst {
                 rect: Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
                 layer: layer_of(idx),
@@ -3193,12 +3200,12 @@ pub fn scene(
                     });
                 }
             }
-            // In the grid each member's name rides under its icon.
-            if let Some(entry) = entries.get(idx).filter(|_| !box_over_dock) {
+            // Each member's name rides under its icon.
+            if let Some(entry) = entries.get(idx) {
                 boxgrid.labels.push(Label {
-                    text: truncate_label(&entry.name, cell - 12.0, LABEL_FONT_PX),
+                    text: truncate_label(&entry.name, name_w, LABEL_FONT_PX),
                     pos: (cx, cy + size / 2.0 + GRID_LABEL_GAP),
-                    max_w: cell - 12.0,
+                    max_w: name_w,
                     font_px: LABEL_FONT_PX,
                     line_px: LABEL_LINE_PX,
                     centered: true,
@@ -3211,43 +3218,6 @@ pub fn scene(
             }
         }
         scene.grids.push(boxgrid);
-        // Over the dock the hovered member's name shows as the dock's do:
-        // a pill over the plate.
-        if let Some((idx, cx)) = hovered_member.filter(|_| t >= 1.0 && box_drag.is_none()) {
-            if let Some(name) = entries.get(idx).map(|e| e.name.clone()) {
-                let mut tip = GridContent {
-                    clip: Rect::new(0.0, 0.0, surface.0, surface.1),
-                    ..Default::default()
-                };
-                let (font_px, line_px) = (LABEL_FONT_PX, LABEL_FONT_PX * 1.3);
-                let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
-                let pill_h = line_px + 6.0;
-                let pill_y = (box_rect.y - 6.0 - pill_h).max(2.0);
-                let mut bg = dock_bg;
-                bg[3] = bg[3].max(0.92);
-                tip.rects.push(RectInst {
-                    rect: Rect::new(cx - pill_w / 2.0, pill_y, pill_w, pill_h),
-                    radius: pill_h / 2.0,
-                    color: bg,
-                    glass: 0.0,
-                    border: 0.0,
-                });
-                tip.labels.push(Label {
-                    text: name,
-                    pos: (cx, pill_y + (pill_h - line_px) / 2.0),
-                    max_w: pill_w,
-                    font_px,
-                    line_px,
-                    centered: true,
-                    dim: false,
-                    cache: true,
-                    family: None,
-                    color: None,
-                    clip: None,
-                });
-                scene.grids.push(tip);
-            }
-        }
         // Page dots (own grid so they aren't clipped to the box): between
         // a dock stack and its icon; on the bottom edge of a box in the
         // grid, where the row under it leaves them air.
