@@ -481,6 +481,7 @@ fn main() -> anyhow::Result<()> {
     // File thumbnails arrive from their own worker as they render.
     let (thumb_tx, thumb_rx) = channel::channel::<thumbs::Event>();
     let thumbs = thumbs::spawn(thumb_tx);
+    apps::prune_caches();
 
     // Clipboard paste reads answer over this channel (each paste reads
     // the selection pipe on a short-lived thread).
