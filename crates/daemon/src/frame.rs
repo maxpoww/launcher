@@ -1312,11 +1312,12 @@ impl App {
         } else {
             (fast_view.card, Vec::new())
         };
+        let (quick_bg, quick_ink, quick_moving) = self.quick_colours(dt, dock_bg, dock_ink);
         let quick = {
-            let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
-            self.quick_frame(dt, crate::panel::PanelPaint { ink: dock_ink, bright })
+            let bright = quick_ink[0] + quick_ink[1] + quick_ink[2] < 1.5;
+            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright })
         };
-        if quick.is_some() {
+        if quick.is_some() || quick_moving {
             fit_animating = true;
         }
         // Its pictures (the wallpapers' previews), each with its texture
@@ -1328,8 +1329,28 @@ impl App {
             .into_iter()
             .filter_map(|(r, file)| self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape)))
             .collect();
-        let quick_draw =
-            quick.as_ref().map(|(rect, a, draw)| content::QuickDraw { rect: *rect, a: *a, draw, images: &quick_images });
+        // A picture with no preview (yet, or — a video where none can be
+        // made — ever) shows its name instead.
+        let quick_names: Vec<(content::Rect, String)> = quick
+            .as_ref()
+            .map(|(_, _, draw)| draw.images.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, file)| !self.has_picture(file))
+            .map(|(r, file)| {
+                let name = std::path::Path::new(&file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                (r, name)
+            })
+            .collect();
+        let quick_draw = quick.as_ref().map(|(rect, a, draw)| content::QuickDraw {
+            rect: *rect,
+            a: *a,
+            draw,
+            images: &quick_images,
+            names: &quick_names,
+            ink: quick_ink,
+            bg: quick_bg,
+        });
         let fast_draw = (self.fast.visible() && self.fast.boxed.is_none()).then_some(content::FastDraw {
             card: if self.fast.controls { fast_pill_card } else { fast_view.card },
             radius: fast_geo.radius,

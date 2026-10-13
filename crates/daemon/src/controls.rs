@@ -175,7 +175,13 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Run a program to its end, or end it at [`PATIENCE`]. `None`: it is not
 /// there, was ended, or failed.
-fn finish(mut cmd: Command, keep_output: bool) -> Option<String> {
+fn finish(cmd: Command, keep_output: bool) -> Option<String> {
+    finish_within(cmd, keep_output, PATIENCE)
+}
+
+/// [`finish`] with a patience of its own, for the few programs whose work
+/// is long by nature.
+fn finish_within(mut cmd: Command, keep_output: bool, patience: std::time::Duration) -> Option<String> {
     cmd.stdin(Stdio::null()).stderr(Stdio::null());
     cmd.stdout(if keep_output { Stdio::piped() } else { Stdio::null() });
     let mut child = cmd.spawn().ok()?;
@@ -193,7 +199,7 @@ fn finish(mut cmd: Command, keep_output: bool) -> Option<String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if start.elapsed() < PATIENCE => std::thread::sleep(std::time::Duration::from_millis(15)),
+            Ok(None) if start.elapsed() < patience => std::thread::sleep(std::time::Duration::from_millis(15)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -209,7 +215,7 @@ fn finish(mut cmd: Command, keep_output: bool) -> Option<String> {
             None
         }
         None => {
-            warn!("controls: a program did not answer in {PATIENCE:?}; ended");
+            warn!("controls: a program did not answer in {patience:?}; ended");
             None
         }
     }
@@ -986,12 +992,91 @@ pub(crate) fn desktop_handles(text: &str, mime: &str) -> Option<String> {
 // -------------------------------------------------------------- wallpaper
 
 fn wallpaper_dir() -> std::path::PathBuf {
+    // (`WAVERUNNER_WALLPAPER_DIR`: another folder, for a test rig.)
+    if let Some(dir) = std::env::var_os("WAVERUNNER_WALLPAPER_DIR").filter(|d| !d.is_empty()) {
+        return std::path::PathBuf::from(dir);
+    }
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Pictures/Wallpapers")
 }
 
 /// The program that puts a picture on the desktop (`awww`, once `swww`).
 fn wallpaper_tool() -> Option<&'static str> {
     ["awww", "swww"].into_iter().find(|t| crate::launch::on_path(t))
+}
+
+/// The program that plays a video as the desktop's picture.
+const VIDEO_TOOL: &str = "mpvpaper";
+
+fn is_video_ext(ext: &str) -> bool {
+    matches!(ext, "mp4" | "webm" | "mkv" | "mov" | "m4v")
+}
+
+/// Whether the wallpaper at `path` is a video, and whether it moves at all
+/// (a video, or a GIF).
+pub(crate) fn wallpaper_is_video(path: &str) -> bool {
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| is_video_ext(&e.to_lowercase()))
+}
+
+pub(crate) fn wallpaper_moves(path: &str) -> bool {
+    wallpaper_is_video(path) || path.to_lowercase().ends_with(".gif")
+}
+
+/// How long the picture program may take over one picture. A still is
+/// there in a blink, but an animated GIF is read whole and every frame of
+/// it made the screen's size before the program answers: seconds, and a
+/// long one many of them. (The four seconds every other program gets ended
+/// it mid-work, so no GIF was ever shown — Max, 2026-10-13: "los gif están
+/// ahí pero no funcionan".)
+const WALLPAPER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Put the wallpaper at `path` on the desktop: a still or a GIF through the
+/// picture program (`fade`: with its second-long fade), a video through
+/// `mpvpaper`, looping and silent, over whatever picture is there. Any video
+/// playing is ended first. Returns whether it was put — after however long
+/// the picture program needed (see [`WALLPAPER_PATIENCE`]): call it from a
+/// thread that may wait.
+fn show_wallpaper(path: &str, fade: bool) -> bool {
+    // (None playing: nothing to end, and that is not a failure.)
+    run("pkill", &["-x", VIDEO_TOOL]);
+    if wallpaper_is_video(path) {
+        // `-f`: it forks and plays on; `*`: every screen.
+        return run(VIDEO_TOOL, &["-f", "-o", "no-audio loop panscan=1.0", "*", path]);
+    }
+    let Some(tool) = wallpaper_tool() else {
+        return false;
+    };
+    let mut cmd = Command::new(tool);
+    cmd.args(["img", path, "--transition-type"]);
+    if fade {
+        cmd.args(["fade", "--transition-duration", "1"]);
+    } else {
+        cmd.arg("none");
+    }
+    finish_within(cmd, false, WALLPAPER_PATIENCE).is_some()
+}
+
+/// A wallpaper was picked: it is put up on a thread of its own, so a GIF's
+/// seconds of preparation hold up neither the settings nor a later pick,
+/// and remembered once it is up. A newer pick overtakes an older one still
+/// being prepared (`WALLPAPER_PICK`: only the newest is remembered).
+fn pick_wallpaper(path: String) {
+    static WALLPAPER_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mine = WALLPAPER_PICK.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let spawned = std::thread::Builder::new().name("wallpaper".into()).spawn(move || {
+        let shown = show_wallpaper(&path, true);
+        if !shown {
+            warn!("controls: the wallpaper {path:?} could not be put up");
+            return;
+        }
+        if WALLPAPER_PICK.load(std::sync::atomic::Ordering::SeqCst) == mine {
+            let mut s = GolemSettings::load();
+            s.wallpaper = Some(path);
+            s.store();
+        }
+    });
+    if let Err(e) = spawned {
+        warn!("controls: no thread for the wallpaper: {e}");
+    }
 }
 
 /// The most pictures shown.
@@ -1004,8 +1089,13 @@ fn pictures() -> Vec<std::path::PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
+            // Stills, and what moves: an animated GIF is the picture
+            // program's own to play; a video is played by `mpvpaper`, so
+            // videos are listed only where that is installed.
             p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-                matches!(e.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp")
+                let e = e.to_lowercase();
+                matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
+                    || (is_video_ext(&e) && crate::launch::on_path(VIDEO_TOOL))
             })
         })
         .collect();
@@ -1249,7 +1339,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             } else if wallpaper_tool().is_none() {
                 tr("This computer cannot change its wallpaper yet.").to_owned()
             } else {
-                tr("The pictures in Pictures/Wallpapers.").to_owned()
+                tr("The pictures in Pictures/Wallpapers. ▶ marks the ones that move.").to_owned()
             };
             if !found.is_empty() && wallpaper_tool().is_some() {
                 let choices = found
@@ -1432,13 +1522,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         "wallpaper" => {
             let path = std::path::Path::new(value);
             if path.starts_with(wallpaper_dir()) && path.is_file() {
-                if let Some(tool) = wallpaper_tool() {
-                    if run(tool, &["img", value, "--transition-type", "fade", "--transition-duration", "1"]) {
-                        let mut s = GolemSettings::load();
-                        s.wallpaper = Some(value.to_owned());
-                        s.store();
-                    }
-                }
+                pick_wallpaper(value.to_owned());
             }
         }
         k if k.starts_with("default:") => {
@@ -1491,10 +1575,10 @@ pub(crate) fn reassert() {
         }
         // The session puts ITS picture up as it starts (Golem's hyprland.lua);
         // the owner's goes over it once that has settled.
-        if let (Some(picture), Some(tool)) = (&s.wallpaper, wallpaper_tool()) {
+        if let Some(picture) = &s.wallpaper {
             std::thread::sleep(std::time::Duration::from_secs(5));
             if std::path::Path::new(picture).is_file() {
-                run(tool, &["img", picture, "--transition-type", "none"]);
+                show_wallpaper(picture, false);
             }
         }
     });

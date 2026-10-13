@@ -112,6 +112,23 @@ pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
     (crate::options::wash(!bright, wash[layer.min(2)]), LAYER_INK[layer.min(2)])
 }
 
+/// The sign on a wallpaper that moves, at `pos`.
+fn mark(pos: (f32, f32), scale: f32) -> Label {
+    Label {
+        text: "▶".to_owned(),
+        pos,
+        max_w: 40.0 * scale,
+        font_px: 15.0 * scale,
+        line_px: 18.0 * scale,
+        centered: true,
+        dim: false,
+        cache: false,
+        family: TEXT_FONT,
+        color: None,
+        clip: None,
+    }
+}
+
 /// A picture's preview in a setting (the wallpapers): its height for its
 /// width, the gap between two, its corner, and the widest one gets.
 const TILE_ASPECT: f32 = 0.625;
@@ -2015,6 +2032,18 @@ impl Panel {
                     let radius = TILE_RADIUS * s * cs;
                     let wash = crate::options::wash(!paint.bright, layer_wash[2]);
                     out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
+                    // Its name, small, for as long as there is no preview to
+                    // cover it (a video where none can be made); and ▶ on
+                    // one that moves.
+                    if crate::controls::wallpaper_moves(&file) {
+                        // (Dark under light: it reads on any picture.)
+                        let (bx, by) = (r.x + 15.0 * s, r.y + r.h - 25.0 * s);
+                        out.labels.push(Label {
+                            color: Some([0.0, 0.0, 0.0, 0.7 * ca]),
+                            ..mark(map(bx + 1.2 * s, by + 1.2 * s), s * cs)
+                        });
+                        out.labels.push(Label { color: Some([1.0, 1.0, 1.0, 0.95 * ca]), ..mark(map(bx, by), s * cs) });
+                    }
                     if resting {
                         out.images.push((tile, file));
                     }
@@ -2781,6 +2810,9 @@ impl App {
             return;
         };
         info!("control panel: {label}: {key} = {value}");
+        if key == "wallpaper" {
+            self.wallpaper_changing(&value);
+        }
         if !crate::controls::ui_key(key) {
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Set { label, key, value, ui });

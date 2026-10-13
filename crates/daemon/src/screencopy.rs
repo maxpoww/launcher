@@ -98,6 +98,11 @@ const DEMAND_DEADLINE: Duration = Duration::from_millis(80);
 /// it (workspace slide, window animation), so look again shortly instead
 /// of letting a transitional colour sit until the next [`POLL`] tick.
 const SETTLE_BURST: Duration = Duration::from_millis(180);
+/// While a wallpaper fades in: how soon the next look comes.
+const WALL_STEP: Duration = Duration::from_millis(45);
+/// How long the screen is followed closely after a wallpaper is picked (its
+/// fade is a second), before one last look at the settled screen.
+const WALL_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Colour histogram for the dominant-colour (mode) sample: quantised RGB key →
 /// (pixel count, r sum, g sum, b sum) so the winning bucket can be averaged.
@@ -569,6 +574,38 @@ impl App {
             .find(|o| self.output_state.info(o).and_then(|i| i.name).as_deref() == Some(name))
     }
 
+    /// A WALLPAPER WAS PICKED (the picture at `path` is about to fade in over
+    /// a second). Two things make the shell's colours follow it instead of
+    /// jumping a while later (Max, 2026-10-13: "más rápida y smooth… empezar
+    /// por la caja de wallpapers"):
+    ///
+    /// - the colour the picture will give is read from its PREVIEW at once
+    ///   (the band of it the dock sits on), and the wallpapers' box goes
+    ///   there straight away, eased (`quick_colours`);
+    /// - the screen is sampled at every chance while the picture fades, so
+    ///   the dock and the bar move with the fade in many small steps, and
+    ///   once more when it has settled.
+    pub(crate) fn wallpaper_changing(&mut self, path: &str) {
+        let now = std::time::Instant::now();
+        self.wall_guess = self.thumb_map.get(path).and_then(|(_, pixels)| preview_colour(pixels));
+        self.wall_until = Some(now + WALL_WINDOW);
+        tracing::info!("wallpaper: changing; its colour from the preview: {:?}", self.wall_guess);
+        self.demand_capture(Demand::Fresh);
+        let timer = calloop::timer::Timer::from_duration(WALL_WINDOW + Duration::from_millis(60));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            // (A later pick moved the window on: that one's timer ends it.)
+            if app.wall_until.is_some_and(|until| std::time::Instant::now() >= until) {
+                app.wall_until = None;
+                app.wall_guess = None;
+                // The settled screen, read even though nothing moves now.
+                app.demand_capture(Demand::Must);
+                app.schedule_frame();
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+        self.schedule_frame();
+    }
+
     /// Ask for a sample (see [`Demand`]) and move the capture along.
     fn demand_capture(&mut self, demand: Demand) {
         if demand > self.capture_demand {
@@ -884,13 +921,22 @@ impl App {
         // look may come soon, so the colour converges on the settled screen.
         // Otherwise the usual interval. Either way the next frame WAITS for
         // the screen to change: a settled screen is not captured again.
+        // A wallpaper is fading in: look at every chance, so each step of
+        // its fade is one small step of ours (see `App::wallpaper_changing`).
+        let fading = self.wall_until.is_some_and(|until| now < until);
         self.capture_next_at = Some(
-            now + if changed {
+            now + if fading {
+                WALL_STEP
+            } else if changed {
                 SETTLE_BURST
             } else {
                 SAMPLE_INTERVAL
             },
         );
+        if fading {
+            self.capture_demand = Demand::Fresh;
+            self.demand_since = Some(now);
+        }
         if changed {
             crate::perf::COLOR_CHANGED.hit();
             // Fresh colours: hand the window borders their new gradient
@@ -1435,4 +1481,34 @@ mod tests {
         assert!(clean_cols(50, 1, 9, 0, 50, &[]).is_empty());
         assert!(clean_cols(10, 1, 9, 0, 100, &[(0, 100)]).is_empty());
     }
+}
+
+/// The colour a picture gives the dock, from its preview (premultiplied
+/// sRGB bytes, the picture centred on a clear square): the mean of its
+/// bottom band — the part of a wallpaper the dock sits on — in the linear
+/// light the sampled colours are in. `None`: no picture in the preview.
+pub(crate) fn preview_colour(pixels: &[u8]) -> Option<[f32; 4]> {
+    let n = crate::apps::ICON_SIZE as usize;
+    if pixels.len() < n * n * 4 {
+        return None;
+    }
+    let px = |x: usize, y: usize| &pixels[(y * n + x) * 4..(y * n + x) * 4 + 4];
+    let rows: Vec<usize> = (0..n).filter(|&y| px(n / 2, y)[3] > 8).collect();
+    let (top, bottom) = (*rows.first()?, *rows.last()?);
+    // The lowest eighth of the picture.
+    let from = bottom.saturating_sub(((bottom - top) / 8).max(1));
+    let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
+    for y in from..=bottom {
+        for x in 0..n {
+            let p = px(x, y);
+            if p[3] > 8 {
+                let a = f32::from(p[3]) / 255.0;
+                for (c, s) in sum.iter_mut().enumerate() {
+                    *s += srgb_to_linear(f32::from(p[c]) / 255.0 / a);
+                }
+                count += 1.0;
+            }
+        }
+    }
+    (count > 0.0).then(|| [sum[0] / count, sum[1] / count, sum[2] / count, 1.0])
 }

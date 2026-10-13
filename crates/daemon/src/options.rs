@@ -7236,6 +7236,39 @@ impl crate::App {
         self.dock_regime().surface(bg, ink, false)
     }
 
+    /// THE QUICK BOX's colours this frame, given the dock's (`dock_fill`,
+    /// `dock_ink`, already eased). While a wallpaper is changing they head
+    /// for what the new picture will give — read from its preview the
+    /// moment it was picked — so the box is first to change and the rest of
+    /// the shell arrives where it already is; otherwise they are the
+    /// dock's. Eased either way: quick, never a step.
+    pub(crate) fn quick_colours(&mut self, dt: f32, dock_fill: [f32; 4], dock_ink: [f32; 4]) -> ([f32; 4], [f32; 4], bool) {
+        /// τ ≈ 80 ms: there in a quarter of a second.
+        const RATE: f32 = 12.0;
+        let (fill_to, ink_to) = match self.wall_guess {
+            Some(guess) => {
+                let backdrop = Backdrop { matched: None, frost: Some(guess) };
+                let (mut fill, ink) = backdrop.surface(dock_fill, dock_ink, true);
+                fill[3] = dock_fill[3];
+                (fill, ink)
+            }
+            None => (dock_fill, dock_ink),
+        };
+        let mut moving = false;
+        let mut ease = |cur: &mut Option<[f32; 4]>, to: [f32; 4]| {
+            let cur = cur.get_or_insert(to);
+            for (c, t) in cur.iter_mut().zip(to) {
+                let (v, m) = crate::animation::ease_toward(*c, t, dt, RATE, 0.002);
+                *c = v;
+                moving |= m;
+            }
+            *cur
+        };
+        let fill = ease(&mut self.quick_fill_anim, fill_to);
+        let ink = ease(&mut self.quick_ink_anim, ink_to);
+        (fill, ink, moving)
+    }
+
     /// [`Self::dock_surface`], temporally smoothed: the sampled colour only
     /// sets *targets*; the drawn fill, ink, and hover wash each ease toward
     /// theirs every frame instead of repainting in one hard set — a new
