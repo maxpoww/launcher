@@ -283,12 +283,19 @@ impl crate::App {
         apply(module, add, remove);
         let catalog = crate::webapps::load_catalog();
         let mut waiting = BTreeSet::new();
+        // Every package of the module in ONE message to the worker: one list
+        // write, one rebuild.
+        let mut batch: Vec<crate::nix::Request> = Vec::new();
         let mut web_changed = false;
         for p in add {
             match (&p.pkg, &p.web) {
                 (Some(attr), _) => {
                     if !self.managed.contains(attr) && !crate::applier::is_installed(attr) && !self.busy_ids.contains(attr) {
-                        self.start_managed_install(attr, Vec::new());
+                        // (As `start_managed_install`, less its own request.)
+                        self.managed.stage(attr, Vec::new());
+                        self.busy_ids.insert(attr.clone());
+                        self.managed_install_attrs.push(attr.clone());
+                        batch.push(crate::nix::Request::Install { id: attr.clone(), attr: attr.clone() });
                         waiting.insert(attr.clone());
                     }
                 }
@@ -308,19 +315,20 @@ impl crate::App {
                 (Some(attr), _) => {
                     if self.managed.contains(attr) && !self.busy_ids.contains(attr) {
                         // The app's own tile, when it has one, so its windows
-                        // are closed and its pin goes; else the bare package.
+                        // are closed and its pin goes with it (as
+                        // `uninstall_app`); else the bare package.
                         let tile = self.managed.desktop_ids_for(attr).into_iter().find(|id| self.removable_ids.contains(id));
-                        let started = match tile {
-                            Some(id) => self.uninstall_app(&id),
-                            None => {
-                                self.busy_ids.insert(attr.clone());
-                                self.nix.request(crate::nix::Request::Remove { id: attr.clone(), attr: attr.clone() });
-                                true
+                        let id = match tile {
+                            Some(id) => {
+                                self.kill_app_windows(&id);
+                                self.uninstalling.insert(id.clone(), attr.clone());
+                                id
                             }
+                            None => attr.clone(),
                         };
-                        if started {
-                            waiting.insert(attr.clone());
-                        }
+                        self.busy_ids.insert(id.clone());
+                        batch.push(crate::nix::Request::Remove { id, attr: attr.clone() });
+                        waiting.insert(attr.clone());
                     }
                 }
                 (None, Some(url)) => {
@@ -334,6 +342,11 @@ impl crate::App {
                 }
                 _ => {}
             }
+        }
+        if !batch.is_empty() {
+            self.recompute_removable();
+            self.nix.request(crate::nix::Request::Batch(batch));
+            self.save_install_state();
         }
         if web_changed {
             self.refilter();
@@ -352,6 +365,25 @@ impl crate::App {
         task.set(0, total);
         info!("modules: {module}: {total} program(s) through the rebuild");
         self.module_job = Some(ModuleJob { name: module.to_owned(), task, waiting, total, failed: 0, removing });
+    }
+
+    /// [`Self::modules_apply`] for the `modules apply:<name>` /
+    /// `modules remove:<name>` verbs: the module's recommended programs
+    /// that are not here yet, or everything of it that is.
+    pub(crate) fn modules_apply_named(&mut self, name: &str, install: bool) {
+        let Some(m) = catalog().modules.iter().find(|m| m.name.eq_ignore_ascii_case(name)) else {
+            info!("modules: no module called {name:?}");
+            return;
+        };
+        let have = self.modules_installed();
+        let here = |p: &&'static Program| have.contains(&p.name.to_lowercase());
+        let (add, remove): (Vec<&'static Program>, Vec<&'static Program>) = if install {
+            (m.programs().filter(|p| p.in_recommended() && !here(p)).collect(), Vec::new())
+        } else {
+            (Vec::new(), m.programs().filter(here).collect())
+        };
+        info!("modules: {} by verb: {} to add, {} to remove", m.name, add.len(), remove.len());
+        self.modules_apply(m.name.as_str(), &add, &remove);
     }
 
     /// One program of the module being applied came out of the rebuild.

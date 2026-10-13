@@ -3022,6 +3022,11 @@ impl App {
             Command::Modules(name) => {
                 if name.is_empty() {
                     self.toggle_modules();
+                } else if let Some(module) = name.strip_prefix("apply:").or_else(|| name.strip_prefix("remove:")) {
+                    // A module's Apply without a pointer: `modules apply:<name>`
+                    // is "Install recommended", `modules remove:<name>`
+                    // "Uninstall all".
+                    self.modules_apply_named(module.trim(), name.starts_with("apply:"));
                 } else {
                     self.show_module(&name);
                 }

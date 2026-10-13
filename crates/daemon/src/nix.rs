@@ -130,6 +130,11 @@ pub enum Request {
     /// grid cell whose busy / failed state the install resolves. On the
     /// install path `id` == `attr`.
     Install { id: String, attr: String },
+    /// Several installs and removals that belong together (a module's
+    /// Apply): handed to the worker as ONE message, so they are one list
+    /// write and one rebuild — sent one by one, the worker could wake on the
+    /// first and build it alone before the rest had arrived.
+    Batch(Vec<Request>),
     /// Uninstall a package declaratively: remove `attr` from the package
     /// list and wait for the rebuild. `id` echoes to `Done { id, .. }` —
     /// the app cell whose busy / failed state the removal resolves (on the
@@ -305,12 +310,20 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                             None
                         }
                         Request::EnsureApplied { force } => Some(force),
-                        // Routed to their own threads.
-                        Request::Rank { .. } | Request::Realize { .. } => None,
+                        // Routed to their own threads; a batch is opened
+                        // below, before it gets here.
+                        Request::Rank { .. } | Request::Realize { .. } | Request::Batch(_) => None,
                     };
-                reconcile = queue_op(request, &mut ops).or(reconcile);
+                let mut waiting = vec![request];
                 while let Ok(more) = mutations_rx.try_recv() {
-                    reconcile = queue_op(more, &mut ops).or(reconcile);
+                    waiting.push(more);
+                }
+                let each = waiting.into_iter().flat_map(|r| match r {
+                    Request::Batch(inside) => inside,
+                    one => vec![one],
+                });
+                for one in each {
+                    reconcile = queue_op(one, &mut ops).or(reconcile);
                 }
                 match ops.len() {
                     0 => {}
