@@ -2781,6 +2781,9 @@ impl App {
             return;
         };
         info!("control panel: {label}: {key} = {value}");
+        if key == "wallpaper" {
+            self.wallpaper_changing(&value);
+        }
         if !crate::controls::ui_key(key) {
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Set { label, key, value, ui });

@@ -767,6 +767,10 @@ fn main() -> anyhow::Result<()> {
         pointer_inside_box: false,
         dock_mag: Vec::new(),
         dock_fill_anim: None,
+        wall_until: None,
+        wall_guess: None,
+        quick_fill_anim: None,
+        quick_ink_anim: None,
         dock_ink_anim: None,
         dock_wash_anim: None,
         dock_plate_anim: None,
@@ -1772,6 +1776,17 @@ pub struct App {
     /// colour changes fade instead of blinking — the ink's black↔white
     /// flip included. `None` until the first frame seeds them.
     dock_fill_anim: Option<[f32; 4]>,
+    /// A WALLPAPER IS CHANGING (picked in its setting): until when the
+    /// screen is sampled at every chance, so the shell's colours follow the
+    /// picture's fade instead of landing in one step later; and the colour
+    /// the new picture should give, read from its preview at once
+    /// (`wallpaper_changing`).
+    wall_until: Option<std::time::Instant>,
+    wall_guess: Option<[f32; 4]>,
+    /// The quick box's own eased colours: it goes to the new picture's
+    /// colour first, ahead of the screen.
+    quick_fill_anim: Option<[f32; 4]>,
+    quick_ink_anim: Option<[f32; 4]>,
     dock_ink_anim: Option<[f32; 4]>,
     dock_wash_anim: Option<[f32; 4]>,
     dock_plate_anim: Option<[f32; 4]>,
