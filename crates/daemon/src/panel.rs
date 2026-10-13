@@ -701,9 +701,9 @@ pub(crate) struct Panel {
     /// no field of pills, only the open setting.
     solo: bool,
     /// THE KEYBOARD in an open setting (Max, 2026-10-13: "manejar todo con
-    /// el teclado"): the choice the keys are on — which of the content's
-    /// pills, in their drawn order. `None` until a key moves: the pointer's
-    /// way shows no cursor.
+    /// el teclado"): the ONE cursor on its choices — which of the content's
+    /// pills, in their drawn order. The pointer moving puts it under the
+    /// pointer, a key moves it from there (`step`); `None`: nowhere.
     focus: Option<usize>,
 }
 
@@ -1802,7 +1802,26 @@ impl Panel {
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
     fn step(&mut self, dt: f32, pointer: Option<(f32, f32)>) {
         self.clock += dt;
+        // ONE CURSOR on an open setting's choices (Max, 2026-10-13: three
+        // tiles looked chosen — the pointer's, the keys', the one in use —
+        // "hacé que haya una sola, la del puntero, y se mueve con el
+        // puntero o con las teclas"): the pointer MOVING puts it where the
+        // pointer is (off every choice: nowhere); a key moves it from
+        // there. A pointer lying still is not a second one.
+        let moved = match (self.pointer, pointer) {
+            (Some(a), Some(b)) => (a.0 - b.0).hypot(a.1 - b.1) > 1.5,
+            (None, Some(_)) => true,
+            _ => false,
+        };
         self.pointer = pointer;
+        if moved && self.open.as_ref().is_some_and(|o| o.want > 0.5) {
+            let chips = self.key_chips();
+            if !chips.is_empty() {
+                let f = self.field;
+                self.focus = pointer
+                    .and_then(|pos| chips.iter().position(|c| Rect::new(f.x + c.0.x, f.y + c.0.y, c.0.w, c.0.h).contains(pos)));
+            }
+        }
         if let Some(open) = &mut self.open {
             if open.want == 0.0 && !self.solo {
                 // Fold back into where the pill is now: the game may have
@@ -2109,13 +2128,12 @@ impl Panel {
             let line = 20.0 * s;
             for (i, chip) in content.chips.into_iter().enumerate() {
                 let r = chip.rect;
-                let hot = resting
-                    && self.pointer.is_some_and(|pos| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
+                // (The one cursor — the pointer's or the keys': `step`.)
+                let keyed = resting && self.focus == Some(i);
                 // A PICTURE: its preview in a still frame — a wash until the
-                // picture is in, a ring when it is the one in use, a
-                // brighter one where the pointer or the keys are.
+                // picture is in, ONE ring where the cursor is, and a small
+                // bar at the foot of the one in use (never a second ring).
                 if let Some(file) = chip.image {
-                    let keyed = resting && self.focus == Some(i);
                     let (mx, my) = map(r.x, r.y);
                     let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
                     let radius = TILE_RADIUS * s * cs;
@@ -2136,8 +2154,28 @@ impl Panel {
                     if resting {
                         out.images.push((tile, file));
                     }
-                    if chip.on || hot || keyed {
-                        let (grow, alpha, border) = if keyed || hot { (3.0 * s, 0.95, 2.4 * s) } else { (2.0 * s, 0.7, 1.6 * s) };
+                    if chip.on {
+                        // (Dark under light, as the ▶: it reads on any picture.)
+                        let (bw, bh) = (26.0 * s * cs, 4.0 * s * cs);
+                        let (bx, by) = (tile.x + (tile.w - bw) / 2.0, tile.y + tile.h - bh - 7.0 * s * cs);
+                        let o = 1.2 * s * cs;
+                        out.rects.push(RectInst {
+                            rect: Rect::new(bx - o, by - o, bw + 2.0 * o, bh + 2.0 * o),
+                            radius: bh / 2.0 + o,
+                            color: [0.0, 0.0, 0.0, 0.6 * ca],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                        out.rects.push(RectInst {
+                            rect: Rect::new(bx, by, bw, bh),
+                            radius: bh / 2.0,
+                            color: [1.0, 1.0, 1.0, 0.95 * ca],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
+                    if keyed {
+                        let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
                         out.rects.push(RectInst {
                             rect: Rect::new(tile.x - grow, tile.y - grow, tile.w + 2.0 * grow, tile.h + 2.0 * grow),
                             radius: radius + grow,
@@ -2150,8 +2188,7 @@ impl Panel {
                 }
                 let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
                 let (x0, y0) = (r.x + 1.1 * s * a.cos(), r.y + 1.1 * s * a.sin());
-                let keyed = resting && self.focus == Some(i);
-                let wa = if hot || keyed {
+                let wa = if keyed {
                     hover_a
                 } else if chip.on {
                     layer_wash[0]
@@ -2181,7 +2218,7 @@ impl Panel {
                         border: (2.0 * s * cs).max(1.5),
                     });
                 }
-                let ink_a = if chip.on || hot || keyed { 1.0 } else { LAYER_INK[1] };
+                let ink_a = if chip.on || keyed { 1.0 } else { LAYER_INK[1] };
                 text(out, chip.text, x0 + r.w / 2.0, y0 + (r.h - line) / 2.0, 16.0, 20.0, ink_a);
             }
             text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
