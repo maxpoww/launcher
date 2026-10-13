@@ -2851,6 +2851,16 @@ impl App {
     /// Entry point for IPC commands (called from ipc.rs) and for
     /// internally generated commands (Escape, focus loss, scroll).
     pub fn handle_command(&mut self, command: Command) {
+        // THE DOCK'S KEY CLOSES WHAT IS OPEN (Max, 2026-10-13: "la idea
+        // sería que super cierre todo lo que esté abierto en nuestro shell
+        // … cierro fastlaunch con super y aprieto de vuelta para abrir").
+        // A tap of Super is `toggle`: with something of the shell's up that
+        // cannot be up beside the dock's box, it only closes that; the next
+        // tap opens the box. (The box itself, open, closes further down as
+        // it always did.)
+        if command == Command::Toggle && self.close_what_is_open() {
+            return;
+        }
         // Calling the dock or a box closes FAST LAUNCH (Max, 2026-10-02).
         // A box takes the keyboard over itself, so the bubble lets go of it
         // without handing it back to a window first.
@@ -5479,6 +5489,32 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Close whatever of the shell's is open that takes the keyboard for
+    /// itself — fast launch or the quick controls (and the box of a setting
+    /// with them), the clipboard's box and its dictionary, a module's box.
+    /// Returns whether anything was. (The boxes that open under the pointer
+    /// on the bar are not these: they go when the pointer does.)
+    fn close_what_is_open(&mut self) -> bool {
+        let mut any = false;
+        if self.fast.open {
+            self.close_fast_launch();
+            any = true;
+        }
+        if self.clip.dict_open {
+            self.close_dict();
+            any = true;
+        }
+        if self.clip.expanded {
+            self.close_clip_box();
+            any = true;
+        }
+        if self.module_box_open {
+            self.close_module_box();
+            any = true;
+        }
+        any
     }
 
     /// Get out of the way. From the open box, retreat to the dock first
