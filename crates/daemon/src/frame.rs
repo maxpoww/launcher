@@ -1257,6 +1257,10 @@ impl App {
             self.panel.reset();
             self.panel_reset_due = false;
         }
+        // (The same for a setting open on the control panel itself.)
+        let panel_draw_images = |app: &mut Self, draw: &crate::panel::PanelDraw| -> Vec<(content::Rect, u32, f32)> {
+            draw.images.clone().into_iter().filter_map(|(r, file)| app.picture_layer(&file).map(|(l, a)| (r, l, a))).collect()
+        };
         let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             if open {
@@ -1268,6 +1272,7 @@ impl App {
         } else {
             None
         };
+        let panel_images = panel_draw.as_ref().map(|d| panel_draw_images(self, d)).unwrap_or_default();
         if paint.moving {
             self.dirty = true;
         }
@@ -1314,7 +1319,17 @@ impl App {
         if quick.is_some() {
             fit_animating = true;
         }
-        let quick_draw = quick.as_ref().map(|(rect, a, draw)| content::QuickDraw { rect: *rect, a: *a, draw });
+        // Its pictures (the wallpapers' previews), each with its texture
+        // once the thumbnailer has it.
+        let quick_images: Vec<(content::Rect, u32, f32)> = quick
+            .as_ref()
+            .map(|(_, _, draw)| draw.images.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(r, file)| self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape)))
+            .collect();
+        let quick_draw =
+            quick.as_ref().map(|(rect, a, draw)| content::QuickDraw { rect: *rect, a: *a, draw, images: &quick_images });
         let fast_draw = (self.fast.visible() && self.fast.boxed.is_none()).then_some(content::FastDraw {
             card: if self.fast.controls { fast_pill_card } else { fast_view.card },
             radius: fast_geo.radius,
@@ -1403,6 +1418,7 @@ impl App {
                 panel: self.panel_mix >= 0.999,
                 panel_mix: self.panel_mix,
                 panel_draw: panel_draw.as_ref(),
+                panel_images: &panel_images,
                 open_box_disp: &open_box_disp,
                 open_box_pages,
                 box_scroll: self.box_pager.pos,

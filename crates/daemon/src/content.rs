@@ -626,6 +626,8 @@ pub struct QuickDraw<'a> {
     pub rect: Rect,
     pub a: f32,
     pub draw: &'a crate::panel::PanelDraw,
+    /// Its pictures: where each goes and the texture layer it is on.
+    pub images: &'a [(Rect, u32, f32)],
 }
 
 impl std::fmt::Debug for QuickDraw<'_> {
@@ -648,6 +650,23 @@ pub struct FastPill {
     pub rest_w: f32,
     pub font_px: f32,
     pub show: f32,
+}
+
+/// A setting's pictures on their tiles. A thumbnail is the whole picture
+/// centred on a clear square; the square is sized so the picture (of shape
+/// `shape`, width over height) is as big as fits inside its tile.
+fn picture_tiles(scene: &mut Scene, images: &[(Rect, u32, f32)]) {
+    for &(tile, layer, shape) in images {
+        let shape = shape.clamp(0.2, 5.0);
+        let side = if shape >= 1.0 { tile.w.min(tile.h * shape) } else { tile.h.min(tile.w / shape) };
+        scene.overlay.push(IconInst {
+            rect: Rect::new(tile.x + (tile.w - side) / 2.0, tile.y + (tile.h - side) / 2.0, side, side),
+            layer,
+            tint: [0.0; 4],
+            ring: -1.0,
+            plate: NO_PLATE,
+        });
+    }
 }
 
 /// How solid the quick box is at least.
@@ -1576,6 +1595,8 @@ pub struct FrameInput<'a> {
     pub panel: bool,
     /// The control panel's field this frame (see `panel.rs`).
     pub panel_draw: Option<&'a crate::panel::PanelDraw>,
+    /// The pictures of the panel's open setting: where, which layer.
+    pub panel_images: &'a [(Rect, u32, f32)],
     /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the settings
     /// field rises in from the card's bottom edge pushing the apps up and
     /// out under the dock (and back down the other way).
@@ -1765,6 +1786,7 @@ pub fn scene(
         open_box_members,
         panel,
         panel_draw,
+        panel_images,
         panel_mix,
         open_box_disp,
         open_box_pages,
@@ -3046,6 +3068,9 @@ pub fn scene(
     // setting clipped to the card like the sections they replace; their
     // glows arrive with the card, not before it (overlay shadows are not
     // clipped, so they also wait for the field to be in).
+    if panel_draw.is_some() && m > 0.995 && card_open > 0.995 {
+        picture_tiles(&mut scene, panel_images);
+    }
     if let Some(pd) = panel_draw.filter(|_| m > 0.0005) {
         let rise = (1.0 - m) * travel;
         let arrive = card_open * card_open * m * m;
@@ -3449,6 +3474,9 @@ pub fn scene(
                 c[3] *= q.a;
             }
             scene.labels.push(l);
+        }
+        if q.a > 0.97 {
+            picture_tiles(&mut scene, q.images);
         }
     }
 

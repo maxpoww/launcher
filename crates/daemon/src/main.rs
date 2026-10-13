@@ -2766,6 +2766,12 @@ impl App {
             as u32
             + content::MAGNIFY_HEADROOM as u32
             + content::DRAG_MARGIN_TOP as u32;
+        // ...and never shorter than the screen (2026-10-13): what is drawn
+        // mid-screen on this surface — fast launch, the quick controls and
+        // the box a setting opens in, the wallpapers' nearly the whole
+        // screen — needs it to reach the top. Everything else is laid out
+        // from its bottom edge, so a taller surface moves nothing.
+        let h = self.output_logical_height().map_or(h, |screen| h.max(screen.round() as u32));
         (w, h)
     }
 
@@ -2789,8 +2795,9 @@ impl App {
     /// top of the app grid ... goes away after resizing").
     fn refresh_scaled_geometry(&mut self) {
         let (dock_extent, full_extent) = self.scaled_extents();
-        if (self.ui.full_extent() - full_extent).abs() < 0.5 {
-            return; // scale unchanged — don't churn the surface
+        let (_, want_h) = self.scaled_surface_size();
+        if (self.ui.full_extent() - full_extent).abs() < 0.5 && self.buffer_size.1 == want_h {
+            return; // scale and height unchanged — don't churn the surface
         }
         self.ui.set_extents(dock_extent, full_extent);
         let (_, h) = self.scaled_surface_size();

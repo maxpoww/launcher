@@ -46,6 +46,9 @@ pub(crate) struct Group {
     /// A choice pill's width, in the panel's design pixels.
     pub width: f32,
     pub choices: Vec<Choice>,
+    /// The choices are PICTURES (each one's `value` is its file): shown as
+    /// a grid of previews, as big as the box lets them all be.
+    pub tiles: bool,
 }
 
 /// What an open setting shows.
@@ -239,7 +242,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -250,7 +253,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new() }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false }
 }
 
 /// On / Off.
@@ -992,7 +995,7 @@ fn wallpaper_tool() -> Option<&'static str> {
 }
 
 /// The most pictures shown.
-const MAX_PICTURES: usize = 24;
+const MAX_PICTURES: usize = 60;
 
 fn pictures() -> Vec<std::path::PathBuf> {
     let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(wallpaper_dir())
@@ -1258,7 +1261,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                         choice(short(&name.replace(['-', '_'], " "), 18), now.as_deref() == Some(path.as_str()), path)
                     })
                     .collect();
-                view.groups.push(group(None, "wallpaper", 170.0, choices));
+                view.groups.push(Group { tiles: true, ..group(None, "wallpaper", 170.0, choices) });
             }
         }
         _ => {}

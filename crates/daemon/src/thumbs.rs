@@ -97,7 +97,17 @@ fn thumbnail(path: &str) -> Option<Vec<u8>> {
     let kind = file_asset_name(path);
     debug!("thumb: {path} classified {kind}");
     match kind {
-        "asset-image" => decode_image(path),
+        "asset-image" => {
+            // A big picture (a wallpaper is 20 megapixels and more) takes a
+            // moment to read whole: its preview is kept, and read back the
+            // next time instead of made again.
+            if let Some(px) = kept_preview(path) {
+                return Some(px);
+            }
+            let px = decode_image(path)?;
+            keep_preview(path, &px);
+            Some(px)
+        }
         "asset-video" => via_tool(path, "ffmpegthumbnailer", |src, dst| {
             vec![
                 "-i".into(),
@@ -142,6 +152,53 @@ fn from_xdg_cache(path: &str) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Pictures smaller than this are quick to read whole: no preview is kept.
+const KEEP_FROM_BYTES: u64 = 600 * 1024;
+
+/// Where the preview of the picture at `path` is kept: named by the file,
+/// its size and when it last changed, so an edited picture gets a new one.
+/// `None`: no such file, or a small one.
+fn kept_path(path: &str) -> Option<PathBuf> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() < KEEP_FROM_BYTES {
+        return None;
+    }
+    let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // FNV-1a over the three: a name for a cache file, not a secret.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.bytes().chain(meta.len().to_le_bytes()).chain(changed.to_le_bytes()) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(cache.join("waverunner/previews").join(format!("{h:016x}.rgba")))
+}
+
+/// The kept preview of a picture, if it is there and whole.
+fn kept_preview(path: &str) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(kept_path(path)?).ok()?;
+    // (The same length a freshly made one has: anything else is a stale or
+    // cut-short file.)
+    let whole = crate::apps::with_mips(vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize]).len();
+    (bytes.len() == whole).then_some(bytes)
+}
+
+/// Keep a preview for next time. Best effort: a full disk only means it is
+/// made again.
+fn keep_preview(path: &str, pixels: &[u8]) {
+    let Some(file) = kept_path(path) else {
+        return;
+    };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = file.with_extension("tmp");
+    if std::fs::write(&tmp, pixels).and_then(|()| std::fs::rename(&tmp, &file)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// Decode an image file (png/jpeg/webp/gif/bmp/tiff — svg goes through

@@ -112,11 +112,20 @@ pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
     (crate::options::wash(!bright, wash[layer.min(2)]), LAYER_INK[layer.min(2)])
 }
 
+/// A picture's preview in a setting (the wallpapers): its height for its
+/// width, the gap between two, its corner, and the widest one gets.
+const TILE_ASPECT: f32 = 0.625;
+const TILE_GAP: f32 = 12.0;
+const TILE_RADIUS: f32 = 8.0;
+const TILE_MAX_W: f32 = 420.0;
+
 /// The quick box (Super+H): its width, the room under its content for the
 /// closing hint, and its least height — design pixels.
 const QUICK_W: f32 = 620.0;
 const QUICK_FOOT: f32 = 44.0;
 const QUICK_MIN_H: f32 = 170.0;
+/// The share of the screen a setting made of pictures takes.
+const QUICK_WHOLE: f32 = 0.9;
 
 /// How long the settings and the modules take to trade places.
 const PANEL_SWAP_SECS: f32 = 0.30;
@@ -509,6 +518,8 @@ struct Chip {
     text: String,
     on: bool,
     action: PanelAction,
+    /// A picture's file: the choice is a preview of it, not a pill.
+    image: Option<String>,
 }
 
 /// A real setting's content at rest, in field coordinates: what
@@ -543,6 +554,9 @@ pub(crate) struct PanelDraw {
     /// Drawn clipped to their rect (an open module's scrolling list: the
     /// pill at its foot is cut in half, which is what says "more below").
     pub clipped: Vec<(Rect, Vec<RectInst>, Vec<Label>)>,
+    /// Pictures to draw (a wallpaper's preview): where, and which file —
+    /// whoever puts the panel on the screen finds each its texture.
+    pub images: Vec<(Rect, String)>,
 }
 
 /// The card's colours the panel draws in.
@@ -742,6 +756,11 @@ impl Panel {
     /// Whether a setting is (still) on show, and whether it is folding.
     pub(crate) fn solo_up(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// Whether the open setting is `label`.
+    pub(crate) fn open_is(&self, label: &str) -> bool {
+        self.open.as_ref().is_some_and(|o| self.pills[o.pill].label == label)
     }
 
     /// How open the box is, 0..1.
@@ -1201,9 +1220,57 @@ impl Panel {
             let in_row = (total - row * per_row).min(per_row);
             let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
             let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
-            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action });
+            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None });
         }
         y + rows as f32 * h + (rows - 1) as f32 * row_gap + GROUP_GAP * s
+    }
+
+    /// Lay PICTURES out as a grid of previews from `y` down: as many columns
+    /// as make them the biggest they can be with every one still in the
+    /// box. Returns the top of what comes next.
+    fn flow_tiles(&self, out: &mut OpenContent, y: f32, group: u8, choices: &[crate::controls::Choice]) -> f32 {
+        if choices.is_empty() {
+            return y;
+        }
+        let s = self.scale;
+        let fw = self.key.0;
+        let gap = TILE_GAP * s;
+        let room_w = (fw - 2.0 * MARGIN * s).max(100.0);
+        // The box's own height (a solo box is as tall as it was made), less
+        // what is above the grid and the closing hint under it.
+        let room_h = (self.field.h.max(self.key.1) - y - 40.0 * s).max(TILE_ASPECT * 80.0 * s);
+        let n = choices.len();
+        let mut cols = 2;
+        let mut best = (1usize, 0.0f32);
+        while cols <= 12 {
+            let w = (room_w - (cols - 1) as f32 * gap) / cols as f32;
+            let h = w * TILE_ASPECT;
+            let rows = n.div_ceil(cols);
+            if rows as f32 * h + (rows - 1) as f32 * gap <= room_h && w > best.1 {
+                best = (cols, w);
+            }
+            cols += 1;
+        }
+        // (Too many for the box at any size: the smallest, and the last rows
+        // run past the hint.)
+        let (cols, w) = if best.1 > 0.0 { best } else { (12, (room_w - 11.0 * gap) / 12.0) };
+        let w = w.min(TILE_MAX_W * s);
+        let h = w * TILE_ASPECT;
+        let rows = n.div_ceil(cols);
+        for (i, c) in choices.iter().enumerate() {
+            let (row, col) = (i / cols, i % cols);
+            let in_row = (n - row * cols).min(cols);
+            let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
+            let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
+            out.chips.push(Chip {
+                rect: Rect::new(x, y + row as f32 * (h + gap), w, h),
+                text: c.text.clone(),
+                on: c.on,
+                action: PanelAction::Pick { group, index: i as u8 },
+                image: Some(c.value.clone()),
+            });
+        }
+        y + rows as f32 * h + (rows - 1) as f32 * gap + GROUP_GAP * s
     }
 
     /// A caption over the next group of choices. Returns the group's top.
@@ -1228,6 +1295,10 @@ impl Panel {
             for (gi, g) in view.groups.iter().enumerate() {
                 if let Some(c) = &g.caption {
                     y = self.caption(&mut out, y, c.clone());
+                }
+                if g.tiles {
+                    y = self.flow_tiles(&mut out, y, gi as u8, &g.choices);
+                    continue;
                 }
                 let chips = g
                     .choices
@@ -1934,6 +2005,31 @@ impl Panel {
                 let r = chip.rect;
                 let hot = resting
                     && self.pointer.is_some_and(|pos| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
+                // A PICTURE: its preview in a still frame — a wash until the
+                // picture is in, a ring when it is the one in use, a
+                // brighter one where the pointer or the keys are.
+                if let Some(file) = chip.image {
+                    let keyed = resting && self.focus == Some(i);
+                    let (mx, my) = map(r.x, r.y);
+                    let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
+                    let radius = TILE_RADIUS * s * cs;
+                    let wash = crate::options::wash(!paint.bright, layer_wash[2]);
+                    out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
+                    if resting {
+                        out.images.push((tile, file));
+                    }
+                    if chip.on || hot || keyed {
+                        let (grow, alpha, border) = if keyed || hot { (3.0 * s, 0.95, 2.4 * s) } else { (2.0 * s, 0.7, 1.6 * s) };
+                        out.rects.push(RectInst {
+                            rect: Rect::new(tile.x - grow, tile.y - grow, tile.w + 2.0 * grow, tile.h + 2.0 * grow),
+                            radius: radius + grow,
+                            color: [paint.ink[0], paint.ink[1], paint.ink[2], alpha * ca],
+                            glass: 0.0,
+                            border: border.max(1.5),
+                        });
+                    }
+                    continue;
+                }
                 let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
                 let (x0, y0) = (r.x + 1.1 * s * a.cos(), r.y + 1.1 * s * a.sin());
                 let keyed = resting && self.focus == Some(i);
@@ -2746,8 +2842,18 @@ impl App {
         let s = self.options_scale() * self.fast_zoom();
         let g = self.fast_geometry();
         let (sw, sh) = (self.buffer_size.0 as f32, self.buffer_size.1 as f32);
-        let w = (QUICK_W * s).min(sw - 40.0 * s).max(200.0);
-        let h = (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(sh - 20.0 * s);
+        // A setting made of pictures takes nearly the whole screen (Max,
+        // 2026-10-13: "casi tan grande como la pantalla completa").
+        let whole = self.quick.open_is("Wallpaper");
+        let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
+        let (w, h) = if whole {
+            ((sw * QUICK_WHOLE).max(200.0), (screen_h * QUICK_WHOLE).max(QUICK_MIN_H * s))
+        } else {
+            (
+                (QUICK_W * s).min(sw - 40.0 * s).max(200.0),
+                (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(sh - 20.0 * s),
+            )
+        };
         let (cx, cy) = (g.card.x + g.card.w / 2.0, g.card.y + g.card.h / 2.0);
         let y = (cy - h / 2.0).clamp(10.0 * s, (sh - h - 10.0 * s).max(10.0 * s));
         Rect::new(cx - w / 2.0, y, w, h)

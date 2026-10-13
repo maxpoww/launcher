@@ -138,6 +138,21 @@ impl App {
 
     /// Base texture layer of the reserved thumbnail block (past the app
     /// icons and both package blocks).
+    /// The texture layer holding the preview of the picture at `path` and the
+    /// picture's shape (width over height), once
+    /// the thumbnailer has made it (asked for here the first time; a frame
+    /// is scheduled when it lands). For pictures shown outside the Files
+    /// section — the wallpapers in their setting.
+    pub(crate) fn picture_layer(&mut self, path: &str) -> Option<(u32, f32)> {
+        if let Some((slot, pixels)) = self.thumb_map.get(path) {
+            return Some((self.thumb_layer_base() + *slot as u32, thumb_aspect(pixels)));
+        }
+        if self.thumb_pending.insert(path.to_owned()) {
+            self.thumbs.request(path);
+        }
+        None
+    }
+
     pub(crate) fn thumb_layer_base(&self) -> u32 {
         self.pkg_layer_base + (crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP) as u32
     }
@@ -372,4 +387,19 @@ mod tests {
         // bashrc, which is unknown → generic (not a crash, not code).
         assert_eq!(file_asset_name(".bashrc"), "asset-file");
     }
+}
+
+/// A thumbnail's picture shape, width over height: the thumbnail is the
+/// picture centred on a clear square, so its shape is the box of what is
+/// not clear (read from the first, full-size level of its pixels).
+pub(crate) fn thumb_aspect(pixels: &[u8]) -> f32 {
+    let n = crate::apps::ICON_SIZE as usize;
+    if pixels.len() < n * n * 4 {
+        return 1.0;
+    }
+    let solid = |x: usize, y: usize| pixels[(y * n + x) * 4 + 3] > 8;
+    // The middle row and column are enough: the picture is a centred box.
+    let w = (0..n).filter(|&x| solid(x, n / 2)).count();
+    let h = (0..n).filter(|&y| solid(n / 2, y)).count();
+    if w == 0 || h == 0 { 1.0 } else { w as f32 / h as f32 }
 }

@@ -230,7 +230,13 @@ The big daemon files are cohesive but long — go straight to the function:
   the same `open_content`/`draw_open`), growing out of the card, as tall as its content
   (`quick_rect`), on the dock's colour nearly solid (`content::QuickDraw`). A click on a choice
   picks it (`quick_click` → the same `control_pick`); Escape, a click outside or Super+H again
-  folds it. ZOOM: Ctrl +/−/0 while fast launch or the quick controls are up make the card and the
+  folds it. A setting made of PICTURES — Wallpaper (Max, 2026-10-13) — takes nearly the whole
+  screen (`QUICK_WHOLE`) and shows each as a preview (`controls::Group::tiles`, `Panel::flow_tiles`:
+  as many columns as make them the biggest with every one still in the box; `PanelDraw::images` →
+  `App::picture_layer`, the Files thumbnailer's textures, each fitted by its own shape); big
+  pictures' previews are kept in `~/.cache/waverunner/previews`. For this the DOCK SURFACE is now
+  never shorter than the screen (`scaled_surface_size`; everything else is laid out from its bottom
+  edge). ZOOM: Ctrl +/−/0 while fast launch or the quick controls are up make the card and the
   box bigger, smaller, as shipped — one zoom for both (`settings.fast_zoom`, `App::fast_zoom`,
   `zoom("fast", …)`; `debug-desktop "zoom fast in|out|reset|<n>"`). THE KEYBOARD in an open setting (the box's AND the control panel's): the arrows and
   Tab walk the choices (`Panel::key_move`, a ring where the keys are — shown from the first key
