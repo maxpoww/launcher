@@ -223,7 +223,7 @@ impl App {
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
         // directory opened with the card up) opens in the Apps grid.
-        if let (Some(_), Some((ox, oy))) = (layout.open_box, self.box_origin(&layout)) {
+        if let (Some(_), Some((_, oy))) = (layout.open_box, self.box_origin(&layout)) {
             let scale = self.icon_scale();
             let cell = content::GRID_CELL_H * scale;
             let cells = (content::BOX_CELL_MIN_W * scale, cell);
@@ -262,15 +262,14 @@ impl App {
                 // It takes whole rows' room, so a full grid stays on its
                 // rows: the last ones leave whole.
                 let ((w, h), grid) = content::row_cells(n, cells, vp.w);
-                let cw = content::GRID_CELL_W * scale;
-                let tile = content::Rect::new(ox - cw / 2.0, oy, cw, 0.0);
                 let row = if oy >= vp.y { ((oy - vp.y) / cell).floor() as isize } else { -1 };
                 let split = vp.y + (row + 1) as f32 * cell;
                 let up = (split + h - (vp.y + vp.h)).clamp(0.0, (row.max(0) as f32 * cell).max(0.0));
                 let t = self.group_expand();
                 layout.apps_part = Some(content::AppsPart { row, up: up * t, down: (h - up) * t });
-                let x = content::row_box_x(tile, w, vp);
-                Some((content::Rect::new(x, split - up, w, h), grid))
+                // Its members stand centred in the line, whatever column
+                // the tile is in.
+                Some((content::Rect::new(vp.x + (vp.w - w) / 2.0, split - up, w, h), grid))
             };
             if let Some((rect, grid)) = placed {
                 layout.open_box = Some(rect);
