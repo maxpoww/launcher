@@ -7624,7 +7624,8 @@ impl DataDeviceHandler for App {
             .as_ref()
             .is_some_and(|l| l.wl_surface() == surface);
         self.card_bar_drag(on_bar);
-        if !on_desktop && !on_dock && !on_card {
+        let on_files = self.filer.id_of(surface);
+        if !on_desktop && !on_dock && !on_card && on_files.is_none() {
             return;
         }
         let offer = self
@@ -7633,7 +7634,9 @@ impl DataDeviceHandler for App {
             .filter(|d| d.inner() == device)
             .and_then(|d| d.data().drag_offer());
         if let Some(offer) = offer {
-            if on_card {
+            if let Some(id) = on_files {
+                self.filer_dnd_enter(id, offer);
+            } else if on_card {
                 self.card_dnd_enter(offer);
             } else {
                 self.desktop_dnd_enter(offer, on_dock);
@@ -7643,7 +7646,9 @@ impl DataDeviceHandler for App {
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {
         self.card_bar_drag(false);
-        if self.card_dnd_active() {
+        if self.filer.dnd_active() {
+            self.filer_dnd_leave();
+        } else if self.card_dnd_active() {
             self.card_dnd_leave();
         } else {
             self.desktop_dnd_leave();
@@ -7661,7 +7666,9 @@ impl DataDeviceHandler for App {
         if self.card_bar_drag_at(x as f32, y as f32) {
             return;
         }
-        if self.card_dnd_active() {
+        if self.filer.dnd_active() {
+            self.filer_dnd_motion(x as f32, y as f32);
+        } else if self.card_dnd_active() {
             self.card_dnd_motion(x as f32, y as f32);
         } else {
             self.desktop_dnd_motion(x as f32, y as f32);
@@ -7685,7 +7692,9 @@ impl DataDeviceHandler for App {
     ) {
         // (A drag dropped over the dock: its hold on a tile is over.)
         self.dock_spring_end();
-        if self.card_dnd_active() {
+        if self.filer.dnd_active() {
+            self.filer_dnd_drop();
+        } else if self.card_dnd_active() {
             self.card_dnd_drop();
         } else {
             self.desktop_dnd_drop();
@@ -7733,7 +7742,9 @@ impl DataSourceHandler for App {
         mime: String,
         pipe: WritePipe,
     ) {
-        if self.is_desktop_drag_source(source) {
+        if self.filer.is_drag_source(source) {
+            self.filer_send_drag(&mime, pipe);
+        } else if self.is_desktop_drag_source(source) {
             self.desktop_send_drag(&mime, pipe);
         } else if self.is_card_drag_source(source) {
             self.card_send_drag(&mime, pipe);
@@ -7746,7 +7757,9 @@ impl DataSourceHandler for App {
         _: &QueueHandle<Self>,
         source: &wl_data_source::WlDataSource,
     ) {
-        if self.is_desktop_drag_source(source) {
+        if self.filer.is_drag_source(source) {
+            self.filer_drag_end(false);
+        } else if self.is_desktop_drag_source(source) {
             self.desktop_drag_end(false);
         } else if self.is_card_drag_source(source) {
             self.card_drag_end(false);
@@ -7767,7 +7780,9 @@ impl DataSourceHandler for App {
         _: &QueueHandle<Self>,
         source: &wl_data_source::WlDataSource,
     ) {
-        if self.is_desktop_drag_source(source) {
+        if self.filer.is_drag_source(source) {
+            self.filer_drag_end(true);
+        } else if self.is_desktop_drag_source(source) {
             self.desktop_drag_end(true);
         } else if self.is_card_drag_source(source) {
             self.card_drag_end(true);
@@ -7781,7 +7796,9 @@ impl DataSourceHandler for App {
         source: &wl_data_source::WlDataSource,
         action: DndAction,
     ) {
-        if self.is_desktop_drag_source(source) {
+        if self.filer.is_drag_source(source) {
+            self.filer_drag_action(action);
+        } else if self.is_desktop_drag_source(source) {
             self.desktop_drag_action(action);
         }
     }

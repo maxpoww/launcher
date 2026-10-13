@@ -19,7 +19,10 @@
 //! Paste · New folder · Open in terminal on the folder itself. A name is
 //! typed in place (`Rename`; the desktop's rules for the ending). The keys
 //! a file manager has: Ctrl+C/X/V, Delete, F2, Ctrl+Shift+N.
-//! Not here yet: drags in and out, the rubber band, the bin as a place.
+//! A press that travels lifts the thing (a real Wayland drag, as the
+//! desktop's) or, from bare ground, draws a rubber band; a drag let go on a
+//! window lands in the folder under it, else in the folder shown.
+//! Not here yet: the bin as a place.
 //!
 //! Pointer-free: `waverunner-ctl files [<folder>]` opens a window;
 //! `files go <folder>|back|forward|up|select <n>|add <n>|activate <n>|key
@@ -31,6 +34,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use smithay_client_toolkit::data_device_manager::data_offer::DragOffer;
+use smithay_client_toolkit::data_device_manager::data_source::DragSource;
 use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use smithay_client_toolkit::seat::keyboard::Keysym;
 use smithay_client_toolkit::shell::xdg::window::{
@@ -39,6 +44,7 @@ use smithay_client_toolkit::shell::xdg::window::{
 use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
 use tracing::{error, info, warn};
+use wayland_client::protocol::wl_data_device_manager::DndAction;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle, WEnum};
@@ -47,7 +53,7 @@ use crate::content::{
     GridContent, IconInst, Label, Rect, RectInst, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
-use crate::desktop::{Item, Kind};
+use crate::desktop::{Item, Kind, PLAIN_TEXT, URI_LIST};
 use crate::desktop_menu::{Action, Menu, MenuPaint, Row};
 use crate::desktop_props::Props;
 use crate::fractional::SurfaceKind;
@@ -95,6 +101,12 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const TYPE_PAUSE: Duration = Duration::from_millis(900);
 /// A wheel's notch (15 units from the compositor) in pixels of scroll.
 const WHEEL_STEP: f32 = 4.0;
+
+/// How far a press travels before it is a drag (or a rubber band).
+const DRAG_START: f32 = 6.0;
+/// The rubber band: a faint fill and a hairline (the desktop's).
+const BAND_FILL: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+const BAND_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.38];
 
 const WASH_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
 const WASH_HERE: [f32; 4] = [1.0, 1.0, 1.0, 0.12];
@@ -221,6 +233,60 @@ impl Layout {
         };
         to.clamp(0.0, self.max_scroll(n))
     }
+}
+
+/// A rubber band: where it began, where the pointer is, what was selected
+/// before it.
+type Band = ((f32, f32), (f32, f32), HashSet<String>);
+
+/// A press of the left button in the icons' field, until it is a click, a
+/// drag of the thing under it, or a rubber band from bare ground.
+#[derive(Debug, Clone, PartialEq)]
+struct Press {
+    /// The thing pressed on (its path), if any.
+    path: Option<String>,
+    at: (f32, f32),
+    /// The press's serial: a drag is started with it.
+    serial: u32,
+    /// Pressed on one of SEVERAL selected things: the group is kept for a
+    /// drag, and only a plain click (no travel) leaves this one alone.
+    of_group: bool,
+}
+
+/// Files of a window in hand: a real Wayland drag of ours, as the desktop's
+/// is. Where it goes comes back as `wl_data_device` events on whichever of
+/// our surfaces it crosses; another app reads the files from the source.
+pub(crate) struct Lifted {
+    win: u32,
+    /// The grabbed one first.
+    paths: Vec<String>,
+    source: DragSource,
+    /// The drag image, held for the drag's life.
+    _icon: Option<crate::desktop::DragIcon>,
+    action: DndAction,
+}
+
+/// A drag hovering a file window (anyone's: another app's, the desktop's,
+/// a file window's own).
+struct Hovering {
+    win: u32,
+    offer: DragOffer,
+}
+
+/// The items a rubber band from `a` to `b` touches (both in the field's
+/// own, unscrolled coordinates): those whose cell, less its margins, it
+/// crosses.
+pub(crate) fn band_hits(layout: &Layout, a: (f32, f32), b: (f32, f32), n: usize) -> Vec<usize> {
+    let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+    let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+    (0..n)
+        .filter(|&i| {
+            let c = layout.cell(i);
+            let (cx0, cx1) = (c.x + 10.0, c.x + c.w - 10.0);
+            let (cy0, cy1) = (c.y + 6.0, c.y + c.h - 6.0);
+            x0 < cx1 && cx0 < x1 && y0 < cy1 && cy0 < y1
+        })
+        .collect()
 }
 
 /// A name being typed in place.
@@ -358,6 +424,14 @@ struct Win {
     /// A thing whose name is to be typed as soon as it is listed (a folder
     /// just made).
     rename_next: Option<String>,
+
+    press: Option<Press>,
+    /// A rubber band being drawn: where it began and where the pointer is,
+    /// in the field's unscrolled coordinates, and what was selected before
+    /// it (kept when Ctrl is held).
+    band: Option<Band>,
+    /// The folder a hovering drag would be let go into.
+    drop_on: Option<usize>,
 }
 
 impl Win {
@@ -416,6 +490,10 @@ pub(crate) struct Filer {
     /// The window the keyboard is on.
     pub keys: Option<u32>,
     icons: Option<crate::notif_icons::NotifIcons>,
+    /// Files in hand, lifted from one of the windows.
+    drag: Option<Lifted>,
+    /// A drag over one of the windows.
+    dnd: Option<Hovering>,
 }
 
 impl Filer {
@@ -427,6 +505,8 @@ impl Filer {
             next: 1,
             keys: None,
             icons: None,
+            drag: None,
+            dnd: None,
         }
     }
 
@@ -447,6 +527,25 @@ impl Filer {
 
     fn put(&mut self, win: Win) {
         self.wins.push(win);
+    }
+
+    /// Files of a window are in hand.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// The files in hand.
+    pub fn drag_paths(&self) -> Vec<String> {
+        self.drag.as_ref().map_or_else(Vec::new, |d| d.paths.clone())
+    }
+
+    pub fn is_drag_source(&self, source: &wayland_client::protocol::wl_data_source::WlDataSource) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.source.inner() == source)
+    }
+
+    /// A drag is over one of the windows.
+    pub fn dnd_active(&self) -> bool {
+        self.dnd.is_some()
     }
 
     /// Whose surface this is.
@@ -816,6 +915,9 @@ impl App {
             props: None,
             rename: None,
             rename_next: None,
+            press: None,
+            band: None,
+            drop_on: None,
         });
         self.filer_places();
         self.filer_show(id, dir);
@@ -924,6 +1026,9 @@ impl App {
         win.menu_path = None;
         win.props = None;
         win.rename = None;
+        win.press = None;
+        win.band = None;
+        win.drop_on = None;
         win.selected.clear();
         win.cursor = None;
         win.click = None;
@@ -1036,6 +1141,10 @@ impl App {
         }
         if win.props.as_ref().is_some_and(|p| !present.contains(p.path.as_str())) {
             win.props = None;
+        }
+        win.drop_on = None;
+        if win.press.as_ref().is_some_and(|p| p.path.as_ref().is_some_and(|p| !present.contains(p.as_str()))) {
+            win.press = None;
         }
         win.cursor = cursor_path.and_then(|p| win.items.iter().position(|it| it.path == p));
         let layout = win.layout(icon_scale);
@@ -1779,7 +1888,7 @@ impl App {
             let item = &win.items[i];
             let mut cell = layout.cell(i);
             cell.y -= win.scroll;
-            if win.selected.contains(&item.path) {
+            if win.selected.contains(&item.path) || win.drop_on == Some(i) {
                 grid.rects.push(rect(
                     Rect::new(cell.x + 3.0, cell.y + 3.0, cell.w - 6.0, cell.h - 6.0),
                     10.0,
@@ -1873,6 +1982,19 @@ impl App {
                 true,
                 true,
             ));
+        }
+        if let Some((a, b, _)) = win.band.as_ref() {
+            let band = Rect::new(
+                a.0.min(b.0),
+                a.1.min(b.1) - win.scroll,
+                (a.0 - b.0).abs(),
+                (a.1 - b.1).abs(),
+            );
+            grid.rects.push(rect(band, 3.0, BAND_FILL));
+            grid.rects.push(RectInst {
+                border: 1.0,
+                ..rect(band, 3.0, BAND_LINE)
+            });
         }
         // How far down the folder this is, when it does not all fit.
         let (content, max) = (layout.content_h(win.items.len()), layout.max_scroll(win.items.len()));
@@ -2029,8 +2151,12 @@ impl App {
             wl_pointer::Event::Leave { .. } => {
                 if let Some(win) = self.filer.win_mut(id) {
                     win.ptr = None;
+                    // (A drag of ours takes the pointer away like this.)
+                    win.press = None;
+                    win.band = None;
                 }
                 self.filer_hover(id);
+                self.filer_request_draw(id);
             }
             wl_pointer::Event::Motion {
                 surface_x, surface_y, ..
@@ -2038,11 +2164,15 @@ impl App {
                 if let Some(win) = self.filer.win_mut(id) {
                     win.ptr = Some((surface_x as f32 / win.zoom, surface_y as f32 / win.zoom));
                 }
-                self.filer_hover(id);
+                if !self.filer_travel(id) {
+                    self.filer_hover(id);
+                }
             }
-            wl_pointer::Event::Button { button, state, .. } => {
+            wl_pointer::Event::Button {
+                button, state, serial, ..
+            } => {
                 let pressed = state == WEnum::Value(wl_pointer::ButtonState::Pressed);
-                self.filer_button(id, button, pressed);
+                self.filer_button(id, button, pressed, serial);
             }
             wl_pointer::Event::AxisSource { axis_source } => {
                 if let Some(win) = self.filer.win_mut(id) {
@@ -2088,7 +2218,7 @@ impl App {
     }
 
     /// A button went down or up.
-    fn filer_button(&mut self, id: u32, button: u32, pressed: bool) {
+    fn filer_button(&mut self, id: u32, button: u32, pressed: bool, serial: u32) {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -2126,6 +2256,22 @@ impl App {
             }
         }
         if !pressed {
+            // The left button came up with nothing carried off: a band
+            // ends where it is; a click on one of a group leaves that one.
+            if button == 0x110 {
+                if let Some(win) = self.filer.win_mut(id) {
+                    let press = win.press.take();
+                    let banded = win.band.take().is_some();
+                    if let Some(i) = press
+                        .filter(|p| p.of_group && !banded)
+                        .and_then(|p| p.path)
+                        .and_then(|p| win.items.iter().position(|it| it.path == p))
+                    {
+                        win.select_only(i);
+                    }
+                    self.filer_request_draw(id);
+                }
+            }
             return;
         }
         let Some(win) = self.filer.win_mut(id) else {
@@ -2142,7 +2288,7 @@ impl App {
             self.filer_end_rename(id, true);
         }
         match button {
-            0x110 => self.filer_click(id),
+            0x110 => self.filer_click(id, serial),
             0x111 => {
                 let icon_scale = self.icon_scale();
                 let Some(win) = self.filer.win(id) else {
@@ -2163,12 +2309,321 @@ impl App {
         }
     }
 
+    /// The pointer moved with the left button down: past `DRAG_START` a
+    /// press on a thing takes it (and its group) in hand, one on bare
+    /// ground draws a rubber band. Whether the motion was that.
+    fn filer_travel(&mut self, id: u32) -> bool {
+        let icon_scale = self.icon_scale();
+        let ctrl = self.modifiers.ctrl;
+        let Some(win) = self.filer.win_mut(id) else {
+            return false;
+        };
+        let Some(at) = win.ptr else {
+            return false;
+        };
+        let layout = win.layout(icon_scale);
+        if let Some((_, to, kept)) = win.band.as_mut() {
+            *to = (at.0, at.1 + win.scroll);
+            let kept = kept.clone();
+            let (a, b) = win.band.as_ref().map_or(((0.0, 0.0), (0.0, 0.0)), |(a, b, _)| (*a, *b));
+            let mut selected = kept;
+            selected.extend(
+                band_hits(&layout, a, b, win.items.len())
+                    .into_iter()
+                    .map(|i| win.items[i].path.clone()),
+            );
+            win.selected = selected;
+            self.filer_request_draw(id);
+            return true;
+        }
+        let Some(press) = win.press.clone() else {
+            return false;
+        };
+        if (at.0 - press.at.0).hypot(at.1 - press.at.1) < DRAG_START {
+            return true;
+        }
+        match press.path.and_then(|p| win.items.iter().position(|it| it.path == p)) {
+            Some(i) => {
+                win.press = None;
+                self.filer_lift(id, i, press.at, press.serial);
+            }
+            None => {
+                let from = (press.at.0, press.at.1 + win.scroll);
+                let kept = if ctrl { win.selected.clone() } else { HashSet::new() };
+                win.band = Some((from, (at.0, at.1 + win.scroll), kept));
+                win.press = None;
+                self.filer_request_draw(id);
+            }
+        }
+        true
+    }
+
+    /// Take item `i` and what is selected with it in hand: a Wayland drag
+    /// of ours offering the files, the grabbed one's picture as its image.
+    fn filer_lift(&mut self, id: u32, i: usize, at: (f32, f32), serial: u32) {
+        let icon_scale = self.icon_scale();
+        let (Some(manager), Some(device), Some(win)) = (
+            self.data_device_manager.as_ref(),
+            self.data_device.as_ref(),
+            self.filer.win(id),
+        ) else {
+            warn!("files: no data device; nothing can be dragged");
+            return;
+        };
+        let Some(item) = win.items.get(i) else {
+            return;
+        };
+        // The grabbed one first, then the rest of its selection.
+        let mut paths = vec![item.path.clone()];
+        let mut volume = item.kind == Kind::Volume;
+        for it in win.items.iter().filter(|it| it.path != item.path && win.selected.contains(&it.path)) {
+            paths.push(it.path.clone());
+            volume |= it.kind == Kind::Volume;
+        }
+        // (A plugged-in volume is only ever copied from.)
+        let source = manager.create_drag_and_drop_source(
+            &self.qh,
+            [URI_LIST, PLAIN_TEXT],
+            if volume { DndAction::Copy } else { DndAction::Move | DndAction::Copy },
+        );
+        // Its picture, held where it was grabbed (in real pixels: the
+        // window's zoom is in how big it is drawn).
+        let layout = win.layout(icon_scale);
+        let mut cell = layout.cell(i);
+        cell.y -= win.scroll;
+        let size = GRID_ICON * icon_scale;
+        let corner = (cell.x + (cell.w - size) / 2.0, cell.y + GRID_ICON_TOP * icon_scale);
+        let grip = ((at.0 - corner.0) * win.zoom, (at.1 - corner.1) * win.zoom);
+        let image = win
+            .chains
+            .get(&item.icon)
+            .and_then(|chain| self.drag_image(chain, grip, icon_scale * win.zoom));
+        source.start_drag(device, win.window.wl_surface(), image.as_ref().map(|d| d.surface()), serial);
+        // (Hyprland maps the image on the first commit that has a texture.)
+        if let Some(image) = image.as_ref() {
+            image.surface().commit();
+        }
+        info!("files: {} in hand ({} in all)", item.name, paths.len());
+        self.filer.drag = Some(Lifted {
+            win: id,
+            paths,
+            source,
+            _icon: image,
+            action: DndAction::empty(),
+        });
+    }
+
+    /// Another app (or one of our own surfaces) asked for the files in
+    /// hand. Written off the loop.
+    pub(crate) fn filer_send_drag(&mut self, mime: &str, pipe: smithay_client_toolkit::data_device_manager::WritePipe) {
+        let Some(drag) = self.filer.drag.as_ref() else {
+            return;
+        };
+        let paths: Vec<&str> = drag.paths.iter().map(String::as_str).collect();
+        let Some(payload) = crate::desktop::drag_payload(&paths, mime) else {
+            warn!("files: {mime} asked of a drag that never offered it");
+            return;
+        };
+        let fd: std::os::fd::OwnedFd = pipe.into();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut file = std::fs::File::from(fd);
+            if let Err(e) = file.write_all(payload.as_bytes()) {
+                warn!("files: writing the dragged files failed: {e}");
+            }
+        });
+    }
+
+    /// The drop target chose what to do with the files in hand.
+    pub(crate) fn filer_drag_action(&mut self, action: DndAction) {
+        if let Some(drag) = self.filer.drag.as_mut() {
+            drag.action = action;
+        }
+    }
+
+    /// Our drag is over: dropped and done, or cancelled. The window it came
+    /// from reads its folder again (a move took the files).
+    pub(crate) fn filer_drag_end(&mut self, done: bool) {
+        let Some(drag) = self.filer.drag.take() else {
+            return;
+        };
+        info!(
+            "files: {} file(s) {} (action {:?})",
+            drag.paths.len(),
+            if done { "dropped" } else { "let go nowhere" },
+            drag.action
+        );
+        let win = drag.win;
+        drop(drag); // the source and the image go with it
+        self.schedule_frame();
+        if done {
+            self.filer_list(win);
+        }
+    }
+
+    /// A drag came over window `id`: taken if it carries files, as a move
+    /// (or a copy, where a move is not possible).
+    pub(crate) fn filer_dnd_enter(&mut self, id: u32, offer: DragOffer) {
+        let has_files = offer.with_mime_types(|m| m.iter().any(|t| t == URI_LIST));
+        if !has_files {
+            offer.accept_mime_type(offer.serial, None);
+            return;
+        }
+        offer.accept_mime_type(offer.serial, Some(URI_LIST.to_owned()));
+        offer.set_actions(DndAction::Move | DndAction::Copy, DndAction::Move);
+        // (The enter's position is the surface's centre on Hyprland, not
+        // the pointer's: where it is comes with the first motion.)
+        self.filer.dnd = Some(Hovering { win: id, offer });
+    }
+
+    /// The hovering drag moved: over a folder, that folder is where it
+    /// would go (and is washed to say so).
+    pub(crate) fn filer_dnd_motion(&mut self, x: f32, y: f32) {
+        let icon_scale = self.icon_scale();
+        let carried = self.filer.drag_paths();
+        let Some(id) = self.filer.dnd.as_ref().map(|d| d.win) else {
+            return;
+        };
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let at = (x / win.zoom, y / win.zoom);
+        let onto = win
+            .layout(icon_scale)
+            .index_at(at, win.scroll, win.items.len())
+            .filter(|&i| {
+                let it = &win.items[i];
+                matches!(it.kind, Kind::Folder | Kind::Volume) && !carried.contains(&it.path)
+            });
+        if onto != win.drop_on {
+            win.drop_on = onto;
+            self.filer_request_draw(id);
+        }
+    }
+
+    /// The drag left for elsewhere — unless it has just been dropped here:
+    /// Hyprland sends `leave` right after `drop` (the desktop's lesson).
+    pub(crate) fn filer_dnd_leave(&mut self) {
+        let dropped = self
+            .data_device
+            .as_ref()
+            .and_then(|d| d.data().drag_offer())
+            .is_some_and(|o| o.dropped);
+        if dropped {
+            return;
+        }
+        if let Some(dnd) = self.filer.dnd.take() {
+            if let Some(win) = self.filer.win_mut(dnd.win) {
+                win.drop_on = None;
+            }
+            self.filer_request_draw(dnd.win);
+        }
+    }
+
+    /// Let go on a window: into the folder under the pointer, else into
+    /// the folder shown. The list of files is asked of the source and read
+    /// off the loop — whoever the source is, a window of ours included.
+    pub(crate) fn filer_dnd_drop(&mut self) {
+        let Some(dnd) = self.filer.dnd.take() else {
+            return;
+        };
+        let id = dnd.win;
+        let Some(win) = self.filer.win_mut(id) else {
+            dnd.offer.destroy();
+            return;
+        };
+        let dir = win
+            .drop_on
+            .take()
+            .and_then(|i| win.items.get(i))
+            .map_or_else(|| win.dir.clone(), |it| PathBuf::from(&it.path));
+        self.filer_request_draw(id);
+        // The live offer (the one kept since `enter` is a snapshot).
+        let offer = self
+            .data_device
+            .as_ref()
+            .and_then(|d| d.data().drag_offer())
+            .filter(|o| o.dropped)
+            .unwrap_or(dnd.offer);
+        info!("files: dropped on window {id}, into {}", dir.display());
+        let pipe = match offer.receive(URI_LIST.to_owned()) {
+            Ok(pipe) => pipe,
+            Err(e) => {
+                warn!("files: cannot receive the drop: {e}");
+                offer.destroy();
+                return;
+            }
+        };
+        // (Through `OwnedFd`, never `into_raw_fd`: SCTK closes the pipe.)
+        let fd: std::os::fd::OwnedFd = pipe.into();
+        let (tx, rx) = calloop::channel::channel::<String>();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut file = std::fs::File::from(fd);
+            let mut text = String::new();
+            if let Err(e) = file.read_to_string(&mut text) {
+                warn!("files: reading the drop's files failed: {e}");
+            }
+            let _ = tx.send(text);
+        });
+        let dropped = offer.clone();
+        if self
+            .loop_handle
+            .insert_source(rx, move |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(text) = event {
+                    // A move, unless the source only lets its files be copied.
+                    let may_move =
+                        dropped.source_actions.is_empty() || dropped.source_actions.contains(DndAction::Move);
+                    let offer = dropped.clone();
+                    app.filer_bring(id, crate::desktop::uri_list_paths(&text), dir.clone(), may_move, move || {
+                        // Done, whatever came of the files: the source must
+                        // always hear the end of its drag.
+                        offer.finish();
+                    });
+                }
+            })
+            .is_err()
+        {
+            warn!("files: cannot wait for the drop's files");
+            offer.destroy();
+        }
+    }
+
+    /// Bring `paths` into `dir` off the loop — a move where one disk
+    /// allows it, else a copy (`desktop::import`) — then `then`, and window
+    /// `id` shows what came if that is the folder it is on.
+    fn filer_bring(
+        &mut self,
+        id: u32,
+        paths: Vec<PathBuf>,
+        dir: PathBuf,
+        may_move: bool,
+        then: impl FnOnce() + 'static,
+    ) {
+        let into = dir.clone();
+        let mut then = Some(then);
+        self.desktop_off_loop(
+            move || crate::desktop::import(&paths, &into, may_move),
+            move |app, brought| {
+                info!("files: {} thing(s) brought into {}", brought.len(), dir.display());
+                if let Some(then) = then.take() {
+                    then();
+                }
+                if let Some(win) = app.filer.win_mut(id).filter(|w| w.dir == dir) {
+                    win.selected = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                    app.filer_list(id);
+                }
+            },
+        );
+    }
+
     /// A left press.
-    fn filer_click(&mut self, id: u32) {
+    fn filer_click(&mut self, id: u32, serial: u32) {
         let ctrl = self.modifiers.ctrl;
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        let at = win.ptr.unwrap_or_default();
         match win.hover {
             Spot::Back => self.filer_back(id),
             Spot::Forward => self.filer_forward(id),
@@ -2196,20 +2651,38 @@ impl App {
                     return;
                 }
                 win.click = Some((now, path.clone()));
+                // One of several selected: the group stays for a drag, and
+                // the release decides (see `filer_button`).
+                let of_group = !ctrl && win.selected.len() > 1 && win.selected.contains(&path);
                 if ctrl {
                     // One more, or one fewer.
                     if !win.selected.remove(&path) {
-                        win.selected.insert(path);
+                        win.selected.insert(path.clone());
                     }
                     win.cursor = Some(i);
-                } else {
+                } else if !of_group {
                     win.select_only(i);
                 }
+                win.press = Some(Press {
+                    path: Some(path),
+                    at,
+                    serial,
+                    of_group,
+                });
                 self.filer_request_draw(id);
             }
             Spot::Nothing => {
                 win.click = None;
-                if !win.selected.is_empty() {
+                // Bare ground in the field: a band may start here.
+                if at.1 > HEAD_H && at.0 > win.hits.places.first().map_or(0.0, |r| r.x + r.w) {
+                    win.press = Some(Press {
+                        path: None,
+                        at,
+                        serial,
+                        of_group: false,
+                    });
+                }
+                if !ctrl && !win.selected.is_empty() {
                     win.selected.clear();
                     self.filer_request_draw(id);
                 }
@@ -2489,6 +2962,39 @@ impl App {
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),
+            "band" => {
+                // `band <x0> <y0> <x1> <y1>`: as a press and a travel.
+                let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                let [x0, y0, x1, y1] = n[..] else {
+                    return "band <x0> <y0> <x1> <y1>".to_owned();
+                };
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.press = Some(Press {
+                        path: None,
+                        at: (x0, y0),
+                        serial: 0,
+                        of_group: false,
+                    });
+                    win.ptr = Some((x1, y1));
+                }
+                self.filer_travel(id);
+                self.filer_travel(id);
+            }
+            "unband" => self.filer_button(id, 0x110, false, 0),
+            "drop" => {
+                // `drop <n|-> <path…>`: as files let go on folder n, or on
+                // the folder shown.
+                let mut words = rest.split_whitespace();
+                let onto = words.next().and_then(|w| w.parse::<usize>().ok());
+                let paths: Vec<PathBuf> = words.map(&as_path).collect();
+                let Some(dir) = self.filer.win(id).map(|w| {
+                    onto.and_then(|i| w.items.get(i))
+                        .map_or_else(|| w.dir.clone(), |it| PathBuf::from(&it.path))
+                }) else {
+                    return "closed".to_owned();
+                };
+                self.filer_bring(id, paths, dir, true, || {});
+            }
             "state" => {}
             _ => return format!("unknown: {what}"),
         }
@@ -2716,6 +3222,20 @@ mod tests {
         // The folder itself: Paste only with files on the clipboard.
         assert_eq!(actions(menu_rows(false, false, true)).first(), Some(&Action::Paste));
         assert_eq!(actions(menu_rows(false, false, false)).first(), Some(&Action::NewFolder));
+    }
+
+    #[test]
+    fn a_rubber_band_selects_what_it_crosses_either_way_round() {
+        let l = Layout::new((920, 600), 1.0);
+        let (a, b) = (l.cell(1), l.cell(l.cols + 2));
+        let from = (a.x + a.w / 2.0, a.y + a.h / 2.0);
+        let to = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+        let want = vec![1, 2, l.cols + 1, l.cols + 2];
+        assert_eq!(band_hits(&l, from, to, 40), want);
+        assert_eq!(band_hits(&l, to, from, 40), want);
+        // Only as far as there are things; a band in a cell's margin touches nothing.
+        assert_eq!(band_hits(&l, from, to, 3), vec![1, 2]);
+        assert!(band_hits(&l, (a.x, a.y), (a.x + 6.0, a.y + 4.0), 40).is_empty());
     }
 
     #[test]

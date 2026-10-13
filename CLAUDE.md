@@ -756,8 +756,20 @@ The big daemon files are cohesive but long — go straight to the function:
   all"): Ctrl +/−/0 → `zoom("files", …)`, one zoom for every file window (`settings.files_zoom`);
   the window is laid out `1/zoom` its size (`Win::virt`) and the renderer's scale is multiplied by
   it (`filer_zoomed`, the configure, `rescale_surface`), the pointer divided (`filer_pointer`) — no
-  layout code knows. `files zoom in|out|reset|<n>`. NOT BUILT:
-  drags in and out, the rubber band, the bin as a place. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
+  layout code knows. `files zoom in|out|reset|<n>`. DRAGS (third cut, the desktop's way): a
+  press that travels `DRAG_START` (`Press`, `filer_travel`) on a thing LIFTS it and its group
+  (`filer_lift`: a real Wayland drag, `Filer::drag` = `Lifted`, the icon as its image, uri-list +
+  text; `DataSourceHandler` asks `Filer::is_drag_source` first), from bare ground draws a RUBBER
+  BAND (`Win::band`, `band_hits`; Ctrl keeps what was selected). A drag over a window —
+  another app's, the desktop's, a window's own — is `Filer::dnd` (`DataDeviceHandler` asks
+  `filer.id_of(surface)` / `dnd_active` first): the folder under it is washed (`Win::drop_on`), the
+  drop ALWAYS reads the list through the wire (`filer_dnd_drop` → `filer_bring` →
+  `desktop::import`: a move on one disk, a copy across disks; into the folder under the pointer,
+  else the folder shown; back where it came from = nothing). Over the DESKTOP a window's drag is
+  another app's to it; over the DOCK it is "ours" (`Filer::dragging` in `desktop_drag_dock_pos`,
+  `desktop_dnd_enter`, `desktop_dnd_drop`): the bin opens and takes it. Rig verbs: `files band
+  <x0> <y0> <x1> <y1>`, `unband`, `drop <n|-> <path…>` (the bringing-in only — the wire itself
+  needs a real pointer). NOT BUILT: the bin as a place, a drag's auto-scroll and spring-open. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
   <px>|hidden|menu [<n>]|pick <row>|copy|cut|paste|newfolder|rename <n>|bin|props <n>|close|state`

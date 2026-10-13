@@ -58,8 +58,8 @@ use crate::i18n::tr;
 /// The one drop type the desktop takes, and the first it offers: a list of
 /// `file://` URIs. A drag out also offers the path as plain text, for a
 /// terminal or an editor.
-const URI_LIST: &str = "text/uri-list";
-const PLAIN_TEXT: &str = "text/plain;charset=utf-8";
+pub(crate) const URI_LIST: &str = "text/uri-list";
+pub(crate) const PLAIN_TEXT: &str = "text/plain;charset=utf-8";
 /// The icon raster's side (level 0 of a mip chain, see `apps::ICON_SIZE`).
 const ICON_PX: usize = crate::apps::ICON_SIZE as usize;
 
@@ -4412,7 +4412,10 @@ impl App {
     /// Where our own drag's pointer is in the DOCK surface's coordinates
     /// (the bin watches it come); `None` when it is not over the dock.
     pub(crate) fn desktop_drag_dock_pos(&self) -> Option<(f32, f32)> {
-        self.desktop.drag.as_ref()?;
+        // (A drag out of a file manager window is ours too.)
+        if self.desktop.drag.is_none() && !self.filer.dragging() {
+            return None;
+        }
         self.desktop.dnd.filter(|d| d.on_dock).map(|d| d.pos)
     }
 
@@ -4540,7 +4543,9 @@ impl App {
         if on_dock {
             self.dock_spring_enter(own);
         }
-        if !has_files || (on_dock && !own) {
+        // (On the dock only our own files are taken — the desktop's, or a
+        // file manager window's: the bin is there for them.)
+        if !has_files || (on_dock && !own && !self.filer.dragging()) {
             offer.accept_mime_type(offer.serial, None);
             return;
         }
@@ -4667,6 +4672,21 @@ impl App {
                 self.desktop_settle_group(&items, at.pos);
             }
             offer.finish(); // → our source's `dnd_finished` → `desktop_drag_end`
+            return;
+        }
+        // A file manager window's files let go on the dock: on the bin they
+        // are thrown away, anywhere else nothing happens. Nothing to read.
+        if self.filer.dragging() && self.desktop.dnd.is_some_and(|d| d.on_dock) {
+            let (Some(offer), Some(at)) = (self.desktop_dnd_offer.take(), self.desktop.dnd.take()) else {
+                return;
+            };
+            if self.dropped_on_trash(&self.current_layout(), at.pos) {
+                for path in self.filer.drag_paths() {
+                    info!("files: {path} → Recycle Bin");
+                    self.trash_file(&path);
+                }
+            }
+            offer.finish(); // → the source's `dnd_finished` → `filer_drag_end`
             return;
         }
         // The live offer (the one kept since `enter` is a snapshot: its
