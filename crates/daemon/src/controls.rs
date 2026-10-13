@@ -1044,6 +1044,33 @@ const WALLPAPER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1
 /// the pattern from matching the very command that carries it.
 const PLAYERS: &str = "[m]pvpaper -f -o";
 
+/// Where the player of a moving wallpaper listens (mpv's own JSON
+/// commands). `None`: no runtime directory, or one with a space in its
+/// path (the player's options are split at spaces).
+fn player_socket() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
+    let socket = dir.join("waverunner-wallpaper.sock");
+    (!socket.to_string_lossy().contains(' ')).then_some(socket)
+}
+
+/// Hold a moving wallpaper still, or let it go on (the overview shows the
+/// desktop nine times over: Max, 2026-10-13, "quiero que el wallpaper se
+/// pause en overview"). Nothing playing, or a player started before it
+/// listened: nothing happens. Never waits: one short write, on its own
+/// thread.
+pub(crate) fn wallpaper_pause(paused: bool) {
+    let Some(socket) = player_socket() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        use std::io::Write;
+        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&socket) {
+            let _ = s.set_write_timeout(Some(std::time::Duration::from_millis(300)));
+            let _ = writeln!(s, r#"{{"command":["set_property","pause",{paused}]}}"#);
+        }
+    });
+}
+
 /// End whatever is playing a moving wallpaper. Asked first; one that has
 /// not gone a moment later is ended outright — a player whose picture is
 /// covered may not be listening, and it would play on under the next one
@@ -1083,8 +1110,14 @@ fn show_wallpaper(path: &str, fade: bool) -> bool {
             // `-f`: it forks and plays on; `*`: every screen. The graphics
             // card decodes where it can (`hwdec`): a 1080p video cost 37 %
             // of a core without it and 5 % with — a wallpaper plays all day.
-            let how = "no-audio loop-file=inf panscan=1.0 hwdec=auto-safe";
-            return run(&player, &["-f", "-o", how, "*", path]);
+            // And it listens on a socket of its own, so it can be told to
+            // hold still (`wallpaper_pause`).
+            let mut how = "no-audio loop-file=inf panscan=1.0 hwdec=auto-safe".to_owned();
+            if let Some(socket) = player_socket() {
+                let _ = std::fs::remove_file(&socket);
+                how.push_str(&format!(" input-ipc-server={}", socket.display()));
+            }
+            return run(&player, &["-f", "-o", &how, "*", path]);
         }
         if wallpaper_is_video(path) {
             return false;

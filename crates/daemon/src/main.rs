@@ -3896,6 +3896,8 @@ impl App {
         }
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
+        // A wallpaper that moves holds still while the overview is up.
+        crate::controls::wallpaper_pause(active);
         // The card is not shown under the overview.
         self.sync_card();
         // The arrangement changed: the Mind decides against it, so it learns
