@@ -308,6 +308,10 @@ pub(crate) struct KeyboardChoice {
     pub layout: String,
     #[serde(default)]
     pub variant: String,
+    /// xkb options (`grp:alt_shift_toggle` for a second script). The panel
+    /// does not set them; the installer's seed may.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub options: String,
 }
 
 /// `~/.config/golem/settings.json`: the owner's live settings. Only
@@ -415,6 +419,9 @@ impl GolemSettings {
                     lua_quote(&k.layout),
                     lua_quote(&k.variant)
                 ));
+                if !k.options.is_empty() && crate::controls::valid_xkb_options(&k.options) {
+                    lines.push(format!("hl.config({{ [\"input.kb_options\"] = {} }})", lua_quote(&k.options)));
+                }
             } else {
                 warn!("golem settings: leaving out the keyboard {k:?}");
             }
@@ -438,8 +445,30 @@ impl GolemSettings {
         }
     }
 
+    /// Put the saved input choices on the compositor and bring the
+    /// compositor's copy of the file in step with them — at start, for a
+    /// `settings.json` written by something else (the installer's seed).
+    pub(crate) fn reassert_input(&self) {
+        if self.input_lua().is_empty() {
+            return;
+        }
+        let lua = self.lua();
+        let path = golem_path("settings.lua");
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(lua.as_str()) {
+            crate::persist::write_text("golem settings", &path, &lua);
+        }
+        for line in self.input_lua() {
+            if !hypr::eval_ok(&line) {
+                warn!("golem settings: the compositor refused {line}");
+            }
+        }
+    }
+
     pub(crate) fn set_keyboard(&mut self, layout: &str, variant: &str) {
-        self.keyboard = Some(KeyboardChoice { layout: layout.to_owned(), variant: variant.to_owned() });
+        // (A layout picked in the panel is one layout: any second group the
+        // installer set up goes with the old one.)
+        self.keyboard =
+            Some(KeyboardChoice { layout: layout.to_owned(), variant: variant.to_owned(), options: String::new() });
         self.store_and_apply_input();
     }
 

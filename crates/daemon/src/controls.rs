@@ -432,6 +432,11 @@ pub(crate) fn valid_xkb(text: &str) -> bool {
     text.len() <= 40 && text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ',' | '(' | ')'))
 }
 
+/// xkb options: names like a layout's, with the colon of `grp:toggle`.
+pub(crate) fn valid_xkb_options(text: &str) -> bool {
+    text.len() <= 120 && text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ',' | ':'))
+}
+
 /// The keyboard layout in use: the saved choice, else the compositor's.
 fn keyboard_now() -> (String, String) {
     if let Some(k) = GolemSettings::load().keyboard {
@@ -1463,6 +1468,9 @@ fn set_charge_limit(on: bool) {
 /// and the session's language and zone.
 pub(crate) fn reassert() {
     let s = GolemSettings::load();
+    // The compositor's own settings: on it now, and in the file it reads at
+    // its start (a settings.json the installer seeded has no such file yet).
+    s.reassert_input();
     if s.dark.is_none() && s.language.is_none() && s.time_zone.is_none() && s.wallpaper.is_none() {
         return;
     }
