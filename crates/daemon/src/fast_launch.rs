@@ -215,42 +215,25 @@ pub(crate) struct FastLaunch {
     /// QUICK CONTROLS (Max, 2026-10-13, Super+H): the same card, searching
     /// the control panel's settings instead of the apps — `matches` and the
     /// places then hold places in [`crate::panel::Panel::real_settings`],
-    /// each drawn as a round pill with its sign. Enter opens the one in
+    /// each drawn as its pill, as on the control panel. Enter opens the one in
     /// front in a box of its own mid-screen (`boxed`: which, while it is up;
     /// the card is away meanwhile and the keys are the box's).
     pub controls: bool,
     pub boxed: Option<&'static str>,
+    /// The quick controls' card and pills as last drawn (surface
+    /// coordinates): what a click is tested against, and what the box
+    /// grows out of.
+    pub pill_card: Rect,
+    pub pill_hits: Vec<(usize, Rect)>,
 }
 
-/// A setting's sign on its round pill (the icon font), by its name.
-pub(crate) fn control_glyph(label: &str) -> &'static str {
-    match label {
-        "Resolution" => "\u{f108}",
-        "Scale" => "\u{f00e}",
-        "Wi-Fi" => "\u{f1eb}",
-        "Sound output" => "\u{f028}",
-        "Dark mode" => "\u{f186}",
-        "Brightness" => "\u{f185}",
-        "Bluetooth" => "\u{f294}",
-        "Volume" => "\u{f027}",
-        "Wallpaper" => "\u{f03e}",
-        "Night light" => "\u{f0eb}",
-        "Notifications" => "\u{f0f3}",
-        "Keyboard layout" => "\u{f11c}",
-        "Power mode" => "\u{f0e7}",
-        "Touchpad speed" => "\u{f245}",
-        "Language" => "\u{f1ab}",
-        "Time zone" => "\u{f017}",
-        "Natural scrolling" => "\u{f07d}",
-        "Updates" => "\u{f021}",
-        "About Golem" => "\u{f05a}",
-        "Microphone" => "\u{f130}",
-        "Battery" => "\u{f240}",
-        "Default apps" => "\u{f009}",
-        "Privacy" => "\u{f023}",
-        _ => "\u{f013}",
-    }
-}
+/// QUICK CONTROLS: the settings on the card are the control panel's own
+/// pills (Max, 2026-10-13: "quiero las pildoras como se ven en controls") —
+/// the one in front a size up and lit, the two at its sides the bar's size.
+const PILL_FRONT: f32 = 1.3;
+const PILL_SIDE: f32 = 0.92;
+const PILL_GAP: f32 = 10.0;
+const PILL_CARD_PAD: f32 = 12.0;
 
 /// How long the bubble stays up with nothing happening (3 s; 2 s was tried and taken back).
 const IDLE_CLOSE: std::time::Duration = std::time::Duration::from_secs(3);
@@ -673,10 +656,7 @@ impl App {
         self.fast_touch();
         // A setting is open in its box: Escape folds it; nothing is typed.
         if self.fast.boxed.is_some() {
-            if keysym == Keysym::Escape {
-                self.quick.close_solo();
-                self.schedule_frame();
-            }
+            self.quick_key(keysym);
             return;
         }
 
@@ -760,7 +740,7 @@ impl App {
             let Some(&(label, _)) = crate::panel::Panel::real_settings().get(idx) else {
                 return;
             };
-            let from = self.fast.view(&self.fast_geometry()).card;
+            let from = self.fast.pill_card;
             self.fast.boxed = Some(label);
             self.fast.enter = None;
             self.quick_open(label, from);
@@ -865,6 +845,16 @@ impl App {
         self.fast_touch();
         // The icons where they are DRAWN (a long name widens the card and
         // moves the side icons out), the front one first: it is on top.
+        if self.fast.controls {
+            // The pills where they were drawn, the front one (last) first.
+            let hit = self.fast.pill_hits.iter().rev().find(|(_, r)| r.contains(pos)).map(|&(e, _)| e);
+            if let Some(entry) = hit {
+                self.fast_launch_pick(Some(entry));
+            } else if !self.fast.pill_card.contains(pos) {
+                self.close_fast_launch();
+            }
+            return;
+        }
         let view = self.fast.view(&self.fast_geometry());
         let hit = view.icons.iter().rev().find(|(_, r)| r.contains(pos)).map(|&(e, _)| e);
         if let Some(entry) = hit {
@@ -872,6 +862,71 @@ impl App {
         } else if !view.card.contains(pos) {
             self.close_fast_launch();
         }
+    }
+
+    /// QUICK CONTROLS: the card and its pills this frame — the setting in
+    /// front in the middle, the others sliding out from behind it to its
+    /// sides as the icons do, each as wide as its name. Remembered for the
+    /// pointer (`pill_card`, `pill_hits`).
+    pub(crate) fn fast_pills(&mut self, g: &Geo) -> (Rect, Vec<crate::content::FastPill>) {
+        let all = crate::panel::Panel::real_settings();
+        let s = self.options_scale();
+        let pill_h = self.options_pill_h();
+        let pad_x = crate::options::PILL_PAD_X * s;
+        let (typed, rest) = self.fast_words();
+        let places = self.fast.places;
+        let name = |e: Option<usize>| e.and_then(|i| all.get(i)).map(|x| crate::i18n::tr(x.0).to_owned());
+        let mut measure = |t: &str, px: f32| {
+            self.renderer.as_mut().map_or(t.chars().count() as f32 * px * 0.55, |r| r.measure_text(t, px, crate::options::TEXT_FONT))
+        };
+        let (cx, cy) = (g.card.x + g.card.w / 2.0, g.card.y + g.card.h / 2.0);
+        let mut pills = Vec::with_capacity(3);
+        let mut hits = Vec::with_capacity(3);
+        // The front one: its size is the card's middle.
+        let font_f = crate::options::FONT_PX * s * PILL_FRONT;
+        let h_f = pill_h * PILL_FRONT;
+        let front_name = name(places[0].entry);
+        let (typed_w, rest_w) = (measure(&typed, font_f), measure(&rest, font_f));
+        let w_f = match &front_name {
+            Some(_) => (typed_w + rest_w + 2.0 * pad_x * PILL_FRONT).max(h_f),
+            None => (typed_w + 2.0 * pad_x * PILL_FRONT).max(h_f * 1.6),
+        };
+        let (gap, pad) = (PILL_GAP * s, PILL_CARD_PAD * s);
+        let mut card = Rect::new(cx - w_f / 2.0 - pad, cy - h_f / 2.0 - pad, w_f + 2.0 * pad, h_f + 2.0 * pad);
+        let font_s = crate::options::FONT_PX * s * PILL_SIDE;
+        let h_s = pill_h * PILL_SIDE;
+        for (i, side) in [places[1], places[2]].iter().enumerate() {
+            let (Some(entry), Some(text)) = (side.entry, name(side.entry)) else {
+                continue;
+            };
+            let v = side.shown_out();
+            let w = (measure(&text, font_s) + 2.0 * pad_x * PILL_SIDE).max(h_s);
+            let dir = if i == 0 { -1.0 } else { 1.0 };
+            // From behind the front pill (the middle, smaller) to its place.
+            let home = cx + dir * (w_f / 2.0 + gap + w / 2.0);
+            let mid = cx + (home - cx) * v;
+            let k = (0.55 + 0.45 * v) * pop_scale(side.pop);
+            let r = grow(Rect::new(mid - w / 2.0, cy - h_s / 2.0, w, h_s), k);
+            if i == 0 {
+                card.x -= (w + gap) * v;
+            }
+            card.w += (w + gap) * v;
+            hits.push((entry, r));
+            pills.push(crate::content::FastPill { rect: r, front: false, typed: String::new(), rest: text, typed_w: 0.0, rest_w: w - 2.0 * pad_x * PILL_SIDE, font_px: font_s * k, show: v });
+        }
+        // The front one last: on top.
+        let p = places[0].pop;
+        let k = if self.fast.open || self.fast.since_close < CLOSE_HOLD { pop_scale(p) } else { 0.4 * p + 0.6 * p * p };
+        if k > 0.02 {
+            let r = grow(Rect::new(cx - w_f / 2.0, cy - h_f / 2.0, w_f, h_f), k);
+            if let Some(entry) = places[0].entry {
+                hits.push((entry, r));
+            }
+            pills.push(crate::content::FastPill { rect: r, front: true, typed, rest, typed_w: typed_w * k, rest_w: rest_w * k, font_px: font_f * k, show: 1.0 });
+        }
+        self.fast.pill_card = card;
+        self.fast.pill_hits = hits;
+        (card, pills)
     }
 
     /// Where the card and its icons sit.

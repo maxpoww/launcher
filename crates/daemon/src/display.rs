@@ -858,6 +858,25 @@ impl App {
                     None => warn!("display: no setting called {which:?}"),
                 },
             },
+            // A key of an open setting (the panel's, or the quick box's when
+            // that is up), without a keyboard: left|right|up|down|tab|enter.
+            (Some("key"), Some(which)) => {
+                use smithay_client_toolkit::seat::keyboard::Keysym;
+                let key = match which {
+                    "left" => Keysym::Left,
+                    "right" => Keysym::Right,
+                    "up" => Keysym::Up,
+                    "down" => Keysym::Down,
+                    "tab" => Keysym::Tab,
+                    "escape" => Keysym::Escape,
+                    _ => Keysym::Return,
+                };
+                if self.fast.boxed.is_some() {
+                    self.quick_key(key);
+                } else {
+                    self.panel_keys(key, false);
+                }
+            }
             // A click on a choice of the open setting, without a pointer:
             // its group and its place there, counted from 0.
             (Some("pick"), Some(group)) => {

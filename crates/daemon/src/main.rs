@@ -6169,6 +6169,25 @@ impl App {
             self.paste();
             return;
         }
+        // An open setting on the control panel takes the keys that walk and
+        // pick its choices (with none open, they are the card's as ever).
+        if self.control_panel
+            && matches!(
+                keysym,
+                Keysym::Left
+                    | Keysym::Right
+                    | Keysym::Up
+                    | Keysym::Down
+                    | Keysym::Tab
+                    | Keysym::ISO_Left_Tab
+                    | Keysym::Return
+                    | Keysym::KP_Enter
+                    | Keysym::space
+            )
+            && self.panel_keys(keysym, false)
+        {
+            return;
+        }
         match keysym {
             // The Mac's Launchpad key (F4 → XF86LaunchB) opens the box through
             // a Hyprland bind, but while the box is open it holds the keyboard

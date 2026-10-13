@@ -220,17 +220,22 @@ The big daemon files are cohesive but long — go straight to the function:
   power mode from a rig that can reach the live session's PipeWire or buses.
 - QUICK CONTROLS (Max, 2026-10-13, Super+H → `waverunner-ctl fast-controls`): FAST LAUNCH for the
   control panel's settings — the same card, motion and ranking (`fast_launch.rs`,
-  `FastLaunch::controls`): it opens on the three settings used most, each a round pill with its
-  sign (`control_glyph`) where an app's icon would be, the front one's name written under it with
-  what was typed bright; names match in the shell's language and in English, then by keyword; ties
+  `FastLaunch::controls`): it opens on the three settings used most, each as ITS PILL as on the control panel
+  (`App::fast_pills`, `content::FastPill`; round sign pills were tried and taken back the same
+  day): the front one a size up, lit and ringed, its name dimmed with what was typed bright; the
+  two at its sides slide out from behind it as the icons do; names match in the shell's language and in English, then by keyword; ties
   go to the setting used most (the settings panel's own standings, `Panel::use_count`). Enter (or a
   click) opens the one in front IN A BOX OF ITS OWN mid-screen (`fast.boxed`, `App::quick_open`):
   a third `Panel` in solo mode (`Panel::solo` — no field of pills, only the open setting, drawn by
   the same `open_content`/`draw_open`), growing out of the card, as tall as its content
   (`quick_rect`), on the dock's colour nearly solid (`content::QuickDraw`). A click on a choice
   picks it (`quick_click` → the same `control_pick`); Escape, a click outside or Super+H again
-  folds it. Pointer-free: `fast-controls`, `debug-query <letters>` types, `debug-query <letters>!`
-  also presses Enter, `display pick <group> <n>` picks in the box.
+  folds it. THE KEYBOARD in an open setting (the box's AND the control panel's): the arrows and
+  Tab walk the choices (`Panel::key_move`, a ring where the keys are — shown from the first key
+  on), Enter or Space picks (`key_pick`); a setting chosen in steps moves the keys to its newest
+  group (`key_follow`). Pointer-free: `fast-controls`, `debug-query <letters>` types, `debug-query <letters>!`
+  also presses Enter, `display pick <group> <n>` picks in the box, `display key
+  left|right|up|down|tab|enter|escape` presses a key there (or on the panel's open setting).
 - `i18n.rs` + `tools/i18n/` — THE SHELL'S LANGUAGES (2026-10-13). Every visible string goes
   through `tr("English")`, a sentence with values through `fill(tr("… {name} …"), &[("name",
   &v)])`; the catalogue is `assets/i18n/<tag>.json`, built into the binary (Spanish is whole).

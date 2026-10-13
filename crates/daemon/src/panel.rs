@@ -48,6 +48,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use smithay_client_toolkit::seat::keyboard::Keysym;
 
 use tracing::info;
 
@@ -101,6 +102,14 @@ const SETTINGS: [Item; 24] = [
 pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
     let flat = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
     SETTINGS.iter().map(|s| s.0).find(|label| flat(label) == flat(name))
+}
+
+/// A pill's look on layer `layer` (0 near, 1 middle, 2 far) of a card that
+/// reads bright or dark: its wash, and how strong its name is. For the
+/// settings drawn as pills elsewhere (the quick controls' card).
+pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
+    let wash = if bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
+    (crate::options::wash(!bright, wash[layer.min(2)]), LAYER_INK[layer.min(2)])
 }
 
 /// The quick box (Super+H): its width, the room under its content for the
@@ -601,6 +610,11 @@ pub(crate) struct Panel {
     /// ONE setting in a box of its own (the quick controls' box, Super+H):
     /// no field of pills, only the open setting.
     solo: bool,
+    /// THE KEYBOARD in an open setting (Max, 2026-10-13: "manejar todo con
+    /// el teclado"): the choice the keys are on — which of the content's
+    /// pills, in their drawn order. `None` until a key moves: the pointer's
+    /// way shows no cursor.
+    focus: Option<usize>,
 }
 
 impl Panel {
@@ -617,12 +631,105 @@ impl Panel {
             return false;
         };
         self.open = Some(OpenBox { pill: i, k: 0.0, want: 1.0, from });
+        self.focus = None;
         self.control = None;
         self.control_ask = crate::controls::is_control(self.pills[i].label);
         if is_display_setting(self.pills[i].label) {
             self.display_at = Some(Instant::now());
         }
         true
+    }
+
+    /// The open setting's choices as the keys walk them: (rect, lit, what a
+    /// pick asks), in drawn order. Empty: nothing open, or nothing to pick.
+    fn key_chips(&self) -> Vec<(Rect, bool, PanelAction)> {
+        let Some(open) = self.open.as_ref().filter(|o| o.want > 0.5) else {
+            return Vec::new();
+        };
+        if self.modules {
+            return Vec::new();
+        }
+        self.open_content(self.pills[open.pill].label)
+            .map(|c| c.chips.into_iter().map(|c| (c.rect, c.on, c.action)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Where the keys start: the choice in use, else the first.
+    fn key_home(chips: &[(Rect, bool, PanelAction)]) -> usize {
+        chips.iter().position(|c| c.1).unwrap_or(0)
+    }
+
+    /// An arrow: `(dx, dy)` one step. Sideways walks the choices in order
+    /// (round the ends); up and down go to the nearest choice of the next
+    /// row. Returns whether there was anything to move on.
+    pub(crate) fn key_move(&mut self, dx: i32, dy: i32) -> bool {
+        let chips = self.key_chips();
+        if chips.is_empty() {
+            return false;
+        }
+        let n = chips.len();
+        let Some(at) = self.focus.map(|f| f.min(n - 1)) else {
+            // The first key shows where the keys are; it moves nothing.
+            self.focus = Some(Self::key_home(&chips));
+            return true;
+        };
+        let to = if dx != 0 {
+            (at as i32 + dx).rem_euclid(n as i32) as usize
+        } else {
+            let here = chips[at].0;
+            let mid = |r: &Rect| r.x + r.w / 2.0;
+            // The rows beyond this one, the nearest first.
+            let mut rows: Vec<f32> = chips
+                .iter()
+                .map(|c| c.0.y)
+                .filter(|y| if dy > 0 { *y > here.y + 1.0 } else { *y < here.y - 1.0 })
+                .collect();
+            rows.sort_by(|a, b| if dy > 0 { a.total_cmp(b) } else { b.total_cmp(a) });
+            match rows.first() {
+                Some(&row) => chips
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| (c.0.y - row).abs() < 1.0)
+                    .min_by(|a, b| (mid(&a.1 .0) - mid(&here)).abs().total_cmp(&(mid(&b.1 .0) - mid(&here)).abs()))
+                    .map_or(at, |(i, _)| i),
+                None => at,
+            }
+        };
+        self.focus = Some(to);
+        true
+    }
+
+    /// Enter or Space: the choice the keys are on is picked (the one in use
+    /// when no key has moved yet). Returns whether a choice was there.
+    pub(crate) fn key_pick(&mut self) -> bool {
+        let chips = self.key_chips();
+        if chips.is_empty() {
+            return false;
+        }
+        let at = self.focus.map_or_else(|| Self::key_home(&chips), |f| f.min(chips.len() - 1));
+        self.focus = Some(at);
+        self.action = Some(chips[at].2);
+        true
+    }
+
+    /// The content changed under the keys (a setting chosen in steps grew a
+    /// new group): they go to the newest group, on its choice in use.
+    fn key_follow(&mut self, before: usize) {
+        if self.focus.is_none() {
+            return;
+        }
+        let chips = self.key_chips();
+        if chips.is_empty() {
+            self.focus = None;
+        } else if chips.len() != before {
+            let last_group = chips
+                .iter()
+                .filter_map(|c| if let PanelAction::Pick { group, .. } = c.2 { Some(group) } else { None })
+                .max();
+            let in_last = |c: &(Rect, bool, PanelAction)| matches!(c.2, PanelAction::Pick { group, .. } if Some(group) == last_group);
+            let first = chips.iter().position(in_last).unwrap_or(0);
+            self.focus = Some(chips.iter().enumerate().position(|(i, c)| i >= first && in_last(c) && c.1).unwrap_or(first));
+        }
     }
 
     /// Fold the solo box away.
@@ -910,6 +1017,7 @@ impl Panel {
 
     /// A click on the card below the dock. Returns whether it did anything.
     fn click(&mut self, pos: (f32, f32)) -> bool {
+        self.focus = None;
         if let Some((pill, want)) = self.open.as_ref().map(|o| (o.pill, o.want)) {
             // Open, the setting is the whole card: a click on its floating
             // controls is theirs; anywhere else folds it back.
@@ -950,6 +1058,7 @@ impl Panel {
         let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
         let (w, h) = (p.w[d] * k, p.h[d] * k);
         info!("control panel: opening {}", p.label);
+        self.focus = None;
         self.open = Some(OpenBox {
             pill: i,
             k: 0.0,
@@ -1042,7 +1151,9 @@ impl Panel {
         if self.open_control_label() != Some(view.label) {
             return false;
         }
+        let before = self.key_chips().len();
         self.control = Some(view);
+        self.key_follow(before);
         true
     }
 
@@ -1825,7 +1936,8 @@ impl Panel {
                     && self.pointer.is_some_and(|pos| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
                 let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
                 let (x0, y0) = (r.x + 1.1 * s * a.cos(), r.y + 1.1 * s * a.sin());
-                let wa = if hot {
+                let keyed = resting && self.focus == Some(i);
+                let wa = if hot || keyed {
                     hover_a
                 } else if chip.on {
                     layer_wash[0]
@@ -1843,7 +1955,19 @@ impl Panel {
                         border: (1.4 * s * cs).max(1.0),
                     });
                 }
-                let ink_a = if chip.on || hot { 1.0 } else { LAYER_INK[1] };
+                // Where the keys are: a full ring, brighter and thicker than
+                // the lit choice's.
+                if keyed {
+                    let (mx, my) = map(x0 - 2.5 * s, y0 - 2.5 * s);
+                    out.rects.push(RectInst {
+                        rect: Rect::new(mx, my, (r.w + 5.0 * s) * cs, (r.h + 5.0 * s) * cs),
+                        radius: (r.h / 2.0 + 2.5 * s) * cs,
+                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.9 * ca],
+                        glass: 0.0,
+                        border: (2.0 * s * cs).max(1.5),
+                    });
+                }
+                let ink_a = if chip.on || hot || keyed { 1.0 } else { LAYER_INK[1] };
                 text(out, chip.text, x0 + r.w / 2.0, y0 + (r.h - line) / 2.0, 16.0, 20.0, ink_a);
             }
             text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
@@ -2670,6 +2794,44 @@ impl App {
         }
         let draw = self.quick.draw(paint);
         Some((rect, smoothstep((k / 0.6).clamp(0.0, 1.0)), draw))
+    }
+
+    /// A key while the quick box is up: the arrows and Tab walk its
+    /// choices, Enter or Space picks, Escape folds it.
+    pub(crate) fn quick_key(&mut self, keysym: Keysym) {
+        if !self.panel_keys(keysym, true) && keysym == Keysym::Escape {
+            self.quick.close_solo();
+        }
+        self.schedule_frame();
+    }
+
+    /// The keys of an open setting — the control panel's (`quick` false) or
+    /// the quick box's: arrows and Tab walk the choices, Enter or Space
+    /// picks the one they are on. Returns whether the key was one of these
+    /// and there was a choice to act on.
+    pub(crate) fn panel_keys(&mut self, keysym: Keysym, quick: bool) -> bool {
+        let panel = if quick { &mut self.quick } else { &mut self.panel };
+        let used = match keysym {
+            Keysym::Left => panel.key_move(-1, 0),
+            Keysym::Right | Keysym::Tab => panel.key_move(1, 0),
+            Keysym::ISO_Left_Tab => panel.key_move(-1, 0),
+            Keysym::Up => panel.key_move(0, -1),
+            Keysym::Down => panel.key_move(0, 1),
+            Keysym::Return | Keysym::KP_Enter | Keysym::space => panel.key_pick(),
+            _ => false,
+        };
+        if used {
+            match panel.take_action() {
+                Some(PanelAction::Scale(scale)) => self.set_display_scale(scale),
+                Some(PanelAction::Mode { w, h, hz }) => self.set_display_mode(w, h, hz),
+                Some(PanelAction::Keep) => self.keep_display(),
+                Some(PanelAction::Revert) => self.revert_display(),
+                Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, quick),
+                None => {}
+            }
+            self.schedule_frame();
+        }
+        used
     }
 
     /// A click while the quick box is up: a choice is picked; the box's own

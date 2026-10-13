@@ -634,6 +634,22 @@ impl std::fmt::Debug for QuickDraw<'_> {
     }
 }
 
+/// One of the quick controls' pills on the fast card (see
+/// `App::fast_pills`): where, whether it is the one in front, its name as
+/// what was typed and the rest with their shaped widths, its type size, and
+/// how far out from behind the front one it is (0..1).
+#[derive(Debug, Clone)]
+pub struct FastPill {
+    pub rect: Rect,
+    pub front: bool,
+    pub typed: String,
+    pub rest: String,
+    pub typed_w: f32,
+    pub rest_w: f32,
+    pub font_px: f32,
+    pub show: f32,
+}
+
 /// How solid the quick box is at least.
 const QUICK_FILL: f32 = 0.93;
 
@@ -647,9 +663,9 @@ pub struct FastDraw<'a> {
     pub a: f32,
     /// The bare icons in draw order (the front one last): entry, rect.
     pub icons: &'a [(usize, Rect)],
-    /// QUICK CONTROLS: in the icons' places, a round pill each with its
-    /// setting's sign (the front one last).
-    pub glyphs: &'a [(&'static str, Rect)],
+    /// QUICK CONTROLS: the settings as pills (the front one last); with
+    /// them there are no icons and no word under.
+    pub pills: &'a [FastPill],
     /// The word: what you typed (bright) then the rest of the name
     /// (dimmed), their shaped widths, the box it is centred in.
     pub typed: &'a str,
@@ -3306,34 +3322,56 @@ pub fn scene(
                 plate: NO_PLATE, // the card is its plate
             });
         }
-        // QUICK CONTROLS: a round pill each, the bar's own (a wash of the
-        // ink, its sign in the middle); the front one, drawn last, stronger.
-        for (n, &(glyph, rect)) in f.glyphs.iter().enumerate() {
-            let front = n + 1 == f.glyphs.len();
-            let side = rect.w.min(rect.h) * if front { 0.86 } else { 0.8 };
-            let pill = Rect::new(rect.x + (rect.w - side) / 2.0, rect.y + (rect.h - side) / 2.0, side, side);
-            let wash = if front { 0.22 } else { 0.13 };
-            scene.rects.push(RectInst {
-                rect: pill,
-                radius: side / 2.0,
-                color: [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * wash * a],
-                glass: 0.0,
-                border: 0.0,
-            });
-            let px = side * 0.46;
-            scene.labels.push(Label {
-                text: glyph.to_owned(),
-                pos: (pill.x + side / 2.0, pill.y + (side - px * 1.2) / 2.0),
-                max_w: side,
-                font_px: px,
-                line_px: px * 1.2,
-                centered: true,
-                dim: false,
-                cache: false,
-                family: Some(crate::options::NERD),
-                color: Some([dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * if front { 0.95 } else { 0.6 } * a]),
-                clip: None,
-            });
+        // QUICK CONTROLS: the control panel's pills — a stadium in a wash of
+        // the ink with the setting's name; the front one in the near layer's
+        // wash, ringed as a lit choice is, its name dimmed with what was
+        // typed bright (the launcher's word, inside the pill).
+        let bright_card = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+        for p in f.pills {
+            let (wash, ink_a) = crate::panel::pill_look(bright_card, if p.front { 0 } else { 1 });
+            let r = p.rect;
+            let show = p.show * a;
+            scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: [wash[0], wash[1], wash[2], wash[3] * show], glass: 0.0, border: 0.0 });
+            if p.front {
+                scene.rects.push(RectInst {
+                    rect: r,
+                    radius: r.h / 2.0,
+                    color: [dock_ink[0], dock_ink[1], dock_ink[2], 0.5 * show],
+                    glass: 0.0,
+                    border: 1.4,
+                });
+            }
+            let line = p.font_px * 1.2;
+            let left = r.x + (r.w - (p.typed_w + p.rest_w)) / 2.0;
+            let mut part = |text: &str, x: f32, k: f32| {
+                if text.is_empty() {
+                    return;
+                }
+                scene.labels.push(Label {
+                    text: text.to_owned(),
+                    pos: (x, r.y + (r.h - line) / 2.0),
+                    max_w: r.w + p.font_px,
+                    font_px: p.font_px,
+                    line_px: line,
+                    centered: false,
+                    dim: false,
+                    cache: false,
+                    family: crate::options::TEXT_FONT,
+                    color: Some([dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * show]),
+                    clip: None,
+                });
+            };
+            if p.front {
+                // Nothing typed: the whole name bright, as on the panel.
+                let rest_k = if p.typed.is_empty() { 1.0 } else { 0.45 };
+                part(&p.typed, left, 1.0);
+                part(&p.rest, left + p.typed_w, rest_k);
+            } else {
+                part(&p.rest, left, ink_a);
+            }
+        }
+        if !f.pills.is_empty() {
+            return scene;
         }
         // The whole word centred (it never jumps as you type: "sp" already
         // sits where "Spotify" will be), and always whole (Max, 2026-10-02:
