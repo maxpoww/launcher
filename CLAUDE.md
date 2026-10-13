@@ -230,7 +230,9 @@ The big daemon files are cohesive but long — go straight to the function:
   the same `open_content`/`draw_open`), growing out of the card, as tall as its content
   (`quick_rect`), on the dock's colour nearly solid (`content::QuickDraw`). A click on a choice
   picks it (`quick_click` → the same `control_pick`); Escape, a click outside or Super+H again
-  folds it. THE KEYBOARD in an open setting (the box's AND the control panel's): the arrows and
+  folds it. ZOOM: Ctrl +/−/0 while fast launch or the quick controls are up make the card and the
+  box bigger, smaller, as shipped — one zoom for both (`settings.fast_zoom`, `App::fast_zoom`,
+  `zoom("fast", …)`; `debug-desktop "zoom fast in|out|reset|<n>"`). THE KEYBOARD in an open setting (the box's AND the control panel's): the arrows and
   Tab walk the choices (`Panel::key_move`, a ring where the keys are — shown from the first key
   on), Enter or Space picks (`key_pick`); a setting chosen in steps moves the keys to its newest
   group (`key_follow`). Pointer-free: `fast-controls`, `debug-query <letters>` types, `debug-query <letters>!`

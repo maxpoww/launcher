@@ -2743,7 +2743,7 @@ impl App {
     /// Where the quick box is: centred where the quick controls' card is, as
     /// wide as a setting needs and as tall as the one that is open.
     pub(crate) fn quick_rect(&self) -> Rect {
-        let s = self.options_scale();
+        let s = self.options_scale() * self.fast_zoom();
         let g = self.fast_geometry();
         let (sw, sh) = (self.buffer_size.0 as f32, self.buffer_size.1 as f32);
         let w = (QUICK_W * s).min(sw - 40.0 * s).max(200.0);
@@ -2754,8 +2754,8 @@ impl App {
     }
 
     fn quick_ensure(&mut self, rect: Rect) {
-        let scale = self.options_scale();
-        let pill_h = self.options_pill_h();
+        let scale = self.options_scale() * self.fast_zoom();
+        let pill_h = self.options_pill_h() * self.fast_zoom();
         if let Some(r) = self.renderer.as_mut() {
             let mut measure = |t: &str, px: f32| r.measure_text(t, px, TEXT_FONT);
             // (Laid out for the box's WIDTH only: its height follows the

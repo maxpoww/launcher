@@ -51,6 +51,9 @@ pub(crate) struct Settings {
     /// The same for a group open over the dock: its members than their
     /// own size.
     pub(crate) stack_zoom: f32,
+    /// The same for FAST LAUNCH and the quick controls (their card and the
+    /// box a setting opens in): one zoom for both.
+    pub(crate) fast_zoom: f32,
 }
 
 impl Settings {

@@ -89,14 +89,21 @@ impl App {
         text_factor(self.stack_zoom())
     }
 
+    /// How much bigger than their own size fast launch and the quick
+    /// controls are drawn (Max, 2026-10-13: Ctrl +/−/0 while one is open).
+    pub(crate) fn fast_zoom(&self) -> f32 {
+        factor(self.settings.fast_zoom)
+    }
+
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
     /// to a number (`how`). What was done.
     pub(crate) fn zoom(&mut self, what: &str, how: &str) -> String {
-        const USAGE: &str = "zoom bar|desktop|stack in|out|reset|<n>";
+        const USAGE: &str = "zoom bar|desktop|stack|fast in|out|reset|<n>";
         let now = match what {
             "bar" => self.bar_zoom(),
             "desktop" => self.desktop_zoom(),
             "stack" => self.stack_zoom(),
+            "fast" => self.fast_zoom(),
             _ => return USAGE.to_owned(),
         };
         let Some(to) = stepped(now, how) else {
@@ -113,6 +120,10 @@ impl App {
             // the windows), its text, its boxes — as for a change of screen.
             self.sync_options_zone();
             self.tasks_changed();
+        } else if what == "fast" {
+            self.settings.fast_zoom = to;
+            self.settings.save();
+            self.schedule_frame();
         } else if what == "stack" {
             self.settings.stack_zoom = to;
             self.settings.save();

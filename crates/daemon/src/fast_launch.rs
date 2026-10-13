@@ -654,6 +654,21 @@ impl App {
     /// A key while the bubble is open: it takes every key.
     pub(crate) fn fast_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
         self.fast_touch();
+        // Ctrl +/−/0: bigger, smaller, as shipped — the card, and the box a
+        // setting is open in (fast launch and the quick controls share it).
+        if self.modifiers.ctrl {
+            let how = match keysym {
+                Keysym::plus | Keysym::equal | Keysym::KP_Add => Some("in"),
+                Keysym::minus | Keysym::underscore | Keysym::KP_Subtract => Some("out"),
+                Keysym::_0 | Keysym::KP_0 | Keysym::parenright => Some("reset"),
+                _ => None,
+            };
+            if let Some(how) = how {
+                let done = self.zoom("fast", how);
+                tracing::info!("{done}");
+                return;
+            }
+        }
         // A setting is open in its box: Escape folds it; nothing is typed.
         if self.fast.boxed.is_some() {
             self.quick_key(keysym);
@@ -870,8 +885,8 @@ impl App {
     /// pointer (`pill_card`, `pill_hits`).
     pub(crate) fn fast_pills(&mut self, g: &Geo) -> (Rect, Vec<crate::content::FastPill>) {
         let all = crate::panel::Panel::real_settings();
-        let s = self.options_scale();
-        let pill_h = self.options_pill_h();
+        let s = self.options_scale() * self.fast_zoom();
+        let pill_h = self.options_pill_h() * self.fast_zoom();
         let pad_x = crate::options::PILL_PAD_X * s;
         let (typed, rest) = self.fast_words();
         let places = self.fast.places;
@@ -935,7 +950,7 @@ impl App {
         geometry(
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             screen_h,
-            self.options_scale(),
+            self.options_scale() * self.fast_zoom(),
         )
     }
 
