@@ -148,11 +148,17 @@ impl App {
         self.sync_zoom_keys();
     }
 
-    /// Bind Ctrl +/−/0 to what they zoom now — a group open over the dock,
-    /// else the bar under the pointer — or give them back.
+    /// Bind Ctrl +/−/0 to what they zoom now — fast launch or the quick
+    /// controls when one is up, else a group open over the dock, else the
+    /// bar under the pointer — or give them back.
     pub(crate) fn sync_zoom_keys(&mut self) {
         let stack = self.dock_stack.is_some() || self.dir_stack.as_ref().is_some_and(|ds| !ds.in_grid);
-        let want = if stack {
+        // Fast launch or the quick controls up: the keys are theirs, over
+        // whatever is behind (a group left open, the bar under the pointer) —
+        // the compositor's binds fire before our own keyboard sees a key.
+        let want = if self.fast.open {
+            Some("fast")
+        } else if stack {
             Some("stack")
         } else if self.bar_zoom_keys {
             Some("bar")
