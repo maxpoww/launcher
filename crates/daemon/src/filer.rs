@@ -141,8 +141,13 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
+    #[cfg(test)]
     pub fn new((w, h): (u32, u32), icon_scale: f32) -> Self {
-        let (w, h) = (w as f32, h as f32);
+        Self::of((w as f32, h as f32), icon_scale)
+    }
+
+    /// The same for a size that is not whole (a zoomed window's — `Win::virt`).
+    pub fn of((w, h): (f32, f32), icon_scale: f32) -> Self {
         let side_w = if w >= SIDE_FROM { SIDE_W } else { 0.0 };
         let body = Rect::new(side_w, HEAD_H, (w - side_w).max(1.0), (h - HEAD_H).max(1.0));
         let (cw, ch) = (GRID_CELL_W * icon_scale, CELL_H * icon_scale);
@@ -297,6 +302,9 @@ struct Win {
     window: Window,
     id: u32,
     size: (u32, u32),
+    /// The owner's zoom of the file windows (`App::files_zoom`), kept here
+    /// for the layout.
+    zoom: f32,
     frame_pending: bool,
     dirty: bool,
     last_frame: Option<Instant>,
@@ -354,7 +362,15 @@ struct Win {
 
 impl Win {
     fn layout(&self, icon_scale: f32) -> Layout {
-        Layout::new(self.size, icon_scale)
+        Layout::of(self.virt(), icon_scale)
+    }
+
+    /// The size everything is laid out in: the window's, as many times
+    /// smaller as it is zoomed — the renderer draws a logical pixel that
+    /// much bigger, so no layout code knows about the zoom. The pointer is
+    /// brought into it the same way (`filer_pointer`).
+    fn virt(&self) -> (f32, f32) {
+        (self.size.0 as f32 / self.zoom, self.size.1 as f32 / self.zoom)
     }
 
     fn layer_of(&self, key: &str) -> Option<u32> {
@@ -761,6 +777,7 @@ impl App {
             window,
             id,
             size: (0, 0),
+            zoom: self.files_zoom(),
             frame_pending: false,
             dirty: false,
             last_frame: None,
@@ -1064,7 +1081,7 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
-        let (w, h) = (win.size.0 as f32, win.size.1 as f32);
+        let (w, h) = win.virt();
         let path = item.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
         match (&path, item) {
             (Some(path), Some(i)) => {
@@ -1305,7 +1322,7 @@ impl App {
         let Some(item) = win.items.get(i) else {
             return;
         };
-        let (w, h) = (win.size.0 as f32, win.size.1 as f32);
+        let (w, h) = win.virt();
         let props = Props::open(item, at, menu, w, h, &home());
         if item.kind == Kind::Folder {
             let path = item.path.clone();
@@ -1390,11 +1407,12 @@ impl App {
         if let Some(fs) = &win.fscale {
             fs.set_logical_size(width, height);
         }
+        let drawn = scale * win.zoom;
         if let Some(renderer) = win.renderer.as_mut() {
-            renderer.set_scale(scale);
+            renderer.set_scale(drawn);
             renderer.resize(pw, ph);
         } else {
-            match crate::renderer::Renderer::new(&self.conn, win.window.wl_surface(), pw, ph, scale) {
+            match crate::renderer::Renderer::new(&self.conn, win.window.wl_surface(), pw, ph, drawn) {
                 Ok(mut renderer) => {
                     if win.capacity > 0 {
                         renderer.alloc_icon_array(win.capacity);
@@ -1410,6 +1428,28 @@ impl App {
             }
         }
         self.filer_relayout(id);
+    }
+
+    /// The owner's zoom of the file windows changed: every window is laid
+    /// out and drawn anew at it.
+    pub(crate) fn filer_zoomed(&mut self) {
+        let zoom = self.files_zoom();
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            let scale = self.surface_scale(SurfaceKind::Files(id));
+            if let Some(win) = self.filer.win_mut(id) {
+                win.zoom = zoom;
+                // What is up was placed for the other size.
+                win.menu = None;
+                win.menu_path = None;
+                win.props = None;
+                if let Some(renderer) = win.renderer.as_mut() {
+                    renderer.set_scale(scale * zoom);
+                }
+            }
+            self.filer_relayout(id);
+            self.filer_hover(id);
+        }
     }
 
     /// The size or the scale changed: keep the scroll inside and draw.
@@ -1618,7 +1658,7 @@ impl App {
         win.last_frame = moving.then_some(now);
         self.filer_sync_icons(&mut win, &layout);
 
-        let (w, h) = (win.size.0 as f32, win.size.1 as f32);
+        let (w, h) = win.virt();
         let mut scene = Scene {
             alpha: 1.0,
             ..Default::default()
@@ -1982,7 +2022,7 @@ impl App {
                 self.enter_serial = serial;
                 self.cursor_now = None;
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.ptr = Some((surface_x as f32, surface_y as f32));
+                    win.ptr = Some((surface_x as f32 / win.zoom, surface_y as f32 / win.zoom));
                 }
                 self.filer_hover(id);
             }
@@ -1996,7 +2036,7 @@ impl App {
                 surface_x, surface_y, ..
             } => {
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.ptr = Some((surface_x as f32, surface_y as f32));
+                    win.ptr = Some((surface_x as f32 / win.zoom, surface_y as f32 / win.zoom));
                 }
                 self.filer_hover(id);
             }
@@ -2014,10 +2054,11 @@ impl App {
                 value,
                 ..
             } => {
-                let step = if self.filer.win(id).is_some_and(|w| w.wheel) {
-                    value as f32 * WHEEL_STEP
-                } else {
-                    value as f32
+                // (Fingers move the folder with them whatever the zoom.)
+                let step = match self.filer.win(id) {
+                    Some(w) if w.wheel => value as f32 * WHEEL_STEP,
+                    Some(w) => value as f32 / w.zoom,
+                    None => return,
                 };
                 self.filer_scroll(id, step, true);
             }
@@ -2261,6 +2302,15 @@ impl App {
                 }
             }
             Keysym::F5 => self.filer_list(id),
+            Keysym::plus | Keysym::equal | Keysym::KP_Add if ctrl => {
+                self.zoom("files", "in");
+            }
+            Keysym::minus | Keysym::KP_Subtract if ctrl => {
+                self.zoom("files", "out");
+            }
+            Keysym::_0 | Keysym::KP_0 if ctrl => {
+                self.zoom("files", "reset");
+            }
             Keysym::F2 => self.filer_act(id, Action::Rename, None, (0.0, 0.0)),
             Keysym::Delete => self.filer_act(id, Action::MoveToBin, None, (0.0, 0.0)),
             Keysym::c | Keysym::C if ctrl => self.filer_act(id, Action::Copy, None, (0.0, 0.0)),
@@ -2407,7 +2457,7 @@ impl App {
             }
             "props" => {
                 if let Ok(i) = rest.parse::<usize>() {
-                    let at = self.filer.win(id).map_or((0.0, 0.0), |w| (w.size.0 as f32 / 2.0, w.size.1 as f32 / 3.0));
+                    let at = self.filer.win(id).map_or((0.0, 0.0), |w| (w.virt().0 / 2.0, w.virt().1 / 3.0));
                     self.filer_open_props(id, i, at, None);
                 }
             }
@@ -2438,6 +2488,7 @@ impl App {
                 self.filer_key(id, key, None);
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
+            "zoom" => return self.zoom("files", rest),
             "state" => {}
             _ => return format!("unknown: {what}"),
         }

@@ -5881,8 +5881,10 @@ impl App {
             if w == 0 || h == 0 {
                 return;
             }
+            let zoom = self.files_zoom();
             if let Some(renderer) = self.filer_renderer(id) {
-                renderer.set_scale(scale);
+                // (Its zoom is in how big a logical pixel is drawn.)
+                renderer.set_scale(scale * zoom);
                 renderer.resize(physical(w, scale), physical(h, scale));
             }
             if let Some(fs) = self.filer.scale_slot(id) {

@@ -752,7 +752,11 @@ The big daemon files are cohesive but long — go straight to the function:
   Escape. Cut/copy = `serve_files`, paste = `desktop_send::put` off the loop (what came is left
   selected), the bin = `trash_file`, a name is typed in place (`Rename`, by PATH; the rules are
   the desktop's, now shared: `desktop::typed_name` / `rename_file`; a new folder's name is typed
-  as soon as it is listed — `rename_next`; the keyboard leaving keeps what was typed). NOT BUILT:
+  as soon as it is listed — `rename_next`; the keyboard leaving keeps what was typed). ZOOM (Max, 2026-10-13: "it zooms
+  all"): Ctrl +/−/0 → `zoom("files", …)`, one zoom for every file window (`settings.files_zoom`);
+  the window is laid out `1/zoom` its size (`Win::virt`) and the renderer's scale is multiplied by
+  it (`filer_zoomed`, the configure, `rescale_surface`), the pointer divided (`filer_pointer`) — no
+  layout code knows. `files zoom in|out|reset|<n>`. NOT BUILT:
   drags in and out, the rubber band, the bin as a place. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll

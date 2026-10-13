@@ -54,6 +54,8 @@ pub(crate) struct Settings {
     /// The same for FAST LAUNCH and the quick controls (their card and the
     /// box a setting opens in): one zoom for both.
     pub(crate) fast_zoom: f32,
+    /// The same for the file manager's windows: everything in them.
+    pub(crate) files_zoom: f32,
 }
 
 impl Settings {

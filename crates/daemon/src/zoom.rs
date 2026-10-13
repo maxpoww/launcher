@@ -20,6 +20,10 @@
 //!   (and before the bar's, should the pointer be on it). Its zoom
 //!   multiplies the scale its members are drawn at.
 //!
+//! - **A file manager window** (`filer.rs`) is a window with the keyboard:
+//!   the keys come to it, and its zoom is of EVERYTHING in it — it is laid
+//!   out as a window `1/zoom` the size and drawn that much bigger.
+//!
 //! All are the owner's standing choice (`settings.json`).
 
 use tracing::info;
@@ -95,15 +99,22 @@ impl App {
         factor(self.settings.fast_zoom)
     }
 
+    /// How much bigger than its own size everything in a file manager
+    /// window is drawn (Max, 2026-10-13: "Ctrl +/− and Ctrl 0, it zooms all").
+    pub(crate) fn files_zoom(&self) -> f32 {
+        factor(self.settings.files_zoom)
+    }
+
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
     /// to a number (`how`). What was done.
     pub(crate) fn zoom(&mut self, what: &str, how: &str) -> String {
-        const USAGE: &str = "zoom bar|desktop|stack|fast in|out|reset|<n>";
+        const USAGE: &str = "zoom bar|desktop|stack|fast|files in|out|reset|<n>";
         let now = match what {
             "bar" => self.bar_zoom(),
             "desktop" => self.desktop_zoom(),
             "stack" => self.stack_zoom(),
             "fast" => self.fast_zoom(),
+            "files" => self.files_zoom(),
             _ => return USAGE.to_owned(),
         };
         let Some(to) = stepped(now, how) else {
@@ -130,6 +141,10 @@ impl App {
             // through the compositor, not through its own keyboard).
             self.fast_touch();
             self.schedule_frame();
+        } else if what == "files" {
+            self.settings.files_zoom = to;
+            self.settings.save();
+            self.filer_zoomed();
         } else if what == "stack" {
             self.settings.stack_zoom = to;
             self.settings.save();
