@@ -669,8 +669,9 @@ fn picture_tiles(scene: &mut Scene, images: &[(Rect, u32, f32)]) {
     }
 }
 
-/// How solid the quick box is at least.
-const QUICK_FILL: f32 = 0.93;
+/// How solid what is ON the quick box is (its choices, its previews'
+/// frames): the plate under each one's wash.
+const QUICK_SOLID: f32 = 0.92;
 
 /// What FAST LAUNCH draws this frame (see `fast_launch.rs`).
 #[derive(Debug, Clone, Copy)]
@@ -3454,17 +3455,32 @@ pub fn scene(
         word(f.rest, left + f.typed_w, ink(0.4));
     }
 
-    // THE QUICK BOX: one setting mid-screen. The dock's own colour, nearly
-    // solid — its words must read over whatever window is behind — with the
-    // rim the plates wear; the panel's drawing on it.
+    // THE QUICK BOX: one setting mid-screen, in the LAUNCHER's own material
+    // (Max, 2026-10-13: "más transparentes, como el lanzador, pero no los
+    // contenidos") — the open card's fill and glass, the rim the plates
+    // wear. What is ON it stays solid: every choice and preview frame gets
+    // a plate of the dock's colour under its wash, so it reads the same
+    // over any window.
     if let Some(q) = quick.filter(|q| q.a > 0.0) {
         let mut fill = dock_bg;
-        fill[3] = fill[3].max(QUICK_FILL) * q.a;
+        if !config.accessibility.reduce_transparency {
+            fill[3] = config.theme.open_alpha(fill[3]);
+        }
+        fill[3] *= q.a;
         let radius = BOX_CORNER_RADIUS;
-        scene.rects.push(RectInst { rect: q.rect, radius, color: fill, glass: 0.0, border: 0.0 });
+        scene.rects.push(RectInst { rect: q.rect, radius, color: fill, glass: 1.0, border: 0.0 });
         scene.rects.push(RectInst { rect: q.rect, radius, color: plate_rim(fill), glass: 0.0, border: 1.0 });
         for r in &q.draw.rects {
             let mut r = *r;
+            if r.border == 0.0 {
+                scene.rects.push(RectInst {
+                    rect: r.rect,
+                    radius: r.radius,
+                    color: [dock_bg[0], dock_bg[1], dock_bg[2], QUICK_SOLID * q.a],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
             r.color[3] *= q.a;
             scene.rects.push(r);
         }
