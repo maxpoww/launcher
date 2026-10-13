@@ -873,6 +873,7 @@ fn main() -> anyhow::Result<()> {
         group_anim: 1.0,
         group_anim_target: 1.0,
         group_origin: None,
+        group_origin_vp_y: None,
         closing_members: None,
         pending_icons: None,
         apps_fingerprint: None,
@@ -2098,6 +2099,10 @@ pub struct App {
     group_anim: f32,
     group_anim_target: f32,
     group_origin: Option<(f32, f32)>,
+    /// The Apps grid's top when a grid tile's box opened: the grid's rows
+    /// hang from it, and it moves as the card grows to hold the box — the
+    /// tile, and so the box's origin, with it (`box_origin`).
+    group_origin_vp_y: Option<f32>,
     /// Members (entry indices) of a box that's animating closed after a
     /// member was dragged out: the box keeps shrinking (via `group_anim`
     /// toward 0) over the live grid even though `app_group` is already

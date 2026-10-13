@@ -264,8 +264,9 @@ const GRID_LABEL_GAP: f32 = 5.0;
 /// A closed box tile's side (the folder-style square that holds the 2×2
 /// mini preview) — the size the magnified box grows out of / collapses to.
 pub const BOX_TILE: f32 = GRID_ICON * 1.15;
-/// Columns/rows of the magnified open box's inner app grid (3×3 = up to
-/// nine members shown per page).
+/// The open box's page is nine members (a stored 3×3 from the square box
+/// it was; now laid in rows over the tile — see [`row_box`]). Also the
+/// rows the Apps grid keeps while a box is open.
 pub const OPEN_BOX_COLS: usize = 3;
 /// Members per open-box page — the box grid's capacity, and the page
 /// size of a group's member list (`groups::PAGE_CAP` re-exports it).
@@ -387,9 +388,6 @@ const DOCK_STRETCH_GAIN: f32 = 1.6;
 /// *down* — tuned live: the dock landed at 1.6x; the content stepped
 /// 1x -> 0.5x -> 0.3x -> 0.22x.
 const CONTENT_STRETCH_GAIN: f32 = 0.22;
-
-/// Gap between an open dock-folder box and the dock icon it springs from.
-const DOCK_BOX_GAP: f32 = 12.0;
 
 /// Space kept above the fully risen card so magnified dock icons can
 /// swell past the card edge (macOS-style). The wl surface is this much
@@ -692,10 +690,12 @@ pub struct Layout {
     pub search_box: Rect,
     /// Compact search button (circle, same center-x and y as search_box).
     pub search_btn: Rect,
-    /// The rectangle the magnified box fills — the Apps grid for a grid box,
-    /// or a square above the dock for a dock folder's stack. Present only
-    /// while a box is open. A click inside is inert (only outside closes).
+    /// The rectangle the open box fills: its members in rows over its tile
+    /// (a grid tile's cell, or a dock folder's icon). Present only while a
+    /// box is open. A click inside is inert (only outside closes).
     pub open_box: Option<Rect>,
+    /// That box's member grid: (columns, rows) of square cells.
+    pub open_box_grid: (usize, usize),
     /// The band under Files while a search matches settings or modules:
     /// each row's title position and the band its pills sit in (pill
     /// height, grid width) — the Controls row, then the Modules row.
@@ -1118,6 +1118,7 @@ pub fn layout(
         search_box,
         search_btn,
         open_box,
+        open_box_grid: (OPEN_BOX_COLS, OPEN_BOX_COLS),
         control_bands,
         controls: Vec::new(),
         apps_full_h: fits as f32 * grid_cell_h,
@@ -1183,16 +1184,50 @@ pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
     })
 }
 
-/// The resting square of a dock folder's open box: a `side`-sized square
-/// centered over `dock_icon` and floating `DOCK_BOX_GAP` above it, clamped
-/// within `surface_w`.
-pub fn dock_box_rect(dock_icon: Rect, side: f32, surface_w: f32) -> Rect {
-    let cx = dock_icon.x + dock_icon.w / 2.0;
-    let x = (cx - side / 2.0).clamp(
-        DRAG_MARGIN_X,
-        (surface_w - DRAG_MARGIN_X - side).max(DRAG_MARGIN_X),
-    );
-    Rect::new(x, dock_icon.y - DOCK_BOX_GAP - side, side, side)
+/// Gap between an open box and its tile (a grid tile's cell, a dock
+/// folder's icon): the page dots sit in it.
+pub const BOX_GAP: f32 = 12.0;
+
+/// The narrowest an open box's cell gets to keep its members on one row:
+/// the icon and a little air (names shorten to fit).
+pub const BOX_CELL_MIN_W: f32 = GRID_ICON + 12.0;
+
+/// The open box at rest (Max, 2026-10-13: "fila/s arriba del tile"): `n`
+/// members in rows of cells `cell` high, centred over `anchor` (its tile)
+/// and `gap` above it, kept inside `area`. One row while it fits `area`'s
+/// width — the cells `cell` wide, narrowing down to `min_w` before a
+/// second row is taken; past that the rows are evened out. With no room
+/// above the tile (a top-row tile, a dock folder with the card up) the
+/// rows hang under it. Returns the rect and its (columns, rows).
+pub fn row_box(
+    anchor: Rect,
+    n: usize,
+    (min_w, cell): (f32, f32),
+    area: Rect,
+    gap: f32,
+) -> (Rect, (usize, usize)) {
+    let n = n.clamp(1, OPEN_BOX_CAP);
+    let min_w = min_w.clamp(1.0, cell.max(1.0));
+    let fit = ((area.w / min_w + 0.001).floor() as usize).max(1);
+    let rows = n.div_ceil(fit);
+    let cols = n.div_ceil(rows);
+    let cell_w = (area.w / cols as f32).clamp(min_w, cell.max(min_w));
+    let (w, h) = (cols as f32 * cell_w, rows as f32 * cell);
+    let cx = anchor.x + anchor.w / 2.0;
+    let x = (cx - w / 2.0).clamp(area.x, (area.x + area.w - w).max(area.x));
+    let (top, bottom) = (area.y, area.y + area.h);
+    let above = anchor.y - gap - h;
+    let below = anchor.y + anchor.h + gap;
+    let y = if above >= top {
+        above
+    } else if below + h <= bottom {
+        below
+    } else if anchor.y - top >= bottom - (anchor.y + anchor.h) {
+        top
+    } else {
+        (bottom - h).max(top)
+    };
+    (Rect::new(x, y, w, h), (cols, rows))
 }
 
 /// Which item (if any) the pointer is over.
@@ -1227,14 +1262,11 @@ pub fn hit_test(
     if let Some(i) = layout.controls.iter().position(|r| r.contains(pos)) {
         return Some(Hit::Control(i));
     }
-    // The magnified open box: resolve the 3×3 member slot under the
-    // pointer (clicks inside are inert/launch; only outside closes).
+    // The open box: resolve the member slot under the pointer (clicks
+    // inside are inert/launch; only outside closes).
     if let Some(b) = layout.open_box {
         if b.contains(pos) {
-            let cols = OPEN_BOX_COLS as f32;
-            let col = (((px - b.x) / (b.w / cols)).floor() as usize).min(OPEN_BOX_COLS - 1);
-            let row = (((py - b.y) / (b.h / cols)).floor() as usize).min(OPEN_BOX_COLS - 1);
-            return Some(Hit::OpenBoxCell(row * OPEN_BOX_COLS + col));
+            return Some(Hit::OpenBoxCell(open_box_slot(b, layout.open_box_grid, pos)));
         }
     }
     for (s, sec) in layout.sections.iter().enumerate() {
@@ -1447,9 +1479,6 @@ pub struct FrameInput<'a> {
     /// draws. Fractional mid-glide (the box's make-room reflow, computed
     /// in `draw` like the grid's `apps_slide`).
     pub open_box_disp: &'a [f32],
-    /// The open box's own grid cell (its tile), hidden from the grid
-    /// behind while the magnified box stands in for it.
-    pub open_box_hidden: Option<usize>,
     /// Open box paging: (current page, total pages). Page dots show when
     /// there is more than one.
     pub open_box_pages: (usize, usize),
@@ -1496,17 +1525,14 @@ pub struct FrameInput<'a> {
     pub dock_highlight: [f32; 4],
 }
 
-/// Local member index shown in 3×3 slot `slot` (row-major) of an open box
-/// on the `left` (or right) side of the grid — the inverse of the
-/// member→slot placement used when drawing. Lets a click on a slot resolve
-/// to the member under it.
-pub fn open_box_slot_member(left: bool, slot: usize) -> usize {
-    let slot_member: [usize; 9] = if left {
-        [0, 1, 3, 2, 4, 5, 6, 7, 8]
-    } else {
-        [2, 0, 1, 4, 5, 3, 6, 7, 8]
-    };
-    slot_member.get(slot).copied().unwrap_or(slot)
+/// The open box's slot under `pos` — the member's place on its page, the
+/// rows read left to right, top to bottom. Evened rows can leave cells
+/// past the page's ninth: those count as the last.
+pub fn open_box_slot(b: Rect, (cols, rows): (usize, usize), pos: (f32, f32)) -> usize {
+    let (cols, rows) = (cols.max(1), rows.max(1));
+    let col = (((pos.0 - b.x) / (b.w / cols as f32)).floor().max(0.0) as usize).min(cols - 1);
+    let row = (((pos.1 - b.y) / (b.h / rows as f32)).floor().max(0.0) as usize).min(rows - 1);
+    (row * cols + col).min(OPEN_BOX_CAP - 1)
 }
 
 /// Rim colour for a plate-coloured tile: the fill's hue lifted toward
@@ -1633,7 +1659,6 @@ pub fn scene(
         panel_draw,
         panel_mix,
         open_box_disp,
-        open_box_hidden,
         open_box_pages,
         box_scroll,
         box_drag,
@@ -2172,7 +2197,8 @@ pub fn scene(
     // (dock icons carry no label of their own, unlike grid cells). Gated
     // behind a hover dwell by the caller (`dock_tooltip`).
     if drag.is_none() {
-        if let Some(i) = dock_tooltip {
+        // Not under a box open over the dock: its rows stand where the pill would.
+        if let Some(i) = dock_tooltip.filter(|_| !box_over_dock) {
             if let (Some(&entry_idx), Some(slot), Some(&vcx)) =
                 (dock_order.get(i), layout.dock_slots.get(i), dock_vcx.get(i))
             {
@@ -2398,9 +2424,12 @@ pub fn scene(
         } else {
             crate::i18n::tr(SECTION_TITLES[s]).to_string()
         };
+        // A box open over the top row stands on the title's line.
+        let title_y = sec.title_pos.1 + TITLE_DROP;
+        let under_box = open_box_rect.is_some_and(|b| b.y < title_y + TITLE_LINE_PX && b.y + b.h > title_y);
         scene.labels.push(Label {
-            text: title,
-            pos: (sec.title_pos.0, sec.title_pos.1 + TITLE_DROP),
+            text: if under_box { String::new() } else { title },
+            pos: (sec.title_pos.0, title_y),
             max_w: sec.viewport.w,
             font_px: TITLE_FONT_PX,
             line_px: TITLE_LINE_PX,
@@ -2481,9 +2510,8 @@ pub fn scene(
             let Some(entry) = entries.get(entry_idx) else {
                 break;
             };
-            // The drag's origin cell vanishes (its ghost is in hand); the
-            // open box's own tile vanishes (the magnified box replaces it).
-            if drag_hidden == Some(entry_idx) || open_box_hidden == Some(entry_idx) {
+            // The drag's origin cell vanishes (its ghost is in hand).
+            if drag_hidden == Some(entry_idx) {
                 continue;
             }
             let g = &mut grid;
@@ -2948,10 +2976,9 @@ pub fn scene(
         }
     }
 
-    // Magnified open box: a rounded panel that grows from the clicked tile
-    // (`group_origin`) to fill the Apps grid, with the member icons in a
-    // big centered 3×3 and the box name as a title. Drawn last so it sits
-    // opaquely over the loose grid behind it.
+    // The open box: a rounded panel that grows from the clicked tile
+    // (`group_origin`) into rows of member icons over it (`row_box`).
+    // Drawn last so it sits opaquely over the loose grid behind it.
     if let (Some(box_rect), Some((ox, oy))) = (open_box_rect, group_origin) {
         let t = group_expand.clamp(0.0, 1.0);
         // Starts at the tile's radius for a seamless spring-out, then rounds up
@@ -3013,18 +3040,10 @@ pub fn scene(
             glass: 0.5,
             border: 0.0,
         });
-        // The 3×3 slot each member takes, by the grid side the box sits on:
-        // left pins member 0 (A) top-left and fills row-major; right pins
-        // member 1 (B) top-right. The rest keep their drag order.
-        let vp = layout.sections[SECTION_APPS].viewport;
-        let member_slot: [usize; 9] = if ox < vp.x + vp.w / 2.0 {
-            // Left: A pinned top-left; D takes top-right, C the middle-left.
-            [0, 1, 3, 2, 4, 5, 6, 7, 8]
-        } else {
-            // Right: B pinned top-right; C takes top-left, D the middle-right.
-            [1, 2, 0, 5, 3, 4, 6, 7, 8]
-        };
-        let cell = box_rect.w / OPEN_BOX_COLS as f32;
+        // Members read left to right, top to bottom, in their stored order.
+        let (cols, rows) = (layout.open_box_grid.0.max(1), layout.open_box_grid.1.max(1));
+        let cell = box_rect.w / cols as f32;
+        let cell_h = box_rect.h / rows as f32;
         // Closed 2×2 mini geometry (matches the closed tile), centered on the
         // tile — the preview four flow from here into their open slots.
         let mini = grid_icon * 0.42;
@@ -3034,7 +3053,7 @@ pub fn scene(
             let u = ((t - 0.15) / 0.55).clamp(0.0, 1.0);
             u * u * (3.0 - 2.0 * u)
         };
-        // Members lay out in a horizontal strip of 3×3 pages shifted by
+        // Members lay out in a horizontal strip of pages shifted by
         // `box_scroll`, so paging slides. Everything clips to the box.
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
         boxgrid.clip = box_rect;
@@ -3042,13 +3061,15 @@ pub fn scene(
         // mid-glide — the reflow itself is computed in `draw`, shared
         // with the grid): positions lerp between the cell centers of the
         // two neighboring slots, pages included.
+        // The icon and the name under it sit centred in the cell together.
+        let name_lift = (3.0 + LABEL_LINE_PX) / 2.0 * t;
         let place = |di: usize| -> (f32, f32) {
-            let slot = member_slot[di % OPEN_BOX_CAP];
-            let (row, col) = (slot / OPEN_BOX_COLS, slot % OPEN_BOX_COLS);
+            let slot = di % OPEN_BOX_CAP;
+            let (row, col) = (slot / cols, slot % cols);
             let page_x = (di / OPEN_BOX_CAP) as f32 * page_w - box_scroll;
             (
                 box_rect.x + page_x + (col as f32 + 0.5) * cell,
-                box_rect.y + (row as f32 + 0.5) * cell,
+                box_rect.y + (row as f32 + 0.5) * cell_h - name_lift,
             )
         };
         for (m, &idx) in open_box_members.iter().enumerate() {
@@ -3112,9 +3133,9 @@ pub fn scene(
             if t > 0.85 {
                 if let Some(entry) = entries.get(idx) {
                     boxgrid.labels.push(Label {
-                        text: truncate_label(&entry.name, cell - 8.0, LABEL_FONT_PX),
+                        text: truncate_label(&entry.name, cell - 4.0, LABEL_FONT_PX),
                         pos: (cx, cy + size / 2.0 + 3.0),
-                        max_w: cell - 8.0,
+                        max_w: cell - 4.0,
                         font_px: LABEL_FONT_PX,
                         line_px: LABEL_LINE_PX,
                         centered: true,
@@ -3128,7 +3149,8 @@ pub fn scene(
             }
         }
         scene.grids.push(boxgrid);
-        // Page dots beneath the box (own grid so they aren't clipped to it).
+        // Page dots between the box and its tile (own grid so they aren't
+        // clipped to it).
         let (page, pages) = open_box_pages;
         if pages > 1 && t > 0.6 {
             let mut dots = GridContent {
@@ -3138,7 +3160,11 @@ pub fn scene(
             let dot_r = 3.0;
             let spacing = 12.0;
             let total_w = pages as f32 * spacing - (spacing - dot_r * 2.0);
-            let dy = box_rect.y + box_rect.h + 12.0;
+            let dy = if box_rect.y + box_rect.h / 2.0 < oy {
+                box_rect.y + box_rect.h + BOX_GAP / 2.0
+            } else {
+                box_rect.y - BOX_GAP / 2.0
+            };
             let x0 = box_rect.x + box_rect.w / 2.0 - total_w / 2.0;
             let hl = dock_highlight;
             for p in 0..pages {
@@ -3673,31 +3699,47 @@ mod tests {
     }
 
     #[test]
-    fn open_box_slots_are_a_bijection_each_side() {
-        // Every 3x3 slot maps to a distinct member 0..9, both sides — a
-        // click on any slot resolves to exactly one member, none aliased.
-        for left in [true, false] {
-            let members: std::collections::BTreeSet<usize> =
-                (0..9).map(|s| open_box_slot_member(left, s)).collect();
-            assert_eq!(members, (0..9).collect(), "slots bijection (left={left})");
-        }
-        // Out-of-range slots pass through as identity (defensive, no panic).
-        assert_eq!(open_box_slot_member(true, 42), 42);
+    fn open_box_slots_read_row_by_row() {
+        let b = Rect::new(100.0, 50.0, 500.0, 200.0); // 5 × 2 cells of 100
+        assert_eq!(open_box_slot(b, (5, 2), (110.0, 60.0)), 0);
+        assert_eq!(open_box_slot(b, (5, 2), (590.0, 60.0)), 4);
+        assert_eq!(open_box_slot(b, (5, 2), (110.0, 240.0)), 5);
+        // The tenth cell of an evened 5 × 2 is past the page's ninth member.
+        assert_eq!(open_box_slot(b, (5, 2), (590.0, 240.0)), 8);
     }
 
     #[test]
-    fn dock_box_rect_centers_over_the_icon_and_clamps_to_the_surface() {
-        // Icon mid-surface, so the centred box sits well inside the
-        // DRAG_MARGIN_X (=80) clamp band and centring is exact.
+    fn row_box_is_one_row_over_its_tile() {
+        let area = Rect::new(80.0, 0.0, 840.0, 500.0);
         let icon = Rect::new(480.0, 500.0, 40.0, 40.0); // centre x = 500
-        let r = dock_box_rect(icon, 200.0, 1000.0);
+        let (r, grid) = row_box(icon, 5, (60.0, 80.0), area, 12.0);
+        assert!((r.w - 400.0).abs() < 0.01, "full-width cells while they fit");
+        assert_eq!(grid, (5, 1));
         assert!((r.x + r.w / 2.0 - 500.0).abs() < 0.01);
-        assert!(r.y + r.h < icon.y, "box floats above the dock icon");
-        // An icon near the right edge clamps the box fully on-surface.
-        let edge = Rect::new(980.0, 500.0, 40.0, 40.0);
-        let r = dock_box_rect(edge, 200.0, 1000.0);
-        assert!(r.x + r.w <= 1000.0 + 0.01, "clamped within the surface");
-        assert!(r.x >= 0.0);
+        assert!((r.y + r.h - (icon.y - 12.0)).abs() < 0.01, "sits just over the tile");
+        // A tile near the edge keeps the row inside the area.
+        let edge = Rect::new(900.0, 500.0, 40.0, 40.0);
+        let (r, _) = row_box(edge, 5, (60.0, 80.0), area, 12.0);
+        assert!(r.x + r.w <= area.x + area.w + 0.01);
+    }
+
+    #[test]
+    fn row_box_evens_its_rows_and_hangs_under_a_top_tile() {
+        let area = Rect::new(0.0, 100.0, 7.0 * 80.0, 300.0);
+        let tile = Rect::new(200.0, 300.0, 100.0, 80.0);
+        // Nine fit across once their cells narrow: still one row.
+        let (r, grid) = row_box(tile, 9, (60.0, 80.0), area, 2.0);
+        assert_eq!(grid, (9, 1));
+        assert!((r.w - area.w).abs() < 0.01);
+        // Nine members where eight fit at the narrowest: two rows, 5 + 4.
+        let (r, grid) = row_box(tile, 9, (70.0, 80.0), area, 2.0);
+        assert_eq!(grid, (5, 2));
+        assert!((r.w - 400.0).abs() < 0.01, "evened rows get their full cells back");
+        assert!(r.y + r.h <= tile.y, "over the tile");
+        // No room above a top-row tile: the rows hang under it.
+        let top = Rect::new(200.0, 100.0, 100.0, 80.0);
+        let (r, _) = row_box(top, 9, (70.0, 80.0), area, 2.0);
+        assert!(r.y >= top.y + top.h, "under the tile");
     }
 
     /// The card and the row it holds are one movement (Max, 2026-09-13).

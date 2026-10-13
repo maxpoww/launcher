@@ -213,17 +213,17 @@ impl App {
             }
             layout.controls = rects;
         }
-        // Position the open box's rest square. A grid box anchors to the
-        // side of the grid it sits on (pinned preview icon lands on its
-        // closed spot); a dock stack floats the same-size square above its
-        // dock folder icon.
-        if let (Some(base), Some((ox, oy))) = (layout.open_box, self.group_origin) {
-            let vp = layout.sections[content::SECTION_APPS].viewport;
-            let s = base.h;
+        // Place the open box: its members in rows over its tile
+        // (`content::row_box`). A grid box (and a dock folder or pinned
+        // directory opened with the card up) keeps inside the Apps grid; a
+        // dock stack floats over its dock icon.
+        if let (Some(_), Some((ox, oy))) = (layout.open_box, self.box_origin(&layout)) {
+            let scale = self.icon_scale();
+            let cell = content::GRID_CELL_H * scale;
+            let cells = (content::BOX_CELL_MIN_W * scale, cell);
+            let n = self.box_fill();
             // The dock icon a dock-anchored stack grows out of: a folder's
-            // box id, or a pinned directory's entry id. A dir stack opened
-            // with the card up anchors into the grid instead (the grid-box
-            // path below), like a dock folder does then.
+            // box id, or a pinned directory's entry id.
             let dock_anchor: Option<String> = if let Some(g) = self.dock_stack {
                 Some(format!("group:{}", self.groups.groups()[g].id))
             } else {
@@ -232,37 +232,40 @@ impl App {
                     .filter(|ds| !ds.in_grid)
                     .map(|ds| ds.id.clone())
             };
-            if let Some(aid) = dock_anchor {
-                let dock = self
-                    .dock_order
+            let placed = if let Some(aid) = dock_anchor {
+                self.dock_order
                     .iter()
                     .position(|&e| self.entries.get(e).is_some_and(|x| x.id == aid))
-                    .and_then(|sl| layout.dock_slots.get(sl));
-                if let Some(&dock_rect) = dock {
-                    // Use the same side as the grid box (3 scaled cells) so
-                    // dock stacks and grid boxes are identical in size.
-                    let side =
-                        content::OPEN_BOX_COLS as f32 * content::GRID_CELL_H * self.icon_scale();
-                    layout.open_box = Some(content::dock_box_rect(
-                        dock_rect,
-                        side,
-                        self.buffer_size.0 as f32,
-                    ));
-                }
+                    .and_then(|sl| layout.dock_slots.get(sl))
+                    .map(|&dock_rect| {
+                        let m = content::DRAG_MARGIN_X;
+                        let area = content::Rect::new(
+                            m,
+                            0.0,
+                            (self.buffer_size.0 as f32 - 2.0 * m).max(cell),
+                            dock_rect.y,
+                        );
+                        content::row_box(dock_rect, n, cells, area, content::BOX_GAP)
+                    })
             } else {
-                let half_cell = s / 6.0; // half a 3×3 cell
-                let mini_off = content::GRID_ICON * self.icon_scale() * 0.26;
-                let left = ox < vp.x + vp.w / 2.0;
-                // Place the near-corner cell center on the pinned icon's spot.
-                let x = if left {
-                    ox - mini_off - half_cell
-                } else {
-                    ox + mini_off - (s - half_cell)
-                };
-                let y = oy - mini_off - half_cell;
-                let x = x.clamp(vp.x, (vp.x + vp.w - s).max(vp.x));
-                let y = y.clamp(vp.y, (vp.y + vp.h - s).max(vp.y));
-                layout.open_box = Some(content::Rect::new(x, y, s, s));
+                // The tile's cell, from its icon's centre.
+                let (cw, icon) = (content::GRID_CELL_W * scale, content::GRID_ICON * scale);
+                let tile = content::Rect::new(
+                    ox - cw / 2.0,
+                    oy - icon / 2.0 - content::GRID_ICON_TOP * scale,
+                    cw,
+                    cell,
+                );
+                // The Apps grid, and the gap's worth of its title line: a
+                // row over a second-row tile takes the whole first row.
+                let vp = layout.sections[content::SECTION_APPS].viewport;
+                let gap = content::BOX_GAP;
+                let area = content::Rect::new(vp.x, vp.y - gap, vp.w, vp.h + gap);
+                Some(content::row_box(tile, n, cells, area, gap))
+            };
+            if let Some((rect, grid)) = placed {
+                layout.open_box = Some(rect);
+                layout.open_box_grid = grid;
             }
         }
         layout
@@ -937,6 +940,7 @@ impl App {
                 self.dir_stack = None;
                 self.closing_members = None;
                 self.group_origin = None;
+                self.group_origin_vp_y = None;
                 self.group_anim = 1.0;
                 self.group_anim_target = 1.0;
                 if was_dock {
@@ -1194,12 +1198,6 @@ impl App {
         if box_sliding {
             self.dirty = true;
         }
-        // Hide the open box's own tile from the grid behind — the magnified
-        // box stands in for it.
-        let open_box_hidden = self.app_group.and_then(|g| {
-            let gid = format!("group:{}", self.groups.groups().get(g)?.id);
-            self.entries.iter().position(|e| e.id == gid)
-        });
         let open_box_pages = self
             .stack_members()
             .map(|members| {
@@ -1370,13 +1368,12 @@ impl App {
                 dock_hidden,
                 dock_slide: &self.dock_slide,
                 group_expand,
-                group_origin: self.group_origin,
+                group_origin: self.box_origin(&layout),
                 open_box_members: &open_box_members,
                 panel: self.panel_mix >= 0.999,
                 panel_mix: self.panel_mix,
                 panel_draw: panel_draw.as_ref(),
                 open_box_disp: &open_box_disp,
-                open_box_hidden,
                 open_box_pages,
                 box_scroll: self.box_pager.pos,
                 box_drag,

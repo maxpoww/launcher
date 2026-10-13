@@ -1,4 +1,5 @@
-//! The open box (magnified app group) — opening/closing, the in-box
+//! The open box (an app group's members in rows over its tile) —
+//! opening/closing, the in-box
 //! member reorder drag with its edge paging and ghost page, pulling a
 //! member out into the loose grid, and the dock stack variants (a group
 //! folder, or a pinned directory's content stack).
@@ -110,14 +111,17 @@ impl App {
             self.pointer_pos
                 .map(|pos| match self.apps_display_cell(&layout, pos) {
                     Some((_, fx, fy)) => {
-                        let cell_top = pos.1 - fy * content::GRID_CELL_H;
+                        // The grid draws at `icon_scale`: so does its cell.
+                        let s = self.icon_scale();
+                        let cell_top = pos.1 - fy * content::GRID_CELL_H * s;
                         (
-                            pos.0 - (fx - 0.5) * content::GRID_CELL_W,
-                            cell_top + content::GRID_ICON_TOP + content::GRID_ICON / 2.0,
+                            pos.0 - (fx - 0.5) * content::GRID_CELL_W * s,
+                            cell_top + (content::GRID_ICON_TOP + content::GRID_ICON / 2.0) * s,
                         )
                     }
                     None => pos,
                 });
+        self.group_origin_vp_y = Some(layout.sections[content::SECTION_APPS].viewport.y);
         // Switching from another open box: drop its state so only this one
         // is live (reset_stack_view below rewinds the grow for it).
         self.dock_stack = None;
@@ -180,6 +184,33 @@ impl App {
             .map(|grp| &grp.members)
     }
 
+    /// Where the open box's tile is in `layout` — the point the box grows
+    /// from and its rows stand over. The stored origin is where the tile
+    /// was when it opened; the card then grows to hold the box, taking the
+    /// dock icon and the grid's rows with it.
+    pub(crate) fn box_origin(&self, layout: &content::Layout) -> Option<(f32, f32)> {
+        let (x, y) = self.group_origin?;
+        if let Some(y0) = self.group_origin_vp_y {
+            return Some((x, y + layout.sections[content::SECTION_APPS].viewport.y - y0));
+        }
+        let dock_id = match (&self.dir_stack, self.open_box_group()) {
+            (Some(ds), _) => Some(ds.id.clone()),
+            (None, Some(g)) if self.box_from_dock => {
+                self.groups.groups().get(g).map(|grp| format!("group:{}", grp.id))
+            }
+            _ => None,
+        };
+        dock_id
+            .and_then(|id| {
+                self.dock_order
+                    .iter()
+                    .position(|&e| self.entries.get(e).is_some_and(|x| x.id == id))
+            })
+            .and_then(|slot| layout.dock_slots.get(slot))
+            .map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0))
+            .or(Some((x, y)))
+    }
+
     /// Center of the dock icon whose entry has `id` (a stack's grow origin).
     pub(crate) fn dock_slot_center(&self, id: &str) -> Option<(f32, f32)> {
         let layout = self.current_layout();
@@ -205,6 +236,7 @@ impl App {
     pub(crate) fn open_dir_stack(&mut self, id: String, path: String) {
         info!("dir stack: {path}");
         self.group_origin = self.dock_slot_center(&id);
+        self.group_origin_vp_y = None;
         self.app_group = None;
         self.dock_stack = None;
         self.closing_members = None;
@@ -227,6 +259,7 @@ impl App {
         let id = format!("group:{}", groups::TRASH_ID);
         info!("recycle bin: opening trash view");
         self.group_origin = self.dock_slot_center(&id);
+        self.group_origin_vp_y = None;
         self.app_group = None;
         self.dock_stack = None;
         self.closing_members = None;
@@ -249,6 +282,7 @@ impl App {
     /// above the icon. Either way it's the same magnified box.
     pub(crate) fn open_dock_folder(&mut self, g: usize) {
         self.group_origin = self.dock_folder_center(g);
+        self.group_origin_vp_y = None;
         // Switching from another open box: drop its state first.
         self.app_group = None;
         self.dock_stack = None;
@@ -276,22 +310,23 @@ impl App {
         })
     }
 
-    /// Whether the open box sits on the left half of the Apps grid (which
-    /// side it's on decides the member→slot layout).
-    pub(crate) fn box_is_left(&self) -> bool {
-        let vp = self.current_layout().sections[content::SECTION_APPS].viewport;
-        self.group_origin
-            .is_none_or(|(ox, _)| ox < vp.x + vp.w / 2.0)
+    /// How many cells the open box lays out: its fullest page (a box's
+    /// pages may be under-full), or the members of one shrinking closed.
+    pub(crate) fn box_fill(&self) -> usize {
+        self.stack_members()
+            .map(|m| m.pages().iter().map(Vec::len).max().unwrap_or(0))
+            .or_else(|| self.closing_members.as_ref().map(Vec::len))
+            .unwrap_or(0)
+            .max(1)
     }
 
-    /// The open box member id shown in 3×3 slot `k` on the current page, if
-    /// that slot is filled (maps slot → member via the side layout + page).
+    /// The open box member id shown in slot `k` on the current page, if
+    /// that slot is filled.
     pub(crate) fn open_box_member_id(&self, k: usize) -> Option<String> {
-        let local = content::open_box_slot_member(self.box_is_left(), k);
         self.stack_members()?
             .pages()
             .get(self.box_page)?
-            .get(local)
+            .get(k)
             .cloned()
     }
 
@@ -423,17 +458,12 @@ impl App {
         self.schedule_frame();
     }
 
-    /// Display slot under the pointer: the 3×3 position on the current
-    /// box page, as `page * PAGE_CAP + within`.
+    /// Display slot under the pointer: the position on the current box
+    /// page, as `page * PAGE_CAP + within`.
     pub(crate) fn box_drag_slot_target(&self, pos: (f32, f32)) -> Option<usize> {
-        let box_rect = self.current_layout().open_box?;
-        let cols = content::OPEN_BOX_COLS;
-        let cell = box_rect.w / cols as f32;
-        let col = (((pos.0 - box_rect.x) / cell).floor() as usize).min(cols - 1);
-        let row = (((pos.1 - box_rect.y) / cell).floor() as usize).min(cols - 1);
-        let slot = row * cols + col;
-        let local = content::open_box_slot_member(self.box_is_left(), slot);
-        Some(self.box_page * groups::PAGE_CAP + local)
+        let layout = self.current_layout();
+        let slot = content::open_box_slot(layout.open_box?, layout.open_box_grid, pos);
+        Some(self.box_page * groups::PAGE_CAP + slot)
     }
 
     /// Pull a box member out into the loose grid (the box shrinks closed).
