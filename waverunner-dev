@@ -85,6 +85,15 @@ fi
 # does). It is not a micro-optimisation: the engine's collectors parse a
 # ~290 KB `pw-dump` per read, and unoptimised serde makes that cost roughly an
 # order of magnitude more CPU — which on a laptop is battery.
+# What plays a wallpaper that moves (a GIF, a video): mpvpaper, from the
+# flake's own nixpkgs, rooted by its out-link like the engines above. An
+# installed Golem has it on the PATH (its home layer); the dev box gets it
+# here, so it needs no system rebuild.
+MPVPAPER="$(timeout $WAIT nix build --out-link "$STATE/mpvpaper" --print-out-paths --inputs-from /home/max/launcher nixpkgs#mpvpaper 2>/dev/null)"
+[ -z "$MPVPAPER" ] && [ -e "$STATE/mpvpaper" ] && MPVPAPER="$STATE/mpvpaper"
+if [ -n "$MPVPAPER" ]; then
+  export WAVERUNNER_MPVPAPER="$MPVPAPER/bin/mpvpaper"
+fi
 PROFILE="${WAVERUNNER_PROFILE:-release}"
 BIN="/home/max/launcher/target/$PROFILE/waverunner"
 if [ ! -x "$BIN" ]; then

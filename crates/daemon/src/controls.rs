@@ -1004,8 +1004,18 @@ fn wallpaper_tool() -> Option<&'static str> {
     ["awww", "swww"].into_iter().find(|t| crate::launch::on_path(t))
 }
 
-/// The program that plays a video as the desktop's picture.
+/// The program that plays what moves as the desktop's picture.
 const VIDEO_TOOL: &str = "mpvpaper";
+
+/// Where it is: the one named by `WAVERUNNER_MPVPAPER` (the dev launcher
+/// builds one and names it, as it does the speech engine), else the one on
+/// the PATH (an installed Golem's). `None`: this computer has none.
+fn video_tool() -> Option<String> {
+    if let Some(named) = std::env::var("WAVERUNNER_MPVPAPER").ok().filter(|p| std::path::Path::new(p).is_file()) {
+        return Some(named);
+    }
+    crate::launch::on_path(VIDEO_TOOL).then(|| VIDEO_TOOL.to_owned())
+}
 
 fn is_video_ext(ext: &str) -> bool {
     matches!(ext, "mp4" | "webm" | "mkv" | "mov" | "m4v")
@@ -1029,18 +1039,28 @@ pub(crate) fn wallpaper_moves(path: &str) -> bool {
 /// ahí pero no funcionan".)
 const WALLPAPER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
-/// Put the wallpaper at `path` on the desktop: a still or a GIF through the
-/// picture program (`fade`: with its second-long fade), a video through
-/// `mpvpaper`, looping and silent, over whatever picture is there. Any video
-/// playing is ended first. Returns whether it was put — after however long
-/// the picture program needed (see [`WALLPAPER_PATIENCE`]): call it from a
-/// thread that may wait.
+/// Put the wallpaper at `path` on the desktop. A still goes through the
+/// picture program (`fade`: with its second-long fade). What MOVES — a
+/// video, and a GIF too — is played by `mpvpaper`, looping and silent, over
+/// whatever picture is there: it scales on the graphics card and starts at
+/// once, where the picture program makes every frame of a GIF the screen's
+/// size on the processor first (9 s for a 92-frame GIF on a small screen,
+/// far more on a big one, and a cache of hundreds of megabytes — Max,
+/// 2026-10-13: "takes for ever"). Only a GIF on a computer without
+/// `mpvpaper` still goes the slow way. Whatever was playing is ended
+/// first. Returns whether it was put: call it from a thread that may wait.
 fn show_wallpaper(path: &str, fade: bool) -> bool {
-    // (None playing: nothing to end, and that is not a failure.)
-    run("pkill", &["-x", VIDEO_TOOL]);
-    if wallpaper_is_video(path) {
-        // `-f`: it forks and plays on; `*`: every screen.
-        return run(VIDEO_TOOL, &["-f", "-o", "no-audio loop panscan=1.0", "*", path]);
+    // (None playing: nothing to end, and that is not a failure. By its
+    // command line: the program's own name is its wrapper's on NixOS.)
+    run("pkill", &["-f", "[m]pvpaper -f -o"]);
+    if wallpaper_moves(path) {
+        if let Some(player) = video_tool() {
+            // `-f`: it forks and plays on; `*`: every screen.
+            return run(&player, &["-f", "-o", "no-audio loop-file=inf panscan=1.0", "*", path]);
+        }
+        if wallpaper_is_video(path) {
+            return false;
+        }
     }
     let Some(tool) = wallpaper_tool() else {
         return false;
@@ -1095,7 +1115,7 @@ fn pictures() -> Vec<std::path::PathBuf> {
             p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                 let e = e.to_lowercase();
                 matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
-                    || (is_video_ext(&e) && crate::launch::on_path(VIDEO_TOOL))
+                    || (is_video_ext(&e) && video_tool().is_some())
             })
         })
         .collect();
@@ -1523,6 +1543,13 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             let path = std::path::Path::new(value);
             if path.starts_with(wallpaper_dir()) && path.is_file() {
                 pick_wallpaper(value.to_owned());
+            }
+        }
+        // The wallpapers' box was left: what the picture program kept of the
+        // GIFs it prepared (hundreds of megabytes each) goes.
+        "wallpaper-leave" => {
+            if let Some(tool) = wallpaper_tool() {
+                run(tool, &["clear-cache"]);
             }
         }
         k if k.starts_with("default:") => {

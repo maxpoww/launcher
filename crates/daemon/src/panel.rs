@@ -2903,6 +2903,14 @@ impl App {
         self.quick.field = rect;
     }
 
+    /// The quick box of `label` was left.
+    pub(crate) fn quick_left(&mut self, label: &'static str) {
+        if label == "Wallpaper" {
+            let ui = self.ui_facts();
+            self.controls_send(ControlCommand::Set { label, key: "wallpaper-leave", value: String::new(), ui });
+        }
+    }
+
     /// One frame of the quick box: its rect, how present it is (0..1) and
     /// what it draws. `None`: no box.
     pub(crate) fn quick_frame(&mut self, dt: f32, paint: PanelPaint) -> Option<(Rect, f32, PanelDraw)> {
@@ -2925,8 +2933,11 @@ impl App {
         let k = self.quick.solo_k();
         // Folded all the way: the quick controls are over.
         if !self.quick.solo_up() {
-            if self.fast.boxed.take().is_some() && self.fast.open {
-                self.close_fast_launch();
+            if let Some(label) = self.fast.boxed.take() {
+                self.quick_left(label);
+                if self.fast.open {
+                    self.close_fast_launch();
+                }
             }
             return None;
         }

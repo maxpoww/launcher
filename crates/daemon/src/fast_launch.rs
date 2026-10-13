@@ -594,7 +594,9 @@ impl App {
             return;
         }
         self.fast.open = false;
-        self.fast.boxed = None;
+        if let Some(label) = self.fast.boxed.take() {
+            self.quick_left(label);
+        }
         self.quick.close_solo();
         if self.interactive && self.ui.target() != crate::state::Target::Open {
             self.begin_keyboard_handback(KbSurface::Launcher, None);
