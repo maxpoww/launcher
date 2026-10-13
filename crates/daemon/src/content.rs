@@ -1746,15 +1746,11 @@ pub fn scene(
             let vp = layout.sections[SECTION_APPS].viewport;
             Some(Rect::new(vp.x, to.y, vp.w, to.h * group_expand.clamp(0.0, 1.0)))
         }
-        (false, Some((ox, oy)), Some(to)) => {
-            let t = group_expand.clamp(0.0, 1.0);
-            let from = Rect::new(ox - box_tile / 2.0, oy - box_tile / 2.0, box_tile, box_tile);
-            Some(Rect::new(
-                lerp(from.x, to.x, t),
-                lerp(from.y, to.y, t),
-                lerp(from.w, to.w, t),
-                lerp(from.h, to.h, t),
-            ))
+        // Over the dock: the same run upwards, from its bottom edge — the
+        // one next to its icon.
+        (false, Some(_), Some(to)) => {
+            let h = to.h * group_expand.clamp(0.0, 1.0);
+            Some(Rect::new(to.x, to.y + to.h - h, to.w, h))
         }
         _ => None,
     };
@@ -3029,26 +3025,25 @@ pub fn scene(
         }
     }
 
-    // The open box: a rounded panel that grows from the clicked tile
-    // (`group_origin`) into rows of member icons over it (`row_box`).
-    // Drawn last so it sits opaquely over the loose grid behind it.
-    if let (Some(box_rect), Some((ox, oy))) = (open_box_rect, group_origin) {
+    // The open box: a rounded panel opening from the edge next to its tile,
+    // its rows of member icons riding out from behind that edge. Drawn last
+    // so it sits opaquely over the loose grid behind it.
+    if let Some(box_rect) = open_box_rect {
         let t = group_expand.clamp(0.0, 1.0);
-        // Starts at the tile's radius for a seamless spring-out, then rounds up
-        // to the shared box radius — the same corner as the fully-open main
+        // The shared box radius — the same corner as the fully-open main
         // card, and rounder than the macOS-style dock behind it.
         let radius = lerp(14.0, BOX_CORNER_RADIUS, t).min(box_rect.h / 2.0);
-        // A box in the grid (Max, 2026-10-13: "centrados en la línea… desde
-        // el borde superior se deslice hacia abajo"): its members stand
-        // centred in the line and ride down from its top edge as it opens,
-        // whole from the start — nothing flies out of the tile.
-        let inline = !box_over_dock;
-        let members_rect = match layout.open_box.filter(|_| inline) {
-            Some(to) => Rect::new(to.x, to.y - (1.0 - t) * to.h, to.w, to.h),
-            None => box_rect,
-        };
+        // Max, 2026-10-13: "centrados en la línea… desde el borde superior
+        // se deslice hacia abajo", and over the dock "la misma animación
+        // hacia arriba": the members ride out from behind the edge the box
+        // opens from, whole from the start — nothing flies out of the tile.
+        // In the grid that is its top edge, the members coming down; over
+        // the dock its bottom edge, the members going up.
+        let rest = layout.open_box.unwrap_or(box_rect);
+        let slide = (1.0 - t) * rest.h * if box_over_dock { 1.0 } else { -1.0 };
+        let members_rect = Rect::new(rest.x, rest.y + slide, rest.w, rest.h);
         // What the members clip to: their own columns (pages slide past
-        // the sides), no further down than the line has opened.
+        // the sides), no further than the box has opened.
         let members_clip = Rect::new(members_rect.x, box_rect.y, members_rect.w, box_rect.h);
         // Built as its own grid pushed last, so it draws over the loose
         // grid behind it (section grids draw in order).
@@ -3105,30 +3100,19 @@ pub fn scene(
             glass: 0.5,
             border: 0.0,
         };
-        if inline {
-            // Its own grid: the members' clip is narrower than the line.
-            let mut line = GridContent {
-                clip: reveal_rect,
-                ..Default::default()
-            };
-            line.rects.push(panel_inst);
-            scene.grids.push(line);
-        } else {
-            boxgrid.rects.push(panel_inst);
-        }
+        // Its own grid: the members' clip is narrower than a line in the grid.
+        // (A stack over the dock stands above the card's reveal region.)
+        let panel_clip = if box_over_dock { Rect::new(0.0, 0.0, surface.0, surface.1) } else { reveal_rect };
+        let mut line = GridContent {
+            clip: panel_clip,
+            ..Default::default()
+        };
+        line.rects.push(panel_inst);
+        scene.grids.push(line);
         // Members read left to right, top to bottom, in their stored order.
         let (cols, rows) = (layout.open_box_grid.0.max(1), layout.open_box_grid.1.max(1));
         let cell = members_rect.w / cols as f32;
         let cell_h = members_rect.h / rows as f32;
-        // Closed 2×2 mini geometry (matches the closed tile), centered on the
-        // tile — the preview four flow from here into their open slots.
-        let mini = grid_icon * 0.42;
-        let mini_offset = (mini + grid_icon * 0.10) / 2.0;
-        // The extra members reveal as the box unfolds past the 2×2.
-        let reveal = {
-            let u = ((t - 0.15) / 0.55).clamp(0.0, 1.0);
-            u * u * (3.0 - 2.0 * u)
-        };
         // Members lay out in a horizontal strip of pages shifted by
         // `box_scroll`, so paging slides. Everything clips to the box.
         let page_w = layout.open_box.map_or(box_rect.w, |b| b.w);
@@ -3138,7 +3122,7 @@ pub fn scene(
         // with the grid): positions lerp between the cell centers of the
         // two neighboring slots, pages included.
         // The icon and the name under it sit centred in the cell together.
-        let name_lift = (3.0 + LABEL_LINE_PX) / 2.0 * if inline { 1.0 } else { t };
+        let name_lift = (3.0 + LABEL_LINE_PX) / 2.0;
         let place = |di: usize| -> (f32, f32) {
             let slot = di % OPEN_BOX_CAP;
             let (row, col) = (slot / cols, slot % cols);
@@ -3165,23 +3149,7 @@ pub fn scene(
             if open_cx < members_rect.x - cell || open_cx > members_rect.x + members_rect.w + cell {
                 continue;
             }
-            let (cx, cy, size) = if inline {
-                (open_cx, open_cy, grid_icon)
-            } else if frac <= f32::EPSILON && d0 < 4 {
-                // Page-0 preview icons flow from the closed 2×2 into place.
-                let sx = if d0 == 0 || d0 == 2 { -1.0 } else { 1.0 };
-                let sy = if d0 < 2 { -1.0 } else { 1.0 };
-                (
-                    lerp(ox + sx * mini_offset, open_cx, t),
-                    lerp(oy + sy * mini_offset, open_cy, t),
-                    lerp(mini, grid_icon, t),
-                )
-            } else {
-                (open_cx, open_cy, lerp(mini, grid_icon, t) * reveal)
-            };
-            if size <= 0.5 {
-                continue;
-            }
+            let (cx, cy, size) = (open_cx, open_cy, grid_icon);
             boxgrid.icons.push(IconInst {
                 rect: Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
                 layer: layer_of(idx),
@@ -3207,24 +3175,22 @@ pub fn scene(
                     });
                 }
             }
-            // Member names pop in near the end of the open, below each icon.
-            if inline || t > 0.85 {
-                if let Some(entry) = entries.get(idx) {
-                    boxgrid.labels.push(Label {
-                        text: truncate_label(&entry.name, cell - 4.0, LABEL_FONT_PX),
-                        pos: (cx, cy + size / 2.0 + 3.0),
-                        // (The whole cell: a name that just fits must not wrap.)
-                        max_w: cell,
-                        font_px: LABEL_FONT_PX,
-                        line_px: LABEL_LINE_PX,
-                        centered: true,
-                        dim: false,
-                        cache: true,
-                        family: None,
-                        color: None,
-                        clip: Some(members_clip),
-                    });
-                }
+            // Each member's name rides under its icon.
+            if let Some(entry) = entries.get(idx) {
+                boxgrid.labels.push(Label {
+                    text: truncate_label(&entry.name, cell - 4.0, LABEL_FONT_PX),
+                    pos: (cx, cy + size / 2.0 + 3.0),
+                    // (The whole cell: a name that just fits must not wrap.)
+                    max_w: cell,
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: None,
+                    color: None,
+                    clip: Some(members_clip),
+                });
             }
         }
         scene.grids.push(boxgrid);
@@ -3234,7 +3200,7 @@ pub fn scene(
         let (page, pages) = open_box_pages;
         if pages > 1 && t > 0.6 {
             let mut dots = GridContent {
-                clip: reveal_rect,
+                clip: panel_clip,
                 ..Default::default()
             };
             let dot_r = 3.0;
