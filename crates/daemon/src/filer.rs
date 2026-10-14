@@ -918,6 +918,12 @@ pub(crate) struct Asked {
     pub archive: bool,
     /// The thing is a file (it can be opened with an app of one's choice).
     pub file: bool,
+    /// The thing is a folder (it can be kept among the places)…
+    pub folder: bool,
+    /// …and is one of them already.
+    pub placed: bool,
+    /// Dot files are shown (the ground's row then puts them away).
+    pub hidden: bool,
 }
 
 /// The apps `gio mime <type>` names for a kind of file, as desktop ids
@@ -957,6 +963,52 @@ fn apps_for(path: &str) -> Vec<String> {
         return Vec::new();
     }
     parse_gio_mime(&said("gio", &["mime", kind]))
+}
+
+/// The owner's own places: the bookmarks GTK's file dialogs keep
+/// (`gtk-3.0/bookmarks`, a line a folder: its `file://` address, then a name
+/// if it was given one) — so a folder kept here is there when a file is
+/// opened or saved from any app, and the other way round.
+fn marks_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map_or_else(|| home().join(".config"), PathBuf::from)
+        .join("gtk-3.0/bookmarks")
+}
+
+/// Each bookmark of `text` that is a folder on this computer: its name
+/// (the one given, else the folder's) and where it is.
+pub(crate) fn parse_marks(text: &str) -> Vec<(String, PathBuf)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (uri, label) = line.split_once(' ').unwrap_or((line, ""));
+            let path = crate::desktop::uri_list_paths(uri).into_iter().next()?;
+            let name = if label.trim().is_empty() { file_name(&path) } else { label.trim().to_owned() };
+            Some((name, path))
+        })
+        .collect()
+}
+
+/// `text` with `path` kept (`keep`) or taken out: its line added at the
+/// end if it is not there, or every line that is it removed; the others as
+/// they are (those of other kinds too — a network place stays).
+pub(crate) fn marks_with(text: &str, path: &Path, keep: bool) -> String {
+    let is_it = |line: &str| {
+        let uri = line.trim().split(' ').next().unwrap_or("");
+        crate::desktop::uri_list_paths(uri).first().is_some_and(|p| p == path)
+    };
+    let mut lines: Vec<String> = text.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
+    let there = lines.iter().any(|l| is_it(l));
+    if keep && !there {
+        lines.push(crate::desktop::file_uri(&path.to_string_lossy()));
+    } else if !keep {
+        lines.retain(|l| !is_it(l));
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 /// Whether `name` is an archive the system's archiver opens.
@@ -1016,6 +1068,9 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
         by_hand,
         archive,
         file,
+        folder,
+        placed,
+        hidden,
     } = asked;
     let row = |label: &'static str, action: Action| Row::Item {
         label,
@@ -1074,6 +1129,15 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
             Row::Sep,
             row(tr("Rename"), Action::Rename),
             row(tr("Compress"), Action::Compress),
+        ]);
+        if folder {
+            rows.push(if placed {
+                row(tr("Remove from places"), Action::RemovePlace)
+            } else {
+                row(tr("Add to places"), Action::AddPlace)
+            });
+        }
+        rows.extend([
             Row::Sep,
             bin,
             Row::Sep,
@@ -1090,6 +1154,14 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
             row(tr("New folder"), Action::NewFolder),
             Row::Sep,
             row(tr("Open in terminal"), Action::OpenTerminal),
+        ]);
+        rows.extend([
+            Row::Sep,
+            if hidden {
+                row(tr("Hide hidden files"), Action::ToggleHidden)
+            } else {
+                row(tr("Show hidden files"), Action::ToggleHidden)
+            },
         ]);
         // A folder arranged by hand can go back to being in order of name
         // (the desktop's own word for it).
@@ -1211,6 +1283,10 @@ struct Win {
     open_with: Vec<(String, String, bool)>,
     /// The "Open with" page is up and its apps are being asked for.
     asking_apps: bool,
+    /// The folders that are the owner's own places (bookmarks), and the one
+    /// a menu opened on a place's row is about.
+    marks: Vec<PathBuf>,
+    menu_place: Option<PathBuf>,
     /// The folder changed while it was being read: read once more after.
     again: bool,
     /// The place a hovering drag would be let go onto.
@@ -1481,7 +1557,13 @@ fn file_name(path: &Path) -> String {
 /// The places down the side: Home, the owner's folders that exist (under
 /// the names they have on disk), the phones' folder, then what is plugged
 /// in and open.
-pub(crate) fn places(home: &Path, user_dirs: &str, bin: &Path, volumes: &[crate::mounts::Mounted]) -> Vec<Place> {
+pub(crate) fn places(
+    home: &Path,
+    user_dirs: &str,
+    bin: &Path,
+    marks: &[(String, PathBuf)],
+    volumes: &[crate::mounts::Mounted],
+) -> Vec<Place> {
     let mut out = vec![Place {
         name: tr("Home").to_owned(),
         path: home.to_path_buf(),
@@ -1525,6 +1607,20 @@ pub(crate) fn places(home: &Path, user_dirs: &str, bin: &Path, volumes: &[crate:
         gap: false,
         start: true,
     });
+    // The owner's own, where they still are (and are not up there already).
+    let mut first = true;
+    for (name, path) in marks {
+        if path.is_dir() && !out.iter().any(|p| p.path == *path) {
+            out.push(Place {
+                name: name.clone(),
+                path: path.clone(),
+                icon: "asset:folder".to_owned(),
+                gap: first,
+                start: false,
+            });
+            first = false;
+        }
+    }
     let mut first = true;
     for v in volumes.iter().filter(|v| !v.closed) {
         out.push(Place {
@@ -1807,6 +1903,8 @@ impl App {
             asked: None,
             open_with: Vec::new(),
             asking_apps: false,
+            marks: Vec::new(),
+            menu_place: None,
             again: false,
             drop_place: None,
             edge: 0.0,
@@ -1850,10 +1948,13 @@ impl App {
                 .join("user-dirs.dirs"),
         )
         .unwrap_or_default();
-        let list = places(&home, &user_dirs, &bin_root(), &self.desktop.volumes);
+        let marks = parse_marks(&std::fs::read_to_string(marks_path()).unwrap_or_default());
+        let list = places(&home, &user_dirs, &bin_root(), &marks, &self.desktop.volumes);
+        let marked: Vec<PathBuf> = marks.into_iter().map(|(_, p)| p).collect();
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
+                win.marks = marked.clone();
                 if win.places != list {
                     win.places = list.clone();
                     // (A drag over them held a place by its number.)
@@ -2225,6 +2326,11 @@ impl App {
         let file = item
             .and_then(|i| win.items.get(i))
             .is_some_and(|it| it.kind == Kind::File);
+        let folder = item
+            .and_then(|i| win.items.get(i))
+            .is_some_and(|it| it.kind == Kind::Folder);
+        let placed = path.as_ref().is_some_and(|p| win.marks.iter().any(|m| m.as_os_str() == p.as_str()));
+        win.menu_place = None;
         let asked = Asked {
             on_item: path.is_some(),
             many,
@@ -2233,6 +2339,9 @@ impl App {
             by_hand,
             archive,
             file,
+            folder,
+            placed,
+            hidden: win.hidden,
         };
         let rows = menu_rows(asked);
         win.asked = Some(asked);
@@ -2500,6 +2609,31 @@ impl App {
                 if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
                     error!("files: {name} could not be started: {e:#}");
                 }
+            }
+            Action::AddPlace | Action::RemovePlace => {
+                // The folder the menu is on — or the place whose row it is.
+                let Some(path) = win
+                    .menu_place
+                    .clone()
+                    .or_else(|| selected.first().map(PathBuf::from))
+                else {
+                    return;
+                };
+                let keep = action == Action::AddPlace;
+                info!("files: {} {} the places", path.display(), if keep { "kept among" } else { "taken out of" });
+                let file = marks_path();
+                let text = marks_with(&std::fs::read_to_string(&file).unwrap_or_default(), &path, keep);
+                if let Some(dir) = file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                crate::persist::write_text("files-places", &file, &text);
+                self.filer_places();
+            }
+            Action::ToggleHidden => {
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.hidden = !win.hidden;
+                }
+                self.filer_list(id);
             }
             Action::NewFolder => self.filer_new_folder(id),
             Action::CleanUp => {
@@ -4033,11 +4167,35 @@ impl App {
                     return;
                 };
                 let layout = win.layout(icon_scale);
-                // The menu belongs to the icons' field: the head and the
-                // places have none.
+                // The menu belongs to the icons' field; of the places only
+                // the owner's own have one (to be taken out again).
                 if layout.body.contains(at) {
                     let item = layout.index_at(at, win.scroll, win.items.len());
                     self.filer_open_menu(id, at, item);
+                } else if let Some(path) = win
+                    .hits
+                    .places
+                    .iter()
+                    .position(|r| r.contains(at))
+                    .and_then(|n| win.places.get(n))
+                    .map(|p| p.path.clone())
+                    .filter(|p| win.marks.contains(p))
+                {
+                    let (w, h) = win.virt();
+                    let rows = vec![Row::Item {
+                        label: tr("Remove from places"),
+                        action: Action::RemovePlace,
+                        danger: false,
+                    }];
+                    if let Some(win) = self.filer.win_mut(id) {
+                        win.selected.clear();
+                        win.menu = Some(Menu::open(None, false, at, w, h).with_rows(rows, h));
+                        win.menu_path = None;
+                        win.asked = None;
+                        win.props = None;
+                        win.menu_place = Some(path);
+                    }
+                    self.filer_request_draw(id);
                 }
             }
             // The mouse's side buttons.
@@ -5328,6 +5486,9 @@ mod tests {
             by_hand: false,
             archive: false,
             file: false,
+            folder: false,
+            placed: false,
+            hidden: false,
         };
         let actions = |rows: Vec<Row>| -> Vec<Action> {
             rows.into_iter()
@@ -5337,18 +5498,18 @@ mod tests {
                 })
                 .collect()
         };
-        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false }));
+        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }));
         assert_eq!(one.first(), Some(&Action::Open));
         // Properties is last: it is the row the menu turns into a box from.
         assert_eq!(one.last(), Some(&Action::Properties));
         assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
         // A group: nothing that is about ONE thing.
-        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false }));
+        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }));
         assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
         assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
         // The folder itself: Paste only with files on the clipboard.
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false })).first(), Some(&Action::Paste));
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false })).first(), Some(&Action::NewFolder));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })).first(), Some(&Action::NewFolder));
         // An archive can be opened out; anything can be packed.
         let zip = actions(menu_rows(Asked { archive: true, ..asked(true, false) }));
         assert!(zip.contains(&Action::Extract) && zip.contains(&Action::Compress));
@@ -5360,12 +5521,31 @@ mod tests {
         let said = "Default application for “image/png”: org.gnome.Loupe.desktop\nRegistered applications:\n\torg.gnome.Loupe.desktop\n\tseam.desktop\nRecommended applications:\n\tseam.desktop\n";
         assert_eq!(parse_gio_mime(said), ["org.gnome.Loupe", "seam"]);
         assert!(parse_gio_mime("No default applications for “x/y”\n").is_empty());
+        // A folder can be kept among the places, and taken out again.
+        assert!(actions(menu_rows(Asked { folder: true, ..asked(true, false) })).contains(&Action::AddPlace));
+        let kept = Asked { folder: true, placed: true, ..asked(true, false) };
+        assert!(actions(menu_rows(kept)).contains(&Action::RemovePlace));
+        assert!(actions(menu_rows(asked(false, false))).contains(&Action::ToggleHidden));
+        let text = "file:///home/max/Pictures/Wallpapers\nsftp://host/x Remote\nfile:///home/max/My%20Work Work\n";
+        assert_eq!(
+            parse_marks(text),
+            [
+                ("Wallpapers".to_owned(), PathBuf::from("/home/max/Pictures/Wallpapers")),
+                ("Work".to_owned(), PathBuf::from("/home/max/My Work")),
+            ]
+        );
+        // Added once, at the end; taken out, the others stay — the network one too.
+        let more = marks_with(text, Path::new("/home/max/a b"), true);
+        assert!(more.ends_with("file:///home/max/a%20b\n") && more.starts_with(text));
+        assert_eq!(marks_with(&more, Path::new("/home/max/a b"), true), more);
+        let less = marks_with(text, Path::new("/home/max/My Work"), false);
+        assert_eq!(less, "file:///home/max/Pictures/Wallpapers\nsftp://host/x Remote\n");
         // In the bin: back or gone, and the bin emptied; never a new thing.
-        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false }));
+        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }));
         assert!(binned.contains(&Action::PutBack) && binned.contains(&Action::Erase));
         assert!(!binned.contains(&Action::Rename) && !binned.contains(&Action::MoveToBin));
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false })), [Action::EmptyBin]);
-        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false, file: false }).is_empty());
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })), [Action::EmptyBin]);
+        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }).is_empty());
     }
 
     #[test]

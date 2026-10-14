@@ -82,6 +82,12 @@ pub(crate) enum Action {
     /// A file manager window: turn the page to the apps that open this
     /// kind of file (each then a `SendTo`).
     OpenWith,
+    /// A file manager window: a folder kept among the places down its side
+    /// (the bookmarks file dialogs show too), and taken out again; dot
+    /// files shown or put away.
+    AddPlace,
+    RemovePlace,
+    ToggleHidden,
 }
 
 /// One row: an action, or a rule between groups.

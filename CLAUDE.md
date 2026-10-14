@@ -839,7 +839,12 @@ The big daemon files are cohesive but long — go straight to the function:
   that say they open that kind of file — `xdg-mime query filetype` then `gio mime`, off the
   loop (`apps_for`, `parse_gio_mime`), each id looked up in the dock's own index for its name
   and command (`Win::open_with`, `Action::SendTo(n)`). Rig: `files apps` / `menuback` with a
-  menu up. HARDENING (a review, 2026-10-14 — keep these): a menu's row acts on the
+  menu up. THE OWNER'S OWN PLACES are GTK's bookmarks (`gtk-3.0/bookmarks`: `marks_path`,
+  `parse_marks`, `marks_with`; `Win::marks`) — a folder's menu has "Add to places" / "Remove
+  from places" (`Action::AddPlace|RemovePlace`), a kept place's own row has a menu to take it
+  out (`Win::menu_place`), and what is kept here is in every app's open/save dialog, and the
+  other way round. The ground's menu shows or puts away dot files (`Action::ToggleHidden`).
+  HARDENING (a review, 2026-10-14 — keep these): a menu's row acts on the
   thing the menu is ON (its group only while it is one of it — `filer_act`); a click is on what is
   under the pointer NOW (`filer_click` reads the spot again: the folder scrolls under a still
   pointer); a drag LET GO is no longer in hand (`Lifted::dropped`, from the source's
