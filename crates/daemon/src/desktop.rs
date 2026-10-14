@@ -557,16 +557,58 @@ pub(crate) fn list(dir: &Path) -> Vec<Item> {
     items
 }
 
+/// The owner's own folders and the icon each wears (Max, 2026-10-14: "the
+/// folder on home have no symbols"): Home, the folders `user-dirs.dirs`
+/// names (under whatever names they have on disk), and `~/Phones`. Read once:
+/// they are moved about rarely, and a listing asks for every folder.
+fn own_folders() -> &'static [(PathBuf, &'static str)] {
+    static OWN: std::sync::OnceLock<Vec<(PathBuf, &'static str)>> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| {
+        let home = crate::filer::home();
+        let text = std::fs::read_to_string(
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map_or_else(|| home.join(".config"), PathBuf::from)
+                .join("user-dirs.dirs"),
+        )
+        .unwrap_or_default();
+        let mut own = vec![(home.clone(), "user-home"), (home.join("Phones"), "folder-phone")];
+        for (key, fallback, icon) in [
+            ("DESKTOP", "Desktop", "user-desktop"),
+            ("DOCUMENTS", "Documents", "folder-documents"),
+            ("DOWNLOAD", "Downloads", "folder-download"),
+            ("PICTURES", "Pictures", "folder-pictures"),
+            ("MUSIC", "Music", "folder-music"),
+            ("VIDEOS", "Videos", "folder-videos"),
+            ("PUBLICSHARE", "Public", "folder-publicshare"),
+            ("TEMPLATES", "Templates", "folder-templates"),
+        ] {
+            let path = crate::filer::user_dir(&text, &home, key).unwrap_or_else(|| home.join(fallback));
+            own.push((path, icon));
+        }
+        own
+    })
+}
+
+/// A folder's icon: its own symbol when it is one of the owner's folders,
+/// else the plain folder.
+pub(crate) fn folder_icon(path: &Path) -> String {
+    own_folders()
+        .iter()
+        .find(|(p, _)| p == path)
+        .map_or_else(|| asset_key("asset-folder"), |(_, icon)| format!("asset:{icon}"))
+}
+
 /// The item for one directory entry. A `.desktop` file that parses as an
 /// application is a launcher; one that does not is just a file.
 pub(crate) fn item_for(path: PathBuf, name: String, is_dir: bool) -> Item {
     let path_str = path.to_string_lossy().into_owned();
     if is_dir {
+        let icon = folder_icon(&path);
         return Item {
             path: path_str,
             name,
             kind: Kind::Folder,
-            icon: asset_key("asset-folder"),
+            icon,
             exec: None,
         };
     }

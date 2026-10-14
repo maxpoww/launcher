@@ -1592,7 +1592,7 @@ impl Filer {
 
 /// One of the owner's folders as `user-dirs.dirs` names it
 /// (`XDG_<KEY>_DIR="$HOME/…"`), if it is there and is not Home itself.
-fn user_dir(text: &str, home: &Path, key: &str) -> Option<PathBuf> {
+pub(crate) fn user_dir(text: &str, home: &Path, key: &str) -> Option<PathBuf> {
     let wanted = format!("XDG_{key}_DIR=");
     let value = text
         .lines()
@@ -1606,7 +1606,7 @@ fn user_dir(text: &str, home: &Path, key: &str) -> Option<PathBuf> {
     (path != home && path.is_absolute()).then_some(path)
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
@@ -1656,7 +1656,7 @@ pub(crate) fn places(
         out.push(Place {
             name: file_name(&phones),
             path: phones,
-            icon: "asset:phone".to_owned(),
+            icon: "asset:folder-phone".to_owned(),
             gap: false,
             start: false,
         });
