@@ -41,6 +41,8 @@ pub enum Event {
 /// A moving preview: how many frames a second, and how long a loop.
 pub const MOVING_FPS: u32 = 12;
 const MOVING_SECS: u32 = 4;
+/// How long the frames of one file may take to read.
+const MOVING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Handle to the thumbnailer thread.
 pub struct Thumbs {
@@ -99,24 +101,49 @@ fn moving_frames(path: &str) -> Vec<Vec<u8>> {
     let filter = format!(
         "fps={MOVING_FPS},scale={n}:{n}:force_original_aspect_ratio=decrease,format=rgba,pad={n}:{n}:-1:-1:color=black@0"
     );
-    let out = std::process::Command::new(tool)
+    let child = std::process::Command::new(tool)
         .args(["-v", "error", "-nostdin", "-t", &MOVING_SECS.to_string(), "-i", path])
         .args(["-an", "-vf", &filter, "-frames:v", &(MOVING_FPS * MOVING_SECS).to_string()])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output();
-    let bytes = match out {
-        Ok(o) if o.status.success() => o.stdout,
-        Ok(o) => {
-            warn!("thumb: ffmpeg exited {} for {path}", o.status);
-            return Vec::new();
-        }
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
         Err(e) => {
             warn!("thumb: ffmpeg failed to run: {e}");
             return Vec::new();
         }
     };
+    // Read on a thread of its own, and the program is given a time: one
+    // file it never finishes must not end the moving previews for good
+    // (this thread makes them all, one after the other).
+    let reader = child.stdout.take().map(|mut o| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            let _ = o.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let started = std::time::Instant::now();
+    let done = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if started.elapsed() < MOVING_PATIENCE => std::thread::sleep(std::time::Duration::from_millis(15)),
+            _ => {
+                warn!("thumb: ffmpeg did not finish {path} in {MOVING_PATIENCE:?}; ended");
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    let bytes = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    if !done {
+        return Vec::new();
+    }
     let one = (n * n * 4) as usize;
     bytes
         .chunks_exact(one)

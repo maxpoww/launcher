@@ -947,6 +947,7 @@ fn main() -> anyhow::Result<()> {
         shell_tx,
         shell_sent: options_engine::ShellState::default(),
         overview_active: false,
+        wallpaper_held: 0,
         battery_alarm: battery::BatteryAlarm::default(),
         battery_beat_epoch: None,
         battery_beat_pending: false,
@@ -2328,6 +2329,9 @@ pub struct App {
     /// The compositor overview (waveview) is open: every waverunner surface
     /// stays concealed and reveals are ignored until it closes.
     overview_active: bool,
+    /// Why a moving wallpaper is held still, one bit a reason
+    /// (`controls::HOLD_*`): it plays only while there is none.
+    wallpaper_held: u8,
     /// Battery OPTION (see `battery.rs`): the alarm ladder state, the beat
     /// animation epoch + frame latch, the suspend arm, the post-wake
     /// awareness window, and the wake detector's last-snapshot stamp.
@@ -3109,6 +3113,14 @@ impl App {
             }
             Command::Display(args) => {
                 self.display_command(&args);
+                return;
+            }
+            Command::Wallpaper(args) => {
+                match args.split_once(' ') {
+                    Some(("hold", "screen")) => self.wallpaper_hold(crate::controls::HOLD_SCREEN, true),
+                    Some(("go", "screen")) => self.wallpaper_hold(crate::controls::HOLD_SCREEN, false),
+                    _ => warn!("wallpaper: hold screen | go screen (got {args:?})"),
+                }
                 return;
             }
             Command::FloatMode(mode) => {
@@ -3896,6 +3908,20 @@ impl App {
         let _ = self.shell_tx.send(next);
     }
 
+    /// A reason to hold a moving wallpaper still came or went. It costs a
+    /// tenth of a core to play (measured on the Acer, 2026-10-13) whether
+    /// or not anyone can see it — and the player's own "pause when hidden"
+    /// does nothing under this compositor (measured too) — so it is held
+    /// while the overview is up, while a window is fullscreen over it and
+    /// while the screen is off, and goes on when the last reason has gone.
+    pub(crate) fn wallpaper_hold(&mut self, why: u8, on: bool) {
+        let before = self.wallpaper_held;
+        self.wallpaper_held = if on { before | why } else { before & !why };
+        if (before == 0) != (self.wallpaper_held == 0) {
+            crate::controls::wallpaper_pause(self.wallpaper_held != 0);
+        }
+    }
+
     fn set_overview(&mut self, active: bool) {
         if self.overview_active == active {
             return;
@@ -3903,7 +3929,7 @@ impl App {
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
         // A wallpaper that moves holds still while the overview is up.
-        crate::controls::wallpaper_pause(active);
+        self.wallpaper_hold(crate::controls::HOLD_OVERVIEW, active);
         // The card is not shown under the overview.
         self.sync_card();
         // The arrangement changed: the Mind decides against it, so it learns

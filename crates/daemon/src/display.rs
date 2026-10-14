@@ -365,6 +365,18 @@ impl GolemSettings {
         crate::persist::read_json(&golem_path("settings.json")).unwrap_or_default()
     }
 
+    /// CHANGE the file: read it, let `f` alter and save it, with nobody
+    /// else doing the same in between. The UI thread, the settings' worker
+    /// and (through the worker) the wallpaper's thread all write this one
+    /// file, each from its own reading of it: two of them at the same
+    /// moment and the later write dropped the earlier one's change. Every
+    /// read-alter-save goes through here; a plain `load` is for reading.
+    pub(crate) fn change<R>(f: impl FnOnce(&mut Self) -> R) -> R {
+        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut Self::load())
+    }
+
     /// Write the file, and the compositor's copy beside it.
     fn save(&self) {
         crate::persist::write_json("golem settings", &golem_path("settings.json"), self);
@@ -718,9 +730,10 @@ impl App {
                 // On a resolution still being tried: part of the trial.
                 Some(p) if p.selector == selector => p.wanted = choice,
                 _ => {
-                    let mut store = GolemSettings::load();
-                    store.displays.insert(selector.to_owned(), choice);
-                    store.save();
+                    GolemSettings::change(|store| {
+                        store.displays.insert(selector.to_owned(), choice);
+                        store.save();
+                    });
                 }
             }
         }
@@ -796,9 +809,10 @@ impl App {
             return;
         };
         info!("display: keeping {}", p.wanted.mode);
-        let mut store = GolemSettings::load();
-        store.displays.insert(p.selector, p.wanted);
-        store.save();
+        GolemSettings::change(|store| {
+            store.displays.insert(p.selector, p.wanted);
+            store.save();
+        });
         self.display_changed();
     }
 
@@ -819,10 +833,11 @@ impl App {
             return;
         };
         self.display_pending = None;
-        let mut store = GolemSettings::load();
-        if store.displays.remove(&m.selector()).is_some() {
-            store.save();
-        }
+        GolemSettings::change(|store| {
+            if store.displays.remove(&m.selector()).is_some() {
+                store.save();
+            }
+        });
         info!("display: {} back to Golem's defaults", m.name);
         hypr::reload_config();
         self.display_changed();

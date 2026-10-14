@@ -1957,8 +1957,7 @@ impl App {
                 String::new(),
             ),
             SysHit::Effects(light) => {
-                let mut s = crate::display::GolemSettings::load();
-                s.set_light_effects(light);
+                crate::display::GolemSettings::change(|s| s.set_light_effects(light));
             }
             SysHit::Folder(i) => self.page_view(PView::Folder(i)),
             SysHit::OpenFolder(i) => {

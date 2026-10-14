@@ -137,6 +137,11 @@ pub enum Command {
     /// show scale|resolution` (open the panel on that setting); alone, log
     /// what is on the screen.
     Display(String),
+    /// A moving wallpaper holds still, or goes on, for a reason the dock
+    /// cannot see by itself: `wallpaper hold screen` when the screen is
+    /// turned off, `wallpaper go screen` when it is back on (Golem's
+    /// `golem-dpms` says both).
+    Wallpaper(String),
     /// Trigger the dynamic OPTION offer with this affordance id (e.g.
     /// `media.playpause`, `git.commit`) — the same action a click on its pill
     /// runs. Exposed for scripting and for verifying the action end to end.
@@ -289,6 +294,7 @@ impl fmt::Display for Command {
             Command::Modules(name) => write!(f, "modules {name}"),
             Command::Display(args) if args.is_empty() => f.write_str("display"),
             Command::Display(args) => write!(f, "display {args}"),
+            Command::Wallpaper(args) => write!(f, "wallpaper {args}"),
             Command::OptionsTrigger(id) => write!(f, "options-trigger {id}"),
             Command::OverviewOn => f.write_str("overview-on"),
             Command::OverviewOff => f.write_str("overview-off"),
@@ -362,6 +368,7 @@ impl FromStr for Command {
             ("window-mode", Command::WindowMode as fn(String) -> Command),
             ("float-mode", Command::FloatMode as fn(String) -> Command),
             ("display", Command::Display as fn(String) -> Command),
+            ("wallpaper", Command::Wallpaper as fn(String) -> Command),
             ("modules", Command::Modules as fn(String) -> Command),
             ("min-add", Command::MinAdd as fn(String) -> Command),
             ("min-del", Command::MinDel as fn(String) -> Command),
@@ -574,6 +581,7 @@ mod tests {
                 | Command::ControlPanel
                 | Command::Modules(_)
                 | Command::Display(_)
+                | Command::Wallpaper(_)
                 | Command::OptionsTrigger(_)
                 | Command::OverviewOn
                 | Command::OverviewOff
@@ -634,6 +642,7 @@ mod tests {
         Command::Modules("Music Production".into()),
         Command::Display(String::new()),
         Command::Display("scale 1.25".into()),
+        Command::Wallpaper("hold screen".into()),
             Command::OptionsTrigger("media.playpause".into()),
             Command::OverviewOn,
             Command::OverviewOff,

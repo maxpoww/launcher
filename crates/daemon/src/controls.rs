@@ -1076,6 +1076,20 @@ fn player_socket() -> Option<std::path::PathBuf> {
 /// listened: nothing happens. Never waits: one short write, on its own
 /// thread.
 pub(crate) fn wallpaper_pause(paused: bool) {
+    HELD.store(paused, std::sync::atomic::Ordering::SeqCst);
+    wallpaper_tell(paused);
+}
+
+/// Why a moving wallpaper is held (`App::wallpaper_hold`).
+pub(crate) const HOLD_OVERVIEW: u8 = 1;
+pub(crate) const HOLD_FULLSCREEN: u8 = 2;
+pub(crate) const HOLD_SCREEN: u8 = 4;
+
+/// Whether the wallpaper is held now: a player started meanwhile is told
+/// so as soon as it listens.
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn wallpaper_tell(paused: bool) {
     let Some(socket) = player_socket() else {
         return;
     };
@@ -1205,6 +1219,12 @@ fn show_wallpaper(path: &str, fade: bool) -> bool {
             }
             if let (Some(tool), Some(still)) = (wallpaper_tool(), poster(path)) {
                 show_still(tool, &still, false);
+            }
+            // (Started while the wallpaper is held: it holds too. By now it
+            // has had the time to open its socket.)
+            if HELD.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                wallpaper_tell(true);
             }
             return true;
         }
@@ -1630,9 +1650,10 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SOURCE@", if on { "1" } else { "0" }]);
         }
         "dark" => {
-            let mut s = GolemSettings::load();
-            s.dark = Some(on);
-            s.store();
+            GolemSettings::change(|s| {
+                s.dark = Some(on);
+                s.store();
+            });
             assert_dark(on);
         }
         "brightness" => {
@@ -1641,8 +1662,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         "keyboard" => {
             let (layout, variant) = value.split_once(':').unwrap_or((value, ""));
             if valid_xkb(layout) && valid_xkb(variant) && !layout.is_empty() {
-                let mut s = GolemSettings::load();
-                s.set_keyboard(layout, variant);
+                GolemSettings::change(|s| s.set_keyboard(layout, variant));
             } else {
                 warn!("controls: not a keyboard layout: {value:?}");
             }
@@ -1652,13 +1672,11 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         }
         "speed" => {
             if let Ok(v) = value.parse::<f64>() {
-                let mut s = GolemSettings::load();
-                s.set_pointer_speed(v.clamp(-1.0, 1.0));
+                GolemSettings::change(|s| s.set_pointer_speed(v.clamp(-1.0, 1.0)));
             }
         }
         "natural" => {
-            let mut s = GolemSettings::load();
-            s.set_natural_scroll(on);
+            GolemSettings::change(|s| s.set_natural_scroll(on));
         }
         "update" => {
             run("systemctl", &["start", "--no-block", "golem-autoupdate.service"]);
@@ -1681,10 +1699,11 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         "zone" => {
             let known = zone.zones.as_ref().is_some_and(|z| z.iter().any(|(n, _)| n == value));
             if known {
-                let mut s = GolemSettings::load();
-                s.time_zone = Some(value.to_owned());
-                s.store();
-                assert_session_env(&s);
+                GolemSettings::change(|s| {
+                    s.time_zone = Some(value.to_owned());
+                    s.store();
+                    assert_session_env(s);
+                });
                 *zone = ZonePick { zones: zone.zones.take(), ..Default::default() };
                 return Applied::Zone(value.to_owned());
             } else {
@@ -1702,10 +1721,11 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             };
             match locale {
                 Some(locale) => {
-                    let mut s = GolemSettings::load();
-                    s.language = Some(locale);
-                    s.store();
-                    assert_session_env(&s);
+                    GolemSettings::change(|s| {
+                        s.language = Some(locale);
+                        s.store();
+                        assert_session_env(s);
+                    });
                     return Applied::Language;
                 }
                 None => warn!("controls: this system has no locale for {value:?}"),
@@ -1725,9 +1745,10 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             }
             drop(want);
             if key == "wallpaper-saved" {
-                let mut s = GolemSettings::load();
-                s.wallpaper = Some(value.to_owned());
-                s.store();
+                GolemSettings::change(|s| {
+                    s.wallpaper = Some(value.to_owned());
+                    s.store();
+                });
             }
         }
         // The wallpapers' box was left: what the picture program kept of the

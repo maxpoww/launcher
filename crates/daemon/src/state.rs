@@ -207,6 +207,7 @@ impl UiState {
             | Command::ControlPanel
             | Command::Modules(_)
             | Command::Display(_)
+            | Command::Wallpaper(_)
             | Command::OptionsTrigger(_)
             | Command::OverviewOn
             | Command::OverviewOff

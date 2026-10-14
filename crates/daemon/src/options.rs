@@ -4460,6 +4460,9 @@ impl App {
         // grooms — not only as current as the last focus change. It counts as a
         // change to the pill in its own right: an app that renames its class
         // under a standing title changes what the pill is allowed to strip.
+        // (A window fullscreen over the desktop: a moving wallpaper under it
+        // holds still.)
+        self.wallpaper_hold(crate::controls::HOLD_FULLSCREEN, fullscreen);
         let class_changed = self.options_class != class;
         self.options_class = class.clone();
         if self.options_active_addr != addr {
