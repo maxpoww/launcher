@@ -483,6 +483,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "window-mode <tiled|float|pseudo|fullscreen>",
     "float-mode <on|off|toggle>",
     "display [scale <n>|mode <WxH[@Hz]>|keep|back|reset|show <scale|resolution>]",
+    "wallpaper <hold|go> screen",
     "min-add <addr> <ws> <aspect> <class> <path> <title…>",
     "min-del <addr>",
     "window-placed <addr>",
