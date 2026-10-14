@@ -45,6 +45,7 @@ use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
 use tracing::{error, info, warn};
 use wayland_client::protocol::wl_data_device_manager::DndAction;
+use wayland_protocols::xdg::toplevel_tag::v1::client::xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1;
 use wayland_client::protocol::wl_pointer;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle, WEnum};
@@ -334,8 +335,8 @@ enum Spot {
     Item(usize),
     Place(usize),
     Crumb(usize),
-    Back,
-    Forward,
+    /// The head's `..` (only where the places, and theirs, are left out).
+    Up,
     /// The button that turns the folder between icons and a list.
     View,
     /// The magnifier: it opens the search.
@@ -681,6 +682,11 @@ impl Orders {
 /// Where the open windows' folders are noted, so a dock that is started
 /// again (an update, a crash) brings them back: the runtime dir, which a
 /// new login starts empty.
+fn nav_path() -> PathBuf {
+    PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned()))
+        .join("waverunner-files-nav")
+}
+
 fn session_path() -> PathBuf {
     PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned()))
         .join("waverunner-files-session.json")
@@ -1218,8 +1224,7 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
 /// The clickable parts whose places are only known once drawn.
 #[derive(Debug, Default)]
 struct Hits {
-    back: Rect,
-    forward: Rect,
+    up: Rect,
     crumbs: Vec<(Rect, PathBuf)>,
     places: Vec<Rect>,
     view: Rect,
@@ -1429,11 +1434,8 @@ impl Win {
     }
 
     fn spot(&self, pos: (f32, f32), layout: &Layout) -> Spot {
-        if self.hits.back.contains(pos) {
-            return Spot::Back;
-        }
-        if self.hits.forward.contains(pos) {
-            return Spot::Forward;
+        if self.hits.up.contains(pos) {
+            return Spot::Up;
         }
         if let Some(i) = self.hits.crumbs.iter().position(|(r, _)| r.contains(pos)) {
             return Spot::Crumb(i);
@@ -1485,6 +1487,9 @@ impl Win {
 /// Every file window, and what they share.
 pub(crate) struct Filer {
     xdg: Option<XdgShell>,
+    /// `xdg-toplevel-tag`: each window is tagged `golem-files-<id>`, which
+    /// the compositor (and the waveview bar) sees as the window's own.
+    tags: Option<XdgToplevelTagManagerV1>,
     fractional: Option<crate::fractional::Fractional>,
     wins: Vec<Win>,
     next: u32,
@@ -1504,10 +1509,15 @@ pub(crate) struct Filer {
 }
 
 impl Filer {
-    pub fn new(xdg: Option<XdgShell>, fractional: Option<crate::fractional::Fractional>) -> Self {
+    pub fn new(
+        xdg: Option<XdgShell>,
+        fractional: Option<crate::fractional::Fractional>,
+        tags: Option<XdgToplevelTagManagerV1>,
+    ) -> Self {
         Self {
             xdg,
             fractional,
+            tags,
             wins: Vec::new(),
             next: 1,
             keys: None,
@@ -1692,6 +1702,32 @@ pub(crate) fn places(
     out
 }
 
+/// `..` — the folder this one is in — as the first of the places (Max,
+/// 2026-10-14): a click goes up, and it is where things are dragged OUT of
+/// a folder to.
+pub(crate) const UP: &str = "..";
+
+/// `places` for a window on `dir`: `..` first, then the rest (the first
+/// of them a little apart from it). At the root there is nowhere up: no
+/// `..` at all (Max: hidden, not grey).
+pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
+    let Some(parent) = dir.parent() else {
+        return places.to_vec();
+    };
+    let mut out = vec![Place {
+        name: UP.to_owned(),
+        path: parent.to_path_buf(),
+        icon: "asset:go-up".to_owned(),
+        gap: false,
+        start: false,
+    }];
+    out.extend(places.iter().cloned());
+    if let Some(first) = out.get_mut(1) {
+        first.gap = true;
+    }
+    out
+}
+
 /// The way to `dir` as steps to click: from the place it is deepest under
 /// (Home, a stick, a phone), else from the root.
 pub(crate) fn crumbs(dir: &Path, places: &[Place]) -> Vec<(String, PathBuf)> {
@@ -1867,6 +1903,11 @@ impl App {
         let surface = self.compositor.create_surface(&self.qh);
         let window = xdg.create_window(surface, WindowDecorations::RequestServer, &self.qh);
         window.set_app_id(APP_ID);
+        // Its tag: how the bar tells this window from the others of its class
+        // (its back and forward arrows — `filer_note_nav`).
+        if let Some(tags) = self.filer.tags.as_ref() {
+            tags.set_toplevel_tag(window.xdg_toplevel(), format!("{APP_ID}-{id}"));
+        }
         window.set_title(file_name(&dir));
         window.set_min_size(Some(MIN_SIZE));
         let fscale = self
@@ -1996,6 +2037,7 @@ impl App {
         }
         info!("files: window {id} closed");
         self.filer_note_session();
+        self.filer_note_nav();
     }
 
     /// The places, read again for every window (something was plugged in or
@@ -2018,8 +2060,10 @@ impl App {
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
                 win.marks = marked.clone();
+                // (Each window's own: `..` is the folder ITS folder is in.)
+                let list = with_up(&list, &win.dir);
                 if win.places != list {
-                    win.places = list.clone();
+                    win.places = list;
                     // (A drag over them held a place by its number.)
                     win.drop_place = None;
                     self.filer_request_draw(id);
@@ -2137,6 +2181,25 @@ impl App {
         self.filer_list(id);
         self.filer_request_draw(id);
         self.filer_note_session();
+        self.filer_note_nav();
+        // (`..` is another folder now.)
+        self.filer_places();
+    }
+
+    /// BACK AND FORWARD ON THE WINDOW'S BAR (Max, 2026-10-14: "los botones
+    /// < > en la barra de título, como las webapps"). The waveview bar draws
+    /// them, and only while there is somewhere to go, from what each window
+    /// says here — a line a window, `<its tag> <can go back 0|1> <can go
+    /// forward 0|1>` (the webapps' own format, `seam/nav`) — and a click on
+    /// one sends the window Alt+← / Alt+→, which are its back and forward.
+    fn filer_note_nav(&self) {
+        let text: String = self
+            .filer
+            .wins
+            .iter()
+            .map(|w| format!("{APP_ID}-{} {} {}\n", w.id, u8::from(!w.back.is_empty()), u8::from(!w.forward.is_empty())))
+            .collect();
+        crate::persist::write_text("files-nav", &nav_path(), &text);
     }
 
     /// Note which folders stand open (see `session_path`).
@@ -2791,7 +2854,7 @@ impl App {
             .wins
             .iter()
             .flat_map(|w| w.places.iter())
-            .find(|p| p.path == dir)
+            .find(|p| p.path == dir && p.name != UP)
             .map_or_else(|| file_name(dir), |p| p.name.clone());
         let words = if says_move {
             tr("Moving {what} to {where}")
@@ -3484,22 +3547,22 @@ impl App {
         }
         let mut hits = Hits::default();
 
-        // ── the head: back, forward, the way here ──
+        // ── the head: the way here ──
+        // (No back and forward buttons — Max, 2026-10-14: nobody presses
+        // forward, and back is `..` at the top of the places; both stay on
+        // the keys and the mouse's side buttons. Only where the places are
+        // left out — a narrow window — does `..` stand here instead.)
         let mid = HEAD_H / 2.0;
-        hits.back = Rect::new(PAD, mid - 14.0, 28.0, 28.0);
-        hits.forward = Rect::new(PAD + 32.0, mid - 14.0, 28.0, 28.0);
-        for (spot, r, glyph, live) in [
-            (Spot::Back, hits.back, "‹", !win.back.is_empty()),
-            (Spot::Forward, hits.forward, "›", !win.forward.is_empty()),
-        ] {
-            if live && win.hover == spot {
-                scene.rects.push(rect(r, 14.0, WASH_HOVER));
+        let mut crumbs_left = PAD + 8.0;
+        if layout.side_w == 0.0 && win.dir.parent().is_some() {
+            hits.up = Rect::new(PAD, mid - 14.0, 34.0, 28.0);
+            if win.hover == Spot::Up {
+                scene.rects.push(rect(hits.up, 10.0, WASH_HOVER));
             }
-            scene.labels.push(Label {
-                font_px: 18.0,
-                line_px: 22.0,
-                ..label(glyph, (r.x + r.w / 2.0, mid - 12.0), r.w, true, !live)
-            });
+            scene
+                .labels
+                .push(label(UP, (hits.up.x + hits.up.w / 2.0, mid - TEXT_LINE / 2.0), hits.up.w, true, false));
+            crumbs_left = PAD + 48.0;
         }
         // Icons or a list: the button shows the one it turns to.
         hits.view = Rect::new(w - PAD - 28.0, mid - 14.0, 28.0, 28.0);
@@ -3601,7 +3664,7 @@ impl App {
             // (The view's button, the magnifier and the search field stand
             // at the head's right end.)
             let taken = 68.0 + if win.find.is_some() { FIND_W + 8.0 } else { 0.0 };
-            let (left, room) = (PAD + 76.0, (w - PAD - 76.0 - PAD - taken).max(40.0));
+            let (left, room) = (crumbs_left, (w - crumbs_left - PAD - taken).max(40.0));
             // The steps that fit, counted from the folder shown: the first
             // ones give way when the window is narrow.
             let mut from = steps.len().saturating_sub(1);
@@ -3658,7 +3721,9 @@ impl App {
                     y += ROW_GAP;
                 }
                 let row = Rect::new(6.0, y, layout.side_w - 12.0, ROW_H);
-                if win.dir == place.path || win.drop_place == Some(n) {
+                // (`..` is never "here".)
+                let up = place.name == UP;
+                if (win.dir == place.path && !up) || win.drop_place == Some(n) {
                     scene.rects.push(rect(row, 8.0, WASH_HERE));
                 } else if win.hover == Spot::Place(n) {
                     scene.rects.push(rect(row, 8.0, WASH_HOVER));
@@ -4009,8 +4074,7 @@ impl App {
                 .items
                 .get(i)
                 .is_some_and(|it| matches!(it.kind, Kind::Folder | Kind::Volume)),
-            Spot::Back => !win.back.is_empty(),
-            Spot::Forward => !win.forward.is_empty(),
+            Spot::Up => win.dir.parent().is_some(),
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
             Spot::Place(_) | Spot::View | Spot::Find | Spot::Col(_) => true,
         };
@@ -4951,18 +5015,18 @@ impl App {
         let layout = win.layout(icon_scale);
         win.hover = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
         match win.hover {
-            Spot::Back => self.filer_back(id),
-            Spot::Forward => self.filer_forward(id),
+            Spot::Up => self.filer_up(id),
             Spot::Crumb(n) => {
                 if let Some((_, path)) = win.hits.crumbs.get(n).cloned() {
                     self.filer_go(id, path);
                 }
             }
-            Spot::Place(n) => {
-                if let Some(path) = win.places.get(n).map(|p| p.path.clone()) {
-                    self.filer_go(id, path);
-                }
-            }
+            Spot::Place(n) => match win.places.get(n).map(|p| (p.name == UP, p.path.clone())) {
+                // (`..`: out of this folder, which is left selected.)
+                Some((true, _)) => self.filer_up(id),
+                Some((false, path)) => self.filer_go(id, path),
+                None => {}
+            },
             Spot::Item(i) => {
                 let Some(path) = win.items.get(i).map(|it| it.path.clone()) else {
                     return;
@@ -5530,6 +5594,7 @@ impl WindowHandler for App {
 
 smithay_client_toolkit::delegate_xdg_shell!(App);
 smithay_client_toolkit::delegate_xdg_window!(App);
+wayland_client::delegate_noop!(App: ignore XdgToplevelTagManagerV1);
 
 #[cfg(test)]
 mod tests {
@@ -5607,6 +5672,26 @@ mod tests {
         assert_eq!(user_dir(text, home, "MUSIC"), None);
         assert_eq!(user_dir(text, home, "VIDEOS"), Some(PathBuf::from("/data/Videos")));
         assert_eq!(user_dir(text, home, "PICTURES"), None);
+    }
+
+    #[test]
+    fn two_dots_lead_to_the_folder_this_one_is_in() {
+        let home = Place {
+            name: "Home".to_owned(),
+            path: PathBuf::from("/home/max"),
+            icon: String::new(),
+            gap: false,
+            start: true,
+        };
+        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"));
+        assert_eq!((places[0].name.as_str(), places[0].path.as_path()), (UP, Path::new("/home/max/Documents")));
+        // Home follows, a little apart; the way here still starts at Home.
+        assert!(places[1].gap && places[1].path == home.path);
+        let names: Vec<String> = crumbs(Path::new("/home/max/Documents/Work"), &places).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["Home", "Documents", "Work"]);
+        // At the root there is nowhere up: no `..`, and Home is not set apart.
+        let at_root = with_up(std::slice::from_ref(&home), Path::new("/"));
+        assert_eq!(at_root, [home]);
     }
 
     #[test]

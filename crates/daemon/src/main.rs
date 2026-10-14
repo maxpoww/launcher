@@ -688,6 +688,7 @@ fn main() -> anyhow::Result<()> {
         filer: filer::Filer::new(
             smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok(),
             fractional,
+            globals.bind(&qh, 1..=1, ()).ok(),
         ),
         desktop_icons,
         desktop_frame_pending: false,
