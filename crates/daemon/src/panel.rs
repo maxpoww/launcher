@@ -496,6 +496,12 @@ impl Pill {
 // ---- An open setting's choices ------------------------------------------
 /// Where an open setting's controls start under its title and subtitle.
 const CONTENT_TOP: f32 = 114.0;
+/// A wall of pictures: where it starts (under a title and subtitle drawn
+/// higher than a setting's), how far under it its hint is, and how far the
+/// box's edge is under that.
+const WALL_TOP: f32 = 92.0;
+const WALL_HINT_GAP: f32 = 8.0;
+const WALL_FOOT: f32 = 26.0;
 /// A choice pill: its height, the gap to the next, and between rows.
 const CHIP_H: f32 = 40.0;
 const CHIP_GAP: f32 = 12.0;
@@ -1471,7 +1477,11 @@ impl Panel {
                 return Some(out);
             };
             out.subtitle = view.subtitle.clone();
-            let mut y = top;
+            // A WALL of pictures sits tight under its title and over its
+            // hint (Max, 2026-10-14: "para mí hay mucho aire abajo y arriba
+            // de las imágenes").
+            let wall = view.groups.iter().any(|g| g.tiles && !g.choices.is_empty());
+            let mut y = if wall { WALL_TOP * s } else { top };
             for (gi, g) in view.groups.iter().enumerate() {
                 if let Some(c) = &g.caption {
                     y = self.caption(&mut out, y, c.clone());
@@ -1488,7 +1498,7 @@ impl Panel {
                     .collect();
                 y = self.flow(&mut out, y, g.width, chips);
             }
-            out.foot_y = (y - (GROUP_GAP - 12.0) * s).max(top);
+            out.foot_y = if wall { y - (GROUP_GAP - WALL_HINT_GAP) * s } else { (y - (GROUP_GAP - 12.0) * s).max(top) };
             return Some(out);
         }
         if !is_display_setting(label) {
@@ -2211,9 +2221,10 @@ impl Panel {
             });
         };
         let cx = fw / 2.0;
-        let mut y = 30.0 * s;
+        let wall = self.open_has_tiles() && self.control.is_some();
+        let mut y = if wall { 20.0 } else { 30.0 } * s;
         text(out, crate::i18n::tr(p.label).to_owned(), cx, y, 30.0, 36.0, 1.0);
-        y += 44.0 * s;
+        y += if wall { 40.0 } else { 44.0 } * s;
         if let Some(content) = self.open_content(p.label) {
             // A real setting: its choices as floating pills, the one in use
             // lit and ringed (the settings boxes' preset idiom), each on its
@@ -3109,8 +3120,8 @@ impl App {
             // (Max, 2026-10-14: "hay mucho real estate que estamos
             // desperdiciando en la caja, sobre todo abajo" — it ran to the
             // dock whatever was in it). Not laid out yet: as it last was.
-            let wall = self.quick.open_height().filter(|h| *h > CONTENT_TOP * s + 1.0).or(self.quick.wall_h);
-            let h = wall.map_or(room, |h| (h + QUICK_FOOT * s).min(room)).max(QUICK_MIN_H * s);
+            let wall = self.quick.open_height().filter(|h| *h > WALL_TOP * s + 1.0).or(self.quick.wall_h);
+            let h = wall.map_or(room, |h| (h + WALL_FOOT * s).min(room)).max(QUICK_MIN_H * s);
             let cx = g.card.x + g.card.w / 2.0;
             return Rect::new(cx - w / 2.0, top + (room - h) / 2.0, w, h);
         }
