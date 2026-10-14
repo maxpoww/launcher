@@ -796,7 +796,10 @@ The big daemon files are cohesive but long — go straight to the function:
   through `Layout::cell_at`, the grid's `cell_pos`); what is in hand leaves its place
   (`in_hand`), the gap (`Win::gap`, counted among what is not in hand) goes to the side of a
   thing the pointer is on (`gap_at`, `Layout::slot_at`), and a FOLDER'S MIDDLE holds still to be
-  dropped into (`filer_drag_over`). Let go in the gap, it STAYS there: the folder is ARRANGED BY
+  dropped into (`filer_drag_over`). What is let go LANDS (Max, 2026-10-14: it went back to its place and came out again): things of the
+  SAME folder are reordered AT ONCE, on the loop, nothing read (`settled`, in `filer_dnd_drop`);
+  for what comes from elsewhere the order is saved BEFORE it arrives and the gap stays open until
+  the listing has it (`Win::gap_keep`, `filer_bring`). Let go in the gap, it STAYS there: the folder is ARRANGED BY
   HAND from then on (`Orders`, `files-order.json`: dir → names in order; `arranged` at every
   listing, newcomers last; a rename keeps its place) — also how things of one window are put in
   order by dragging. The ground's menu gets "Clean up" = by name again. Never in the bin. Rig:

@@ -571,6 +571,39 @@ pub(crate) fn parted(rank: usize, gap: usize, n: usize) -> usize {
     }
 }
 
+/// Things of this very folder let go in the room made for them: `items`
+/// with those `carried` (paths) standing at `gap` among the rest, and each
+/// thing's display slot — the rest keep theirs (they are already where the
+/// room put them), the carried take their new places at once. So what is
+/// let go LANDS: nothing goes back to where it was first.
+pub(crate) fn settled(items: Vec<Item>, slide: &[f32], carried: &[String], gap: usize) -> (Vec<Item>, Vec<f32>) {
+    let (mut rest, mut moved) = (Vec::new(), Vec::new());
+    for (i, item) in items.into_iter().enumerate() {
+        if carried.contains(&item.path) {
+            moved.push(item);
+        } else {
+            rest.push((item, slide.get(i).copied().unwrap_or(i as f32)));
+        }
+    }
+    let gap = gap.min(rest.len());
+    let after = rest.split_off(gap);
+    let mut out = Vec::with_capacity(rest.len() + moved.len() + after.len());
+    let mut at = Vec::with_capacity(out.capacity());
+    for (item, slot) in rest {
+        out.push(item);
+        at.push(slot);
+    }
+    for item in moved {
+        at.push(out.len() as f32);
+        out.push(item);
+    }
+    for (item, slot) in after {
+        out.push(item);
+        at.push(slot);
+    }
+    (out, at)
+}
+
 /// Where the gap goes for a pointer over display slot `d`, `fx` of the way
 /// across it: before or after the thing standing there, by which half of
 /// it the pointer is on (the grid's rule for an icon coming in); over the
@@ -1325,6 +1358,9 @@ struct Win {
     /// The gap a hovering drag has open, counted among the things not in
     /// hand: where what it carries would land.
     gap: Option<usize>,
+    /// Something was let go in the gap and is on its way (being copied,
+    /// listed): the gap stays open for it until it is there.
+    gap_keep: bool,
     press: Option<Press>,
     /// A rubber band being drawn: where it began and where the pointer is,
     /// in the field's unscrolled coordinates, and what was selected before
@@ -1337,9 +1373,9 @@ struct Win {
 impl Win {
     /// The room made is where what comes will stay: the names not in hand
     /// (`carried`), in order, before and after the gap — for a drop into
-    /// the folder shown. The gap is closed.
+    /// the folder shown. (The gap stays open: what comes arrives into it.)
     fn arrangement(&mut self, dir: &Path, carried: &[String]) -> Option<(Vec<String>, Vec<String>)> {
-        let g = self.gap.take().filter(|_| dir == self.dir)?;
+        let g = self.gap.filter(|_| dir == self.dir)?;
         let names: Vec<String> = self
             .items
             .iter()
@@ -1938,6 +1974,7 @@ impl App {
             zoom_run: 0.0,
             slide: Vec::new(),
             gap: None,
+            gap_keep: false,
             press: None,
             band: None,
             drop_on: None,
@@ -2240,6 +2277,11 @@ impl App {
         let again = std::mem::take(&mut win.again);
         let cursor_path = win.cursor.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
         let anchor_path = win.anchor.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
+        // (What the gap was kept open for has arrived: it stands in it.)
+        if win.gap_keep && listed.as_ref().is_ok_and(|items| items.len() != win.all.len()) {
+            win.gap = None;
+            win.gap_keep = false;
+        }
         match listed {
             Ok(items) => {
                 win.all = items;
@@ -4432,6 +4474,12 @@ impl App {
     /// long while yet): nothing is in hand any more — every thing is drawn
     /// where it is, so a click lands on what is seen.
     pub(crate) fn filer_drag_dropped(&mut self) {
+        // (Let go over one of our own windows: that window's drop settles
+        // it — marked here first, the things would be drawn back in their
+        // old places for a frame.)
+        if self.filer.dnd.is_some() {
+            return;
+        }
         let Some(drag) = self.filer.drag.as_mut() else {
             return;
         };
@@ -4489,7 +4537,10 @@ impl App {
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
             if let Some(w) = self.filer.win_mut(id) {
-                w.gap = None;
+                // (Not the room something is still arriving into.)
+                if !w.gap_keep {
+                    w.gap = None;
+                }
                 w.edge = 0.0;
             }
             self.filer_request_draw(id);
@@ -4686,6 +4737,7 @@ impl App {
         };
         let id = dnd.win;
         let carried = self.filer.drag_paths();
+        let from_here = self.filer.drag.as_ref().is_some_and(|d| d.win == id);
         let Some(win) = self.filer.win_mut(id) else {
             dnd.offer.destroy();
             return;
@@ -4697,6 +4749,44 @@ impl App {
                 .and_then(|i| win.items.get(i))
                 .map_or_else(|| win.dir.clone(), |it| PathBuf::from(&it.path)),
         };
+        // THINGS OF THIS FOLDER put in another place of it (Max, 2026-10-14:
+        // "cuando suelto un icono en el espacio que creó otro, no cae ahí:
+        // vuelve a su lugar y vuelve a salir"): nothing is moved on the
+        // disk, so nothing is read or awaited — they land in the room made,
+        // now, and the folder's order is that from here on.
+        let reordered = from_here
+            && dir == win.dir
+            && !carried.is_empty()
+            && carried.iter().all(|p| Path::new(p).parent() == Some(dir.as_path()));
+        // (The gap is taken only for this: another drop still needs it.)
+        let gap = if reordered { win.gap.take() } else { None };
+        if let Some(gap) = gap {
+            let names = |items: &[Item]| -> Vec<String> { items.iter().map(|it| file_name(Path::new(&it.path))).collect() };
+            let was = names(&win.items);
+            let (items, slide) = settled(std::mem::take(&mut win.items), &win.slide, &carried, gap);
+            win.items = items;
+            win.slide = slide;
+            win.all = win.items.clone();
+            win.names.1.clear();
+            win.cursor = win.items.iter().position(|it| it.path == carried[0]);
+            win.anchor = win.cursor;
+            win.edge = 0.0;
+            win.drop_on = None;
+            let order = names(&win.items);
+            info!("files: {} thing(s) put in another place of {}", carried.len(), dir.display());
+            // (Let go where it already was: the folder is not "arranged by
+            // hand" for that.)
+            if order != was {
+                self.filer.orders.set(&dir, Some(order));
+            }
+            // In hand no more: drawn where it landed.
+            if let Some(drag) = self.filer.drag.as_mut() {
+                drag.dropped = true;
+            }
+            dnd.offer.finish(); // → the source's `dnd_finished` → `filer_drag_end`
+            self.filer_request_draw(id);
+            return;
+        }
         // Let go in the room made for it: that is where it stays — the
         // folder is arranged by hand from now on (its names, in order, with
         // the place what comes goes to).
@@ -4779,6 +4869,20 @@ impl App {
         }
         let into = dir.clone();
         let mut then = Some(then);
+        // What comes stands where it was let go — said BEFORE it arrives, so
+        // the folder's own watch lists it into the room made (not at the
+        // end first, to jump there after); the room stays open meanwhile.
+        let order_was = self.filer.orders.of(&dir).cloned();
+        if let Some((before, after)) = arrange.as_ref() {
+            let coming: Vec<String> = paths.iter().map(|p| file_name(p)).collect();
+            let mut order: Vec<String> = before.iter().filter(|n| !coming.contains(n)).cloned().collect();
+            order.extend(coming.iter().cloned());
+            order.extend(after.iter().filter(|n| !coming.contains(n)).cloned());
+            self.filer.orders.set(&dir, Some(order));
+            if let Some(win) = self.filer.win_mut(id) {
+                win.gap_keep = win.gap.is_some();
+            }
+        }
         // (Across disks a drop is a copy: what was dragged stays where it was.)
         let sources = paths.clone();
         let task = self.filer_copy_task(&paths, &dir, may_move, false);
@@ -4807,22 +4911,23 @@ impl App {
                 if let Some(then) = then.take() {
                     then();
                 }
-                // What came stands where it was let go.
-                if let Some((before, after)) = arrange.clone().filter(|_| !brought.is_empty()) {
-                    let came: Vec<String> = brought.iter().map(|p| file_name(p)).collect();
-                    let mut order: Vec<String> = before.into_iter().filter(|n| !came.contains(n)).collect();
-                    order.extend(came.iter().cloned());
-                    order.extend(after.into_iter().filter(|n| !came.contains(n)));
-                    // (Let go where it already was — a hand that only
-                    // twitched: the folder is not "arranged by hand" for it.)
-                    let as_shown: Option<Vec<String>> = app
-                        .filer
-                        .win(id)
-                        .filter(|w| w.dir == dir)
-                        .map(|w| w.items.iter().map(|it| file_name(Path::new(&it.path))).collect());
-                    if as_shown.as_ref() != Some(&order) {
+                // What came stands where it was let go — under the names it
+                // came to have (one already taken got its number); nothing
+                // came: the folder's order is what it was.
+                if let Some((before, after)) = arrange.clone() {
+                    if brought.is_empty() {
+                        app.filer.orders.set(&dir, order_was.clone());
+                    } else {
+                        let came: Vec<String> = brought.iter().map(|p| file_name(p)).collect();
+                        let mut order: Vec<String> = before.into_iter().filter(|n| !came.contains(n)).collect();
+                        order.extend(came.iter().cloned());
+                        order.extend(after.into_iter().filter(|n| !came.contains(n)));
                         app.filer.orders.set(&dir, Some(order));
                     }
+                }
+                if let Some(win) = app.filer.win_mut(id) {
+                    win.gap = None;
+                    win.gap_keep = false;
                 }
                 if let Some(win) = app.filer.win_mut(id).filter(|w| w.dir == dir) {
                     win.selected = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -5687,6 +5792,22 @@ mod tests {
         }
         // Three in hand: three slots stand open.
         assert_eq!((0..5).map(|r| parted(r, 2, 3)).collect::<Vec<_>>(), [0, 1, 5, 6, 7]);
+    }
+
+    #[test]
+    fn things_let_go_in_the_room_made_land_there_at_once() {
+        let items: Vec<Item> = ["a", "b", "c", "d", "e"].into_iter().map(item).collect();
+        // "b" in hand: the rest closed up and parted at 3 (a c d _ e).
+        let slide = [0.0, 1.0, 1.0, 2.0, 4.0];
+        let (now, at) = settled(items.clone(), &slide, &["/x/b".to_owned()], 3);
+        let names: Vec<&str> = now.iter().map(|it| it.name.as_str()).collect();
+        assert_eq!(names, ["a", "c", "d", "b", "e"]);
+        // The rest stay where the room put them; what was carried is in it.
+        assert_eq!(at, [0.0, 1.0, 2.0, 3.0, 4.0]);
+        // A group keeps its own order; a gap past the end is the end.
+        let (now, _) = settled(items, &slide, &["/x/d".to_owned(), "/x/a".to_owned()], 99);
+        let names: Vec<&str> = now.iter().map(|it| it.name.as_str()).collect();
+        assert_eq!(names, ["b", "c", "e", "a", "d"]);
     }
 
     #[test]
