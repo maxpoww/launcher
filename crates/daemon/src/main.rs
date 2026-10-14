@@ -6004,9 +6004,10 @@ impl App {
             if w == 0 || h == 0 {
                 return;
             }
-            let zoom = self.files_zoom();
+            // (The panel's zoom is in how big a logical pixel is drawn; the
+            // field's is drawn inside it.)
+            let zoom = self.files_panel_zoom();
             if let Some(renderer) = self.filer_renderer(id) {
-                // (Its zoom is in how big a logical pixel is drawn.)
                 renderer.set_scale(scale * zoom);
                 renderer.resize(physical(w, scale), physical(h, scale));
             }

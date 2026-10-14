@@ -21,8 +21,11 @@
 //!   multiplies the scale its members are drawn at.
 //!
 //! - **A file manager window** (`filer.rs`) is a window with the keyboard:
-//!   the keys come to it, and its zoom is of EVERYTHING in it — it is laid
-//!   out as a window `1/zoom` the size and drawn that much bigger.
+//!   the keys come to it, and they zoom WHAT THE POINTER IS ON (Max,
+//!   2026-10-14): its field — the things — or its panel — the places and the
+//!   head. The panel's zoom is the window's (laid out `1/zoom` the size and
+//!   drawn that much bigger); the field's is laid out and drawn inside that
+//!   at its own (`filer::Layout::zoom`).
 //!
 //! All are the owner's standing choice (`settings.json`).
 
@@ -105,16 +108,22 @@ impl App {
         factor(self.settings.files_zoom)
     }
 
+    /// The same for a file manager window's panel: its places and its head.
+    pub(crate) fn files_panel_zoom(&self) -> f32 {
+        factor(self.settings.files_panel_zoom)
+    }
+
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
     /// to a number (`how`). What was done.
     pub(crate) fn zoom(&mut self, what: &str, how: &str) -> String {
-        const USAGE: &str = "zoom bar|desktop|stack|fast|files in|out|reset|<n>";
+        const USAGE: &str = "zoom bar|desktop|stack|fast|files|files-panel in|out|reset|<n>";
         let now = match what {
             "bar" => self.bar_zoom(),
             "desktop" => self.desktop_zoom(),
             "stack" => self.stack_zoom(),
             "fast" => self.fast_zoom(),
             "files" => self.files_zoom(),
+            "files-panel" => self.files_panel_zoom(),
             _ => return USAGE.to_owned(),
         };
         let Some(to) = stepped(now, how) else {
@@ -141,8 +150,12 @@ impl App {
             // through the compositor, not through its own keyboard).
             self.fast_touch();
             self.schedule_frame();
-        } else if what == "files" {
-            self.settings.files_zoom = to;
+        } else if what == "files" || what == "files-panel" {
+            if what == "files" {
+                self.settings.files_zoom = to;
+            } else {
+                self.settings.files_panel_zoom = to;
+            }
             self.settings.save();
             self.filer_zoomed();
         } else if what == "stack" {

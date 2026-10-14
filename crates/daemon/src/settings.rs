@@ -54,8 +54,11 @@ pub(crate) struct Settings {
     /// The same for FAST LAUNCH and the quick controls (their card and the
     /// box a setting opens in): one zoom for both.
     pub(crate) fast_zoom: f32,
-    /// The same for the file manager's windows: everything in them.
+    /// The same for the file manager's windows: their field (the things).
     pub(crate) files_zoom: f32,
+    /// …and their PANEL — the places down the side and the head — apart
+    /// (Max, 2026-10-14: "when I'm hovering it I grow that").
+    pub(crate) files_panel_zoom: f32,
     /// The file manager's windows show a folder as a LIST (name, size,
     /// date) and not as icons.
     pub(crate) files_list: bool,

@@ -1277,9 +1277,14 @@ struct Win {
     window: Window,
     id: u32,
     size: (u32, u32),
-    /// The owner's zoom of the file windows (`App::files_zoom`), kept here
-    /// for the layout.
+    /// The owner's zoom of the file windows' field (`App::files_zoom`),
+    /// kept here for the layout…
     zoom: f32,
+    /// …and of their panel, the places and the head (`App::files_panel_zoom`):
+    /// the window is laid out `1/panel` its size and drawn that much bigger.
+    panel: f32,
+    /// The pointer is over the field (not the panel): what Ctrl +/−/0 zoom.
+    over_field: bool,
     /// Shown as a list (`settings.files_list`, one choice for every window).
     list: bool,
     /// What the things are ordered by here, biggest or newest first when
@@ -1450,22 +1455,41 @@ impl Win {
     }
 
     fn layout(&self, icon_scale: f32) -> Layout {
-        Layout::of(self.virt(), icon_scale, self.list, self.zoom)
+        // (The field inside a window already drawn at the panel's zoom.)
+        Layout::of(self.virt(), icon_scale, self.list, self.zoom / self.panel)
     }
 
-    /// The window's size (the zoom is the field's alone: `Layout::zoom`).
+    /// The size the window is laid out in: its own, `panel` times smaller —
+    /// the renderer draws a logical pixel that much bigger. (The field has a
+    /// zoom of its own inside it: `Layout::zoom`.)
     fn virt(&self) -> (f32, f32) {
-        (self.size.0 as f32, self.size.1 as f32)
+        (self.size.0 as f32 / self.panel, self.size.1 as f32 / self.panel)
     }
 
-    /// Where the pointer is, for what it is over: in the field's own space
-    /// over the field (`Layout::inward`) — except while a menu or a box is
-    /// up, which stand in the window's own space.
+    /// Where the pointer is, for what it is over: brought into the laid-out
+    /// window, then into the field's own space over the field
+    /// (`Layout::inward`) — except while a menu or a box is up, which stand
+    /// in the window's.
     fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
+        let at = (raw.0 / self.panel, raw.1 / self.panel);
         if self.menu.is_some() || self.props.is_some() {
-            return raw;
+            return at;
         }
-        self.layout(icon_scale).inward(raw)
+        self.layout(icon_scale).inward(at)
+    }
+
+    /// Whether a point the pointer gave is over the field.
+    fn on_field(&self, raw: (f32, f32), icon_scale: f32) -> bool {
+        self.layout(icon_scale).shown_body().contains((raw.0 / self.panel, raw.1 / self.panel))
+    }
+
+    /// What Ctrl +/−/0 zoom now: the field, or the panel under the pointer.
+    fn zoom_target(&self) -> &'static str {
+        if self.ptr.is_none() || self.over_field {
+            "files"
+        } else {
+            "files-panel"
+        }
     }
 
     fn layer_of(&self, key: &str) -> Option<u32> {
@@ -2086,6 +2110,8 @@ impl App {
             id,
             size: (0, 0),
             zoom: self.files_zoom(),
+            panel: self.files_panel_zoom(),
+            over_field: false,
             list: self.settings.files_list,
             sort: (SortKey::Name, false),
             meta: HashMap::new(),
@@ -3339,7 +3365,7 @@ impl App {
         if let Some(fs) = &win.fscale {
             fs.set_logical_size(width, height);
         }
-        let drawn = scale;
+        let drawn = scale * win.panel;
         if let Some(renderer) = win.renderer.as_mut() {
             renderer.set_scale(drawn);
             renderer.resize(pw, ph);
@@ -3455,11 +3481,16 @@ impl App {
     /// The owner's zoom of the file windows changed: every window's field is
     /// laid out and drawn anew at it (the places and the head keep theirs).
     pub(crate) fn filer_zoomed(&mut self) {
-        let zoom = self.files_zoom();
+        let (zoom, panel) = (self.files_zoom(), self.files_panel_zoom());
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
+            let scale = self.surface_scale(SurfaceKind::Files(id));
             if let Some(win) = self.filer.win_mut(id) {
                 win.zoom = zoom;
+                win.panel = panel;
+                if let Some(renderer) = win.renderer.as_mut() {
+                    renderer.set_scale(scale * panel);
+                }
                 // What is up was placed for the other size.
                 win.menu = None;
                 win.menu_path = None;
@@ -4323,7 +4354,9 @@ impl App {
                 self.enter_serial = serial;
                 self.cursor_now = None;
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.ptr = Some(win.point((surface_x as f32, surface_y as f32), icon_scale));
+                    let raw = (surface_x as f32, surface_y as f32);
+                    win.ptr = Some(win.point(raw, icon_scale));
+                    win.over_field = win.on_field(raw, icon_scale);
                 }
                 self.filer_hover(id);
             }
@@ -4341,7 +4374,9 @@ impl App {
                 surface_x, surface_y, ..
             } => {
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.ptr = Some(win.point((surface_x as f32, surface_y as f32), icon_scale));
+                    let raw = (surface_x as f32, surface_y as f32);
+                    win.ptr = Some(win.point(raw, icon_scale));
+                    win.over_field = win.on_field(raw, icon_scale);
                 }
                 if !self.filer_travel(id) {
                     self.filer_hover(id);
@@ -4374,7 +4409,8 @@ impl App {
                     if steps != 0.0 {
                         win.zoom_run -= steps * 15.0;
                         // (Away from oneself is bigger.)
-                        self.zoom("files", if steps < 0.0 { "in" } else { "out" });
+                        let what = self.filer.win(id).map_or("files", Win::zoom_target);
+                        self.zoom(what, if steps < 0.0 { "in" } else { "out" });
                     }
                     return;
                 }
@@ -4821,7 +4857,7 @@ impl App {
             return;
         };
         let layout = win.layout(icon_scale);
-        let at = layout.inward((x, y));
+        let at = layout.inward((x / win.panel, y / win.panel));
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
         // In the field: the things not in hand, and which of them — if any
@@ -5442,14 +5478,18 @@ impl App {
             }
             Keysym::_1 if ctrl => self.filer_set_list(false),
             Keysym::_2 if ctrl => self.filer_set_list(true),
+            // (What the pointer is on: the field or the panel.)
             Keysym::plus | Keysym::equal | Keysym::KP_Add if ctrl => {
-                self.zoom("files", "in");
+                let what = win.zoom_target();
+                self.zoom(what, "in");
             }
             Keysym::minus | Keysym::KP_Subtract if ctrl => {
-                self.zoom("files", "out");
+                let what = win.zoom_target();
+                self.zoom(what, "out");
             }
             Keysym::_0 | Keysym::KP_0 if ctrl => {
-                self.zoom("files", "reset");
+                let what = win.zoom_target();
+                self.zoom(what, "reset");
             }
             Keysym::F2 => self.filer_act(id, Action::Rename, None, (0.0, 0.0)),
             Keysym::Delete => self.filer_act(id, Action::MoveToBin, None, (0.0, 0.0)),
@@ -5639,6 +5679,7 @@ impl App {
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),
+            "panel" => return self.zoom("files-panel", rest),
             "where" => {
                 // `where item <n>|place <n>|crumb <n>|up|view|find|field`: the
                 // middle of that part, in the window's own pixels (what a
@@ -5673,7 +5714,7 @@ impl App {
                 return match at {
                     Some(p) => {
                         let (x, y) = win.layout(self.icon_scale()).outward(p);
-                        format!("where {x:.0} {y:.0}")
+                        format!("where {:.0} {:.0}", x * win.panel, y * win.panel)
                     }
                     None => format!("where nothing: {rest}"),
                 };
@@ -5727,7 +5768,10 @@ impl App {
                     [x, y] => {
                         // (A point of the field, as the other verbs take.)
                         let icon_scale = self.icon_scale();
-                        let (x, y) = self.filer.win(id).map_or((x, y), |w| w.layout(icon_scale).outward((x, y)));
+                        let (x, y) = self.filer.win(id).map_or((x, y), |w| {
+                            let (x, y) = w.layout(icon_scale).outward((x, y));
+                            (x * w.panel, y * w.panel)
+                        });
                         self.filer_drag_over(id, x, y);
                     }
                     _ => {
