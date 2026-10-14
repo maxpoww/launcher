@@ -83,7 +83,7 @@ const SIDE_W: f32 = 176.0;
 /// and the same air to each side"); the icon is `PLACE_ICON` times the
 /// panel's zoom — which is of the places' ICONS alone, not their words
 /// (Max: "zoom more on the panel icons (not the text)").
-const PLACE_ICON: f32 = 25.0;
+const PLACE_ICON: f32 = 28.0;
 const RAIL_AIR: f32 = 10.0;
 /// How far the words of an open place reach past the rail.
 const SIDE_WORDS: f32 = 140.0;
@@ -97,11 +97,11 @@ const ROW_GAP: f32 = 12.0;
 const PAD: f32 = 10.0;
 /// A cell is the desktop's with a second line of name: here a name is read
 /// to tell files apart, and one line cuts most of them.
-const CELL_H: f32 = crate::content::GRID_CELL_H - 2.0 + LABEL_LINE_PX;
+const CELL_H: f32 = crate::content::GRID_CELL_H - 8.0 + LABEL_LINE_PX;
 /// A cell's width: narrower than the Apps grid's (Max, 2026-10-14: "make the
 /// icons in the content be closer to each other") — the things stand nearer,
 /// more to a row; a long name takes its second line sooner.
-const FILES_CELL_W: f32 = 90.0;
+const FILES_CELL_W: f32 = 80.0;
 const LABEL_GAP: f32 = 5.0;
 /// Text in the head and the places.
 const TEXT_PX: f32 = 13.0;
@@ -4037,7 +4037,10 @@ impl App {
             ..Default::default()
         };
         let view = layout.in_view(win.scroll, win.items.len());
-        let label_w = layout.cw - 12.0;
+        // (A name has the whole column's width, not only its cell's: the
+        // cells are narrow — Max wants the things close — and a word should
+        // not break.)
+        let label_w = (layout.pitch - 4.0).max(layout.cw - 12.0);
         if win.names.0 != icon_scale || win.names.1.len() != win.items.len() {
             win.names = (icon_scale, vec![None; win.items.len()]);
         }
@@ -5973,7 +5976,7 @@ mod tests {
     fn cells_flow_row_by_row_and_share_the_spare_width() {
         let l = Layout::new((920, 600), 1.0);
         assert_eq!(l.side_w, SIDE_W);
-        assert_eq!(l.cols, 8); // (920 − 176 − 20) / 90 = 8.04
+        assert_eq!(l.cols, 9); // (920 − 176 − 20) / 80 = 9.05
         let (a, b, next_row) = (l.cell(0), l.cell(1), l.cell(l.cols));
         assert!((b.x - a.x - l.pitch).abs() < 0.01 && l.pitch > l.cw);
         assert!((next_row.x - a.x).abs() < 0.01 && (next_row.y - a.y - l.ch).abs() < 0.01);
@@ -5987,7 +5990,7 @@ mod tests {
     fn a_narrow_window_has_no_places_and_never_zero_columns() {
         let l = Layout::new((400, 300), 1.0);
         assert_eq!(l.side_w, 0.0);
-        assert_eq!(l.cols, 4); // (400 − 20) / 90 = 4.2
+        assert_eq!(l.cols, 4); // (400 − 20) / 80 = 4.75
         assert_eq!(Layout::new((60, 60), 2.0).cols, 1);
     }
 
