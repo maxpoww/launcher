@@ -68,6 +68,9 @@ const MIN_STEP: f64 = 32.0;
 const NEAR: i32 = 12;
 /// A parked window brought this far towards the centre is out.
 const DRAG_OUT: i32 = 170;
+/// How near the centre a called window has to stand to count as still
+/// there (it can settle a pixel or two off: odd sizes, the app's size steps).
+const CENTRED_WITHIN: i32 = 3;
 /// How often a parked window in hand is looked at.
 const DRAG_POLL: Duration = Duration::from_millis(40);
 /// A window moved by scroll has no "put down" of its own: still for this long
@@ -89,6 +92,13 @@ struct Parked {
     home: Place,
     /// Out of the column for now — called, or dragged out — its place kept.
     out: bool,
+    /// Out by the pill's call and not moved since: "where it was" is the
+    /// column, so the next right-click on it, centred, parks it again. Moved
+    /// by hand since, where it was is that spot, and the pill's ordinary
+    /// centre ↔ back takes over; only the gesture parks it then (Max,
+    /// 2026-10-14: "para enviarla a la columna tiene que ser con el gesto").
+    #[serde(default)]
+    called: bool,
 }
 
 /// A parked window in hand.
@@ -340,7 +350,7 @@ impl App {
             h: f64::from(s.h),
         };
         let ws = s.workspace;
-        let slot = self.side.place(ws, None, Parked { addr: addr.to_owned(), home, out: false });
+        let slot = self.side.place(ws, None, Parked { addr: addr.to_owned(), home, out: false, called: false });
         run_lua(&resize_lua(addr, PARK_W, PARK_H));
         info!(
             "side: {addr} thrown to place {slot} of workspace {ws} (was {}x{} at {},{})",
@@ -393,6 +403,7 @@ impl App {
                     h: f64::from(s.h),
                 };
                 p.out = false;
+                p.called = false;
             }
         }
         if was_out {
@@ -510,7 +521,7 @@ impl App {
                 }
             };
             let want = Some(slot_at_y(s.y, mon));
-            let slot = self.side.place(s.workspace, want, Parked { addr: addr.clone(), home, out: false });
+            let slot = self.side.place(s.workspace, want, Parked { addr: addr.clone(), home, out: false, called: false });
             if !small {
                 lua.push_str(&resize_lua(&addr, PARK_W, PARK_H));
                 if let Some(s) = here.get_mut(&addr) {
@@ -536,26 +547,44 @@ impl App {
         run_lua(&lua);
     }
 
-    /// The pill's right-click on a window of the side's: one in its place is
-    /// CALLED — to the centre, at the size it had, in front, its place kept
-    /// empty; one out is parked again in its place. `false` for any other
-    /// window (the pill's ordinary centre ↔ back then applies).
+    /// The pill's right-click is always "to the centre, and back to where it
+    /// was". Here, the side's part of it: a window in its place is CALLED —
+    /// to the centre, at the size it had, in front, its place kept empty;
+    /// one called and still centred goes back where it was, its place in
+    /// the column. `false` for anything else — a window called and then
+    /// moved by hand, one dragged out, any other window — and the pill's
+    /// ordinary centre ↔ back takes over (`nub_drag.rs::click_move`); only
+    /// the gesture sends a window to the column.
     pub(crate) fn side_click(&mut self, addr: &str) -> bool {
-        let Some((out, home)) = self.side.get(addr).map(|p| (p.out, p.home)) else {
+        let Some((out, called, home)) = self.side.get(addr).map(|p| (p.out, p.called, p.home)) else {
             return false;
         };
+        let Ok(mon) = hypr::focused_monitor() else {
+            return false;
+        };
+        let (ux, uy, uw, uh) = usable(&mon);
         if out {
-            self.side_park(addr);
-            return true;
+            let centred = seen().get(addr).is_some_and(|s| {
+                let cx = (ux + (uw - f64::from(s.w)) / 2.0).round() as i32;
+                let cy = (uy + (uh - f64::from(s.h)) / 2.0).round() as i32;
+                (s.x - cx).abs() <= CENTRED_WITHIN && (s.y - cy).abs() <= CENTRED_WITHIN
+            });
+            if called && centred {
+                self.side_park(addr);
+                return true;
+            }
+            // Moved by hand since it was called: where it was is that spot
+            // now, not the column.
+            if let Some(p) = self.side.get_mut(addr) {
+                p.called = false;
+            }
+            return false;
         }
         self.side_stop_watching(addr);
         if let Some(p) = self.side.get_mut(addr) {
             p.out = true;
+            p.called = true;
         }
-        let Ok(mon) = hypr::focused_monitor() else {
-            return true;
-        };
-        let (ux, uy, uw, uh) = usable(&mon);
         let (w, h) = (home.w.round() as i32, home.h.round() as i32);
         hypr::dispatch(&format!(
             "(function() local a = \"address:{addr}\" \
@@ -637,6 +666,7 @@ impl App {
             return;
         };
         p.out = true;
+        p.called = false;
         let (w, h) = (p.home.w.round() as i32, p.home.h.round() as i32);
         run_lua(&format!("{}{}", resize_lua(addr, w, h), zorder_lua(addr, "top")));
         info!("side: {addr} taken out by hand, back to {w}x{h}, its place kept");
@@ -795,7 +825,7 @@ mod tests {
     }
 
     fn parked(addr: &str) -> Parked {
-        Parked { addr: addr.into(), home: Place { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }, out: false }
+        Parked { addr: addr.into(), home: Place { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }, out: false, called: false }
     }
 
     #[test]
