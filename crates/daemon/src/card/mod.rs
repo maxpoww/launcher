@@ -6441,10 +6441,9 @@ impl App {
                 String::new()
             }
             "lifted" => {
-                self.card_window_lifted(rest);
-                // A parked window taken in hand is watched for leaving the
-                // side (`side.rs`).
-                self.side_drag_began(rest.trim(), false);
+                // A title bar taken in hand: the one way every hand lifts a
+                // window (`nub_drag.rs::window_lifted`).
+                self.window_lifted(rest.trim());
                 String::new()
             }
             "slide" => {

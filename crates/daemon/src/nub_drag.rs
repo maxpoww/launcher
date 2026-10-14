@@ -99,8 +99,8 @@ impl App {
         let relative = rpm.get_relative_pointer(&ptr, &qh, ());
         let _ = self.conn.flush();
         debug!("nub drag: grabbed {addr} at ({start_x},{start_y})");
-        // The window is in hand: its card is away until it is dropped.
-        self.card_window_lifted(&addr);
+        // The window is in hand, as when its title bar is taken.
+        self.window_lifted(&addr);
         self.nub_drag = Some(NubDrag {
             locked,
             relative,
@@ -131,8 +131,8 @@ impl App {
             return;
         }
         nd.last_move = Instant::now();
-        let (x, y) = nd.target();
-        move_window(&nd.addr, x, y);
+        let (rx, ry, fx, fy) = nd.wanted();
+        drag_move(&nd.addr, rx, ry, (fx, fy));
     }
 
     /// End the drag on the second right-click: a start-then-stop that barely
@@ -167,17 +167,14 @@ impl App {
                 }
             }
         } else {
-            let (x, y) = nd.target();
-            move_window(&nd.addr, x, y);
-            // A parked window dragged by the pill: let go far enough out,
-            // else snapped back into its place (`side.rs`).
-            self.side_drag_ended(&nd.addr);
+            let (rx, ry, fx, fy) = nd.wanted();
+            drag_move(&nd.addr, rx, ry, (fx, fy));
         }
         nd.locked.destroy();
         nd.relative.destroy();
         let _ = self.conn.flush();
         debug!("nub drag: dropped {} (travelled {travelled:.0})", nd.addr);
-        self.card_window_placed(&nd.addr);
+        self.window_placed(&nd.addr);
     }
 }
 
@@ -219,11 +216,54 @@ impl App {
 }
 
 impl NubDrag {
-    fn target(&self) -> (i32, i32) {
-        snap_target(
+    /// Where the hand has taken it — the raw position, and the old snap of
+    /// our own for a compositor without `move_snapped`.
+    fn wanted(&self) -> (i32, i32, i32, i32) {
+        let (fx, fy) = snap_target(
             self.start_x, self.start_y, self.win_w, self.win_h, self.acc_x, self.acc_y, self.ux0,
             self.uy0, self.ux1, self.uy1,
+        );
+        (
+            (self.start_x as f64 + self.acc_x).round() as i32,
+            (self.start_y as f64 + self.acc_y).round() as i32,
+            fx,
+            fy,
         )
+    }
+}
+
+/// Move a window the hand is dragging from the pill to (x, y) THROUGH THE
+/// COMPOSITOR'S OWN SNAP — the plugin's `move_snapped`, Hyprland's drag code
+/// itself — so the pill's magnetism is the title bar's: the same reach, the
+/// other windows' edges, the top magnet under the bar, the title bar and the
+/// border counted (Max, 2026-10-14: "it is not the same when i drag a window
+/// from the pill than from the titlebar"; the pill had a 24 px snap of its own,
+/// screen edges only, that tucked the title bar under the top bar). A plugin
+/// too old to have it: the old snap of our own, `fallback`.
+fn drag_move(addr: &str, x: i32, y: i32, fallback: (i32, i32)) {
+    if !hypr::eval_ok(&format!("hl.plugin.waveview.move_snapped(\"{addr}\", {x}, {y})")) {
+        move_window(addr, fallback.0, fallback.1);
+    }
+}
+
+impl App {
+    /// A window was taken in hand — by its title bar (the plugin's `card
+    /// lifted`), or by the pill: held, scrolled or pinched. ONE way for all of
+    /// them, so nothing knows which hand it was: the card steps away, a window
+    /// of the side is watched for leaving it.
+    pub(crate) fn window_lifted(&mut self, addr: &str) {
+        self.card_window_lifted(addr);
+        self.side_drag_began(addr, false);
+    }
+
+    /// The window was put down — a title-bar drag or resize let go (the
+    /// plugin's `window-placed`), the pill's hold released, its scroll gone
+    /// still, its pinch ended. The same for all: the side takes it back or
+    /// lets it go, window memory notes where it is, the card comes back.
+    pub(crate) fn window_placed(&mut self, addr: &str) {
+        self.side_drag_ended(addr);
+        self.remember_window_placed(addr);
+        self.card_window_placed(addr);
     }
 }
 
@@ -367,10 +407,10 @@ impl App {
                 fling: None,
                 judging: false,
             });
-            // A parked window scrolled about is in hand: watched for leaving
-            // the side, snapped back when it goes still (`side.rs`).
+            // In hand, as when its title bar is taken; put down when the
+            // scroll stops (the judge below).
             let addr = self.scroll_drag.as_ref().map(|sd| sd.addr.clone()).unwrap_or_default();
-            self.side_drag_began(&addr, true);
+            self.window_lifted(&addr);
         }
         let Some(sd) = self.scroll_drag.as_mut() else {
             return;
@@ -397,11 +437,15 @@ impl App {
             return;
         }
         sd.last_move = Instant::now();
-        let (tx, ty) = snap_target(
+        let fallback = snap_target(
             sd.start_x, sd.start_y, sd.win_w, sd.win_h, sd.acc_x, sd.acc_y, sd.ux0, sd.uy0, sd.ux1,
             sd.uy1,
         );
-        move_window(&sd.addr, tx, ty);
+        let (rx, ry) = (
+            (sd.start_x as f64 + sd.acc_x).round() as i32,
+            (sd.start_y as f64 + sd.acc_y).round() as i32,
+        );
+        drag_move(&sd.addr, rx, ry, fallback);
     }
 }
 
@@ -425,8 +469,11 @@ impl App {
             }
             sd.judging = false;
             sd.fling = None;
+            let addr = sd.addr.clone();
+            // The scroll stopped: the window is put down, as when a title-bar
+            // drag lets go — whether it was a throw or not.
+            app.window_placed(&addr);
             if f.thrown() {
-                let addr = sd.addr.clone();
                 debug!("pill scroll: a throw ({:.0} units in {:?})", (f.sx * f.sx + f.sy * f.sy).sqrt(), f.last - f.began);
                 app.scroll_drag = None;
                 app.side_throw(&addr);
@@ -517,7 +564,7 @@ impl App {
         let Some((x, y, w, h)) = hypr::active_window_geom() else {
             return;
         };
-        self.card_window_lifted(&addr);
+        self.window_lifted(&addr);
         self.pinch_drag = Some(PinchResize {
             addr,
             start_w: w as f64,
@@ -546,7 +593,7 @@ impl App {
     /// Pinch ended: drop the state.
     pub(crate) fn pinch_end(&mut self) {
         if let Some(pd) = self.pinch_drag.take() {
-            self.card_window_placed(&pd.addr);
+            self.window_placed(&pd.addr);
         }
     }
 }

@@ -3194,11 +3194,9 @@ impl App {
                 return;
             }
             Command::WindowPlaced(addr) => {
-                // A parked window put down snaps back into the column.
-                self.side_drag_ended(addr.trim());
-                self.remember_window_placed(addr.trim());
-                // The card went away while its window was in hand.
-                self.card_window_placed(addr.trim());
+                // A title-bar drag or resize let go: the one way every hand
+                // puts a window down (`nub_drag.rs::window_placed`).
+                self.window_placed(addr.trim());
                 return;
             }
             // The map has STARTED closing over a live stage: put the stage shape
