@@ -743,7 +743,33 @@ impl App {
         p.called = false;
         p.stubborn = false;
         let (w, h) = (p.home.w.round() as i32, p.home.h.round() as i32);
-        run_lua(&format!("{}{}", resize_lua(addr, w, h), zorder_lua(addr, "top")));
+        // The size comes back about the small window's centre, which near
+        // the top sent the grown window's bar off the screen (y = -124 in
+        // the rig): it is kept on the screen, and the hand moving on takes
+        // it from there.
+        let clamp = match hypr::focused_monitor() {
+            Ok(mon) => {
+                let (ux, uy, uw, uh) = usable(&mon);
+                format!(
+                    "local win = hl.get_window(a) \
+                     if win and win.at and win.size then \
+                       local x = math.max({ux}, math.min(win.at.x, {ux} + {uw} - win.size.x)) \
+                       local y = math.max({uy}, math.min(win.at.y, {uy} + {uh} - win.size.y)) \
+                       if x ~= win.at.x or y ~= win.at.y then \
+                         hl.dispatch(hl.dsp.window.move({{ x = math.floor(x + 0.5), y = math.floor(y + 0.5), window = a }})) \
+                       end \
+                     end "
+                )
+            }
+            Err(_) => String::new(),
+        };
+        hypr::dispatch(&format!(
+            "(function() local a = \"address:{addr}\" \
+             hl.dispatch(hl.dsp.window.resize({{ x = {w}, y = {h}, window = a }})) \
+             {clamp}\
+             hl.dispatch(hl.dsp.window.alter_zorder({{ mode = \"top\", window = a }})) \
+             return hl.dsp.no_op() end)()"
+        ));
         info!("side: {addr} taken out by hand, back to {w}x{h}, its place kept");
         self.side.save();
     }
