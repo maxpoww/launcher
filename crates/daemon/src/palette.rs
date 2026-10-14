@@ -27,7 +27,7 @@
 //! [`resolve`] makes the [`Theme`] — what is in use now — and [`publish`]
 //! writes it out for everything outside the daemon, in
 //! `~/.local/state/golem/theme/` (`colors.json` for anyone; `foot.ini`,
-//! `hyprlock.conf`, `gtk4.css`, `gtk3.css`, `qt.conf` for the apps Golem's
+//! `hyprlock.conf`, `gtk4.css`, `gtk3.css`, `qt.conf`, `nvim.lua` for the apps Golem's
 //! home layer points there), then tells the running ones.
 
 use std::path::{Path, PathBuf};
@@ -368,6 +368,7 @@ pub(crate) fn write_all(dir: &Path, t: &Theme) {
     put("gtk4.css", gtk4_css(t));
     put("gtk3.css", gtk3_css(t));
     put("qt.conf", qt_scheme(t));
+    put("nvim.lua", nvim_lua(t));
     for app in ["qt5ct", "qt6ct"] {
         let conf = config_home().join(app).join(format!("{app}.conf"));
         // Ours to write: absent, or already pointing at the theme. One
@@ -601,6 +602,20 @@ fn qtct_conf(scheme: &Path, t: &Theme) -> String {
     )
 }
 
+/// Neovim (mini.base16, Golem's home layer loads this at each start).
+fn nvim_lua(t: &Theme) -> String {
+    let palette: String = t.c.iter().enumerate().map(|(i, c)| format!("    {} = '#{}',\n", slot_name(i), hex(*c))).collect();
+    format!(
+        "-- Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change.\n\
+         vim.o.background = '{}'\n\
+         require('mini.base16').setup({{\n  palette = {{\n{}  }},\n  use_cterm = true,\n}})\n\
+         vim.g.colors_name = 'golem'\n",
+        t.name,
+        if t.dark { "dark" } else { "light" },
+        palette,
+    )
+}
+
 /// libadwaita's named accent nearest the palette's (apps that ask the
 /// portal for the accent get a name, not a colour).
 fn adwaita_accent(c: Rgb) -> &'static str {
@@ -768,5 +783,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&colors_json(&t)).unwrap();
         assert_eq!(json["accent"], "#ffbe98");
         assert_eq!(json["dark_websites"], false, "websites stay as made unless asked");
+        let nvim = nvim_lua(&t);
+        assert!(nvim.contains("base09 = '#ffbe98',") && nvim.contains("vim.o.background = 'dark'"));
     }
 }
