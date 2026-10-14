@@ -161,6 +161,9 @@ impl App {
                 };
                 if let Some((tx, ty)) = to {
                     move_window(&nd.addr, tx, ty);
+                    // A window of the side: to the front at the centre, back
+                    // into the fan at home (`side.rs`).
+                    self.side_after_click(&nd.addr, (tx, ty) != (x, y));
                 }
             }
         } else {
@@ -237,6 +240,57 @@ const SCROLL_GAIN: f64 = -2.0;
 /// instead of snapping back to the first grab's origin.
 const SCROLL_REGRAB: Duration = Duration::from_millis(200);
 
+/// A THROW: a short, fast two-finger swipe on the pill that stops sends the
+/// window to the side (`side.rs`; Max, 2026-10-14: *"a fast short swipe on
+/// the task pill to send the windows there"*). Judged the card's way
+/// (`card/place.rs`) — when the swipe STOPS, by how brief it was: a flick is
+/// over in a moment, while moving the window fast by hand is a longer scroll
+/// however quick. So: the whole run lasted no longer than [`FLING_BRIEF`],
+/// covered at least [`FLING_SCROLL`] (scroll units, any direction), never
+/// turned back, and then went quiet for [`FLING_QUIET`].
+const FLING_SCROLL: f64 = 40.0;
+const FLING_BRIEF: Duration = Duration::from_millis(170);
+const FLING_QUIET: Duration = Duration::from_millis(30);
+
+/// One run of scroll on the pill: when it began, its last step, what it adds
+/// up to, and whether it ever turned back.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Fling {
+    began: Instant,
+    last: Instant,
+    sx: f64,
+    sy: f64,
+    turned: bool,
+}
+
+impl Fling {
+    /// The run after one more step of (`dx`, `dy`) at `now`: the same run if
+    /// the step came soon enough after the last, a new one otherwise.
+    fn step(run: Option<Fling>, now: Instant, dx: f64, dy: f64) -> Fling {
+        match run {
+            Some(f) if now.saturating_duration_since(f.last) <= FLING_QUIET => Fling {
+                last: now,
+                sx: f.sx + dx,
+                sy: f.sy + dy,
+                turned: f.turned || f.sx * dx + f.sy * dy < 0.0,
+                ..f
+            },
+            _ => Fling { began: now, last: now, sx: dx, sy: dy, turned: false },
+        }
+    }
+
+    fn stopped(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last) > FLING_QUIET
+    }
+
+    /// Whether, now that it has stopped, it was a throw.
+    fn thrown(&self) -> bool {
+        !self.turned
+            && self.last.saturating_duration_since(self.began) <= FLING_BRIEF
+            && (self.sx * self.sx + self.sy * self.sy).sqrt() >= FLING_SCROLL
+    }
+}
+
 /// A scroll-driven window drag (no button, no lock — scroll already leaves the
 /// cursor still). Re-grabs on a fresh gesture; accumulates and moves otherwise.
 pub(crate) struct ScrollDrag {
@@ -253,6 +307,10 @@ pub(crate) struct ScrollDrag {
     acc_y: f64,
     last_scroll: Instant,
     last_move: Instant,
+    /// The run of scroll steps being judged for a throw.
+    fling: Option<Fling>,
+    /// A judge is waiting for the run to stop.
+    judging: bool,
 }
 
 impl App {
@@ -297,6 +355,8 @@ impl App {
                 acc_y: 0.0,
                 last_scroll: Instant::now(),
                 last_move: Instant::now(),
+                fling: None,
+                judging: false,
             });
         }
         let Some(sd) = self.scroll_drag.as_mut() else {
@@ -304,7 +364,16 @@ impl App {
         };
         sd.acc_x += dx * SCROLL_GAIN;
         sd.acc_y += dy * SCROLL_GAIN;
-        sd.last_scroll = Instant::now();
+        let now = Instant::now();
+        sd.last_scroll = now;
+        sd.fling = Some(Fling::step(sd.fling, now, dx, dy));
+        if !sd.judging {
+            sd.judging = true;
+            self.arm_fling_judge();
+        }
+        let Some(sd) = self.scroll_drag.as_mut() else {
+            return;
+        };
         // The card is away while the window is being scrolled about.
         let addr = sd.addr.clone();
         self.card_window_nudged(&addr);
@@ -320,6 +389,37 @@ impl App {
             sd.uy1,
         );
         move_window(&sd.addr, tx, ty);
+    }
+}
+
+impl App {
+    /// Wait for the run of scroll on the pill to stop, then judge it: a throw
+    /// sends the window to the side and ends the drag; anything else was the
+    /// plain drag it looked like. One judge per run; it waits on while steps
+    /// keep coming.
+    fn arm_fling_judge(&mut self) {
+        let timer = calloop::timer::Timer::from_duration(FLING_QUIET + Duration::from_millis(5));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            let Some(sd) = app.scroll_drag.as_mut() else {
+                return calloop::timer::TimeoutAction::Drop;
+            };
+            let Some(f) = sd.fling else {
+                sd.judging = false;
+                return calloop::timer::TimeoutAction::Drop;
+            };
+            if !f.stopped(Instant::now()) {
+                return calloop::timer::TimeoutAction::ToDuration(FLING_QUIET);
+            }
+            sd.judging = false;
+            sd.fling = None;
+            if f.thrown() {
+                let addr = sd.addr.clone();
+                debug!("pill scroll: a throw ({:.0} units in {:?})", (f.sx * f.sx + f.sy * f.sy).sqrt(), f.last - f.began);
+                app.scroll_drag = None;
+                app.side_throw(&addr);
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 }
 
@@ -356,7 +456,7 @@ fn snap_target(
 }
 
 /// Move a window to an absolute logical position via the Hyprland socket.
-fn move_window(addr: &str, x: i32, y: i32) {
+pub(crate) fn move_window(addr: &str, x: i32, y: i32) {
     hypr::dispatch(&format!(
         "hl.dsp.window.move({{ x = {x}, y = {y}, window = \"address:{addr}\" }})"
     ));
@@ -448,6 +548,36 @@ fn resize_about_centre(addr: &str, w: i32, h: i32, cx: f64, cy: f64) {
            hl.dispatch(hl.dsp.window.move({{ x = math.floor({cx} - sw / 2 + 0.5), y = math.floor({cy} - sh / 2 + 0.5), window = a }})) \
            return hl.dsp.no_op() end)()"
     ));
+}
+
+#[cfg(test)]
+mod fling_tests {
+    use super::*;
+
+    fn run(steps: &[(u64, f64, f64)]) -> Fling {
+        let t0 = Instant::now();
+        let mut f = None;
+        for &(ms, dx, dy) in steps {
+            f = Some(Fling::step(f, t0 + Duration::from_millis(ms), dx, dy));
+        }
+        f.expect("at least one step")
+    }
+
+    #[test]
+    fn a_flick_is_a_throw_and_a_slow_or_wavering_scroll_is_not() {
+        assert!(run(&[(0, 20.0, 0.0), (8, 25.0, 2.0), (16, 20.0, 1.0)]).thrown(), "brief, far, one way");
+        assert!(run(&[(0, 0.0, -30.0), (10, 0.0, -30.0)]).thrown(), "any direction");
+        assert!(!run(&[(0, 10.0, 0.0), (12, 5.0, 0.0)]).thrown(), "too short a way");
+        assert!(!run(&[(0, 20.0, 0.0), (100, 20.0, 0.0), (200, 20.0, 0.0)]).thrown(), "too long: a drag");
+        assert!(!run(&[(0, 30.0, 0.0), (10, -30.0, 0.0), (20, 30.0, 0.0)]).thrown(), "turned back");
+    }
+
+    #[test]
+    fn a_pause_starts_a_new_run() {
+        let f = run(&[(0, 30.0, 0.0), (10, 30.0, 0.0), (200, 10.0, 0.0)]);
+        assert!((f.sx - 10.0).abs() < f64::EPSILON, "the old run is gone");
+        assert!(!f.thrown());
+    }
 }
 
 #[cfg(test)]

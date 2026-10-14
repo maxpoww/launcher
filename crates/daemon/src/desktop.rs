@@ -5178,6 +5178,11 @@ impl App {
         if let Some(rest) = what.strip_prefix("taskbox ") {
             return self.task_pill_debug(rest.trim());
         }
+        // `side throw|fan|state`: the side — windows thrown to the right edge
+        // by a flick on the current-task pill — without a touchpad.
+        if let Some(rest) = what.strip_prefix("side ") {
+            return self.side_debug(rest.trim());
+        }
         // `syncstuck <name>` / `syncfixed <name>`: what the bar says of a
         // phone that can no longer be synced over Wi-Fi, and of its mending
         // (no phone needed).

@@ -61,6 +61,7 @@ mod minimized;
 mod net;
 mod nix;
 mod nub_drag;
+mod side;
 // Notification OPTION data plane: a D-Bus worker that mirrors the options-notify
 // daemon's active list into the UI and sends back dismiss/act/reply. The render
 // surface (the vertical-list box + entry/exit springs) consumes this next; the
@@ -633,6 +634,7 @@ fn main() -> anyhow::Result<()> {
         nub_drag: None,
         nub_home: std::collections::HashMap::new(),
         scroll_drag: None,
+        side: side::Side::default(),
         pinch_drag: None,
         pointer_surface: options::PointerSurface::Dock,
         options_ptr: None,
@@ -1473,6 +1475,9 @@ pub struct App {
     /// An in-flight scroll drag: two-finger scroll over the current-task pill is
     /// moving the focused window (the touchpad path). `None` when not dragging.
     scroll_drag: Option<nub_drag::ScrollDrag>,
+    /// The side: windows thrown to the right edge by a flick on the
+    /// current-task pill, each in its slot (`side.rs`).
+    side: side::Side,
     /// An in-flight pinch resize: a two-finger pinch over the current-task pill is
     /// resizing the focused window. `None` when not pinching.
     pinch_drag: Option<nub_drag::PinchResize>,

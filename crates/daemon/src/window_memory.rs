@@ -290,7 +290,9 @@ impl App {
         if !self.settings.floating {
             return;
         }
-        if let Some(place) = gone.place {
+        // A window hanging on the side (`side.rs`) closed where it was parked,
+        // not where it is used: that is no place for the app.
+        if let Some(place) = gone.place.filter(|_| !self.side.has(addr)) {
             self.window_memory.adopt(&gone.class, place, "closed");
         }
         self.sync_place_rules();
