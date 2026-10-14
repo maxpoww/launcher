@@ -298,7 +298,7 @@ pub(crate) fn materialize_entry() {
     let contents = format!(
         "[Desktop Entry]\nType=Application\nName=Golem Files\nName[es]=Archivos de Golem\n\
          Comment=Your folders, in a window\nComment[es]=Tus carpetas, en una ventana\n\
-         Exec={ctl} files %f\nIcon=system-file-manager\nStartupWMClass={APP_ID}\n\
+         Exec={ctl} files %f\nIcon=golem-files\nStartupWMClass={APP_ID}\n\
          MimeType=inode/directory;\nCategories=System;FileManager;\nTerminal=false\n"
     );
     let path = dir.join(format!("{APP_ID}.desktop"));
