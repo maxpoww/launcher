@@ -51,7 +51,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, QueueHandle, WEnum};
 
 use crate::content::{
-    GridContent, IconInst, Label, Rect, RectInst, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
+    GridContent, IconInst, Label, Rect, RectInst, Scene, GRID_ICON, GRID_ICON_TOP,
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
 use crate::desktop::{Item, Kind, PLAIN_TEXT, URI_LIST};
@@ -83,7 +83,7 @@ const SIDE_W: f32 = 176.0;
 /// and the same air to each side"); the icon is `PLACE_ICON` times the
 /// panel's zoom — which is of the places' ICONS alone, not their words
 /// (Max: "zoom more on the panel icons (not the text)").
-const PLACE_ICON: f32 = 22.0;
+const PLACE_ICON: f32 = 25.0;
 const RAIL_AIR: f32 = 10.0;
 /// How far the words of an open place reach past the rail.
 const SIDE_WORDS: f32 = 140.0;
@@ -97,7 +97,11 @@ const ROW_GAP: f32 = 12.0;
 const PAD: f32 = 10.0;
 /// A cell is the desktop's with a second line of name: here a name is read
 /// to tell files apart, and one line cuts most of them.
-const CELL_H: f32 = crate::content::GRID_CELL_H + 6.0 + LABEL_LINE_PX;
+const CELL_H: f32 = crate::content::GRID_CELL_H - 2.0 + LABEL_LINE_PX;
+/// A cell's width: narrower than the Apps grid's (Max, 2026-10-14: "make the
+/// icons in the content be closer to each other") — the things stand nearer,
+/// more to a row; a long name takes its second line sooner.
+const FILES_CELL_W: f32 = 90.0;
 const LABEL_GAP: f32 = 5.0;
 /// Text in the head and the places.
 const TEXT_PX: f32 = 13.0;
@@ -407,7 +411,7 @@ impl Layout {
             };
         }
         let body = Rect::new(side_w, HEAD_H, (w - side_w).max(1.0), ((h - HEAD_H) / zoom).max(1.0));
-        let (cw, ch) = (GRID_CELL_W * icon_scale, CELL_H * icon_scale);
+        let (cw, ch) = (FILES_CELL_W * icon_scale, CELL_H * icon_scale);
         let room = (body.w - 2.0 * PAD).max(cw);
         let cols = ((room / cw).floor() as usize).max(1);
         Self {
@@ -5969,7 +5973,7 @@ mod tests {
     fn cells_flow_row_by_row_and_share_the_spare_width() {
         let l = Layout::new((920, 600), 1.0);
         assert_eq!(l.side_w, SIDE_W);
-        assert_eq!(l.cols, 6); // (920 − 176 − 20) / 104 = 6.96
+        assert_eq!(l.cols, 8); // (920 − 176 − 20) / 90 = 8.04
         let (a, b, next_row) = (l.cell(0), l.cell(1), l.cell(l.cols));
         assert!((b.x - a.x - l.pitch).abs() < 0.01 && l.pitch > l.cw);
         assert!((next_row.x - a.x).abs() < 0.01 && (next_row.y - a.y - l.ch).abs() < 0.01);
@@ -5983,20 +5987,22 @@ mod tests {
     fn a_narrow_window_has_no_places_and_never_zero_columns() {
         let l = Layout::new((400, 300), 1.0);
         assert_eq!(l.side_w, 0.0);
-        assert_eq!(l.cols, 3);
+        assert_eq!(l.cols, 4); // (400 − 20) / 90 = 4.2
         assert_eq!(Layout::new((60, 60), 2.0).cols, 1);
     }
 
     #[test]
     fn the_item_under_a_point_follows_the_scroll() {
         let l = Layout::new((920, 600), 1.0);
-        let c = l.cell(7);
+        // (One on the second row, whatever the columns.)
+        let i = l.cols + 1;
+        let c = l.cell(i);
         let mid = (c.x + c.w / 2.0, c.y + c.h / 2.0);
-        assert_eq!(l.index_at(mid, 0.0, 20), Some(7));
-        assert_eq!(l.index_at(mid, l.ch, 20), Some(7 + l.cols));
-        assert_eq!(l.index_at((mid.0, mid.1 - l.ch), l.ch, 20), Some(7));
+        assert_eq!(l.index_at(mid, 0.0, 30), Some(i));
+        assert_eq!(l.index_at(mid, l.ch, 30), Some(i + l.cols));
+        assert_eq!(l.index_at((mid.0, mid.1 - l.ch), l.ch, 30), Some(i));
         // Past the last item, in the head and in the places: nothing.
-        assert_eq!(l.index_at(mid, 0.0, 7), None);
+        assert_eq!(l.index_at(mid, 0.0, i), None);
         assert_eq!(l.index_at((mid.0, 10.0), 0.0, 20), None);
         assert_eq!(l.index_at((20.0, mid.1), 0.0, 20), None);
     }
