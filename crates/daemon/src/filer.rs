@@ -1707,9 +1707,10 @@ pub(crate) fn places(
 /// a folder to.
 pub(crate) const UP: &str = "..";
 
-/// `places` for a window on `dir`: `..` first, then the rest (the first
-/// of them a little apart from it). At the root there is nowhere up: no
-/// `..` at all (Max: hidden, not grey).
+/// `places` for a window on `dir`: `..` first, a FOLDER like the others
+/// (Max, 2026-10-14: "tiene que ser otra carpeta arriba de Home" — not an
+/// arrow, not set apart), then the rest. At the root there is nowhere up:
+/// no `..` at all (Max: hidden, not grey).
 pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
     let Some(parent) = dir.parent() else {
         return places.to_vec();
@@ -1717,14 +1718,11 @@ pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
     let mut out = vec![Place {
         name: UP.to_owned(),
         path: parent.to_path_buf(),
-        icon: "asset:go-up".to_owned(),
+        icon: "asset:folder".to_owned(),
         gap: false,
         start: false,
     }];
     out.extend(places.iter().cloned());
-    if let Some(first) = out.get_mut(1) {
-        first.gap = true;
-    }
     out
 }
 
@@ -5685,11 +5683,11 @@ mod tests {
         };
         let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"));
         assert_eq!((places[0].name.as_str(), places[0].path.as_path()), (UP, Path::new("/home/max/Documents")));
-        // Home follows, a little apart; the way here still starts at Home.
-        assert!(places[1].gap && places[1].path == home.path);
+        // Home follows, right under it; the way here still starts at Home.
+        assert!(!places[1].gap && places[1].path == home.path);
         let names: Vec<String> = crumbs(Path::new("/home/max/Documents/Work"), &places).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["Home", "Documents", "Work"]);
-        // At the root there is nowhere up: no `..`, and Home is not set apart.
+        // At the root there is nowhere up: no `..`.
         let at_root = with_up(std::slice::from_ref(&home), Path::new("/"));
         assert_eq!(at_root, [home]);
     }
