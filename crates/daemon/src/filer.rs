@@ -74,6 +74,12 @@ const MIN_SIZE: (u32, u32) = (380, 260);
 const HEAD_H: f32 = 46.0;
 /// The places' column, and the window width under which it is left out.
 const SIDE_W: f32 = 176.0;
+/// The places at rest: a RAIL of their icons only, the field beside it; the
+/// pointer on it opens them to `SIDE_W` OVER the field (Max, 2026-10-14:
+/// "make the sidebar auto hide (only see the icons) and open on hover").
+const SIDE_RAIL: f32 = 46.0;
+/// How fast the places open and close (the menus' ease).
+const SIDE_RATE: f32 = 18.0;
 const SIDE_FROM: f32 = 560.0;
 /// One place's row, its icon, and the space over the plugged-in ones.
 const ROW_H: f32 = 30.0;
@@ -370,7 +376,7 @@ impl Layout {
     /// A window of `w`×`h`; its field at `zoom`.
     pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool, zoom: f32) -> Self {
         let zoom = zoom.max(0.1);
-        let side_w = if w >= SIDE_FROM { SIDE_W } else { 0.0 };
+        let side_w = if w >= SIDE_FROM { SIDE_RAIL } else { 0.0 };
         // (The field's own size, as it is laid out: the room it has, `zoom`
         // times smaller.)
         let (w, h) = (side_w + (w - side_w) / zoom, h);
@@ -1285,6 +1291,14 @@ struct Win {
     panel: f32,
     /// The pointer is over the field (not the panel): what Ctrl +/−/0 zoom.
     over_field: bool,
+    /// The pointer as it is in the laid-out window (not brought into the
+    /// field): what opens the places.
+    at_win: Option<(f32, f32)>,
+    /// The places: open (wanted), how open they are (0 = the rail, 1 =
+    /// open; eased), and how wide that drew them.
+    side_open: bool,
+    side_t: f32,
+    side_now: f32,
     /// Shown as a list (`settings.files_list`, one choice for every window).
     list: bool,
     /// What the things are ordered by here, biggest or newest first when
@@ -1472,15 +1486,30 @@ impl Win {
     /// in the window's.
     fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
         let at = (raw.0 / self.panel, raw.1 / self.panel);
-        if self.menu.is_some() || self.props.is_some() {
+        if self.menu.is_some() || self.props.is_some() || self.in_side(at) {
             return at;
         }
         self.layout(icon_scale).inward(at)
     }
 
+    /// Whether a point of the laid-out window is on the places as they are
+    /// drawn now (open over the field, or the rail).
+    fn in_side(&self, at: (f32, f32)) -> bool {
+        self.side_now > 0.0 && at.0 < self.side_now && at.1 >= HEAD_H
+    }
+
     /// Whether a point the pointer gave is over the field.
     fn on_field(&self, raw: (f32, f32), icon_scale: f32) -> bool {
-        self.layout(icon_scale).shown_body().contains((raw.0 / self.panel, raw.1 / self.panel))
+        let at = (raw.0 / self.panel, raw.1 / self.panel);
+        !self.in_side(at) && self.layout(icon_scale).shown_body().contains(at)
+    }
+
+    /// Open the places while the pointer is on them (the rail, or what they
+    /// cover once open); whether that changed.
+    fn side_follow(&mut self, rail: f32) -> bool {
+        let reach = if self.side_open { SIDE_W } else { rail };
+        let want = rail > 0.0 && self.at_win.is_some_and(|p| p.0 < reach && p.1 >= HEAD_H);
+        std::mem::replace(&mut self.side_open, want) != want
     }
 
     /// What Ctrl +/−/0 zoom now: the field, or the panel under the pointer.
@@ -2112,6 +2141,10 @@ impl App {
             zoom: self.files_zoom(),
             panel: self.files_panel_zoom(),
             over_field: false,
+            at_win: None,
+            side_open: false,
+            side_t: 0.0,
+            side_now: 0.0,
             list: self.settings.files_list,
             sort: (SortKey::Name, false),
             meta: HashMap::new(),
@@ -3729,6 +3762,10 @@ impl App {
             props.t = t;
             moving |= m;
         }
+        // The places opening or closing.
+        let (t, m) = crate::animation::ease_toward(win.side_t, if win.side_open { 1.0 } else { 0.0 }, dt, SIDE_RATE, 0.004);
+        win.side_t = t;
+        moving |= m;
         win.last_frame = moving.then_some(now);
         self.filer_sync_icons(&mut win, &layout);
 
@@ -3738,11 +3775,8 @@ impl App {
             ..Default::default()
         };
         scene.rects.push(rect(Rect::new(0.0, 0.0, w, h), 0.0, ground));
-        if layout.side_w > 0.0 {
-            scene
-                .rects
-                .push(rect(Rect::new(0.0, HEAD_H, layout.side_w, h - HEAD_H), 0.0, side_ground));
-        }
+        // (The places' ground is drawn with them, over the field: below.)
+        let _ = side_ground;
         let mut hits = Hits::default();
 
         // ── the head: the way here ──
@@ -3913,23 +3947,34 @@ impl App {
             }
         }
 
-        // ── the places ──
+        // ── the places ── over the field, from the rail to open
+        let mut side = GridContent::default();
         if layout.side_w > 0.0 {
+            let t = win.side_t;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let side_w = layout.side_w + (SIDE_W - layout.side_w) * ease;
+            win.side_now = side_w;
+            side.clip = Rect::new(0.0, HEAD_H, side_w, h - HEAD_H);
+            side.rects.push(rect(side.clip, 0.0, side_ground));
+            if ease > 0.0 {
+                // (Its edge, once it is out over the field.)
+                side.rects.push(rect(Rect::new(side_w - 1.0, HEAD_H, 1.0, h - HEAD_H), 0.0, [0.0, 0.0, 0.0, 0.25 * ease]));
+            }
             let mut y = HEAD_H + 6.0;
             for (n, place) in win.places.iter().enumerate() {
                 if place.gap {
                     y += ROW_GAP;
                 }
-                let row = Rect::new(6.0, y, layout.side_w - 12.0, ROW_H);
+                let row = Rect::new(6.0, y, side_w - 12.0, ROW_H);
                 // (`..` is never "here".)
                 let up = place.name == UP;
                 if (win.dir == place.path && !up) || win.drop_place == Some(n) {
-                    scene.rects.push(rect(row, 8.0, pal.here));
+                    side.rects.push(rect(row, 8.0, pal.here));
                 } else if win.hover == Spot::Place(n) {
-                    scene.rects.push(rect(row, 8.0, pal.hover));
+                    side.rects.push(rect(row, 8.0, pal.hover));
                 }
                 if let Some(layer) = win.layer_of(&place.icon) {
-                    scene.icons.push(IconInst {
+                    side.icons.push(IconInst {
                         rect: Rect::new(row.x + 10.0, y + (ROW_H - ROW_ICON) / 2.0, ROW_ICON, ROW_ICON),
                         layer,
                         tint: [0.0; 4],
@@ -3937,16 +3982,23 @@ impl App {
                         plate: NO_PLATE,
                     });
                 }
-                scene.labels.push(label(
-                    &place.name,
-                    (row.x + 10.0 + ROW_ICON + 9.0, y + (ROW_H - TEXT_LINE) / 2.0),
-                    row.w - ROW_ICON - 26.0,
-                    false,
-                    false,
-                ));
+                if ease > 0.0 {
+                    side.labels.push(Label {
+                        clip: Some(row),
+                        ..label(
+                            &place.name,
+                            (row.x + 10.0 + ROW_ICON + 9.0, y + (ROW_H - TEXT_LINE) / 2.0),
+                            SIDE_W - ROW_ICON - 38.0,
+                            false,
+                            false,
+                        )
+                    });
+                }
                 hits.places.push(row);
                 y += ROW_H;
             }
+        } else {
+            win.side_now = 0.0;
         }
 
         // ── the icons ──
@@ -4213,7 +4265,16 @@ impl App {
             ));
         }
         zoom_grid(&mut grid, (layout.body.x, layout.body.y), layout.zoom);
+        // The places out over the field: the field ends where they do (the
+        // renderer draws every grid's words in one late pass — a name under
+        // them would show through).
+        if win.side_now > grid.clip.x {
+            let cut = (win.side_now - grid.clip.x).min(grid.clip.w);
+            grid.clip.x += cut;
+            grid.clip.w -= cut;
+        }
         scene.grids.push(grid);
+        scene.grids.push(side);
         win.hits = hits;
         // The menu and the box, over everything.
         if let Some(menu) = win.menu.as_ref() {
@@ -4329,8 +4390,9 @@ impl App {
             return;
         }
         let layout = win.layout(icon_scale);
+        let side = win.side_follow(layout.side_w);
         let spot = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
-        let changed = spot != win.hover;
+        let changed = spot != win.hover || side;
         win.hover = spot;
         self.filer_cursor(id);
         // (An icon under the pointer looks no different: only the head's
@@ -4355,6 +4417,7 @@ impl App {
                 self.cursor_now = None;
                 if let Some(win) = self.filer.win_mut(id) {
                     let raw = (surface_x as f32, surface_y as f32);
+                    win.at_win = Some((raw.0 / win.panel, raw.1 / win.panel));
                     win.ptr = Some(win.point(raw, icon_scale));
                     win.over_field = win.on_field(raw, icon_scale);
                 }
@@ -4363,6 +4426,7 @@ impl App {
             wl_pointer::Event::Leave { .. } => {
                 if let Some(win) = self.filer.win_mut(id) {
                     win.ptr = None;
+                    win.at_win = None;
                     // (A drag of ours takes the pointer away like this.)
                     win.press = None;
                     win.band = None;
@@ -4375,6 +4439,7 @@ impl App {
             } => {
                 if let Some(win) = self.filer.win_mut(id) {
                     let raw = (surface_x as f32, surface_y as f32);
+                    win.at_win = Some((raw.0 / win.panel, raw.1 / win.panel));
                     win.ptr = Some(win.point(raw, icon_scale));
                     win.over_field = win.on_field(raw, icon_scale);
                 }
@@ -4857,7 +4922,12 @@ impl App {
             return;
         };
         let layout = win.layout(icon_scale);
-        let at = layout.inward((x / win.panel, y / win.panel));
+        let at_win = (x / win.panel, y / win.panel);
+        win.at_win = Some(at_win);
+        if win.side_follow(layout.side_w) {
+            win.dirty = true;
+        }
+        let at = if win.in_side(at_win) { at_win } else { layout.inward(at_win) };
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
         // In the field: the things not in hand, and which of them — if any
