@@ -225,7 +225,17 @@ impl App {
         let mut open = HashMap::new();
         for c in hypr::client_geometries() {
             let on_desk = c.floating && !c.special;
-            let fit_to_keep = on_desk && !c.fullscreen && !c.staged && c.w >= MIN_W && c.h >= MIN_H;
+            // A window parked on the side (`side.rs`) is small and at the edge:
+            // not a place to remember. Left out here, what is kept for it is
+            // where it was before it was parked — or, out again and closed
+            // before the next look, still that, never the column's spot (a
+            // window let out and closed at once was remembered parked).
+            let fit_to_keep = on_desk
+                && !c.fullscreen
+                && !c.staged
+                && c.w >= MIN_W
+                && c.h >= MIN_H
+                && !self.side.in_column(&c.address);
             let prev = self.window_memory.seen.remove(&c.address);
             let here = Place { x: c.x - mon.x, y: c.y - mon.y, w: c.w, h: c.h };
             let place = if fit_to_keep { Some(here) } else { prev.and_then(|p| p.place) };

@@ -458,13 +458,19 @@ impl App {
         // fullscreen, minimized to the dock, tiled — keeps its place too (a
         // place is the window's until it closes) and is simply left alone
         // until it floats again.
-        // Moved to another workspace: to that workspace's column.
+        // Moved to another REAL workspace: to that workspace's column. (A
+        // special workspace — minimized to the dock — is a state, not a move:
+        // the window keeps its place and comes back to it.)
         let moved: Vec<(String, i64)> = self
             .side
             .columns
             .iter()
             .flat_map(|(&ws, col)| col.iter().flatten().map(move |p| (ws, p)))
-            .filter_map(|(ws, p)| here.get(&p.addr).filter(|s| s.workspace != ws).map(|s| (p.addr.clone(), s.workspace)))
+            .filter_map(|(ws, p)| {
+                here.get(&p.addr)
+                    .filter(|s| s.workspace >= 0 && s.workspace != ws)
+                    .map(|s| (p.addr.clone(), s.workspace))
+            })
             .collect();
         for (addr, ws) in moved {
             if let Some(p) = self.side.remove(&addr) {
