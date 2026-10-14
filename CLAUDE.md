@@ -300,6 +300,15 @@ The big daemon files are cohesive but long — go straight to the function:
   over an app's tile in the dock, `desktop.rs::dock_spring_*` does (`Spring`: any drag over the
   dock — the dock comes up for one that is not the desktop's own — held `SPRING` on a tile with a
   window → `hypr::focus_window`, or `restore_minimized`).
+- `look.rs` — THE LOOK, light or dark (Max, 2026-10-14): one flag (`look::dark()`), set at start
+  from `controls::dark_now` and by the control panel's Dark mode (`App::look_set`). It picks the
+  ICON THEME's tone — Golem's own icons come as `Golem` (silver) and `Golem-Dark` (graphite),
+  made by Golem's `tools/icons`; `look::icon_theme` maps the configured name and every
+  `IconLoader` rebuilds itself when `look::generation()` moves (`IconLoader::sync`) — the dock's
+  three figures (`look::figure`: the cast silver recoloured graphite), and Golem Files' colours
+  (`filer::Palette`). A change rescans the dock and drops the desktop's and the file windows'
+  theme pictures (`desktop_look_changed`, `filer_look_changed`); `controls::assert_dark` also
+  writes dconf's icon-theme for the apps.
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
   as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its
   leave (`bar_zoom_keys`, the card's way) → `waverunner-ctl debug-desktop zoom bar in|out|reset`;

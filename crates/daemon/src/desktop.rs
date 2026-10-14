@@ -2486,6 +2486,21 @@ impl App {
         }
     }
 
+    /// The look changed: the icons from the theme (not the files' own
+    /// pictures) are let go and asked for again, in the new tone.
+    pub(crate) fn desktop_look_changed(&mut self) {
+        self.desktop.chains.retain(|k, _| k.starts_with("thumb:"));
+        self.desktop.missing.clear();
+        self.desktop.pending.clear();
+        for held in self.desktop.uploaded.iter_mut() {
+            if held.as_deref().is_some_and(|k| !k.starts_with("thumb:")) {
+                *held = None;
+            }
+        }
+        self.sync_desktop_icons();
+        self.request_desktop_draw();
+    }
+
     /// The resolver answered: file the pixels (a placeholder answer means
     /// the theme has no such icon — the name alone is shown) and draw.
     pub(crate) fn on_desktop_icon(&mut self, res: crate::notif_icons::Resolved) {

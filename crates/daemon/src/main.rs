@@ -34,6 +34,7 @@ mod desktop_send;
 mod desktop_top;
 mod mounts;
 mod logging;
+mod look;
 mod dict;
 mod display;
 mod dragging;
@@ -454,6 +455,8 @@ fn main() -> anyhow::Result<()> {
     // several worker threads; set it before any of them start.
     apps::set_icon_plate(config.theme.icon_plate);
     let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
+    // The look first: every icon loader is built in its tone.
+    look::set_dark(controls::dark_now());
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
     // The nix thread owns the nixpkgs package index (Install-section

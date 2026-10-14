@@ -382,13 +382,14 @@ const DOCK_FIGURES: [(&str, &[u8]); 3] = [
 /// The Recycle Bin's lid, drawn apart from its can so it can rise under a
 /// drag (the can is `DOCK_FIGURES`' "group:trash").
 pub(crate) fn bin_lid_figure() -> Option<Vec<u8>> {
-    Some(with_mips(rasterize_svg(include_bytes!("../assets/dock/bin-lid.svg"))?.take()))
+    Some(with_mips(rasterize_svg(&crate::look::figure(include_bytes!("../assets/dock/bin-lid.svg")))?.take()))
 }
 
 /// The ready-to-upload tile of a fixed-tail figure, by entry id.
 pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
-    Some(with_mips(rasterize_svg(svg)?.take()))
+    // (Silver, or graphite in the dark: `look::figure`.)
+    Some(with_mips(rasterize_svg(&crate::look::figure(svg))?.take()))
 }
 
 /// Whether `id` is one of the dock's fixed trio ([`DOCK_FIXED`]).
@@ -625,6 +626,12 @@ fn scan_home_files() -> Vec<FileEntry> {
 /// resolutions get their own persistent cache because the theme
 /// directory walk — not rasterization — dominates index time.
 pub(crate) struct IconLoader {
+    /// The theme the config names; which tone of it is walked follows the
+    /// look (`look::icon_theme`).
+    configured: String,
+    /// The look's generation this loader was built for: when it moves, the
+    /// loader builds itself again for the new tone (see [`Self::sync`]).
+    look: u32,
     /// Theme fallback chain, best first (see [`theme_chain`]).
     themes: Vec<String>,
     rasters: HashMap<String, (Vec<u8>, bool)>,
@@ -634,12 +641,25 @@ pub(crate) struct IconLoader {
 
 impl IconLoader {
     pub(crate) fn new(theme: String) -> Self {
-        let themes = theme_chain(&theme);
+        let look = crate::look::generation();
+        let themes = theme_chain(&crate::look::icon_theme(&theme));
         Self {
             resolutions: ResolutionCache::load(&themes.join("+")),
             rasters: HashMap::new(),
             disk: DiskCache::new(),
+            configured: theme,
+            look,
             themes,
+        }
+    }
+
+    /// The look changed since this loader was built: build it again, so what
+    /// it resolves and rasterizes from now on is in the new tone (the old
+    /// tone's resolutions are dropped with it).
+    pub(crate) fn sync(&mut self) {
+        if self.look != crate::look::generation() {
+            self.resolutions.save();
+            *self = Self::new(std::mem::take(&mut self.configured));
         }
     }
 
@@ -658,6 +678,7 @@ impl IconLoader {
 
     /// The entry's icon as `(pixels, is_placeholder)`.
     pub(crate) fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
+        self.sync();
         // The fixed trio wears its built-in figure, sized as designed (not
         // re-fitted to the 80% every theme icon is normalized to).
         if let Some(chain) = dock_figure(&entry.id) {

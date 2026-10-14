@@ -250,14 +250,8 @@ const SPRING: Duration = Duration::from_millis(650);
 
 /// How far a press travels before it is a drag (or a rubber band).
 const DRAG_START: f32 = 6.0;
-/// The rubber band: a faint fill and a hairline (the desktop's).
-const BAND_FILL: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
-const BAND_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.38];
-
-const WASH_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
-const WASH_HERE: [f32; 4] = [1.0, 1.0, 1.0, 0.12];
-const WASH_SELECTED: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
-const SCROLL_THUMB: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
+// (The band's, the washes' and the scroll thumb's colours are the look's:
+// `Palette`.)
 
 /// The app's own launcher, written where the dock's index finds it: a tile
 /// in the grid that opens a window on Home (`waverunner-ctl files`, the ctl
@@ -1851,6 +1845,67 @@ pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
     )
 }
 
+/// The window's colours in the present look (Max, 2026-10-14: "do the dark
+/// light mode of files"). DARK: the dock's own colour made solid, its ink,
+/// light washes. LIGHT: a pale cool grey, nearly black ink, dark washes — the
+/// same weights, turned over. Colours here are LINEAR light.
+pub(crate) struct Palette {
+    pub ground: [f32; 4],
+    pub side: [f32; 4],
+    pub ink: [f32; 4],
+    pub hover: [f32; 4],
+    pub here: [f32; 4],
+    pub selected: [f32; 4],
+    pub band_fill: [f32; 4],
+    pub band_line: [f32; 4],
+    pub thumb: [f32; 4],
+    /// The search and path fields, and their rim.
+    pub field: [f32; 4],
+    pub field_rim: [f32; 4],
+    /// A name being typed: its field, its rim, the mark over what is selected.
+    pub name_field: [f32; 4],
+    pub name_rim: [f32; 4],
+    pub name_mark: [f32; 4],
+}
+
+fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
+    if dark {
+        return Palette {
+            ground: lift(dock, 0.0),
+            side: lift(dock, 0.012),
+            ink: dock_ink,
+            hover: [1.0, 1.0, 1.0, 0.07],
+            here: [1.0, 1.0, 1.0, 0.12],
+            selected: [1.0, 1.0, 1.0, 0.16],
+            band_fill: [1.0, 1.0, 1.0, 0.07],
+            band_line: [1.0, 1.0, 1.0, 0.38],
+            thumb: [1.0, 1.0, 1.0, 0.22],
+            field: [0.0, 0.0, 0.0, 0.35],
+            field_rim: [1.0, 1.0, 1.0, 0.16],
+            name_field: [0.0, 0.0, 0.0, 0.6],
+            name_rim: [1.0, 1.0, 1.0, 0.18],
+            name_mark: [1.0, 1.0, 1.0, 0.22],
+        };
+    }
+    Palette {
+        // sRGB #f3f4f6, #e7e9ed, #20232a.
+        ground: [0.896, 0.905, 0.922, 1.0],
+        side: [0.799, 0.815, 0.846, 1.0],
+        ink: [0.014, 0.017, 0.023, 1.0],
+        hover: [0.0, 0.0, 0.0, 0.05],
+        here: [0.0, 0.0, 0.0, 0.08],
+        selected: [0.0, 0.0, 0.0, 0.11],
+        band_fill: [0.0, 0.0, 0.0, 0.05],
+        band_line: [0.0, 0.0, 0.0, 0.32],
+        thumb: [0.0, 0.0, 0.0, 0.25],
+        field: [1.0, 1.0, 1.0, 0.95],
+        field_rim: [0.0, 0.0, 0.0, 0.14],
+        name_field: [1.0, 1.0, 1.0, 0.97],
+        name_rim: [0.0, 0.0, 0.0, 0.22],
+        name_mark: [0.0, 0.0, 0.0, 0.12],
+    }
+}
+
 /// A colour brought `k` of the way to white, solid: the window's ground is
 /// the dock's own colour without its glass. (Colours here are linear light:
 /// a little goes a long way.)
@@ -3126,10 +3181,22 @@ impl App {
         self.filer_request_draw(id);
     }
 
+    /// This look's colours of a file window.
+    pub(crate) fn filer_palette(&self) -> Palette {
+        palette(crate::look::dark(), self.config.theme.background_rgba(), self.config.theme.text_rgba())
+    }
+
     /// The menu's and the box's paint in a window: the boxes' own surface,
-    /// laid solid on the window's ground (there is no glass inside it).
+    /// laid solid on the window's ground (there is no glass inside it). In
+    /// the light, a white panel with the window's ink.
     fn filer_panel_paint(&self, rect: Rect, ground: [f32; 4]) -> MenuPaint {
         let mut paint = self.desktop_panel_paint(rect);
+        if !crate::look::dark() {
+            paint.fill = [1.0, 1.0, 1.0, 1.0];
+            paint.ink = self.filer_palette().ink;
+            paint.wash = [0.0, 0.0, 0.0, 0.06];
+            return paint;
+        }
         let a = paint.fill[3];
         for (c, g) in paint.fill.iter_mut().zip(ground).take(3) {
             *c = *c * a + g * (1.0 - a);
@@ -3443,6 +3510,26 @@ impl App {
         }
     }
 
+    /// The look changed: every window lets go of the theme's icons (not the
+    /// files' own pictures), asks for them again and draws in its new colours.
+    pub(crate) fn filer_look_changed(&mut self) {
+        let mut ids = Vec::new();
+        for win in self.filer.wins.iter_mut() {
+            win.chains.retain(|k, _| k.starts_with("thumb:"));
+            win.missing.clear();
+            win.pending.clear();
+            for held in win.uploaded.iter_mut() {
+                if held.as_deref().is_some_and(|k| !k.starts_with("thumb:")) {
+                    *held = None;
+                }
+            }
+            ids.push(win.id);
+        }
+        for id in ids {
+            self.filer_request_draw(id);
+        }
+    }
+
     /// The resolver answered: every window that asked for it files the
     /// pixels and draws.
     fn filer_on_icon(&mut self, res: crate::notif_icons::Resolved) {
@@ -3491,9 +3578,8 @@ impl App {
     /// Draw one frame of window `id`.
     fn filer_draw(&mut self, id: u32) {
         let icon_scale = self.icon_scale();
-        let ground = lift(self.config.theme.background_rgba(), 0.0);
-        let side_ground = lift(self.config.theme.background_rgba(), 0.012);
-        let ink = self.config.theme.text_rgba();
+        let pal = self.filer_palette();
+        let (ground, side_ground, ink) = (pal.ground, pal.side, pal.ink);
         let squircle = self.config.theme.icon_squircle;
         let Some(mut win) = self.filer.take(id) else {
             return;
@@ -3555,7 +3641,7 @@ impl App {
         if layout.side_w == 0.0 && win.dir.parent().is_some() {
             hits.up = Rect::new(PAD, mid - 14.0, 34.0, 28.0);
             if win.hover == Spot::Up {
-                scene.rects.push(rect(hits.up, 10.0, WASH_HOVER));
+                scene.rects.push(rect(hits.up, 10.0, pal.hover));
             }
             scene
                 .labels
@@ -3565,7 +3651,7 @@ impl App {
         // Icons or a list: the button shows the one it turns to.
         hits.view = Rect::new(w - PAD - 28.0, mid - 14.0, 28.0, 28.0);
         if win.hover == Spot::View {
-            scene.rects.push(rect(hits.view, 14.0, WASH_HOVER));
+            scene.rects.push(rect(hits.view, 14.0, pal.hover));
         }
         scene.labels.push(Label {
             font_px: 14.0,
@@ -3584,7 +3670,7 @@ impl App {
         // field what is typed goes in: the folder shows what it finds.
         hits.find = Rect::new(hits.view.x - 32.0, mid - 14.0, 28.0, 28.0);
         if win.hover == Spot::Find || win.find.is_some() {
-            scene.rects.push(rect(hits.find, 14.0, WASH_HOVER));
+            scene.rects.push(rect(hits.find, 14.0, pal.hover));
         }
         scene.labels.push(Label {
             font_px: 14.0,
@@ -3594,10 +3680,10 @@ impl App {
         });
         if let Some(find) = win.find.as_ref() {
             let field = Rect::new(hits.find.x - 8.0 - FIND_W, mid - 13.0, FIND_W, 26.0);
-            scene.rects.push(rect(field, 13.0, [0.0, 0.0, 0.0, 0.35]));
+            scene.rects.push(rect(field, 13.0, pal.field));
             scene.rects.push(RectInst {
                 border: 1.0,
-                ..rect(field, 13.0, [1.0, 1.0, 1.0, 0.16])
+                ..rect(field, 13.0, pal.field_rim)
             });
             let (x, y) = (field.x + 12.0, mid - TEXT_LINE / 2.0);
             let tw = win
@@ -3639,7 +3725,7 @@ impl App {
             for (n, (key, x0, x1, words)) in cols.into_iter().enumerate() {
                 let hit = Rect::new(x0 - 6.0, HEAD_H + 2.0, x1 - x0 + 6.0, LIST_HEAD - 4.0);
                 if win.hover == Spot::Col(n) {
-                    scene.rects.push(rect(hit, 7.0, WASH_HOVER));
+                    scene.rects.push(rect(hit, 7.0, pal.hover));
                 }
                 // (Size is read from its right end, as its numbers are.)
                 let tw = if key == SortKey::Size {
@@ -3674,10 +3760,10 @@ impl App {
             // A path being typed stands in the steps' place.
             if let Some(text) = win.go_to.as_ref() {
                 let field = Rect::new(left - 10.0, mid - 13.0, room + 10.0, 26.0);
-                scene.rects.push(rect(field, 13.0, [0.0, 0.0, 0.0, 0.35]));
+                scene.rects.push(rect(field, 13.0, pal.field));
                 scene.rects.push(RectInst {
                     border: 1.0,
-                    ..rect(field, 13.0, [1.0, 1.0, 1.0, 0.16])
+                    ..rect(field, 13.0, pal.field_rim)
                 });
                 let tw = renderer.measure_text(text, TEXT_PX, None);
                 // (A long one shows its end, where the typing is.)
@@ -3701,7 +3787,7 @@ impl App {
                 let tw = tw.min(room);
                 let hit = Rect::new(x - 7.0, mid - 13.0, tw + 14.0, 26.0);
                 if !last && win.hover == Spot::Crumb(hits.crumbs.len()) {
-                    scene.rects.push(rect(hit, 8.0, WASH_HOVER));
+                    scene.rects.push(rect(hit, 8.0, pal.hover));
                 }
                 scene
                     .labels
@@ -3722,9 +3808,9 @@ impl App {
                 // (`..` is never "here".)
                 let up = place.name == UP;
                 if (win.dir == place.path && !up) || win.drop_place == Some(n) {
-                    scene.rects.push(rect(row, 8.0, WASH_HERE));
+                    scene.rects.push(rect(row, 8.0, pal.here));
                 } else if win.hover == Spot::Place(n) {
-                    scene.rects.push(rect(row, 8.0, WASH_HOVER));
+                    scene.rects.push(rect(row, 8.0, pal.hover));
                 }
                 if let Some(layer) = win.layer_of(&place.icon) {
                     scene.icons.push(IconInst {
@@ -3817,7 +3903,7 @@ impl App {
                 grid.rects.push(rect(
                     Rect::new(cell.x + 3.0, cell.y + 3.0, cell.w - 6.0, cell.h - 6.0),
                     10.0,
-                    WASH_SELECTED,
+                    pal.selected,
                 ));
             }
             let icon = layout.icon_in(&cell, icon_scale);
@@ -3852,13 +3938,13 @@ impl App {
                         .map_or(0.0, |r| r.measure_text(&rename.text, TEXT_PX, None));
                     let inner = tw.max(24.0);
                     let field = Rect::new(name_x - 7.0, top - 2.0, inner + 14.0, TEXT_LINE + 4.0);
-                    grid.rects.push(rect(field, 7.0, [0.0, 0.0, 0.0, 0.6]));
+                    grid.rects.push(rect(field, 7.0, pal.name_field));
                     grid.rects.push(RectInst {
                         border: 1.0,
-                        ..rect(field, 7.0, [1.0, 1.0, 1.0, 0.18])
+                        ..rect(field, 7.0, pal.name_rim)
                     });
                     if rename.all && tw > 0.0 {
-                        grid.rects.push(rect(Rect::new(name_x, top + 1.0, tw, TEXT_LINE - 2.0), 2.0, [1.0, 1.0, 1.0, 0.22]));
+                        grid.rects.push(rect(Rect::new(name_x, top + 1.0, tw, TEXT_LINE - 2.0), 2.0, pal.name_mark));
                     }
                     grid.rects.push(rect(Rect::new(name_x + tw + 1.0, top + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
                     grid.labels.push(Label {
@@ -3916,16 +4002,16 @@ impl App {
                     .map_or(0.0, |r| r.measure_text(&rename.text, LABEL_FONT_PX, None));
                 let inner = tw.max(24.0);
                 let field = Rect::new(cx - inner / 2.0 - 7.0, top - 2.0, inner + 14.0, LABEL_LINE_PX + 4.0);
-                grid.rects.push(rect(field, 7.0, [0.0, 0.0, 0.0, 0.6]));
+                grid.rects.push(rect(field, 7.0, pal.name_field));
                 grid.rects.push(RectInst {
                     border: 1.0,
-                    ..rect(field, 7.0, [1.0, 1.0, 1.0, 0.18])
+                    ..rect(field, 7.0, pal.name_rim)
                 });
                 if rename.all && tw > 0.0 {
                     grid.rects.push(rect(
                         Rect::new(cx - tw / 2.0, top + 1.0, tw, LABEL_LINE_PX - 2.0),
                         2.0,
-                        [1.0, 1.0, 1.0, 0.22],
+                        pal.name_mark,
                     ));
                 }
                 grid.rects.push(rect(
@@ -3993,10 +4079,10 @@ impl App {
                 (a.0 - b.0).abs(),
                 (a.1 - b.1).abs(),
             );
-            grid.rects.push(rect(band, 3.0, BAND_FILL));
+            grid.rects.push(rect(band, 3.0, pal.band_fill));
             grid.rects.push(RectInst {
                 border: 1.0,
-                ..rect(band, 3.0, BAND_LINE)
+                ..rect(band, 3.0, pal.band_line)
             });
         }
         // How far down the folder this is, when it does not all fit.
@@ -4007,7 +4093,7 @@ impl App {
             grid.rects.push(rect(
                 Rect::new(layout.body.x + layout.body.w - 7.0, y, 4.0, bar_h),
                 2.0,
-                SCROLL_THUMB,
+                pal.thumb,
             ));
         }
         scene.grids.push(grid);

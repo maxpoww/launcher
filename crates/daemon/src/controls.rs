@@ -483,7 +483,7 @@ const SPEEDS: [(f64, &str); 5] =
 // ------------------------------------------------------------------- look
 
 /// Whether the apps are asked for their dark look.
-fn dark_now() -> bool {
+pub(crate) fn dark_now() -> bool {
     if let Some(dark) = GolemSettings::load().dark {
         return dark;
     }
@@ -503,6 +503,12 @@ pub(crate) fn assert_dark(dark: bool) {
     let theme = if dark { "'Adwaita-dark'" } else { "'Adwaita'" };
     run("dconf", &["write", "/org/gnome/desktop/interface/color-scheme", scheme]);
     run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", theme]);
+    // Golem's icons in the same tone (Max, 2026-10-14): silver `Golem` in the
+    // light, graphite `Golem-Dark` in the dark — where they are installed.
+    if crate::look::installed("Golem") {
+        let icons = if dark { "'Golem-Dark'" } else { "'Golem'" };
+        run("dconf", &["write", "/org/gnome/desktop/interface/icon-theme", icons]);
+    }
 }
 
 // ------------------------------------------------------------------ power
