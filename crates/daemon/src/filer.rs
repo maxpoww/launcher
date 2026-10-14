@@ -1888,19 +1888,21 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
         };
     }
     Palette {
-        // sRGB #f3f4f6, #e7e9ed, #20232a.
-        ground: [0.896, 0.905, 0.922, 1.0],
-        side: [0.799, 0.815, 0.846, 1.0],
-        ink: [0.014, 0.017, 0.023, 1.0],
+        // A BRIGHT GREY, a touch warm — not white, and not blue (Max,
+        // 2026-10-14: "too white… reduce a little the blue light"): sRGB
+        // #e3e3e0, the side #d7d7d3, the ink #24231f.
+        ground: [0.768, 0.768, 0.745, 1.0],
+        side: [0.68, 0.68, 0.651, 1.0],
+        ink: [0.018, 0.017, 0.014, 1.0],
         hover: [0.0, 0.0, 0.0, 0.05],
         here: [0.0, 0.0, 0.0, 0.08],
         selected: [0.0, 0.0, 0.0, 0.11],
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
         thumb: [0.0, 0.0, 0.0, 0.25],
-        field: [1.0, 1.0, 1.0, 0.95],
+        field: [0.871, 0.871, 0.847, 1.0], // #f0f0ed
         field_rim: [0.0, 0.0, 0.0, 0.14],
-        name_field: [1.0, 1.0, 1.0, 0.97],
+        name_field: [0.871, 0.871, 0.847, 1.0],
         name_rim: [0.0, 0.0, 0.0, 0.22],
         name_mark: [0.0, 0.0, 0.0, 0.12],
     }
@@ -3188,11 +3190,11 @@ impl App {
 
     /// The menu's and the box's paint in a window: the boxes' own surface,
     /// laid solid on the window's ground (there is no glass inside it). In
-    /// the light, a white panel with the window's ink.
+    /// the light, a pale warm grey panel with the window's ink.
     fn filer_panel_paint(&self, rect: Rect, ground: [f32; 4]) -> MenuPaint {
         let mut paint = self.desktop_panel_paint(rect);
         if !crate::look::dark() {
-            paint.fill = [1.0, 1.0, 1.0, 1.0];
+            paint.fill = [0.855, 0.855, 0.831, 1.0]; // #eeeeeb
             paint.ink = self.filer_palette().ink;
             paint.wash = [0.0, 0.0, 0.0, 0.06];
             return paint;
