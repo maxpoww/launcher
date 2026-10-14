@@ -118,7 +118,9 @@ const TILE_ASPECT: f32 = 0.625;
 const TILE_GAP: f32 = 9.0;
 /// The most pictures on one page of a wall; the room under the wall for its
 /// pages' dots, and a dot's size.
-const TILES_PER_PAGE: usize = 45;
+/// (63 = seven rows of nine: Max, 2026-10-14, after a first 45: "agregá 18
+/// más por página (dos líneas más)".)
+pub(crate) const TILES_PER_PAGE: usize = 63;
 const TILE_DOTS_H: f32 = 22.0;
 const TILE_DOT: f32 = 6.0;
 const TILE_RADIUS: f32 = 8.0;
