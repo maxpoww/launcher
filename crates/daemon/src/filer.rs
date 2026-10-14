@@ -97,8 +97,18 @@ const CHAINS_MAX: usize = 400;
 const LAYER_HEADROOM: u32 = 16;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-/// A wheel's notch (15 units from the compositor) in pixels of scroll.
-const WHEEL_STEP: f32 = 4.0;
+/// THE CARD'S SCROLLING (Max, 2026-10-14: "hacé que el scrolling sea como
+/// el de la card" — `card/mod.rs::card_scroll_by` / `card_fling`, its
+/// numbers): a step of the wheel or the fingers in pixels; how fast and
+/// after how far a scroll let go of glides on; how far it carries (its
+/// speed for this long); and how quickly the folder follows a wheel's
+/// notch, and a glide.
+const SCROLL_STEP: f32 = 2.4;
+const FLING_FAST: f32 = 900.0;
+const FLING_FAR: f32 = 90.0;
+const FLING_CARRY: f32 = 0.32;
+const RATE_NOTCH: f32 = 24.0;
+const RATE_GLIDE: f32 = 4.5;
 
 /// THE LIST: a row a thing, under a strip naming its columns.
 const LIST_ROW: f32 = 30.0;
@@ -1259,7 +1269,15 @@ struct Win {
     ptr: Option<(f32, f32)>,
     hover: Spot,
     /// The scroll being reported comes from a wheel (notches), not fingers.
-    wheel: bool,
+    /// The scroll comes from FINGERS on a touchpad (the folder then follows
+    /// them step for step); how fast it was going (px/s) and when its last
+    /// step was; how far this scroll has gone; and whether the folder is
+    /// GLIDING on after a fast one was let go.
+    finger: bool,
+    scroll_vel: f32,
+    scroll_last: Option<Instant>,
+    scroll_run: f32,
+    gliding: bool,
     click: Option<(Instant, String)>,
     hits: Hits,
     watch: Option<calloop::RegistrationToken>,
@@ -1889,7 +1907,11 @@ impl App {
             missing: HashSet::new(),
             ptr: None,
             hover: Spot::Nothing,
-            wheel: false,
+            finger: false,
+            scroll_vel: 0.0,
+            scroll_last: None,
+            scroll_run: 0.0,
+            gliding: false,
             click: None,
             hits: Hits::default(),
             watch: None,
@@ -3372,8 +3394,14 @@ impl App {
             .last_frame
             .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
             .unwrap_or(0.0);
-        let (scroll, mut moving) = crate::animation::ease_toward(win.scroll, win.scroll_to, dt, 18.0, 0.5);
+        // The folder on its way to where the scroll sent it: quickly after a
+        // step of the wheel, slowly through a glide (the card's rates).
+        let rate = if win.gliding { RATE_GLIDE } else { RATE_NOTCH };
+        let (scroll, mut moving) = crate::animation::ease_toward(win.scroll, win.scroll_to, dt, rate, 0.4);
         win.scroll = scroll;
+        if !moving {
+            win.gliding = false;
+        }
         // The menu's and the box's entrance, at the desktop's rates.
         if let Some(menu) = win.menu.as_mut() {
             let (t, m) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
@@ -4027,7 +4055,7 @@ impl App {
             }
             wl_pointer::Event::AxisSource { axis_source } => {
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
+                    win.finger = axis_source == WEnum::Value(wl_pointer::AxisSource::Finger);
                 }
             }
             wl_pointer::Event::Axis {
@@ -4035,19 +4063,13 @@ impl App {
                 value,
                 ..
             } => {
-                // (Fingers move the folder with them whatever the zoom.)
-                let step = match self.filer.win(id) {
-                    Some(w) if w.wheel => value as f32 * WHEEL_STEP,
-                    Some(w) => value as f32 / w.zoom,
-                    None => return,
-                };
-                self.filer_scroll(id, step, true);
+                self.filer_scroll(id, value as f32 * SCROLL_STEP, true);
             }
-            wl_pointer::Event::Frame => {
-                if let Some(win) = self.filer.win_mut(id) {
-                    win.wheel = false;
-                }
-            }
+            // The fingers left the touchpad: a fast scroll glides on.
+            wl_pointer::Event::AxisStop {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                ..
+            } => self.filer_fling(id),
             _ => {}
         }
     }
@@ -4060,11 +4082,52 @@ impl App {
             return;
         };
         let max = win.layout(icon_scale).max_scroll(win.items.len());
-        win.scroll_to = (win.scroll_to + by).clamp(0.0, max);
-        if from_pointer && !win.wheel {
+        if !from_pointer {
+            // (A key: a page, eased to.)
+            win.gliding = false;
+            win.scroll_to = (win.scroll_to + by).clamp(0.0, max);
+            self.filer_hover(id);
+            return self.filer_request_draw(id);
+        }
+        // (A glide under way is taken over from where it is.)
+        let from = if win.gliding { win.scroll } else { win.scroll_to };
+        win.gliding = false;
+        win.scroll_run += by.abs();
+        let now = Instant::now();
+        let dt = win
+            .scroll_last
+            .map_or(0.1, |last| (now - last).as_secs_f32())
+            .clamp(0.004, 0.1);
+        win.scroll_vel = 0.55 * win.scroll_vel + 0.45 * (by / dt);
+        win.scroll_last = Some(now);
+        win.scroll_to = (from + by).clamp(0.0, max);
+        // Under fingers the folder moves exactly as they do; a wheel's
+        // notch is eased to.
+        if win.finger {
             win.scroll = win.scroll_to;
         }
         self.filer_hover(id);
+        self.filer_request_draw(id);
+    }
+
+    /// The fingers left the touchpad on a scroll: one that was going FAST,
+    /// after some travel, keeps going — the folder glides on the same way
+    /// and comes to rest, as a page does under a flick.
+    fn filer_fling(&mut self, id: u32) {
+        let icon_scale = self.icon_scale();
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let far = std::mem::take(&mut win.scroll_run) >= FLING_FAR;
+        let fresh = win.scroll_last.is_some_and(|last| last.elapsed() < Duration::from_millis(90));
+        let v = std::mem::take(&mut win.scroll_vel);
+        win.scroll_last = None;
+        if !fresh || !far || v.abs() < FLING_FAST {
+            return;
+        }
+        let max = win.layout(icon_scale).max_scroll(win.items.len());
+        win.scroll_to = (win.scroll_to + v * FLING_CARRY).clamp(0.0, max);
+        win.gliding = true;
         self.filer_request_draw(id);
     }
 
@@ -4850,6 +4913,7 @@ impl App {
         } else {
             win.select_only(i);
         }
+        win.gliding = false;
         win.scroll_to = win.layout(icon_scale).reveal(i, win.scroll_to, win.items.len());
         self.filer_request_draw(id);
     }
