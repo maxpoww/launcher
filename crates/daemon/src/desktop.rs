@@ -626,7 +626,7 @@ pub(crate) fn locked_shortcut(item: &Item) -> Option<waverunner_core::index::App
 pub(crate) fn typed_name(typed: &str, old: &Path, is_file: bool) -> String {
     let typed = typed.trim();
     let kept = (is_file && !typed.is_empty() && !typed.contains('.'))
-        .then(|| old.extension().map(|e| e.to_string_lossy().into_owned()))
+        .then(|| old.file_name().and_then(|n| ending(&n.to_string_lossy()).map(str::to_owned)))
         .flatten();
     match kept {
         Some(ext) => format!("{typed}.{ext}"),
@@ -636,6 +636,22 @@ pub(crate) fn typed_name(typed: &str, old: &Path, is_file: bool) -> String {
             .unwrap_or(typed)
             .to_owned(),
     }
+}
+
+/// A file name's ENDING, the part that says what kind of file it is: what
+/// follows its last dot when that is short and plain (`txt`, `mp4`, `7z` —
+/// not the "2 final" of "Report v1.2 final"), with the `tar` before it for
+/// a packed tarball (`tar.gz`).
+pub(crate) fn ending(name: &str) -> Option<&str> {
+    let (stem, last) = name.rsplit_once('.')?;
+    if stem.is_empty() || last.is_empty() || last.len() > 8 || !last.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    // (All ASCII from here: the cut is on a character.)
+    if stem.len() > 4 && stem.to_ascii_lowercase().ends_with(".tar") {
+        return Some(&name[stem.len() - 3..]);
+    }
+    Some(last)
 }
 
 /// `fs::rename` `old` to `name` in its folder; where it is now. `None` when
@@ -4537,6 +4553,10 @@ impl App {
     /// — or a copy, where a move is not possible; not on the dock).
     pub(crate) fn desktop_dnd_enter(&mut self, offer: DragOffer, on_dock: bool) {
         let own = self.desktop.drag.is_some();
+        // (A file window's drag, still in hand, over the dock: noted here,
+        // so the drop knows it whichever of the two "let go" events of
+        // ours comes first.)
+        self.filer.over_dock = on_dock && self.filer.dragging();
         let mimes = offer.with_mime_types(|m| m.to_vec());
         let has_files = mimes.iter().any(|t| t == URI_LIST);
         if !own {
@@ -4601,6 +4621,7 @@ impl App {
     /// the other app's drag unfinished (Nautilus stuck mid-drag, 2026-10-07).
     pub(crate) fn desktop_dnd_leave(&mut self) {
         self.dock_spring_end();
+        self.filer.over_dock = false;
         let dropped = self
             .data_device
             .as_ref()
@@ -4686,7 +4707,7 @@ impl App {
         }
         // A file manager window's files let go on the dock: on the bin they
         // are thrown away, anywhere else nothing happens. Nothing to read.
-        if self.filer.dragging() && self.desktop.dnd.is_some_and(|d| d.on_dock) {
+        if std::mem::take(&mut self.filer.over_dock) && self.desktop.dnd.is_some_and(|d| d.on_dock) {
             let (Some(offer), Some(at)) = (self.desktop_dnd_offer.take(), self.desktop.dnd.take()) else {
                 return;
             };
@@ -5974,6 +5995,22 @@ mod tests {
         assert_eq!(unique_dest(&dir, "README"), dir.join("README (2)"));
         assert_eq!(unique_dest(&dir, "fresh.txt"), dir.join("fresh.txt"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_typed_name_keeps_the_files_real_ending() {
+        let keep = |typed: &str, old: &str| typed_name(typed, Path::new(old), true);
+        assert_eq!(keep("apuntes", "/x/notas.txt"), "apuntes.txt");
+        assert_eq!(keep("backup", "/x/a.tar.gz"), "backup.tar.gz");
+        // What follows a dot is not always an ending.
+        assert_eq!(keep("Summary", "/x/Report v1.2 final"), "Summary");
+        assert_eq!(keep("b", "/x/.hidden"), "b");
+        // An ending typed is the one meant; a dot at the end takes it off.
+        assert_eq!(keep("apuntes.md", "/x/notas.txt"), "apuntes.md");
+        assert_eq!(keep("apuntes.", "/x/notas.txt"), "apuntes");
+        assert_eq!(typed_name("carpeta", Path::new("/x/old.d"), false), "carpeta");
+        assert_eq!(ending("a.TAR.xz"), Some("TAR.xz"));
+        assert_eq!(ending("tar.gz"), Some("gz"));
     }
 
     #[test]

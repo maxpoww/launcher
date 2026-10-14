@@ -519,6 +519,10 @@ pub(crate) struct Lifted {
     /// The drag image, held for the drag's life.
     _icon: Option<crate::desktop::DragIcon>,
     action: DndAction,
+    /// It has been let go: the source lives on until the target has read
+    /// the files (a long copy), but nothing is in hand any more — the
+    /// things are drawn in their places again and no later drag is "ours".
+    dropped: bool,
 }
 
 /// A drag hovering a file window (anyone's: another app's, the desktop's,
@@ -700,6 +704,11 @@ fn take_back(undo: Undo) -> Option<String> {
                         && !from.exists()
                         && (std::fs::rename(now, from).is_ok()
                             || (crate::desktop_send::copy_all_metered(now, from, None).is_ok()
+                                && std::process::Command::new("sync")
+                                    .arg("-f")
+                                    .arg(from)
+                                    .status()
+                                    .is_ok_and(|s| s.success())
                                 && (if now.is_dir() {
                                     std::fs::remove_dir_all(now)
                                 } else {
@@ -1200,6 +1209,10 @@ struct Win {
     /// and the apps of its "Open with" page: name, command, in a terminal.
     asked: Option<Asked>,
     open_with: Vec<(String, String, bool)>,
+    /// The "Open with" page is up and its apps are being asked for.
+    asking_apps: bool,
+    /// The folder changed while it was being read: read once more after.
+    again: bool,
     /// The place a hovering drag would be let go onto.
     drop_place: Option<usize>,
     /// A hovering drag is near the field's top (< 0) or bottom (> 0) edge:
@@ -1352,6 +1365,9 @@ pub(crate) struct Filer {
     orders: Orders,
     /// What Ctrl+Z takes back, the newest last.
     undo: Vec<Undo>,
+    /// A drag of ours came over the DOCK while still in hand (set at its
+    /// enter there, taken at the drop): the bin may take it.
+    pub over_dock: bool,
 }
 
 impl Filer {
@@ -1367,6 +1383,7 @@ impl Filer {
             dnd: None,
             orders: Orders::default(),
             undo: Vec::new(),
+            over_dock: false,
         }
     }
 
@@ -1391,7 +1408,7 @@ impl Filer {
 
     /// Files of a window are in hand.
     pub fn dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.as_ref().is_some_and(|d| !d.dropped)
     }
 
     /// The files in hand.
@@ -1789,6 +1806,8 @@ impl App {
             armed: None,
             asked: None,
             open_with: Vec::new(),
+            asking_apps: false,
+            again: false,
             drop_place: None,
             edge: 0.0,
             edge_at: (0.0, 0.0),
@@ -1837,6 +1856,8 @@ impl App {
             if let Some(win) = self.filer.win_mut(id) {
                 if win.places != list {
                     win.places = list.clone();
+                    // (A drag over them held a place by its number.)
+                    win.drop_place = None;
                     self.filer_request_draw(id);
                 }
             }
@@ -2013,6 +2034,13 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        // (While it is being read, changes only ask for one more reading
+        // after — else every answer is dropped for the next and a folder
+        // that keeps changing never shows.)
+        if win.loading {
+            win.again = true;
+            return;
+        }
         if win.reload_pending {
             return;
         }
@@ -2082,7 +2110,9 @@ impl App {
             return;
         }
         win.loading = false;
+        let again = std::mem::take(&mut win.again);
         let cursor_path = win.cursor.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
+        let anchor_path = win.anchor.and_then(|i| win.items.get(i)).map(|it| it.path.clone());
         match listed {
             Ok(items) => {
                 win.all = items;
@@ -2125,6 +2155,7 @@ impl App {
             win.press = None;
         }
         win.cursor = cursor_path.and_then(|p| win.items.iter().position(|it| it.path == p));
+        win.anchor = anchor_path.and_then(|p| win.items.iter().position(|it| it.path == p));
         let layout = win.layout(icon_scale);
         if let Some(i) = win
             .reveal
@@ -2147,6 +2178,10 @@ impl App {
         if let Some(i) = named {
             self.filer_walk_to(id, i);
             self.filer_begin_rename(id, i);
+        }
+        // It changed again while this reading was on its way.
+        if again {
+            self.filer_changed(id);
         }
     }
 
@@ -2202,6 +2237,7 @@ impl App {
         let rows = menu_rows(asked);
         win.asked = Some(asked);
         win.open_with.clear();
+        win.asking_apps = false;
         if rows.is_empty() {
             return;
         }
@@ -2227,6 +2263,7 @@ impl App {
             action: Action::Back,
             danger: false,
         };
+        win.asking_apps = true;
         win.menu = win
             .menu
             .take()
@@ -2242,9 +2279,14 @@ impl App {
                     .filter_map(|id| app.entries.iter().find(|e| &e.id == id))
                     .map(|e| (e.name.clone(), e.exec.clone(), e.needs_terminal))
                     .collect();
-                let Some(win) = app.filer.win_mut(id).filter(|w| w.menu_path.as_ref() == Some(&path)) else {
+                let Some(win) = app
+                    .filer
+                    .win_mut(id)
+                    .filter(|w| w.asking_apps && w.menu.is_some() && w.menu_path.as_ref() == Some(&path))
+                else {
                     return;
                 };
+                win.asking_apps = false;
                 let h = win.virt().1;
                 let mut rows = vec![back(), Row::Sep];
                 if apps.is_empty() {
@@ -2270,6 +2312,7 @@ impl App {
         let (Some(asked), h) = (win.asked, win.virt().1) else {
             return;
         };
+        win.asking_apps = false;
         win.menu = win.menu.take().map(|m| m.with_rows(menu_rows(asked), h));
         self.filer_hover(id);
         self.filer_request_draw(id);
@@ -2281,6 +2324,14 @@ impl App {
         let selected = self.filer_selected(id);
         let Some(win) = self.filer.win(id) else {
             return;
+        };
+        // A menu's row is about the thing the menu was opened on: with what
+        // is selected only while that thing is one of them. (A paste that
+        // ended meanwhile selects what came — it must not be what is
+        // thrown away.)
+        let selected = match item.and_then(|i| win.items.get(i)) {
+            Some(it) if !selected.contains(&it.path) => vec![it.path.clone()],
+            _ => selected,
         };
         let dir = win.dir.clone();
         let bin = win.in_bin();
@@ -2301,41 +2352,70 @@ impl App {
         }
         match action {
             Action::PutBack | Action::Erase if bin == InBin::Top => {
-                let trash = crate::trash::Trash::home();
-                let known = trash.list();
-                for path in selected {
-                    let name = file_name(Path::new(&path));
-                    if action == Action::Erase {
-                        info!("files: {name} deleted for good");
-                        if let Err(e) = trash.erase(&name) {
-                            warn!("files: cannot delete {name}: {e}");
+                // Only what lies IN the bin itself has a record there: a
+                // thing inside a thrown-away folder shares its name with
+                // nothing the bin knows — or, worse, with another entry.
+                let root = bin_root();
+                let names: Vec<String> = selected
+                    .iter()
+                    .map(Path::new)
+                    .filter(|p| p.parent() == Some(root.as_path()))
+                    .map(file_name)
+                    .collect();
+                let erase = action == Action::Erase;
+                // (Off the loop: a big folder takes its time to go or come.)
+                self.desktop_off_loop(
+                    move || {
+                        let trash = crate::trash::Trash::home();
+                        let known = trash.list();
+                        let mut stayed = Vec::new();
+                        for name in names {
+                            if erase {
+                                info!("files: {name} deleted for good");
+                                if let Err(e) = trash.erase(&name) {
+                                    warn!("files: cannot delete {name}: {e}");
+                                }
+                                continue;
+                            }
+                            // Back where it was — never over something that
+                            // has taken its place since.
+                            let Some(was) = known.iter().find(|t| t.name == name) else {
+                                continue;
+                            };
+                            if was.original_path.exists() {
+                                stayed.push(was.display_name().to_owned());
+                                continue;
+                            }
+                            match trash.restore(&name) {
+                                Ok(to) => info!("files: {name} put back at {}", to.display()),
+                                Err(e) => warn!("files: cannot put {name} back: {e}"),
+                            }
                         }
-                        continue;
-                    }
-                    // Back where it was — never over something that has
-                    // taken its place since.
-                    let Some(was) = known.iter().find(|t| t.name == name) else {
-                        continue;
-                    };
-                    if was.original_path.exists() {
-                        let body = format!("{} {}", was.display_name(), tr("is already there: it stays in the bin"));
-                        std::thread::spawn(move || crate::desktop_send_notify(&body));
-                        continue;
-                    }
-                    match trash.restore(&name) {
-                        Ok(to) => info!("files: {name} put back at {}", to.display()),
-                        Err(e) => warn!("files: cannot put {name} back: {e}"),
-                    }
-                }
-                self.filer_list(id);
+                        stayed
+                    },
+                    move |app, stayed: Vec<String>| {
+                        for name in stayed {
+                            let body = format!("{name} {}", tr("is already there: it stays in the bin"));
+                            std::thread::spawn(move || crate::desktop_send_notify(&body));
+                        }
+                        app.filer_list(id);
+                        app.schedule_frame();
+                    },
+                );
             }
             Action::EmptyBin if bin == InBin::Top => {
                 info!("files: the bin is emptied");
-                if let Err(e) = crate::trash::Trash::home().empty() {
-                    warn!("files: the bin could not be emptied whole: {e}");
-                }
-                self.filer_list(id);
-                self.schedule_frame();
+                self.desktop_off_loop(
+                    || {
+                        if let Err(e) = crate::trash::Trash::home().empty() {
+                            warn!("files: the bin could not be emptied whole: {e}");
+                        }
+                    },
+                    move |app, ()| {
+                        app.filer_list(id);
+                        app.schedule_frame();
+                    },
+                );
             }
             Action::Open => {
                 let all: Vec<usize> = win
@@ -2522,22 +2602,39 @@ impl App {
     /// Throw `paths` away, remembering their names in the bin so Ctrl+Z
     /// can put them back.
     fn filer_bin(&mut self, paths: &[PathBuf]) {
-        let trash = crate::trash::Trash::home();
-        let mut names = Vec::new();
-        for path in paths {
-            match trash.trash(path) {
-                Ok(item) => {
-                    info!("files: {} → Recycle Bin", path.display());
-                    names.push(item.name);
+        let paths = paths.to_vec();
+        // (Off the loop: from another disk a thing is COPIED into the bin.)
+        self.desktop_off_loop(
+            move || {
+                let trash = crate::trash::Trash::home();
+                let mut names = Vec::new();
+                let mut failed = 0usize;
+                for path in &paths {
+                    match trash.trash(path) {
+                        Ok(item) => {
+                            info!("files: {} → Recycle Bin", path.display());
+                            names.push(item.name);
+                        }
+                        Err(e) => {
+                            warn!("files: cannot throw {} away: {e}", path.display());
+                            failed += 1;
+                        }
+                    }
                 }
-                Err(e) => warn!("files: cannot throw {} away: {e}", path.display()),
-            }
-        }
-        if !names.is_empty() {
-            self.filer_did(Undo::Binned(names));
-        }
-        // (The dock's Files section and its bin show it too.)
-        self.refilter();
+                (names, failed)
+            },
+            |app, (names, failed): (Vec<String>, usize)| {
+                if !names.is_empty() {
+                    app.filer_did(Undo::Binned(names));
+                }
+                if failed > 0 {
+                    let body = crate::i18n::fill(tr("{n} could not be moved to the bin"), &[("n", &failed)]);
+                    std::thread::spawn(move || crate::desktop_send_notify(&body));
+                }
+                // (The dock's Files section and its bin show it too.)
+                app.refilter();
+            },
+        );
     }
 
     /// Remember something done, for Ctrl+Z (the last thirty).
@@ -2551,19 +2648,24 @@ impl App {
     /// Ctrl+Z: take back the last thing done in a file window — a name, a
     /// move, a copy, a throwing away, a new folder — and say so.
     fn filer_undo(&mut self) {
-        let said = match self.filer.undo.pop() {
-            None => tr("Nothing to undo").to_owned(),
-            Some(undo) => {
-                info!("files: undo {undo:?}");
-                take_back(undo).unwrap_or_else(|| tr("That could not be undone").to_owned())
-            }
+        let Some(undo) = self.filer.undo.pop() else {
+            let said = tr("Nothing to undo").to_owned();
+            std::thread::spawn(move || crate::desktop_send_notify(&said));
+            return;
         };
-        std::thread::spawn(move || crate::desktop_send_notify(&said));
-        self.refilter();
-        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
-        for id in ids {
-            self.filer_list(id);
-        }
+        info!("files: undo {undo:?}");
+        // (Off the loop: taking a move back across disks is a copy.)
+        self.desktop_off_loop(
+            move || take_back(undo).unwrap_or_else(|| tr("That could not be undone").to_owned()),
+            |app, said: String| {
+                std::thread::spawn(move || crate::desktop_send_notify(&said));
+                app.refilter();
+                let ids: Vec<u32> = app.filer.wins.iter().map(|w| w.id).collect();
+                for id in ids {
+                    app.filer_list(id);
+                }
+            },
+        );
     }
 
     /// Enter in the typed path: go to the folder it stands for (a file's
@@ -2845,13 +2947,19 @@ impl App {
         win.deep.clear();
         win.deep_gen += 1;
         win.show_found();
-        let words = win.find.clone().filter(|f| !f.trim().is_empty());
+        // (Not below the bin: what lies inside a thrown-away folder has no
+        // record of its own, and the bin's rows are not for it.)
+        let words = win
+            .find
+            .clone()
+            .filter(|f| !f.trim().is_empty() && win.in_bin() == InBin::No);
         win.deep_busy = words.is_some();
         let (generation, dir, hidden) = (win.deep_gen, win.dir.clone(), win.hidden);
         // What is shown changed under everything that held a place in it.
         let present: HashSet<&str> = win.items.iter().map(|it| it.path.as_str()).collect();
         win.selected.retain(|p| present.contains(p.as_str()));
         win.cursor = None;
+        win.anchor = None;
         win.names.1.clear();
         win.slide.clear();
         win.menu = None;
@@ -3378,13 +3486,11 @@ impl App {
         // MAKE ROOM: what is in hand leaves its place, and while a drag is
         // over the window the rest part around where it would land — each
         // easing to its display slot at the Apps grid's rate.
-        let in_hand: HashSet<&str> = self
-            .filer
-            .drag
-            .as_ref()
+        let held = self.filer.drag.as_ref().filter(|d| !d.dropped);
+        let in_hand: HashSet<&str> = held
             .map(|d| d.paths.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        let width = self.filer.drag.as_ref().map_or(1, |d| d.paths.len());
+        let width = held.map_or(1, |d| d.paths.len());
         if win.slide.len() != win.items.len() {
             win.slide = (0..win.items.len()).map(|i| i as f32).collect();
         }
@@ -3975,6 +4081,9 @@ impl App {
             return true;
         }
         match press.path.and_then(|p| win.items.iter().position(|it| it.path == p)) {
+            // (Out of the bin a thing goes by "Put back": dragged out it
+            // would land under the bin's own name for it, its record lost.)
+            Some(_) if win.in_bin() == InBin::Top => win.press = None,
             Some(i) => {
                 win.press = None;
                 self.filer_lift(id, i, press.at, press.serial);
@@ -4042,19 +4151,36 @@ impl App {
         }
         info!("files: {} in hand ({} in all)", item.name, paths.len());
         // Its place stays open until the pointer says otherwise.
-        let hole = (win.in_bin() == InBin::No)
-            .then(|| win.items[..i].iter().filter(|it| !paths.contains(&it.path)).count());
+        let orderly = win.in_bin() == InBin::No
+            && win.sort.0 == SortKey::Name
+            && win.find.as_ref().is_none_or(|f| f.is_empty());
+        let hole = orderly.then(|| win.items[..i].iter().filter(|it| !paths.contains(&it.path)).count());
         self.filer.drag = Some(Lifted {
             win: id,
             paths,
             source,
             _icon: image,
             action: DndAction::empty(),
+            dropped: false,
         });
         if let Some(win) = self.filer.win_mut(id) {
             win.gap = hole;
         }
         self.filer_request_draw(id);
+    }
+
+    /// Our drag was let go somewhere (its target may read the files for a
+    /// long while yet): nothing is in hand any more — every thing is drawn
+    /// where it is, so a click lands on what is seen.
+    pub(crate) fn filer_drag_dropped(&mut self) {
+        let Some(drag) = self.filer.drag.as_mut() else {
+            return;
+        };
+        drag.dropped = true;
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.filer_request_draw(id);
+        }
     }
 
     /// Another app (or one of our own surfaces) asked for the files in
@@ -4423,12 +4549,21 @@ impl App {
                     then();
                 }
                 // What came stands where it was let go.
-                if let Some((before, after)) = arrange.clone() {
+                if let Some((before, after)) = arrange.clone().filter(|_| !brought.is_empty()) {
                     let came: Vec<String> = brought.iter().map(|p| file_name(p)).collect();
                     let mut order: Vec<String> = before.into_iter().filter(|n| !came.contains(n)).collect();
                     order.extend(came.iter().cloned());
                     order.extend(after.into_iter().filter(|n| !came.contains(n)));
-                    app.filer.orders.set(&dir, Some(order));
+                    // (Let go where it already was — a hand that only
+                    // twitched: the folder is not "arranged by hand" for it.)
+                    let as_shown: Option<Vec<String>> = app
+                        .filer
+                        .win(id)
+                        .filter(|w| w.dir == dir)
+                        .map(|w| w.items.iter().map(|it| file_name(Path::new(&it.path))).collect());
+                    if as_shown.as_ref() != Some(&order) {
+                        app.filer.orders.set(&dir, Some(order));
+                    }
                 }
                 if let Some(win) = app.filer.win_mut(id).filter(|w| w.dir == dir) {
                     win.selected = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -4440,12 +4575,17 @@ impl App {
 
     /// A left press.
     fn filer_click(&mut self, id: u32, serial: u32) {
+        let icon_scale = self.icon_scale();
         let (ctrl, shift) = (self.modifiers.ctrl, self.modifiers.shift);
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         let at = win.ptr.unwrap_or_default();
         let layout_top = if win.list { HEAD_H + LIST_HEAD } else { HEAD_H };
+        // What is under the pointer NOW: the folder may have scrolled under
+        // it since it last moved (a wheel's eased notch, a walk by keys).
+        let layout = win.layout(icon_scale);
+        win.hover = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
         match win.hover {
             Spot::Back => self.filer_back(id),
             Spot::Forward => self.filer_forward(id),

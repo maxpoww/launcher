@@ -352,6 +352,7 @@
  "Move to": "Mover a",
  "Move to Home": "Mover a Inicio",
  "Home": "Inicio",
+ "{n} could not be moved to the bin": "{n} no se pudieron mover a la papelera",
  "Nothing to undo": "Nada que deshacer",
  "Undone: it has its old name again": "Deshecho: vuelve a tener su nombre anterior",
  "Undone: {n} moved back": "Deshecho: {n} devueltos a su sitio",

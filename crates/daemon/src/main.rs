@@ -7825,8 +7825,13 @@ impl DataSourceHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
+        source: &wl_data_source::WlDataSource,
     ) {
+        // (A file window's drag let go: nothing of it is in hand any more,
+        // however long its target takes to read the files.)
+        if self.filer.is_drag_source(source) {
+            self.filer_drag_dropped();
+        }
     }
 
     fn dnd_finished(

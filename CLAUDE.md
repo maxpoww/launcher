@@ -839,7 +839,18 @@ The big daemon files are cohesive but long — go straight to the function:
   that say they open that kind of file — `xdg-mime query filetype` then `gio mime`, off the
   loop (`apps_for`, `parse_gio_mime`), each id looked up in the dock's own index for its name
   and command (`Win::open_with`, `Action::SendTo(n)`). Rig: `files apps` / `menuback` with a
-  menu up. UNDO (Ctrl+Z, `filer_undo`): the last thirty things done in file windows
+  menu up. HARDENING (a review, 2026-10-14 — keep these): a menu's row acts on the
+  thing the menu is ON (its group only while it is one of it — `filer_act`); a click is on what is
+  under the pointer NOW (`filer_click` reads the spot again: the folder scrolls under a still
+  pointer); a drag LET GO is no longer in hand (`Lifted::dropped`, from the source's
+  `dnd_dropped` — its target may read for minutes; `Filer::dragging` is false from then, the
+  dock's bin knows ours by `Filer::over_dock`); the bin's Put back / Delete act only on what lies
+  IN the bin (by its record's name — never a thing inside a thrown-away folder; no search below
+  in the bin; nothing is dragged OUT of the bin); `anchor` and `cursor` follow their thing across
+  a listing; a typed name keeps the file's REAL ending (`desktop::ending`: `tar.gz`, not the
+  "2 final" of "v1.2 final"); a folder is only "arranged by hand" when a drop changed its order;
+  throwing away, undo, put back, delete and empty run OFF the loop; a folder that changes while
+  it is read is read once more after (`Win::again`), not on every change. UNDO (Ctrl+Z, `filer_undo`): the last thirty things done in file windows
   (`Filer::undo`, `Undo`, recorded by `filer_did`): a name goes back, things moved go back where
   they were (`undo_of` tells a move from a copy by what was left behind), copies go to the bin,
   what was thrown away comes back (`filer_bin` keeps its names in the bin), a new folder goes
