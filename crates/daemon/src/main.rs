@@ -6079,6 +6079,11 @@ impl App {
         // FAST LAUNCH spans the whole surface: a scroll anywhere is not a
         // reach for the dock.
         if self.fast.open {
+            // (But a setting's box under it pages its pictures by the wheel,
+            // as the dock's box does.)
+            if self.fast.boxed.is_some() && self.quick.tiles_wheel(value) {
+                self.schedule_frame();
+            }
             return;
         }
         // A drag in flight owns paging (the clamped edge bands): wheel

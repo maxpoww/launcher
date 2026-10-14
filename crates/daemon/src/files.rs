@@ -223,7 +223,8 @@ impl App {
     /// on a weak one). The time it takes to type the setting's name is
     /// theirs.
     pub(crate) fn pictures_warm(&mut self) {
-        for file in crate::controls::wallpaper_files() {
+        // (The first page's: the others' are made as their page is turned to.)
+        for file in crate::controls::wallpaper_files().into_iter().take(45) {
             let _ = self.picture_layer(&file);
             if crate::controls::wallpaper_moves(&file) {
                 self.picture_loop_ask(&file);

@@ -116,6 +116,11 @@ pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
 /// width, the gap between two, its corner, and the widest one gets.
 const TILE_ASPECT: f32 = 0.625;
 const TILE_GAP: f32 = 9.0;
+/// The most pictures on one page of a wall; the room under the wall for its
+/// pages' dots, and a dot's size.
+const TILES_PER_PAGE: usize = 45;
+const TILE_DOTS_H: f32 = 22.0;
+const TILE_DOT: f32 = 6.0;
 const TILE_RADIUS: f32 = 8.0;
 const TILE_MAX_W: f32 = 420.0;
 
@@ -533,6 +538,14 @@ struct OpenContent {
     chips: Vec<Chip>,
     /// Top of the closing hint.
     foot_y: f32,
+    /// A wall of pictures in pages: how far the page that is up still has
+    /// to slide (added to its tiles' x when drawn), the tiles of the page
+    /// it is taking the place of with theirs, and the dots under it — their
+    /// top, how many pages, which is up.
+    slide: f32,
+    ghosts: Vec<Chip>,
+    ghost_slide: f32,
+    dots: Option<(f32, usize, usize)>,
 }
 
 /// The pill that became the whole card.
@@ -690,6 +703,15 @@ pub(crate) struct Panel {
     /// pills, in their drawn order. The pointer moving puts it under the
     /// pointer, a key moves it from there (`step`); `None`: nowhere.
     focus: Option<usize>,
+    /// PAGES of pictures (the wallpapers past one page's worth): which page
+    /// is up and its slide, the dock's box's own pager.
+    tiles: crate::pager::Pager,
+    /// The room a wall of pictures may take top to foot, where the box is
+    /// made to hug it (the quick box): 0 = the field's own height.
+    tile_room_h: f32,
+    /// The wall's height as last laid out: the box opens at it, before the
+    /// setting has been read again.
+    wall_h: Option<f32>,
 }
 
 impl Panel {
@@ -707,6 +729,7 @@ impl Panel {
         };
         self.open = Some(OpenBox { pill: i, k: 1.0, want: 1.0, from, pop: 0.0, vel: 0.0, shown: 0.0 });
         self.focus = None;
+        self.tiles.reset();
         self.control = None;
         self.control_ask = crate::controls::is_control(self.pills[i].label);
         if is_display_setting(self.pills[i].label) {
@@ -748,6 +771,15 @@ impl Panel {
             self.focus = Some(Self::key_home(&chips));
             return true;
         };
+        // Past either end of a page of pictures: the next page, the keys on
+        // its first; the one before, on its last.
+        if dx != 0 && self.tile_pages() > 1 && ((dx > 0 && at == n - 1) || (dx < 0 && at == 0)) {
+            if self.tiles_turn(i64::from(dx.signum())) {
+                let now = self.key_chips().len();
+                self.focus = Some(if dx > 0 { 0 } else { now.saturating_sub(1) });
+            }
+            return true;
+        }
         let to = if dx != 0 {
             (at as i32 + dx).rem_euclid(n as i32) as usize
         } else {
@@ -1159,6 +1191,7 @@ impl Panel {
             shown: 0.0,
         });
         self.hot = None;
+        self.tiles.reset();
         if self.modules {
             let name = self.pills[i].label;
             self.mods = ModView::default();
@@ -1300,8 +1333,12 @@ impl Panel {
     }
 
     /// Lay PICTURES out as a grid of previews from `y` down: as many columns
-    /// as make them the biggest they can be with every one still in the
-    /// box. Returns the top of what comes next.
+    /// as make them the biggest they can be with a page of them in the box.
+    /// A PAGE is at most [`TILES_PER_PAGE`]; past that the rest are on
+    /// further pages to the right, turned as the dock's box's are (Max,
+    /// 2026-10-14: "que llegue a 45 y de ahí que aparezca otra página a la
+    /// derecha, por desborde, como hacemos en la caja del dock"). Returns
+    /// the top of what comes next — the same on every page.
     fn flow_tiles(&self, out: &mut OpenContent, y: f32, group: u8, choices: &[crate::controls::Choice]) -> f32 {
         if choices.is_empty() {
             return y;
@@ -1310,10 +1347,15 @@ impl Panel {
         let fw = self.key.0;
         let gap = TILE_GAP * s;
         let room_w = (fw - 2.0 * MARGIN * s).max(100.0);
-        // The box's own height (a solo box is as tall as it was made), less
-        // what is above the grid and the closing hint under it.
-        let room_h = (self.field.h.max(self.key.1) - y - 40.0 * s).max(TILE_ASPECT * 80.0 * s);
-        let n = choices.len();
+        let pages = choices.len().div_ceil(TILES_PER_PAGE);
+        let dots_h = if pages > 1 { TILE_DOTS_H * s } else { 0.0 };
+        // The room top to foot: the box's own height (a box made to hug the
+        // wall says how much it may take), less what is above the grid, the
+        // dots and the closing hint under it.
+        let whole = if self.tile_room_h > 0.0 { self.tile_room_h } else { self.field.h.max(self.key.1) };
+        let room_h = (whole - y - 40.0 * s - dots_h).max(TILE_ASPECT * 80.0 * s);
+        // Sized for a full page, so every page is laid on the same grid.
+        let n = choices.len().min(TILES_PER_PAGE);
         let mut cols = 2;
         let mut best = (1usize, 0.0f32);
         while cols <= 12 {
@@ -1331,20 +1373,73 @@ impl Panel {
         let w = w.min(TILE_MAX_W * s);
         let h = w * TILE_ASPECT;
         let rows = n.div_ceil(cols);
-        for (i, c) in choices.iter().enumerate() {
-            let (row, col) = (i / cols, i % cols);
-            let in_row = (n - row * cols).min(cols);
-            let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
-            let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
-            out.chips.push(Chip {
-                rect: Rect::new(x, y + row as f32 * (h + gap), w, h),
-                text: c.text.clone(),
-                on: c.on,
-                action: PanelAction::Pick { group, index: i as u8 },
-                image: Some(c.value.clone()),
-            });
+        let page_of = |page: usize| -> Vec<Chip> {
+            let first = page * TILES_PER_PAGE;
+            let on_page = choices.len().saturating_sub(first).min(TILES_PER_PAGE);
+            (0..on_page)
+                .map(|k| {
+                    let (row, col) = (k / cols, k % cols);
+                    let in_row = (on_page - row * cols).min(cols);
+                    let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
+                    let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
+                    let c = &choices[first + k];
+                    Chip {
+                        rect: Rect::new(x, y + row as f32 * (h + gap), w, h),
+                        text: c.text.clone(),
+                        on: c.on,
+                        action: PanelAction::Pick { group, index: (first + k) as u8 },
+                        image: Some(c.value.clone()),
+                    }
+                })
+                .collect()
+        };
+        let page = self.tiles.page(fw).min(pages - 1);
+        out.chips.extend(page_of(page));
+        // Mid-turn: the page slides in from its side, the one it replaces
+        // out by the other (the pager's position against where it is going).
+        let behind = self.tiles.pos - self.tiles.target;
+        if pages > 1 && behind.abs() > 0.5 {
+            let forward = behind < 0.0;
+            let from = if forward { (page + pages - 1) % pages } else { (page + 1) % pages };
+            out.slide = -behind;
+            out.ghosts = page_of(from);
+            out.ghost_slide = -behind + if forward { -fw } else { fw };
         }
-        y + rows as f32 * h + (rows - 1) as f32 * gap + GROUP_GAP * s
+        let foot = y + rows as f32 * h + (rows - 1) as f32 * gap;
+        if pages > 1 {
+            out.dots = Some((foot + (dots_h - TILE_DOT * s) / 2.0, pages, page));
+        }
+        foot + dots_h + GROUP_GAP * s
+    }
+
+    /// How many pages the open setting's pictures make.
+    fn tile_pages(&self) -> usize {
+        self.control
+            .as_ref()
+            .and_then(|v| v.groups.iter().find(|g| g.tiles))
+            .map_or(1, |g| g.choices.len().div_ceil(TILES_PER_PAGE).max(1))
+    }
+
+    /// Turn the pictures' page: `dir` +1 the next, -1 the one before, round
+    /// the ends. Returns whether there was a page to turn to.
+    pub(crate) fn tiles_turn(&mut self, dir: i64) -> bool {
+        let pages = self.tile_pages();
+        let turned = self.open.is_some() && self.tiles.turn(dir, true, pages, self.key.0);
+        if turned {
+            self.focus = None;
+        }
+        turned
+    }
+
+    /// The wheel over the pictures: enough of it turns a page.
+    pub(crate) fn tiles_wheel(&mut self, value: f64) -> bool {
+        if self.tile_pages() < 2 {
+            return false;
+        }
+        match self.tiles.wheel(value) {
+            Some(dir) => self.tiles_turn(dir),
+            None => false,
+        }
     }
 
     /// A caption over the next group of choices. Returns the group's top.
@@ -1358,7 +1453,16 @@ impl Panel {
     fn open_content(&self, label: &str) -> Option<OpenContent> {
         let s = self.scale;
         let top = CONTENT_TOP * s;
-        let mut out = OpenContent { subtitle: String::new(), captions: Vec::new(), chips: Vec::new(), foot_y: top };
+        let mut out = OpenContent {
+            subtitle: String::new(),
+            captions: Vec::new(),
+            chips: Vec::new(),
+            foot_y: top,
+            slide: 0.0,
+            ghosts: Vec::new(),
+            ghost_slide: 0.0,
+            dots: None,
+        };
         if !self.modules && crate::controls::is_control(label) {
             // Not read yet: the bare card, for the moment the read takes.
             let Some(view) = self.control.as_ref().filter(|v| v.label == label) else {
@@ -1806,7 +1910,8 @@ impl Panel {
             _ => false,
         };
         self.pointer = pointer;
-        if moved && self.open.as_ref().is_some_and(|o| o.want > 0.5) {
+        self.tiles.ease(dt);
+        if moved && !self.tiles.is_settling() && self.open.as_ref().is_some_and(|o| o.want > 0.5) {
             let chips = self.key_chips();
             if !chips.is_empty() {
                 let f = self.field;
@@ -2118,38 +2223,57 @@ impl Panel {
             let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
             let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
             let line = 20.0 * s;
+            // A PICTURE: its preview in a still frame — a wash until the
+            // picture is in, and ONE ring where the cursor is (never a second
+            // ring, and no mark, for the one in use). The picture fills its
+            // tile, and nothing is written on it (Max, 2026-10-14, of a foot
+            // strip with ▶ and ✓: "the wallpaper box is screwed … it was
+            // good before"). `dx`: a page of them mid-turn is drawn that far
+            // aside, and a tile not wholly in the box is not drawn at all
+            // (a picture cannot be cut at the box's edge).
+            let tile_at = |out: &mut PanelDraw, r: Rect, dx: f32, file: String, keyed: bool| {
+                if r.x + dx < 0.0 || r.x + dx + r.w > fw {
+                    return;
+                }
+                let (mx, my) = map(r.x + dx, r.y);
+                let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
+                let radius = TILE_RADIUS * s * cs;
+                let wash = crate::options::wash(!paint.bright, layer_wash[2]);
+                out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
+                if resting {
+                    out.images.push((tile, file));
+                }
+                if keyed {
+                    let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
+                    out.rects.push(RectInst {
+                        rect: Rect::new(tile.x - grow, tile.y - grow, tile.w + 2.0 * grow, tile.h + 2.0 * grow),
+                        radius: radius + grow,
+                        color: [paint.ink[0], paint.ink[1], paint.ink[2], alpha * ca],
+                        glass: 0.0,
+                        border: border.max(1.5),
+                    });
+                }
+            };
+            for chip in content.ghosts {
+                if let Some(file) = chip.image {
+                    tile_at(out, chip.rect, content.ghost_slide, file, false);
+                }
+            }
+            // The pages' dots under the wall: the one that is up, brighter.
+            if let Some((top, pages, page)) = content.dots {
+                let (d, step) = (TILE_DOT * s, TILE_DOT * s * 2.2);
+                let x0 = (fw - (pages - 1) as f32 * step - d) / 2.0;
+                for k in 0..pages {
+                    let a = if k == page { 0.9 } else { 0.3 };
+                    rect(out, x0 + k as f32 * step, top, d, d, d / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], a]);
+                }
+            }
             for (i, chip) in content.chips.into_iter().enumerate() {
                 let r = chip.rect;
                 // (The one cursor — the pointer's or the keys': `step`.)
                 let keyed = resting && self.focus == Some(i);
-                // A PICTURE: its preview in a still frame — a wash until the
-                // picture is in, and ONE ring where the cursor is (never a
-                // second ring, and no mark, for the one in use).
                 if let Some(file) = chip.image {
-                    let (mx, my) = map(r.x, r.y);
-                    let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
-                    let radius = TILE_RADIUS * s * cs;
-                    let wash = crate::options::wash(!paint.bright, layer_wash[2]);
-                    out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
-                    // The picture fills its tile, and nothing is written on
-                    // it (Max, 2026-10-14, of a foot strip with ▶ and ✓: "the
-                    // wallpaper box is screwed, i dont need the play button
-                    // (i see the animated live) and the thumbnails now dont
-                    // use the whole card. it was good before"). What moves is
-                    // seen moving; the one in use is the one on the desktop.
-                    if resting {
-                        out.images.push((tile, file));
-                    }
-                    if keyed {
-                        let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
-                        out.rects.push(RectInst {
-                            rect: Rect::new(tile.x - grow, tile.y - grow, tile.w + 2.0 * grow, tile.h + 2.0 * grow),
-                            radius: radius + grow,
-                            color: [paint.ink[0], paint.ink[1], paint.ink[2], alpha * ca],
-                            glass: 0.0,
-                            border: border.max(1.5),
-                        });
-                    }
+                    tile_at(out, r, content.slide, file, keyed && content.slide.abs() < 0.5);
                     continue;
                 }
                 let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
@@ -2977,14 +3101,16 @@ impl App {
             // it a few pixels up (i dont want it to touch the dock)" — it
             // was 90 % of the screen each way, centred, and its foot lay on
             // the dock's top edge).
-            let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
-            let (dock_h, _) = self.scaled_extents();
-            let top = self.options_pill_h() + 16.0 * s;
-            let bottom = screen_h - dock_h - QUICK_OFF_DOCK * s;
+            let (top, room) = self.quick_wall_room();
             let w = (sw * QUICK_WHOLE).max(200.0);
-            let h = (bottom - top).max(QUICK_MIN_H * s);
+            // As tall as its wall and no taller, in the middle of that room
+            // (Max, 2026-10-14: "hay mucho real estate que estamos
+            // desperdiciando en la caja, sobre todo abajo" — it ran to the
+            // dock whatever was in it). Not laid out yet: as it last was.
+            let wall = self.quick.open_height().filter(|h| *h > CONTENT_TOP * s + 1.0).or(self.quick.wall_h);
+            let h = wall.map_or(room, |h| (h + QUICK_FOOT * s).min(room)).max(QUICK_MIN_H * s);
             let cx = g.card.x + g.card.w / 2.0;
-            return Rect::new(cx - w / 2.0, top, w, h);
+            return Rect::new(cx - w / 2.0, top + (room - h) / 2.0, w, h);
         }
         let (w, h) = {
             (
@@ -2997,7 +3123,24 @@ impl App {
         Rect::new(cx - w / 2.0, y, w, h)
     }
 
+    /// Where a wall of pictures may stand: from under the bar to clear of
+    /// the dock — its top, and how tall that is.
+    fn quick_wall_room(&self) -> (f32, f32) {
+        let s = self.options_scale() * self.fast_zoom();
+        let sh = self.buffer_size.1 as f32;
+        let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
+        let (dock_h, _) = self.scaled_extents();
+        let top = self.options_pill_h() + 16.0 * s;
+        (top, (screen_h - dock_h - QUICK_OFF_DOCK * s - top).max(QUICK_MIN_H * s))
+    }
+
     fn quick_ensure(&mut self, rect: Rect) {
+        // (The wall is laid out for the room it MAY take; the box then hugs
+        // what it took.)
+        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") { self.quick_wall_room().1 } else { 0.0 };
+        if let Some(h) = self.quick.open_height().filter(|_| self.quick.open_is("Wallpaper") && self.quick.open_has_tiles()) {
+            self.quick.wall_h = Some(h);
+        }
         let scale = self.options_scale() * self.fast_zoom();
         let pill_h = self.options_pill_h() * self.fast_zoom();
         if let Some(r) = self.renderer.as_mut() {
