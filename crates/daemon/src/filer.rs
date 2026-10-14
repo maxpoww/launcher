@@ -88,7 +88,7 @@ const RAIL_AIR: f32 = 10.0;
 /// How far the words of an open place reach past the rail.
 const SIDE_WORDS: f32 = 140.0;
 /// A place's icon this small or smaller is drawn as its symbol alone.
-const SYMBOL_FROM: f32 = 40.0; // (Max, 2026-10-14: the size he had set, 1.5× = 42 px, is the last of the folders)
+const SYMBOL_FROM: f32 = 30.0; // (Max, 2026-10-14: the size he had set, 1× = 28 px, is the biggest of the symbols)
 /// How fast the places open and close (the menus' ease).
 const SIDE_RATE: f32 = 18.0;
 const SIDE_FROM: f32 = 560.0;
@@ -1511,11 +1511,13 @@ impl Win {
     /// SYMBOL alone (`<name>-symbolic`; Max, 2026-10-14: "the sidebar dirs
     /// become the symbols if I make them too small"). A place with no
     /// symbol of its own keeps its icon.
-    fn place_key(&self, icon: &str) -> String {
+    fn place_key(&self, place: &Place) -> String {
+        let icon = place.icon.as_str();
         if self.place_icon() > SYMBOL_FROM {
             return icon.to_owned();
         }
-        let symbol = format!("{icon}-symbolic");
+        // (`..` is an arrow up then: Max, 2026-10-14.)
+        let symbol = if place.name == UP { "asset:go-up-symbolic".to_owned() } else { format!("{icon}-symbolic") };
         if self.missing.contains(&symbol) {
             icon.to_owned()
         } else {
@@ -3650,7 +3652,7 @@ impl App {
             }
         }
         // (The places as they are drawn: a folder, or its symbol alone.)
-        let place_keys: Vec<String> = win.places.iter().map(|p| win.place_key(&p.icon)).collect();
+        let place_keys: Vec<String> = win.places.iter().map(|p| win.place_key(p)).collect();
         let mut worn: Vec<&str> = Vec::new();
         for key in place_keys
             .iter()
@@ -4023,7 +4025,7 @@ impl App {
                 } else if win.hover == Spot::Place(n) {
                     side.rects.push(rect(row, 8.0, pal.hover));
                 }
-                if let Some(layer) = win.layer_of(&win.place_key(&place.icon)) {
+                if let Some(layer) = win.layer_of(&win.place_key(place)) {
                     side.icons.push(IconInst {
                         rect: Rect::new(RAIL_AIR, y + (row_h - icon) / 2.0, icon, icon),
                         layer,
