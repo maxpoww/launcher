@@ -112,27 +112,6 @@ pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
     (crate::options::wash(!bright, wash[layer.min(2)]), LAYER_INK[layer.min(2)])
 }
 
-/// The strip at the foot of a picture's tile that the picture leaves free
-/// for its marks.
-const TILE_FOOT: f32 = 22.0;
-
-/// A sign on a wallpaper's tile (▶: it moves), at `pos`.
-fn mark(pos: (f32, f32), scale: f32) -> Label {
-    Label {
-        text: "▶".to_owned(),
-        pos,
-        max_w: 40.0 * scale,
-        font_px: 15.0 * scale,
-        line_px: 18.0 * scale,
-        centered: true,
-        dim: false,
-        cache: false,
-        family: TEXT_FONT,
-        color: None,
-        clip: None,
-    }
-}
-
 /// A picture's preview in a setting (the wallpapers): its height for its
 /// width, the gap between two, its corner, and the widest one gets.
 const TILE_ASPECT: f32 = 0.625;
@@ -2142,34 +2121,22 @@ impl Panel {
                 // (The one cursor — the pointer's or the keys': `step`.)
                 let keyed = resting && self.focus == Some(i);
                 // A PICTURE: its preview in a still frame — a wash until the
-                // picture is in, ONE ring where the cursor is, and a tick on
-                // the foot of the one in use (never a second ring).
+                // picture is in, and ONE ring where the cursor is (never a
+                // second ring, and no mark, for the one in use).
                 if let Some(file) = chip.image {
                     let (mx, my) = map(r.x, r.y);
                     let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
                     let radius = TILE_RADIUS * s * cs;
                     let wash = crate::options::wash(!paint.bright, layer_wash[2]);
                     out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
-                    // The picture stands on a FOOT of the tile's own, where
-                    // its marks are written: ▶ on one that moves, ✓ on the
-                    // one in use. (Nothing can be drawn OVER a picture —
-                    // pictures are the topmost layer — so a mark laid on it
-                    // showed only where the picture happened not to reach:
-                    // the ▶ was a sliver, the mark of the one in use nothing.)
-                    let foot = TILE_FOOT * s * cs;
-                    let sign = |text: &str, x: f32| Label {
-                        text: text.to_owned(),
-                        color: Some([paint.ink[0], paint.ink[1], paint.ink[2], 0.9 * ca]),
-                        ..mark((x, tile.y + tile.h - foot + (foot - 18.0 * s * cs) / 2.0), s * cs)
-                    };
-                    if crate::controls::wallpaper_moves(&file) {
-                        out.labels.push(sign("▶", tile.x + 15.0 * s * cs));
-                    }
-                    if chip.on {
-                        out.labels.push(sign("✓", tile.x + tile.w - 15.0 * s * cs));
-                    }
+                    // The picture fills its tile, and nothing is written on
+                    // it (Max, 2026-10-14, of a foot strip with ▶ and ✓: "the
+                    // wallpaper box is screwed, i dont need the play button
+                    // (i see the animated live) and the thumbnails now dont
+                    // use the whole card. it was good before"). What moves is
+                    // seen moving; the one in use is the one on the desktop.
                     if resting {
-                        out.images.push((Rect::new(tile.x, tile.y, tile.w, tile.h - foot), file));
+                        out.images.push((tile, file));
                     }
                     if keyed {
                         let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);

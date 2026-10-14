@@ -1551,7 +1551,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             } else if wallpaper_tool().is_none() {
                 tr("This computer cannot change its wallpaper yet.").to_owned()
             } else {
-                tr("The pictures in Pictures/Wallpapers. ▶ marks the ones that move.").to_owned()
+                tr("The pictures in Pictures/Wallpapers.").to_owned()
             };
             if !found.is_empty() && wallpaper_tool().is_some() {
                 let choices = found
