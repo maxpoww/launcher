@@ -5463,6 +5463,42 @@ impl App {
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),
+            "where" => {
+                // `where item <n>|place <n>|crumb <n>|up|view|find|field`: the
+                // middle of that part, in the window's own pixels (what a
+                // pointer on the screen is moved to, from the window's
+                // corner) — for tests with a real pointer.
+                let icon_scale = self.icon_scale();
+                let Some(win) = self.filer.win(id) else {
+                    return "closed".to_owned();
+                };
+                let layout = win.layout(icon_scale);
+                let mut words = rest.split_whitespace();
+                let what = words.next().unwrap_or("");
+                let n = words.next().and_then(|w| w.parse::<usize>().ok()).unwrap_or(0);
+                let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                let at = match what {
+                    "item" if n < win.items.len() => {
+                        let mut c = layout.cell(n);
+                        c.y -= win.scroll;
+                        // (On its icon: the middle of a cell is between icon and name.)
+                        let icon = layout.icon_in(&c, icon_scale);
+                        Some(mid(icon))
+                    }
+                    "place" => win.hits.places.get(n).copied().map(mid),
+                    "crumb" => win.hits.crumbs.get(n).map(|(r, _)| mid(*r)),
+                    "up" => Some(mid(win.hits.up)),
+                    "view" => Some(mid(win.hits.view)),
+                    "find" => Some(mid(win.hits.find)),
+                    // Bare ground in the field, past the last thing.
+                    "field" => Some((layout.body.x + layout.body.w - 20.0, layout.body.y + layout.body.h - 20.0)),
+                    _ => None,
+                };
+                return match at {
+                    Some((x, y)) => format!("where {:.0} {:.0}", x * win.zoom, y * win.zoom),
+                    None => format!("where nothing: {rest}"),
+                };
+            }
             "undo" => self.filer_undo(),
             "path" => {
                 // `path <text>`: as typed in the head, then Enter; `path? <text>`: Tab.
