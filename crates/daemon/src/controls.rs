@@ -177,6 +177,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Default apps"
             | "Wallpaper"
             | "Colours"
+            | "Tiles"
     )
 }
 
@@ -1500,6 +1501,11 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             view.subtitle = if ui.updates.is_empty() { tr("Up to date").to_owned() } else { ui.updates.clone() };
             view.groups.push(group(None, "update", 150.0, vec![choice(tr("Check now"), false, "check")]));
             view.groups.push(more("gear"));
+        }
+        // How the windows sit and stick. Empty for now: the window controls
+        // come here as they are made (Max, 2026-10-14).
+        "Tiles" => {
+            view.subtitle = tr("How windows sit, stick and line up.").to_owned();
         }
         "About Golem" => {
             view.subtitle = os_name();
