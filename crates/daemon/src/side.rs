@@ -269,15 +269,23 @@ impl App {
             return;
         };
         let here = seen();
+        // A window no longer floating (fullscreen, minimized, tiled) leaves
+        // the column. One MISSING from the compositor's list is only on its
+        // way out: its close event takes it out, and until then its home is
+        // still owed to window memory — a burst of closes had the first
+        // one's layout drop the rest before their events came, and their
+        // parked size was remembered as the app's place (2026-10-14).
         self.side
             .parked
-            .retain(|p| here.get(&p.addr).is_some_and(|s| s.floating));
+            .retain(|p| here.get(&p.addr).is_none_or(|s| s.floating));
         let mut lua = String::new();
         let mut workspaces: Vec<i64> = Vec::new();
         for p in &self.side.parked {
-            let ws = here[&p.addr].workspace;
-            if !workspaces.contains(&ws) {
-                workspaces.push(ws);
+            let Some(s) = here.get(&p.addr) else {
+                continue;
+            };
+            if !workspaces.contains(&s.workspace) {
+                workspaces.push(s.workspace);
             }
         }
         for ws in workspaces {
@@ -285,7 +293,7 @@ impl App {
                 .side
                 .parked
                 .iter()
-                .filter(|p| here[&p.addr].workspace == ws)
+                .filter(|p| here.get(&p.addr).is_some_and(|s| s.workspace == ws))
                 .collect();
             let heights: Vec<i32> = group.iter().map(|p| here[&p.addr].h).collect();
             let (places, _) = layout(&heights, &mon);
@@ -521,18 +529,25 @@ impl App {
         self.side_layout();
     }
 
-    /// Without a touchpad: `debug-desktop "side throw|call|layout|state"`
-    /// (`throw` and `call` act on the focused window).
+    /// Without a touchpad: `debug-desktop "side throw|call [addr]|layout|state"`.
+    /// `throw` and `call` act on the window named, else on the focused one —
+    /// name it from a rig: a focus asked for can fail to take, and the verb
+    /// then acts on whatever the owner has in front (it threw his file
+    /// manager, twice).
     pub(crate) fn side_debug(&mut self, what: &str) -> String {
-        match what {
-            "throw" | "call" => match hypr::active_window() {
+        let (verb, named) = match what.split_once(' ') {
+            Some((v, a)) => (v, Some(a.trim().to_owned()).filter(|a| !a.is_empty())),
+            None => (what, None),
+        };
+        match verb {
+            "throw" | "call" => match named.or_else(hypr::active_window) {
                 Some(addr) => {
-                    if what == "throw" {
+                    if verb == "throw" {
                         self.side_throw(&addr);
                     } else if !self.side_click(&addr) {
                         return format!("{addr} is not on the side");
                     }
-                    format!("{addr} {what}")
+                    format!("{addr} {verb}")
                 }
                 None => "no focused window".to_owned(),
             },
