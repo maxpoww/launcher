@@ -183,7 +183,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 
 /// The keys `App` carries out itself (see the module docs).
 pub(crate) fn ui_key(key: &str) -> bool {
-    matches!(key, "open" | "night" | "dnd" | "restart" | "colors-dynamic" | "colors-palette" | "colors-accent")
+    matches!(key, "open" | "night" | "dnd" | "restart" | "colors-dynamic" | "colors-palette" | "colors-accent" | "colors-websites")
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1402,6 +1402,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 choice(tr(name), picked, crate::palette::slot_name(*slot))
             }));
             view.groups.push(group(Some("Accent colour"), "colors-accent", 96.0, accents));
+            view.groups.push(on_off(Some("Dark websites"), "colors-websites", picked.dark_websites));
         }
         "Brightness" => match brightness() {
             Some(now) => {

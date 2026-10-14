@@ -3074,7 +3074,7 @@ impl App {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
                 }
             }
-            "colors-dynamic" | "colors-palette" | "colors-accent" => {
+            "colors-dynamic" | "colors-palette" | "colors-accent" | "colors-websites" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {

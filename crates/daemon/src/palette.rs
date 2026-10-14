@@ -17,6 +17,9 @@
 //! - `accent` — one of the palette's own hues (`base0D`…); absent: the
 //!   palette's accent. An accent is always a colour OF the palette, so a
 //!   pick survives a change of palette and still matches it.
+//! - `dark_websites` — off by default: websites stay as they are made. On:
+//!   Seam darkens them (Dark Reader) while the look is dark — it reads this
+//!   from `colors.json` (Golem's `seam/golem-chrome.js`, DARK WEBSITES).
 //!
 //! The dark/light choice stays the "Dark mode" setting's; it picks the
 //! palette's variant.
@@ -66,6 +69,8 @@ pub(crate) struct ColorChoice {
     pub palette: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dark_websites: bool,
 }
 
 fn yes() -> bool {
@@ -74,7 +79,7 @@ fn yes() -> bool {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { dynamic: true, palette: None, accent: None }
+        Self { dynamic: true, palette: None, accent: None, dark_websites: false }
     }
 }
 
@@ -107,6 +112,7 @@ pub(crate) struct Theme {
     pub name: String,
     pub dark: bool,
     pub dynamic: bool,
+    pub dark_websites: bool,
     pub c: [Rgb; 16],
     pub accent_slot: usize,
 }
@@ -286,6 +292,7 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         name: p.name,
         dark,
         dynamic: choice.dynamic,
+        dark_websites: choice.dark_websites,
         c: if dark { p.dark } else { p.light },
         accent_slot,
     }
@@ -384,6 +391,7 @@ fn colors_json(t: &Theme) -> String {
     m.insert("palette".into(), t.id.clone().into());
     m.insert("dark".into(), t.dark.into());
     m.insert("dynamic".into(), t.dynamic.into());
+    m.insert("dark_websites".into(), t.dark_websites.into());
     for (i, c) in t.c.iter().enumerate() {
         m.insert(slot_name(i), format!("#{}", hex(*c)).into());
     }
@@ -691,6 +699,7 @@ impl crate::App {
                 "colors-dynamic" => c.dynamic = value == "on",
                 "colors-palette" => c.palette = (value != GOLEM).then(|| value.to_owned()),
                 "colors-accent" => c.accent = slot(value).filter(|s| *s >= 8).map(slot_name),
+                "colors-websites" => c.dark_websites = value == "on",
                 _ => return,
             }
             s.colors = Some(c);
@@ -714,7 +723,7 @@ mod tests {
         assert!(dark.dynamic && dark.dark);
         assert_eq!(dark.accent(), [0xff, 0xbe, 0x98]);
         assert!(rel_lum(dark.bg()) < rel_lum(dark.ink()), "dark: light ink on a dark ground");
-        let light = resolve(&ColorChoice { dynamic: false, palette: None, accent: Some("base0D".into()) }, false);
+        let light = resolve(&ColorChoice { dynamic: false, palette: None, accent: Some("base0D".into()), dark_websites: false }, false);
         assert!(!light.dynamic);
         assert_eq!(light.accent_slot, 0x0D);
         assert!(rel_lum(light.bg()) > rel_lum(light.ink()), "light: dark ink on a light ground");
@@ -758,5 +767,6 @@ mod tests {
         assert_eq!(t.accent_ink(), t.c[0]);
         let json: serde_json::Value = serde_json::from_str(&colors_json(&t)).unwrap();
         assert_eq!(json["accent"], "#ffbe98");
+        assert_eq!(json["dark_websites"], false, "websites stay as made unless asked");
     }
 }
