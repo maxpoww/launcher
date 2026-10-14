@@ -575,8 +575,9 @@ impl App {
             }
             // Moved by hand since it was called: where it was is that spot
             // now, not the column.
-            if let Some(p) = self.side.get_mut(addr) {
+            if let Some(p) = self.side.get_mut(addr).filter(|p| p.called) {
                 p.called = false;
+                self.side.save();
             }
             return false;
         }
