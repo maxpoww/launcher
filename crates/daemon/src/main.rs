@@ -6173,6 +6173,12 @@ impl App {
     /// axis; verify on real hardware.)
     fn on_hscroll(&mut self, value: f64) {
         if self.fast.open {
+            // A setting's box under it: a side-scroll (two fingers sideways
+            // on a touchpad) turns its pictures' pages, as it does the dock's
+            // box (Max, 2026-10-14: "el scroll debería ser hacia los lados").
+            if self.fast.boxed.is_some() && self.quick.tiles_wheel(value) {
+                self.schedule_frame();
+            }
             return;
         }
         // Mid-drag wheel events must not page (see `on_scroll`).
