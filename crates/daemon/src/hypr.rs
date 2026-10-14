@@ -1233,20 +1233,6 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // about this or it will offer a tile that no longer
                         // exists (and, if the staged one closed, sit in front
                         // of nothing).
-                        // `activewindowv2>>ADDRESS` — a window of the side
-                        // was focused: the compositor raised it over the
-                        // strips below, the fan goes back (`side.rs`).
-                        if name.starts_with("activewindowv2") {
-                            if let Some(addr) = line
-                                .split(">>")
-                                .nth(1)
-                                .map(|a| a.trim().trim_matches(','))
-                                .filter(|a| !a.is_empty())
-                            {
-                                let addr = format!("0x{}", addr.trim_start_matches("0x"));
-                                app.side_focus_changed(&addr);
-                            }
-                        }
                         if name.starts_with("closewindow") {
                             if let Some(addr) = line.split(">>").nth(1).map(str::trim) {
                                 let addr = format!("0x{}", addr.trim_start_matches("0x"));

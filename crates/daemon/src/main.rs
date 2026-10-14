@@ -3181,6 +3181,8 @@ impl App {
                 return;
             }
             Command::WindowPlaced(addr) => {
+                // A parked window put down snaps back into the column.
+                self.side_drag_ended(addr.trim());
                 self.remember_window_placed(addr.trim());
                 // The card went away while its window was in hand.
                 self.card_window_placed(addr.trim());

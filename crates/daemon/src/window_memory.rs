@@ -290,9 +290,14 @@ impl App {
         if !self.settings.floating {
             return;
         }
-        // A window hanging on the side (`side.rs`) closed where it was parked,
-        // not where it is used: that is no place for the app.
-        if let Some(place) = gone.place.filter(|_| !self.side.has(addr)) {
+        // A window hanging on the side (`side.rs`) closed small and parked:
+        // what is remembered is its size and place from before it was thrown
+        // (Max, 2026-10-14: "it remembers the last size, not this one").
+        let place = match self.side.home_of(addr) {
+            Some(home) => Some(home),
+            None => gone.place,
+        };
+        if let Some(place) = place {
             self.window_memory.adopt(&gone.class, place, "closed");
         }
         self.sync_place_rules();

@@ -143,7 +143,10 @@ impl App {
             return;
         };
         let travelled = (nd.acc_x * nd.acc_x + nd.acc_y * nd.acc_y).sqrt();
-        if travelled < CLICK_MAX {
+        if travelled < CLICK_MAX && self.side_click(&nd.addr) {
+            // A window of the side's: called to the centre, or parked again
+            // (`side.rs` owns that round trip).
+        } else if travelled < CLICK_MAX {
             // A click, not a drag: centre the window in the usable area (only if
             // we actually read the monitor — otherwise leave it where it is).
             if nd.ux0.is_finite() && nd.ux1.is_finite() {
@@ -161,9 +164,6 @@ impl App {
                 };
                 if let Some((tx, ty)) = to {
                     move_window(&nd.addr, tx, ty);
-                    // A window of the side: to the front at the centre, back
-                    // into the fan at home (`side.rs`).
-                    self.side_after_click(&nd.addr, (tx, ty) != (x, y));
                 }
             }
         } else {

@@ -1,118 +1,153 @@
 //! THE SIDE: windows thrown to the right edge (Max, 2026-10-14).
 //!
 //! A fast, short two-finger swipe on the [current task] pill THROWS the
-//! focused window to the right edge of the screen, where it hangs with only
-//! its left strip showing — the title and the first words of each line — like
-//! a card tucked into a sleeve. Max laid six of them out by hand that night
-//! (160 px in from the edge, each about 85 px lower than the one above) and
-//! said: *"the first one goes to the top, the next window thrown there goes a
-//! little lower and so on, so i can have them there"*. The workflow, his
-//! words: throw a few there; click one; right-click the pill → it comes to
-//! the centre to be used; right-click again → it goes back to its place on the
-//! side; click the next one… The centre ↔ back half is the pill's own
-//! right-click (`nub_drag.rs`, `click_move`), which remembers where a window
-//! was centred FROM — its slot — so nothing here has to.
+//! focused window to the right edge of the screen, where it hangs small —
+//! Seam's smallest window, 804×240, *"i like that size"* — with its left
+//! 226 px showing: the title and enough of the content to know it. The first
+//! hangs right under the bar, each next one flush under the one above (its
+//! title bar in the gap), a column Max laid out by hand first and then asked
+//! for: *"throw a window there, change its size, but the size restores when
+//! i call it back"*.
 //!
-//! - A window keeps its slot while it is away at the centre (the next throw
-//!   does not take it) and until it closes; one thrown again goes back to its
-//!   own slot. A window carried off its slot by hand has left the side, and
-//!   its slot is free again (`side_tidy`).
-//! - The side is FANNED: each window lies under the one below it, and all of
-//!   them under the working windows, so every strip can be seen and clicked.
-//!   The compositor raises what is clicked, which would cover the strips below
-//!   it, so the fan is put back whenever a window of the side is focused — and
-//!   after a throw, and after a return. One brought to the centre comes to the
-//!   front there.
-//! - The throw is judged when the swipe STOPS, the card's way (`card/place.rs`):
-//!   a short run, one way, far enough — `nub_drag.rs::Fling`. A long or slow
-//!   scroll is the plain drag it always was.
-//! - A window closing on the side closed where it was parked, not where it is
-//!   used: window memory does not take that as the app's place.
+//! - **Calling one** is the pill's right-click: the window comes to the centre
+//!   at the size it had before it was thrown, in front; the ones below it
+//!   move up to close its spot. The next right-click parks it again, at the
+//!   bottom of the column. (For any other window the pill's right-click is
+//!   still `nub_drag.rs::click_move`, centre ↔ back.)
+//! - **Dragging one out**: a pointer drag of a parked window is watched; once
+//!   it has come [`DRAG_OUT`] towards the centre it is let go — its size comes
+//!   back under the hand, the column closes up — and it is a plain window
+//!   again. Put down near its place instead, it snaps back into the column.
+//! - **Window memory** never learns the parked size: a window closing on the
+//!   side is remembered at the size and place it had before it was thrown.
+//! - A thrown window goes under the working windows; a called one comes to
+//!   the front. The throw is judged when the swipe STOPS, the card's way
+//!   (`nub_drag.rs::Fling`): a short run, far enough, never turned back. A
+//!   long or slow scroll is the plain pill drag it always was.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tracing::{debug, info};
 
+use crate::window_memory::Place;
 use crate::{hypr, App};
 
-/// How much of a window shows, in from the right edge (logical px).
-const PEEK: f64 = 160.0;
-/// Each slot this much lower than the one above.
-const STEP: f64 = 84.0;
-/// The first slot's top, below the usable area's top: the title bar (25) and
-/// the border (3) stand above the window's box, plus a hair.
-const FIRST: f64 = 30.0;
-/// A window this near its slot is on it.
-const AT_SLOT: i32 = 12;
+/// How much of a parked window shows, in from the right edge (logical px).
+const PEEK: f64 = 226.0;
+/// The parked size: Seam's smallest window. A window whose own minimum is
+/// bigger keeps it; the column is laid out on the sizes they really have.
+const PARK_W: i32 = 804;
+const PARK_H: i32 = 240;
+/// Between two parked windows: the lower one's title bar, which stands above
+/// its box. The first one's title bar is the same distance under the bar.
+const GAP: f64 = 25.0;
+/// A window this near its place is on it.
+const NEAR: i32 = 12;
+/// A parked window dragged this far towards the centre has left the side.
+const DRAG_OUT: i32 = 100;
+/// How often a parked window in hand is looked at.
+const DRAG_POLL: Duration = Duration::from_millis(40);
 
-/// The side: which window hangs in which slot.
+/// A window on the side, and what it was before.
+struct Parked {
+    addr: String,
+    /// Its size and place before it was thrown (monitor-relative, as window
+    /// memory keeps them): what it goes back to, and what is remembered of it.
+    home: Place,
+}
+
+/// The side: the column, top to bottom, and what has been called out of it.
 #[derive(Default)]
 pub(crate) struct Side {
-    /// Slot → the window there (`None`: free).
-    slots: Vec<Option<String>>,
+    parked: Vec<Parked>,
+    /// Called out to the centre by the pill (address → its home): the pill's
+    /// next right-click parks it again.
+    out: HashMap<String, Place>,
+    /// A parked window in hand (a pointer drag), watched for leaving.
+    dragging: Option<String>,
 }
 
 impl Side {
-    pub(crate) fn slot_of(&self, addr: &str) -> Option<usize> {
-        self.slots.iter().position(|s| s.as_deref() == Some(addr))
+    fn index_of(&self, addr: &str) -> Option<usize> {
+        self.parked.iter().position(|p| p.addr == addr)
     }
 
     pub(crate) fn has(&self, addr: &str) -> bool {
-        self.slot_of(addr).is_some()
+        self.index_of(addr).is_some()
     }
 
-    /// The first free slot, opened at the bottom if there is none.
-    fn take_free(&mut self, addr: &str) -> usize {
-        let slot = match self.slots.iter().position(Option::is_none) {
-            Some(i) => i,
-            None => {
-                self.slots.push(None);
-                self.slots.len() - 1
-            }
-        };
-        self.slots[slot] = Some(addr.to_owned());
-        slot
+    /// What a parked window was before it was thrown.
+    pub(crate) fn home_of(&self, addr: &str) -> Option<Place> {
+        self.parked.iter().find(|p| p.addr == addr).map(|p| p.home)
     }
 
-    fn forget(&mut self, addr: &str) {
-        if let Some(i) = self.slot_of(addr) {
-            self.slots[i] = None;
-        }
-        while self.slots.last().is_some_and(Option::is_none) {
-            self.slots.pop();
-        }
+    fn remove(&mut self, addr: &str) -> Option<Parked> {
+        let i = self.index_of(addr)?;
+        Some(self.parked.remove(i))
     }
 }
 
-/// Where slot `slot` is on `mon`: the window's top-left corner, layout px.
-/// Past the bottom the slots start again from the top.
-pub(crate) fn slot_at(slot: usize, mon: &hypr::MonitorInfo) -> (i32, i32) {
-    let (_, t, r, b) = mon.reserved;
-    let usable_h = (mon.h - t - b).max(1.0);
-    let capacity = (((usable_h - FIRST) / STEP).floor() as usize).max(1);
-    let x = mon.x + mon.w - r - PEEK;
-    let y = mon.y + t + FIRST + STEP * (slot % capacity) as f64;
-    (x.round() as i32, y.round() as i32)
-}
-
-fn near(a: (i32, i32), b: (i32, i32)) -> bool {
-    (a.0 - b.0).abs() <= AT_SLOT && (a.1 - b.1).abs() <= AT_SLOT
-}
-
-/// Every mapped window: its top-left corner, and whether it floats on a real
-/// workspace (the only kind that can hang on the side).
-fn positions() -> HashMap<String, (i32, i32, bool)> {
-    hypr::client_geometries()
-        .into_iter()
-        .map(|c| {
-            (c.address, (c.x.round() as i32, c.y.round() as i32, c.floating && !c.special))
+/// Where the column's windows go, top to bottom, given each one's height:
+/// their top-left corners in layout px. Flush: each one's title bar sits in
+/// the gap under the one above.
+pub(crate) fn layout(heights: &[i32], mon: &hypr::MonitorInfo) -> Vec<(i32, i32)> {
+    let (_, t, r, _) = mon.reserved;
+    let x = (mon.x + mon.w - r - PEEK).round() as i32;
+    let mut y = mon.y + t + GAP;
+    heights
+        .iter()
+        .map(|&h| {
+            let at = (x, y.round() as i32);
+            y += f64::from(h) + GAP;
+            at
         })
         .collect()
 }
 
+fn near(a: (i32, i32), b: (i32, i32)) -> bool {
+    (a.0 - b.0).abs() <= NEAR && (a.1 - b.1).abs() <= NEAR
+}
+
+/// One mapped window as the side sees it: where it is, how big, and whether
+/// it floats on a real workspace (the only kind that can hang on the side).
+#[derive(Clone, Copy)]
+struct Seen {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    floating: bool,
+}
+
+fn seen() -> HashMap<String, Seen> {
+    hypr::client_geometries()
+        .into_iter()
+        .map(|c| {
+            (
+                c.address,
+                Seen {
+                    x: c.x.round() as i32,
+                    y: c.y.round() as i32,
+                    w: c.w.round() as i32,
+                    h: c.h.round() as i32,
+                    floating: c.floating && !c.special,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The usable area's top-left corner and size, layout px.
+fn usable(mon: &hypr::MonitorInfo) -> (f64, f64, f64, f64) {
+    let (l, t, r, b) = mon.reserved;
+    (mon.x + l, mon.y + t, (mon.w - l - r).max(1.0), (mon.h - t - b).max(1.0))
+}
+
 impl App {
-    /// Throw a window to the side: its own slot if it has one, else the first
-    /// free one. Floating windows only, and not while the stage owns the
+    /// Throw a window to the side: it goes small and under the others, at
+    /// the bottom of the column. One called out before goes back with the
+    /// home it had. Floating windows only, and not while the stage owns the
     /// screen.
     pub(crate) fn side_throw(&mut self, addr: &str) {
         if self.stage.is_on() {
@@ -121,132 +156,190 @@ impl App {
         let Ok(mon) = hypr::focused_monitor() else {
             return;
         };
-        let here = positions();
-        match here.get(addr) {
-            Some(&(_, _, true)) => {}
-            _ => {
-                debug!("side: {addr} is not a floating window; not thrown");
-                return;
-            }
+        if self.side.has(addr) {
+            self.side_layout();
+            return;
         }
-        self.side_tidy(&mon, &here);
-        let slot = match self.side.slot_of(addr) {
-            Some(s) => s,
-            None => self.side.take_free(addr),
+        let Some(s) = seen().get(addr).copied().filter(|s| s.floating) else {
+            debug!("side: {addr} is not a floating window; not thrown");
+            return;
         };
-        let (x, y) = slot_at(slot, &mon);
-        crate::nub_drag::move_window(addr, x, y);
-        info!("side: {addr} thrown to slot {slot} at ({x}, {y})");
-        self.side_fan();
+        let home = self.side.out.remove(addr).unwrap_or(Place {
+            x: f64::from(s.x) - mon.x,
+            y: f64::from(s.y) - mon.y,
+            w: f64::from(s.w),
+            h: f64::from(s.h),
+        });
+        self.side.parked.push(Parked { addr: addr.to_owned(), home });
+        hypr::dispatch(&format!(
+            "(function() local a = \"address:{addr}\" \
+             hl.dispatch(hl.dsp.window.resize({{ x = {PARK_W}, y = {PARK_H}, window = a }})) \
+             hl.dispatch(hl.dsp.window.alter_zorder({{ mode = \"bottom\", window = a }})) \
+             return hl.dsp.no_op() end)()"
+        ));
+        info!(
+            "side: {addr} thrown (was {}x{} at {},{}), {} on the side",
+            home.w,
+            home.h,
+            home.x,
+            home.y,
+            self.side.parked.len()
+        );
+        self.side_layout();
     }
 
-    /// Drop the windows that have left the side: closed, no longer floating,
-    /// or carried off their slot by hand. One away at the centre by the pill's
-    /// right-click — its remembered home IS the slot — stays.
-    fn side_tidy(&mut self, mon: &hypr::MonitorInfo, here: &HashMap<String, (i32, i32, bool)>) {
-        let gone: Vec<String> = self
-            .side
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let addr = s.as_deref()?;
-                let slot = slot_at(i, mon);
-                let stays = match here.get(addr) {
-                    Some(&(x, y, true)) => {
-                        near((x, y), slot)
-                            || self.nub_home.get(addr).is_some_and(|&h| near(h, slot))
-                    }
-                    _ => false,
-                };
-                (!stays).then(|| addr.to_owned())
-            })
-            .collect();
-        for addr in gone {
-            debug!("side: {addr} has left the side");
-            self.side.forget(&addr);
-        }
-    }
-
-    /// Lay the side out in order: each window under the one below it, all of
-    /// them under the working windows. Only windows ON their slot are put in
-    /// the order; one away at the centre is left where it is.
-    pub(crate) fn side_fan(&mut self) {
+    /// Put the column in order: every parked window at its place, top to
+    /// bottom, on the sizes they really have — the ones below a spot that
+    /// opened move up. Windows that are gone leave the column.
+    pub(crate) fn side_layout(&mut self) {
         let Ok(mon) = hypr::focused_monitor() else {
             return;
         };
-        let here = positions();
-        self.side_tidy(&mon, &here);
-        let mut lua = String::new();
-        for (i, s) in self.side.slots.iter().enumerate().rev() {
-            let Some(addr) = s.as_deref() else {
-                continue;
-            };
-            let on_slot = here
-                .get(addr)
-                .is_some_and(|&(x, y, _)| near((x, y), slot_at(i, &mon)));
-            if on_slot {
-                lua.push_str(&format!(
-                    "hl.dispatch(hl.dsp.window.alter_zorder({{ mode = \"bottom\", window = \"address:{addr}\" }})) "
-                ));
+        let here = seen();
+        self.side.parked.retain(|p| here.contains_key(&p.addr));
+        let heights: Vec<i32> = self.side.parked.iter().map(|p| here[&p.addr].h).collect();
+        let places = layout(&heights, &mon);
+        for (p, (x, y)) in self.side.parked.iter().zip(places) {
+            let s = here[&p.addr];
+            if !near((s.x, s.y), (x, y)) {
+                crate::nub_drag::move_window(&p.addr, x, y);
             }
         }
-        if !lua.is_empty() {
-            hypr::dispatch(&format!("(function() {lua} return hl.dsp.no_op() end)()"));
-        }
     }
 
-    /// A window was focused: if it hangs on the side the compositor just
-    /// raised it over the strips below — put the fan back.
-    pub(crate) fn side_focus_changed(&mut self, addr: &str) {
-        if self.side.has(addr) {
-            self.side_fan();
+    /// The pill's right-click on a window of the side's: a parked one is
+    /// CALLED — to the centre, at the size it had, in front, its spot closed
+    /// behind it; a called one is parked again. `false` for any other window
+    /// (the pill's ordinary centre ↔ back then applies).
+    pub(crate) fn side_click(&mut self, addr: &str) -> bool {
+        if self.side.out.contains_key(addr) {
+            self.side_throw(addr);
+            return true;
         }
+        let Some(p) = self.side.remove(addr) else {
+            return false;
+        };
+        let Ok(mon) = hypr::focused_monitor() else {
+            return true;
+        };
+        let (ux, uy, uw, uh) = usable(&mon);
+        let (w, h) = (p.home.w.round() as i32, p.home.h.round() as i32);
+        hypr::dispatch(&format!(
+            "(function() local a = \"address:{addr}\" \
+             hl.dispatch(hl.dsp.window.resize({{ x = {w}, y = {h}, window = a }})) \
+             local win = hl.get_window(a) \
+             local sw, sh = {w}, {h} \
+             if win and win.size then sw, sh = win.size.x, win.size.y end \
+             hl.dispatch(hl.dsp.window.move({{ x = math.floor({ux} + ({uw} - sw) / 2 + 0.5), y = math.floor({uy} + ({uh} - sh) / 2 + 0.5), window = a }})) \
+             hl.dispatch(hl.dsp.window.alter_zorder({{ mode = \"top\", window = a }})) \
+             return hl.dsp.no_op() end)()"
+        ));
+        info!("side: {addr} called to the centre at {w}x{h}");
+        self.side.out.insert(addr.to_owned(), p.home);
+        self.side_layout();
+        true
     }
 
-    /// The pill's right-click moved a window of the side: back home — the fan
-    /// is put back; to the centre — it comes to the front there.
-    pub(crate) fn side_after_click(&mut self, addr: &str, went_home: bool) {
-        if !self.side.has(addr) {
+    /// A pointer drag began on a parked window: watch it for leaving.
+    pub(crate) fn side_drag_began(&mut self, addr: &str) {
+        if !self.side.has(addr) || self.side.dragging.is_some() {
             return;
         }
-        if went_home {
-            self.side_fan();
-        } else {
-            hypr::dispatch(&format!(
-                "hl.dsp.window.alter_zorder({{ mode = \"top\", window = \"address:{addr}\" }})"
-            ));
+        self.side.dragging = Some(addr.to_owned());
+        let timer = calloop::timer::Timer::from_duration(DRAG_POLL);
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            let Some(addr) = app.side.dragging.clone() else {
+                return calloop::timer::TimeoutAction::Drop;
+            };
+            if app.side_drag_watch(&addr) {
+                calloop::timer::TimeoutAction::ToDuration(DRAG_POLL)
+            } else {
+                app.side.dragging = None;
+                calloop::timer::TimeoutAction::Drop
+            }
+        });
+    }
+
+    /// One look at a parked window in hand: `true` to keep watching. Come
+    /// [`DRAG_OUT`] towards the centre, it is let go: its size comes back
+    /// under the hand, and the column closes up behind it.
+    fn side_drag_watch(&mut self, addr: &str) -> bool {
+        let Ok(mon) = hypr::focused_monitor() else {
+            return false;
+        };
+        let here = seen();
+        let (Some(s), Some(i)) = (here.get(addr).copied(), self.side.index_of(addr)) else {
+            return false;
+        };
+        let heights: Vec<i32> = self.side.parked.iter().map(|p| here.get(&p.addr).map_or(PARK_H, |s| s.h)).collect();
+        let (px, _) = layout(&heights, &mon)[i];
+        if s.x > px - DRAG_OUT {
+            return true;
+        }
+        let Some(p) = self.side.remove(addr) else {
+            return false;
+        };
+        let (w, h) = (p.home.w.round() as i32, p.home.h.round() as i32);
+        hypr::dispatch(&format!(
+            "hl.dsp.window.resize({{ x = {w}, y = {h}, window = \"address:{addr}\" }})"
+        ));
+        info!("side: {addr} dragged out, back to {w}x{h}");
+        self.side_layout();
+        false
+    }
+
+    /// The drag ended: a window still parked is snapped back into its place.
+    pub(crate) fn side_drag_ended(&mut self, addr: &str) {
+        if self.side.dragging.as_deref() == Some(addr) {
+            self.side.dragging = None;
+        }
+        if self.side.has(addr) {
+            self.side_layout();
         }
     }
 
-    /// A window closed: its slot is free.
+    /// A window closed: its spot closes, and nothing is owed to it.
     pub(crate) fn side_window_closed(&mut self, addr: &str) {
-        self.side.forget(addr);
+        self.side.out.remove(addr);
+        if self.side.dragging.as_deref() == Some(addr) {
+            self.side.dragging = None;
+        }
+        if self.side.remove(addr).is_some() {
+            self.side_layout();
+        }
     }
 
-    /// Without a touchpad: `debug-desktop "side throw|fan|state"`.
+    /// Without a touchpad: `debug-desktop "side throw|call|layout|state"`
+    /// (`throw` and `call` act on the focused window).
     pub(crate) fn side_debug(&mut self, what: &str) -> String {
         match what {
-            "throw" => match hypr::active_window() {
+            "throw" | "call" => match hypr::active_window() {
                 Some(addr) => {
-                    self.side_throw(&addr);
-                    format!("{addr} thrown")
+                    if what == "throw" {
+                        self.side_throw(&addr);
+                    } else if !self.side_click(&addr) {
+                        return format!("{addr} is not on the side");
+                    }
+                    format!("{addr} {what}")
                 }
                 None => "no focused window".to_owned(),
             },
-            "fan" => {
-                self.side_fan();
-                "fanned".to_owned()
+            "layout" => {
+                self.side_layout();
+                "laid out".to_owned()
             }
-            "state" => self
-                .side
-                .slots
-                .iter()
-                .enumerate()
-                .map(|(i, s)| format!("{i}: {}", s.as_deref().unwrap_or("-")))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => "side throw|fan|state".to_owned(),
+            "state" => {
+                let column: Vec<String> = self
+                    .side
+                    .parked
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("{i}: {} (home {}x{} at {},{})", p.addr, p.home.w, p.home.h, p.home.x, p.home.y))
+                    .collect();
+                let out: Vec<&str> = self.side.out.keys().map(String::as_str).collect();
+                format!("parked:\n{}\nout: {}", column.join("\n"), out.join(" "))
+            }
+            _ => "side throw|call|layout|state".to_owned(),
         }
     }
 }
@@ -269,24 +362,31 @@ mod tests {
     }
 
     #[test]
-    fn slots_hang_from_the_top_under_the_bar_and_step_down() {
-        assert_eq!(slot_at(0, &mon()), (2400, 61), "as Max placed the first one");
-        assert_eq!(slot_at(1, &mon()), (2400, 145));
-        // 18 fit; the 19th starts again at the top.
-        assert_eq!(slot_at(18, &mon()), slot_at(0, &mon()));
+    fn the_column_is_flush_under_the_bar_as_max_laid_it_out() {
+        assert_eq!(
+            layout(&[240, 240, 240], &mon()),
+            vec![(2334, 56), (2334, 321), (2334, 586)],
+            "his five webapps: 226 in, 265 apart"
+        );
+        // A window that would not go that small takes the room it has.
+        assert_eq!(layout(&[240, 400, 240], &mon()), vec![(2334, 56), (2334, 321), (2334, 746)]);
+        assert!(layout(&[], &mon()).is_empty());
     }
 
     #[test]
-    fn a_freed_slot_is_taken_first_and_the_tail_is_trimmed() {
+    fn a_called_window_leaves_the_column_and_comes_back_at_the_bottom() {
+        let home = Place { x: 1.0, y: 2.0, w: 3.0, h: 4.0 };
         let mut side = Side::default();
-        assert_eq!(side.take_free("a"), 0);
-        assert_eq!(side.take_free("b"), 1);
-        assert_eq!(side.take_free("c"), 2);
-        side.forget("a");
-        assert_eq!(side.slot_of("b"), Some(1), "the others stay put");
-        assert_eq!(side.take_free("d"), 0, "the hole is filled first");
-        side.forget("c");
-        assert_eq!(side.slots.len(), 2, "the tail is trimmed");
-        assert!(!side.has("c"));
+        for a in ["a", "b", "c"] {
+            side.parked.push(Parked { addr: a.into(), home });
+        }
+        let b = side.remove("b").expect("parked");
+        side.out.insert(b.addr, b.home);
+        assert_eq!(side.index_of("c"), Some(1), "c moved up");
+        assert!(side.out.contains_key("b"));
+        assert_eq!(side.home_of("b"), None, "not parked while out");
+        side.parked.push(Parked { addr: "b".into(), home: side.out.remove("b").unwrap() });
+        assert_eq!(side.index_of("b"), Some(2), "parked again at the bottom");
+        assert_eq!(side.home_of("b"), Some(home), "with the home it had");
     }
 }
