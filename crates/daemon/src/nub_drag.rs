@@ -506,9 +506,12 @@ impl App {
         let Some(addr) = hypr::active_window() else {
             return;
         };
-        // A parked window's size is the column's (`side.rs`): a pinch does
-        // nothing to it.
-        if self.side.has(&addr) {
+        // A window IN the column has the column's size (`side.rs`): a pinch
+        // does nothing to it. One called out is a working window again and
+        // resizes as any other (Max, 2026-10-14: "no me deja cambiar el
+        // tamaño con pinching" — the first cut asked "of the column's?",
+        // which a called window still is).
+        if self.side.in_column(&addr) {
             return;
         }
         let Some((x, y, w, h)) = hypr::active_window_geom() else {
