@@ -64,23 +64,26 @@ fn text_factor(zoom: f32) -> f32 {
 /// kept between `MIN` and `MAX`. `None` for a word it does not know.
 #[cfg(test)]
 pub(crate) fn stepped(now: f32, how: &str) -> Option<f32> {
-    stepped_to(now, how, MAX)
+    stepped_to(now, how, MIN, MAX)
 }
 
-/// [`stepped`] up to `max`.
-fn stepped_to(now: f32, how: &str, max: f32) -> Option<f32> {
+/// [`stepped`] between `min` and `max`.
+fn stepped_to(now: f32, how: &str, min: f32, max: f32) -> Option<f32> {
     let to = match how {
         "in" => now + STEP,
         "out" => now - STEP,
         "reset" => 1.0,
         other => other.parse::<f32>().ok()?,
     };
-    Some(((to * 10.0).round() / 10.0).clamp(MIN, max))
+    Some(((to * 10.0).round() / 10.0).clamp(min, max))
 }
 
 /// How far a file window's places' icons may grow (Max, 2026-10-14: "zoom
 /// more on the panel icons").
 const PANEL_MAX: f32 = 3.0;
+/// …and how small: small enough that the places become their symbols alone
+/// (`filer::SYMBOL_FROM`).
+const PANEL_MIN: f32 = 0.4;
 
 impl App {
     /// How much bigger than its own size the bar is drawn.
@@ -120,7 +123,7 @@ impl App {
     /// The same for a file manager window's panel: its places and its head.
     pub(crate) fn files_panel_zoom(&self) -> f32 {
         let z = self.settings.files_panel_zoom;
-        if z > 0.0 { z.clamp(MIN, PANEL_MAX) } else { 1.0 }
+        if z > 0.0 { z.clamp(PANEL_MIN, PANEL_MAX) } else { 1.0 }
     }
 
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
@@ -136,8 +139,8 @@ impl App {
             "files-panel" => self.files_panel_zoom(),
             _ => return USAGE.to_owned(),
         };
-        let max = if what == "files-panel" { PANEL_MAX } else { MAX };
-        let Some(to) = stepped_to(now, how, max) else {
+        let (min, max) = if what == "files-panel" { (PANEL_MIN, PANEL_MAX) } else { (MIN, MAX) };
+        let Some(to) = stepped_to(now, how, min, max) else {
             return USAGE.to_owned();
         };
         if (to - now).abs() < 0.001 {
