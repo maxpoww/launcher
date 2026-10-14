@@ -186,6 +186,9 @@ const PSEUDO_H: f64 = 0.84;
 /// back from `clients` JSON) and the match key for hyprland.lua's frame
 /// rule, which restores rounding + border under smart gaps.
 const PSEUDO_TAG: &str = "golem-pseudo";
+/// Worn by a pseudo window while it is fullscreen, so that leaving fullscreen
+/// takes it back to pseudo (the state before) rather than to the plain tile.
+const BACK_PSEUDO_TAG: &str = "golem-back-pseudo";
 
 /// Golem's floating size, as a fraction of the MONITOR — the float mode's
 /// answer to [`PSEUDO_W`]/[`PSEUDO_H`], and proportional for the same reason:
@@ -450,9 +453,23 @@ pub fn set_window_mode(target: WindowMode) -> bool {
     if current == WindowMode::Tiled {
         note_tile(addr, &json);
     }
-    // Pressing the mode you are already in is how you get out of it.
+    // Pressing the mode you are already in is how you get out of it: BACK to
+    // the state before it. Leaving fullscreen, that is whatever the window
+    // was underneath — a floating window stays floating (Max, 2026-10-14:
+    // "cuando salgo la ventana vuelve como tile; debería volver a su estado
+    // anterior, en este caso floating"; the first cut tiled every float on
+    // its way in), or pseudo again if that is what it left (it wears
+    // `BACK_PSEUDO_TAG` meanwhile). Leaving floating or pseudo is the layout.
+    let floating_under = json["floating"].as_bool().unwrap_or(false);
+    let back_pseudo = json["tags"]
+        .as_array()
+        .is_some_and(|t| t.iter().any(|t| t.as_str() == Some(BACK_PSEUDO_TAG)));
     let target = if current == target {
-        WindowMode::Tiled
+        match current {
+            WindowMode::Fullscreen if floating_under => WindowMode::Floating,
+            WindowMode::Fullscreen if back_pseudo => WindowMode::Pseudo,
+            _ => WindowMode::Tiled,
+        }
     } else {
         target
     };
@@ -462,14 +479,22 @@ pub fn set_window_mode(target: WindowMode) -> bool {
     let win = format!("window = \"address:{addr}\"");
     let mut lua = String::new();
     // Leave the old mode first, so the window is back in the layout before the
-    // new one is applied to it.
+    // new one is applied to it — except that a floating window goes
+    // fullscreen as it is, and comes back floating, with no trip through the
+    // layout on either side.
     match current {
         WindowMode::Pseudo => {
             lua.push_str(&format!(
                 "hl.dispatch(hl.dsp.window.tag({{ tag = \"-{PSEUDO_TAG}\", {win} }})) \
                  hl.dispatch(hl.dsp.window.pseudo({{ action = \"off\", {win} }})) "
             ));
+            if target == WindowMode::Fullscreen {
+                lua.push_str(&format!(
+                    "hl.dispatch(hl.dsp.window.tag({{ tag = \"+{BACK_PSEUDO_TAG}\", {win} }})) "
+                ));
+            }
         }
+        WindowMode::Floating if target == WindowMode::Fullscreen => {}
         WindowMode::Floating => {
             lua.push_str(&format!(
                 "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
@@ -477,8 +502,16 @@ pub fn set_window_mode(target: WindowMode) -> bool {
         }
         WindowMode::Fullscreen => {
             lua.push_str(&format!(
-                "hl.dispatch(hl.dsp.window.fullscreen({{ action = \"toggle\", {win} }})) "
+                "hl.dispatch(hl.dsp.window.fullscreen({{ action = \"toggle\", {win} }})) \
+                 hl.dispatch(hl.dsp.window.tag({{ tag = \"-{BACK_PSEUDO_TAG}\", {win} }})) "
             ));
+            // Floating underneath, it is floating now; anywhere but Floating
+            // from here means leaving the float first.
+            if floating_under && target != WindowMode::Floating {
+                lua.push_str(&format!(
+                    "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
+                ));
+            }
         }
         WindowMode::Tiled => {}
     }
@@ -486,6 +519,8 @@ pub fn set_window_mode(target: WindowMode) -> bool {
     let mut needs_second_pass = false;
     match target {
         WindowMode::Tiled => {}
+        // Back from fullscreen over a float: floating already, where it was.
+        WindowMode::Floating if current == WindowMode::Fullscreen && floating_under => {}
         WindowMode::Floating => {
             lua.push_str(&format!(
                 "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
