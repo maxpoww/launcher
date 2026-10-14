@@ -20,7 +20,7 @@ use crate::files::file_asset_name;
 
 /// Texture layers reserved for thumbnails past the package blocks —
 /// slots recycle round-robin once full.
-pub const THUMB_CAP: usize = 128;
+pub const THUMB_CAP: usize = 160;
 
 /// A worker result for one requested file.
 pub enum Event {

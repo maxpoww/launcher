@@ -224,7 +224,7 @@ impl App {
     /// theirs.
     pub(crate) fn pictures_warm(&mut self) {
         // (The first page's: the others' are made as their page is turned to.)
-        for file in crate::controls::wallpaper_files().into_iter().take(45) {
+        for file in crate::controls::wallpaper_files().into_iter().take(crate::panel::TILES_PER_PAGE) {
             let _ = self.picture_layer(&file);
             if crate::controls::wallpaper_moves(&file) {
                 self.picture_loop_ask(&file);

@@ -1283,7 +1283,7 @@ fn pick_wallpaper(path: String) {
 
 /// The most pictures shown: three pages of the wall (`panel.rs`
 /// `TILES_PER_PAGE`).
-const MAX_PICTURES: usize = 135;
+const MAX_PICTURES: usize = 3 * crate::panel::TILES_PER_PAGE;
 
 /// The wallpapers the box will show, as paths (one look at the folder:
 /// quick enough for whoever asks).
