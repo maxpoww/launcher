@@ -76,6 +76,9 @@ const STILL: Duration = Duration::from_millis(250);
 /// After a throw the pill's scroll is ignored this long: the tail of the
 /// swipe would re-grab the window just parked.
 const SETTLE: Duration = Duration::from_millis(600);
+/// At start, how long the found-again columns wait to be laid out: the bar
+/// has to be up and have its strip of the screen reserved first.
+const RESTORE_WAIT: Duration = Duration::from_millis(2500);
 
 /// A window of the column's, and what it was before.
 #[derive(Clone, Serialize, Deserialize)]
@@ -242,10 +245,6 @@ fn column_x(mon: &hypr::MonitorInfo) -> i32 {
 fn slot_at_y(y: i32, mon: &hypr::MonitorInfo) -> usize {
     let top = mon.y + mon.reserved.1 + GAP;
     ((f64::from(y) - top) / (f64::from(PARK_H) + GAP)).round().max(0.0) as usize
-}
-
-fn near(a: (i32, i32), b: (i32, i32)) -> bool {
-    (a.0 - b.0).abs() <= NEAR && (a.1 - b.1).abs() <= NEAR
 }
 
 /// One mapped window as the side sees it.
@@ -460,8 +459,10 @@ impl App {
                 let Some(p) = p.as_ref().filter(|p| !p.out) else {
                     continue;
                 };
+                // To the pixel: "near enough" left windows a few px off
+                // their places after an overflow had spread them.
                 if let Some(s) = here.get(&p.addr) {
-                    if !near((s.x, s.y), (x, y)) {
+                    if (s.x, s.y) != (x, y) {
                         lua.push_str(&move_lua(&p.addr, x, y));
                     }
                 }
@@ -711,7 +712,15 @@ impl App {
                 info!("side: {n} window(s) found again");
             }
         }
-        self.side_layout();
+        // Laid out once the bar has its strip of the screen back: at start
+        // the reserved area is not there yet, and the column went 31 px up
+        // under where the bar would be.
+        self.side_raise();
+        let timer = calloop::timer::Timer::from_duration(RESTORE_WAIT);
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.side_layout();
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// Without a touchpad: `debug-desktop "side throw|call|park <addr>|layout|state"`.
