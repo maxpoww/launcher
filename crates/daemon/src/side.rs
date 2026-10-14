@@ -71,6 +71,11 @@ const DRAG_OUT: i32 = 170;
 /// How near the centre a called window has to stand to count as still
 /// there (it can settle a pixel or two off: odd sizes, the app's size steps).
 const CENTRED_WITHIN: i32 = 3;
+/// A window PUT DOWN this near the strip was put there on purpose and is
+/// adopted whatever its size. (Merely standing near the strip adopts only a
+/// window already of the parked size: an app whose remembered place happens
+/// to be by the right edge must not have every new window taken.)
+const DROP_NEAR: i32 = 60;
 /// How often a parked window in hand is looked at.
 const DRAG_POLL: Duration = Duration::from_millis(40);
 /// A window moved by scroll has no "put down" of its own: still for this long
@@ -99,6 +104,11 @@ struct Parked {
     /// 2026-10-14: "para enviarla a la columna tiene que ser con el gesto").
     #[serde(default)]
     called: bool,
+    /// A shrink to the parked size was sent and it did not take: the window
+    /// has a bigger minimum of its own and keeps it (no sense sending it
+    /// again at every layout).
+    #[serde(skip)]
+    stubborn: bool,
 }
 
 /// A parked window in hand.
@@ -246,6 +256,19 @@ pub(crate) fn layout(heights: &[i32], mon: &hypr::MonitorInfo) -> (Vec<(i32, i32
     )
 }
 
+/// Which unknown windows in the strip to adopt.
+enum Adopt {
+    /// Every window standing there already of the parked size.
+    Small,
+    /// This one, just put down there, whatever its size.
+    One(String),
+}
+
+/// Of the parked size (give or take the app's own size steps).
+fn parked_size(s: &Seen) -> bool {
+    (s.w - PARK_W).abs() <= 2 && (s.h - PARK_H).abs() <= 2
+}
+
 /// The column's left edge on `mon`.
 fn column_x(mon: &hypr::MonitorInfo) -> i32 {
     (mon.x + mon.w - mon.reserved.2 - PEEK).round() as i32
@@ -350,7 +373,11 @@ impl App {
             h: f64::from(s.h),
         };
         let ws = s.workspace;
-        let slot = self.side.place(ws, None, Parked { addr: addr.to_owned(), home, out: false, called: false });
+        let slot = self.side.place(
+            ws,
+            None,
+            Parked { addr: addr.to_owned(), home, out: false, called: false, stubborn: false },
+        );
         run_lua(&resize_lua(addr, PARK_W, PARK_H));
         info!(
             "side: {addr} thrown to place {slot} of workspace {ws} (was {}x{} at {},{})",
@@ -404,6 +431,7 @@ impl App {
                 };
                 p.out = false;
                 p.called = false;
+                p.stubborn = false;
             }
         }
         if was_out {
@@ -424,23 +452,12 @@ impl App {
             return;
         };
         let mut here = seen();
-        // Gone for good, or no longer floating: out of the side. (One missing
-        // from the compositor's list is only on its way out: its close event
-        // takes it out, and until then its home is still owed to window
-        // memory.)
-        let leaving: Vec<String> = self
-            .side
-            .columns
-            .values()
-            .flatten()
-            .flatten()
-            .filter(|p| here.get(&p.addr).is_some_and(|s| !s.floating))
-            .map(|p| p.addr.clone())
-            .collect();
-        for addr in leaving {
-            debug!("side: {addr} is no longer floating; it has left the side");
-            self.side.remove(&addr);
-        }
+        // A window missing from the compositor's list is only on its way
+        // out: its close event takes it out, and until then its home is
+        // still owed to window memory. One that is not floating for now —
+        // fullscreen, minimized to the dock, tiled — keeps its place too (a
+        // place is the window's until it closes) and is simply left alone
+        // until it floats again.
         // Moved to another workspace: to that workspace's column.
         let moved: Vec<(String, i64)> = self
             .side
@@ -454,14 +471,23 @@ impl App {
                 self.side.place(ws, None, p);
             }
         }
-        self.side_adopt(&mon, &mut here);
+        self.side_adopt(&mon, &mut here, Adopt::Small);
         let mut lua = String::new();
-        for (&ws, col) in &self.side.columns {
-            let _ = ws;
+        let mut shrunk: Vec<String> = Vec::new();
+        let mut settled: Vec<String> = Vec::new();
+        for col in self.side.columns.values() {
+            // A window in the column is small: one that is not (resized by
+            // hand, or by its app) is shrunk again, once — a window with a
+            // bigger minimum of its own keeps it, and the column is laid out
+            // on the size it really has.
             let heights: Vec<i32> = col
                 .iter()
                 .map(|p| match p {
-                    Some(p) if !p.out => here.get(&p.addr).map_or(PARK_H, |s| s.h),
+                    Some(p) if !p.out => match here.get(&p.addr) {
+                        Some(s) if s.floating && !p.stubborn && !parked_size(s) => PARK_H,
+                        Some(s) if s.floating => s.h,
+                        _ => PARK_H,
+                    },
                     _ => PARK_H,
                 })
                 .collect();
@@ -470,30 +496,70 @@ impl App {
                 let Some(p) = p.as_ref().filter(|p| !p.out) else {
                     continue;
                 };
+                let Some(s) = here.get(&p.addr).filter(|s| s.floating) else {
+                    continue;
+                };
+                if parked_size(s) {
+                    settled.push(p.addr.clone());
+                } else if !p.stubborn {
+                    lua.push_str(&resize_lua(&p.addr, PARK_W, PARK_H));
+                    shrunk.push(p.addr.clone());
+                }
                 // To the pixel: "near enough" left windows a few px off
                 // their places after an overflow had spread them.
-                if let Some(s) = here.get(&p.addr) {
-                    if (s.x, s.y) != (x, y) {
-                        lua.push_str(&move_lua(&p.addr, x, y));
-                    }
+                if (s.x, s.y) != (x, y) {
+                    lua.push_str(&move_lua(&p.addr, x, y));
                 }
             }
         }
         run_lua(&lua);
+        for addr in settled {
+            if let Some(p) = self.side.get_mut(&addr) {
+                p.stubborn = false;
+            }
+        }
+        let again = !shrunk.is_empty();
+        for addr in shrunk {
+            if let Some(p) = self.side.get_mut(&addr) {
+                p.stubborn = true;
+            }
+        }
         self.side_raise();
         self.side.save();
+        // A shrink that did not take leaves the column laid out for a
+        // smaller window than is there: look again once the compositor has
+        // answered (a window that took it is at the parked size by then and
+        // nothing is sent twice).
+        if again {
+            self.side_layout_soon();
+        }
     }
 
-    /// Windows standing in the strip that the side does not know — put there
-    /// by hand, or parked before the side could remember — are adopted, each
-    /// into the place where it stands if free, and made small. One already
-    /// small has no size of its own to go back to: it goes back to what
-    /// window memory keeps for its app, else to Golem's own float size.
-    fn side_adopt(&mut self, mon: &hypr::MonitorInfo, here: &mut HashMap<String, Seen>) {
+    /// A layout a moment from now.
+    fn side_layout_soon(&mut self) {
+        let timer = calloop::timer::Timer::from_duration(Duration::from_millis(150));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.side_layout();
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// Windows found in the strip that the side does not know are adopted,
+    /// each into the place where it stands if free, and made small: every
+    /// window standing there already of the parked size (parked by hand, or
+    /// before the side could remember), or one just put down there whatever
+    /// its size. One already small has no size of its own to go back to: it
+    /// goes back to what window memory keeps for its app, else to Golem's
+    /// own float size.
+    fn side_adopt(&mut self, mon: &hypr::MonitorInfo, here: &mut HashMap<String, Seen>, which: Adopt) {
         let x = column_x(mon);
         let mut found: Vec<(String, Seen)> = here
             .iter()
-            .filter(|(a, s)| s.floating && (s.x - x).abs() <= NEAR && !self.side.has(a))
+            .filter(|(a, s)| s.floating && !self.side.has(a))
+            .filter(|(a, s)| match &which {
+                Adopt::Small => (s.x - x).abs() <= NEAR && parked_size(s),
+                Adopt::One(addr) => a.as_str() == addr && (s.x - x).abs() <= DROP_NEAR,
+            })
             .map(|(a, s)| (a.clone(), s.clone()))
             .collect();
         if found.is_empty() {
@@ -504,7 +570,7 @@ impl App {
         let (ux, uy, uw, uh) = usable(mon);
         let mut lua = String::new();
         for (addr, s) in found {
-            let small = (s.w - PARK_W).abs() <= 2 && (s.h - PARK_H).abs() <= 2;
+            let small = parked_size(&s);
             let home = if small {
                 self.window_memory.place_of(&s.class).unwrap_or(Place {
                     x: ux - mon.x + (uw - default.0 as f64) / 2.0,
@@ -521,7 +587,11 @@ impl App {
                 }
             };
             let want = Some(slot_at_y(s.y, mon));
-            let slot = self.side.place(s.workspace, want, Parked { addr: addr.clone(), home, out: false, called: false });
+            let slot = self.side.place(
+                s.workspace,
+                want,
+                Parked { addr: addr.clone(), home, out: false, called: false, stubborn: false },
+            );
             if !small {
                 lua.push_str(&resize_lua(&addr, PARK_W, PARK_H));
                 if let Some(s) = here.get_mut(&addr) {
@@ -538,10 +608,13 @@ impl App {
     /// from the top place down, so each lies over the one above it and all
     /// over the working windows. Whenever anything else is raised.
     pub(crate) fn side_raise(&self) {
+        let here = seen();
         let mut lua = String::new();
         for col in self.side.columns.values() {
             for p in col.iter().flatten().filter(|p| !p.out) {
-                lua.push_str(&zorder_lua(&p.addr, "top"));
+                if here.get(&p.addr).is_some_and(|s| s.floating) {
+                    lua.push_str(&zorder_lua(&p.addr, "top"));
+                }
             }
         }
         run_lua(&lua);
@@ -668,6 +741,7 @@ impl App {
         };
         p.out = true;
         p.called = false;
+        p.stubborn = false;
         let (w, h) = (p.home.w.round() as i32, p.home.h.round() as i32);
         run_lua(&format!("{}{}", resize_lua(addr, w, h), zorder_lua(addr, "top")));
         info!("side: {addr} taken out by hand, back to {w}x{h}, its place kept");
@@ -687,22 +761,27 @@ impl App {
     /// layout that follows.
     pub(crate) fn side_drag_ended(&mut self, addr: &str) {
         self.side_stop_watching(addr);
-        let (Ok(mon), Some(s)) = (hypr::focused_monitor(), seen().remove(addr)) else {
+        let Ok(mon) = hypr::focused_monitor() else {
             return;
         };
-        let in_strip = (s.x - column_x(&mon)).abs() <= NEAR;
+        let mut here = seen();
+        let Some(s) = here.get(addr).cloned() else {
+            return;
+        };
+        let x = column_x(&mon);
         match self.side.get(addr) {
             Some(p) if !p.out => {
-                if s.x < column_x(&mon) - DRAG_OUT {
+                if s.x < x - DRAG_OUT {
                     self.side_let_out(addr);
                 } else {
                     self.side_layout();
                 }
             }
-            Some(_) if in_strip => self.side_park(addr),
+            Some(_) if (s.x - x).abs() <= DROP_NEAR => self.side_park(addr),
             Some(_) => {}
             None => {
-                if in_strip {
+                if s.floating && (s.x - x).abs() <= DROP_NEAR {
+                    self.side_adopt(&mon, &mut here, Adopt::One(addr.to_owned()));
                     self.side_layout();
                 }
             }
@@ -764,12 +843,15 @@ impl App {
             None => (what, None),
         };
         match verb {
-            "throw" | "call" | "park" => match named.or_else(hypr::active_window) {
+            "throw" | "call" | "park" | "hand" => match named.or_else(hypr::active_window) {
                 Some(addr) => {
                     match verb {
                         "throw" => self.side_throw(&addr),
                         "park" if self.side.has(&addr) => self.side_park(&addr),
                         "call" if self.side_click(&addr) => {}
+                        // As the pill's scroll takes a parked window in
+                        // hand: a rig then moves it by dispatch.
+                        "hand" if self.side.in_column(&addr) => self.side_drag_began(&addr, true),
                         _ => return format!("{addr} is not on the side"),
                     }
                     format!("{addr} {verb}")
@@ -826,7 +908,13 @@ mod tests {
     }
 
     fn parked(addr: &str) -> Parked {
-        Parked { addr: addr.into(), home: Place { x: 1.0, y: 2.0, w: 3.0, h: 4.0 }, out: false, called: false }
+        Parked {
+            addr: addr.into(),
+            home: Place { x: 1.0, y: 2.0, w: 3.0, h: 4.0 },
+            out: false,
+            called: false,
+            stubborn: false,
+        }
     }
 
     #[test]
