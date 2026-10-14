@@ -606,6 +606,16 @@ impl App {
 /// shoved it sideways every step (Max, 2026-09-30: "they shake, move to other
 /// sides"; unpatched, the compositor threw it off-screen).
 fn resize_about_centre(addr: &str, w: i32, h: i32, cx: f64, cy: f64) {
+    // Through the compositor's own snap first, as a border resize (the
+    // plugin's `resize_snapped`: the window's limits, the edges sticking to
+    // other windows and the screen — Max, 2026-10-14: "make pinch resize snap
+    // like the border resize"). The centring below only for a plugin without it.
+    let (x, y) = (cx - f64::from(w) / 2.0, cy - f64::from(h) / 2.0);
+    if hypr::eval_ok(&format!(
+        "hl.plugin.waveview.resize_snapped(\"{addr}\", {x:.0}, {y:.0}, {w}, {h})"
+    )) {
+        return;
+    }
     hypr::dispatch(&format!(
         "(function() \
            local a = \"address:{addr}\" \
