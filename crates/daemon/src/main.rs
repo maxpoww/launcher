@@ -3176,9 +3176,7 @@ impl App {
                 return;
             }
             Command::WindowPlaced(addr) => {
-                if self.settings.floating {
-                    self.track_windows();
-                }
+                self.remember_window_placed(addr.trim());
                 // The card went away while its window was in hand.
                 self.card_window_placed(addr.trim());
                 return;
@@ -3540,11 +3538,37 @@ impl App {
         const FOCUS_LAUNCH_GRACE: Duration = Duration::from_secs(10);
         if self
             .focus_launched
-            .is_some_and(|t| t.elapsed() < FOCUS_LAUNCH_GRACE)
+            .is_none_or(|t| t.elapsed() >= FOCUS_LAUNCH_GRACE)
         {
-            self.focus_launched = None;
-            hypr::focus_window(addr);
+            return;
         }
+        self.focus_launched = None;
+        // Focusing a window on another workspace SWITCHES there, and a launch
+        // is no reason to go anywhere (Max, 2026-10-14: "sometimes a window
+        // will take me to another WS"). One that arrives off the showing
+        // workspace is left where it is — and logged, because it should not
+        // happen at all (`launch::drop_workspace_ticket`).
+        let showing = hypr::focused_monitor().ok().map(|m| m.active_ws);
+        let on = hypr::client_geometries()
+            .into_iter()
+            .find(|c| c.address == addr)
+            .map(|c| c.workspace);
+        if let (Some(showing), Some(on)) = (showing, on) {
+            if on != showing {
+                warn!(
+                    "launched window {addr} mapped on workspace {on} while {showing} is showing: \
+                     left there, not followed"
+                );
+                return;
+            }
+        }
+        // The box's keyboard hand-back may still be on its way to the window
+        // the user was on; landing AFTER this map it raises that window over
+        // the new one — "it opened behind" (Max, 2026-10-14). The keyboard
+        // goes to what was launched; nothing older is owed anything.
+        self.kb_worker.invalidate();
+        self.kb_handback = None;
+        hypr::focus_window(addr);
     }
 
     /// Request an app-index rescan unless one was requested recently.

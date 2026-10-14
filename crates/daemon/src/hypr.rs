@@ -843,6 +843,8 @@ pub struct ClientGeometry {
     /// Framed by STAGE mode (the `golem-stage` tag): its geometry is the
     /// stage's, not the user's.
     pub staged: bool,
+    /// The workspace it is on (negative: special).
+    pub workspace: i64,
 }
 
 /// Every mapped window's geometry (one `j/clients` read).
@@ -869,6 +871,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                 .to_owned();
             let (x, y) = pair(&c["at"]);
             let (w, h) = pair(&c["size"]);
+            let workspace = c["workspace"]["id"].as_i64().unwrap_or(1);
             Some(ClientGeometry {
                 address: c["address"].as_str()?.to_owned(),
                 class,
@@ -879,7 +882,8 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                 floating: c["floating"].as_bool().unwrap_or(false),
                 fullscreen: c["fullscreen"].as_i64().unwrap_or(0) != 0
                     || c["fullscreen"].as_bool().unwrap_or(false),
-                special: c["workspace"]["id"].as_i64().unwrap_or(1) < 0,
+                special: workspace < 0,
+                workspace,
                 staged: c["tags"]
                     .as_array()
                     .is_some_and(|t| t.iter().any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))),
