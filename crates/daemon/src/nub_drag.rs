@@ -169,6 +169,9 @@ impl App {
         } else {
             let (x, y) = nd.target();
             move_window(&nd.addr, x, y);
+            // A parked window dragged by the pill: let go far enough out,
+            // else snapped back into its place (`side.rs`).
+            self.side_drag_ended(&nd.addr);
         }
         nd.locked.destroy();
         nd.relative.destroy();
@@ -358,6 +361,10 @@ impl App {
                 fling: None,
                 judging: false,
             });
+            // A parked window scrolled about is in hand: watched for leaving
+            // the side, snapped back when it goes still (`side.rs`).
+            let addr = self.scroll_drag.as_ref().map(|sd| sd.addr.clone()).unwrap_or_default();
+            self.side_drag_began(&addr, true);
         }
         let Some(sd) = self.scroll_drag.as_mut() else {
             return;
@@ -493,6 +500,11 @@ impl App {
         let Some(addr) = hypr::active_window() else {
             return;
         };
+        // A parked window's size is the column's (`side.rs`): a pinch does
+        // nothing to it.
+        if self.side.has(&addr) {
+            return;
+        }
         let Some((x, y, w, h)) = hypr::active_window_geom() else {
             return;
         };

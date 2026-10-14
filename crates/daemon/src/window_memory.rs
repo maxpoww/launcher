@@ -270,10 +270,13 @@ impl App {
             return;
         }
         self.track_windows();
+        // A parked window (`side.rs`) put down is small and at the edge:
+        // that is the column's place, not the app's.
         let landed = self
             .window_memory
             .seen
             .get(addr)
+            .filter(|_| !self.side.has(addr))
             .and_then(|s| s.place.map(|p| (s.class.clone(), p)));
         if let Some((class, place)) = landed {
             self.window_memory.adopt(&class, place, "placed");

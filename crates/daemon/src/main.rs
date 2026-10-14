@@ -1289,6 +1289,8 @@ fn main() -> anyhow::Result<()> {
     app.gear_startup();
     // Each app's remembered window place rides its own rule (`window_memory`).
     app.reassert_place_rules();
+    // The side's column, as a dock of this login left it (`side.rs`).
+    app.side_restore();
 
     // Declarative installs: the package list is the source of truth.
     // Restore installs that were mid-flight when the daemon last stopped
