@@ -193,7 +193,7 @@ The big daemon files are cohesive but long — go straight to the function:
 - `hypr.rs` — all compositor IPC (dispatch + JSON reads).
 - `panel.rs` — the control panel (the card as a field of settings pills); an open setting's
   content is `open_content`: Scale and Resolution from `display.rs`, every other setting from
-  `controls.rs` (only Accent colour is still the placeholder rows).
+  `controls.rs` (no placeholder is left: Colours was the last, 2026-10-14).
 - `controls.rs` — THE OTHER SETTINGS (2026-10-13): what each one shows open and what a click on
   a choice does, in the idiom Scale and Resolution set — a subtitle, then groups of choice pills,
   the one in use lit (`ControlView { subtitle, groups: [Group { caption, key, width, choices }] }`).
@@ -309,6 +309,23 @@ The big daemon files are cohesive but long — go straight to the function:
   (`filer::Palette`). A change rescans the dock and drops the desktop's and the file windows'
   theme pictures (`desktop_look_changed`, `filer_look_changed`); `controls::assert_dark` also
   writes dconf's icon-theme for the apps.
+- `palette.rs` — THE PALETTE (Max, 2026-10-14: "the pallete have to be everywhere, like omarchy
+  does"): sixteen colours in the base16 layout (base00 ground … base07 brightest ink, base08..0F
+  the hues), a dark and a light variant and an accent slot. Golem's own is `assets/palettes/
+  golem.json` (its base01 IS Seam's chrome colour rgb(29,32,38)); the owner's go in
+  `~/.config/golem/palettes/*.json`. The choice is `colors` in `settings.json` (`ColorChoice`:
+  `dynamic`, `palette`, `accent` = a hue slot of the palette). DYNAMIC ON (default) = the shell
+  exactly as before (screen sampling); OFF = `Backdrop::palette()` in `options.rs` stands in for
+  every sampled regime (bar, clip, boxes, dock: the palette's surface as a match + its ink), the
+  bar is a solid strip of it (`options_bar_fill`), the window border is the accent all round and
+  the inactive border base02 (`border_stops`, `push_window_border`). `App::colors_apply` (start,
+  a pick, a look change) resolves the `Theme` and `publish`es it on a thread into
+  `~/.local/state/golem/theme/`: colors.json, foot.ini (both variants; running foots switch on
+  SIGUSR1/2), hyprlock.conf ($golem_* variables), gtk4.css (libadwaita variables, both looks via
+  prefers-color-scheme), gtk3.css, qt.conf (+ qt5ct/qt6ct.conf when nobody else owns them), and
+  dconf's accent-color (nearest libadwaita name). Golem's home layer points every app there.
+  The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
+  the UI thread in `App::control_pick`).
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
   as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its
   leave (`bar_zoom_keys`, the card's way) → `waverunner-ctl debug-desktop zoom bar in|out|reset`;

@@ -1,0 +1,16 @@
+{
+  "name": "Golem",
+  "accent": "base09",
+  "dark": {
+    "base00": "#16171a", "base01": "#1d2026", "base02": "#2a2e35", "base03": "#474c55",
+    "base04": "#8a8f98", "base05": "#e6e3dd", "base06": "#f1eee8", "base07": "#faf8f4",
+    "base08": "#f2707a", "base09": "#ffbe98", "base0A": "#f5cf7a", "base0B": "#9fd69a",
+    "base0C": "#86d0c8", "base0D": "#8ab4f0", "base0E": "#c9a2e8", "base0F": "#d8a27c"
+  },
+  "light": {
+    "base00": "#f7f5f1", "base01": "#ece9e3", "base02": "#dedad2", "base03": "#b3aea5",
+    "base04": "#6f6b64", "base05": "#2b2a28", "base06": "#1e1d1b", "base07": "#121110",
+    "base08": "#c4384a", "base09": "#c8643a", "base0A": "#a87b12", "base0B": "#3f8a45",
+    "base0C": "#23827a", "base0D": "#2f6bc0", "base0E": "#8a4fb8", "base0F": "#95603a"
+  }
+}

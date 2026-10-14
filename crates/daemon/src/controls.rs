@@ -176,12 +176,13 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Language"
             | "Default apps"
             | "Wallpaper"
+            | "Colours"
     )
 }
 
 /// The keys `App` carries out itself (see the module docs).
 pub(crate) fn ui_key(key: &str) -> bool {
-    matches!(key, "open" | "night" | "dnd" | "restart")
+    matches!(key, "open" | "night" | "dnd" | "restart" | "colors-dynamic" | "colors-palette" | "colors-accent")
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1374,6 +1375,32 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 110.0,
                 vec![choice(tr("Dark"), dark, "on"), choice(tr("Light"), !dark, "off")],
             ));
+        }
+        "Colours" => {
+            let picked = crate::palette::choice();
+            let theme = crate::palette::resolve(&picked, dark_now());
+            view.subtitle = tr(if picked.dynamic {
+                "The shell takes its colours from the screen; the apps wear the palette."
+            } else {
+                "Everything wears the palette."
+            })
+            .to_owned();
+            view.groups.push(on_off(Some("Dynamic colour"), "colors-dynamic", picked.dynamic));
+            view.groups.push(group(
+                Some("Palette"),
+                "colors-palette",
+                110.0,
+                crate::palette::all()
+                    .into_iter()
+                    .map(|p| choice(p.name.clone(), p.id == theme.id, p.id))
+                    .collect(),
+            ));
+            let mut accents = vec![choice(tr("The palette's"), picked.accent.is_none(), "palette")];
+            accents.extend(crate::palette::HUES.iter().map(|(slot, name)| {
+                let picked = picked.accent.is_some() && theme.accent_slot == *slot;
+                choice(tr(name), picked, crate::palette::slot_name(*slot))
+            }));
+            view.groups.push(group(Some("Accent colour"), "colors-accent", 96.0, accents));
         }
         "Brightness" => match brightness() {
             Some(now) => {

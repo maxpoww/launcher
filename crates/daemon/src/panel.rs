@@ -85,7 +85,7 @@ const SETTINGS: [Item; 24] = [
     ("Notifications", 1, "alerts do not disturb dnd messages"),
     ("Keyboard layout", 1, "input language typing keys"),
     ("Power mode", 1, "battery performance energy saver"),
-    ("Accent colour", 2, "color theme appearance highlight"),
+    ("Colours", 2, "colors colour color accent palette theme appearance highlight dynamic"),
     ("Touchpad speed", 2, "trackpad mouse pointer cursor gestures"),
     ("Language", 2, "region locale translation input"),
     ("Time zone", 2, "clock date time region"),
@@ -3070,6 +3070,9 @@ impl App {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
                 }
             }
+            "colors-dynamic" | "colors-palette" | "colors-accent" => {
+                self.colors_pick(key, &value);
+            }
             "dnd" => {
                 if self.notif_muted() != (value == "on") {
                     self.toggle_notif_mute();
@@ -3692,25 +3695,6 @@ mod tests {
         assert_eq!(content.captions.len(), 1);
         assert!(content.captions[0].0.starts_with("This screen has one resolution"));
         assert!(content.captions[0].1 > content.chips[0].rect.y);
-    }
-
-    #[test]
-    fn a_placeholder_setting_still_shows_its_sample_controls() {
-        let mut p = panel();
-        p.field = Rect::new(0.0, 0.0, 960.0, 560.0);
-        p.step(0.0, None);
-        p.open_named("Accent colour");
-        assert!(!p.display_due());
-        assert!(p.open_content("Accent colour").is_none());
-        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
-        assert!(!draw.rects.is_empty());
-        // Its sample rows take a click without asking for anything.
-        for _ in 0..40 {
-            p.step(1.0 / 60.0, None);
-        }
-        assert!(p.click((480.0, 114.0 + 23.0)));
-        assert_eq!(p.take_action(), None);
-        assert!(p.open.as_ref().is_some_and(|o| o.want > 0.5), "a click on a control keeps it open");
     }
 
     #[test]

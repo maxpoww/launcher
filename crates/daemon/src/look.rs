@@ -94,6 +94,8 @@ impl crate::App {
         self.indexer.request_rescan_fresh();
         self.desktop_look_changed();
         self.filer_look_changed();
+        // The palette's other variant, in the shell and the apps.
+        self.colors_apply(true);
     }
 }
 

@@ -345,6 +345,10 @@ pub(crate) struct GolemSettings {
     /// The picture on the desktop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<String>,
+    /// The desktop's colours: the palette and how the shell wears it
+    /// ([`crate::palette`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colors: Option<crate::palette::ColorChoice>,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
 }

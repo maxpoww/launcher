@@ -1145,6 +1145,10 @@ const STAGE_ONLY: Presence = Presence {
     stage: true,
 };
 
+/// The inactive window border hyprland.lua sets, given back when the shell
+/// stops wearing the palette.
+const INACTIVE_BORDER: &str = "rgba(3c3836aa)";
+
 /// The theme's own box colour — the neutral OPTIONS slab, used when nothing
 /// has been sampled yet.
 const BOX_SLAB: [f32; 3] = [0.10, 0.10, 0.12];
@@ -1326,9 +1330,28 @@ struct Backdrop {
     matched: Option<[f32; 4]>,
     /// The sampled frosted backdrop, when nothing is matched.
     frost: Option<[f32; 4]>,
+    /// The ink to wear instead of measuring one: the palette's, when the
+    /// shell wears the palette rather than the screen.
+    ink: Option<[f32; 4]>,
 }
 
 impl Backdrop {
+    /// What every colour-matched surface sits on when the shell is NOT
+    /// dynamic ([`crate::palette`]): the palette's surface, as a match —
+    /// so the washes, the boxes and the ink all follow from it by the one
+    /// formula below — and the palette's own ink.
+    fn palette() -> Option<Backdrop> {
+        if crate::palette::dynamic() {
+            return None;
+        }
+        let t = crate::palette::current();
+        Some(Backdrop {
+            matched: Some(crate::palette::linear(t.surface())),
+            frost: None,
+            ink: Some(crate::palette::linear(t.ink())),
+        })
+    }
+
     /// What this surface actually sits on right now: the match if there is
     /// one, else the frost. `None` only before the first sample lands.
     fn get(&self) -> Option<[f32; 4]> {
@@ -1385,7 +1408,7 @@ impl Backdrop {
         match self.get() {
             Some(backdrop) => {
                 let mut fill = box_fill(backdrop, self.rest_wash());
-                let ink = ink_on(fill);
+                let ink = self.ink.unwrap_or_else(|| ink_on(fill));
                 if !opaque {
                     fill[3] = fallback_fill[3];
                 }
@@ -2839,10 +2862,11 @@ impl App {
     /// into a [`Backdrop`]; every adaptive-colour method below goes through
     /// this instead of touching those fields directly.
     fn options_regime(&self) -> Backdrop {
-        Backdrop {
+        Backdrop::palette().unwrap_or(Backdrop {
             matched: self.options_bar_matched,
             frost: self.options_pill_color,
-        }
+            ink: None,
+        })
     }
 
     /// Whether the matched bar is bright enough to want dark text/ink.
@@ -2888,6 +2912,9 @@ impl App {
     /// This is the ONLY thing the frost sample feeds — the pills' own washes
     /// and shadows keep their matched-only behaviour.
     pub(crate) fn options_text_color(&self) -> [f32; 4] {
+        if let Some(ink) = Backdrop::palette().and_then(|b| b.ink) {
+            return ink;
+        }
         match self.options_backdrop() {
             Some(bg) => ink_on(bg),
             None => self.config.theme.text_rgba(),
@@ -2931,6 +2958,11 @@ impl App {
     /// the layer drawn BEHIND the sunset module (so they are literally the same
     /// material).
     pub(crate) fn options_bar_fill(&self) -> ([f32; 4], bool) {
+        // Wearing the palette: the bar is a strip of its surface — over a
+        // bare wallpaper too, where the palette's ink must still read.
+        if !crate::palette::dynamic() {
+            return (crate::palette::linear(crate::palette::current().surface()), true);
+        }
         match self.options_bar_matched {
             Some(c) => (c, true),
             None if self.options_paused() || self.config.accessibility.reduce_transparency => {
@@ -2967,10 +2999,11 @@ impl App {
     /// live — the clipboard zebra was violet, notif's was neutral grey, off
     /// the same purple-nebula wallpaper sampled at two different x-positions).
     fn clip_regime(&self) -> Backdrop {
-        Backdrop {
+        Backdrop::palette().unwrap_or(Backdrop {
             matched: self.options_bar_matched,
             frost: self.clip_pill_color,
-        }
+            ink: None,
+        })
     }
 
     /// The surface a box at `rect` should wear: the same formula every box on
@@ -2999,11 +3032,13 @@ impl App {
             self.options_pill_color
         };
         let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
-        Backdrop {
-            matched: self.options_bar_matched,
-            frost,
-        }
-        .surface(slab, ink_on(slab), true)
+        Backdrop::palette()
+            .unwrap_or(Backdrop {
+                matched: self.options_bar_matched,
+                frost,
+                ink: None,
+            })
+            .surface(slab, ink_on(slab), true)
     }
 
     /// The clipboard box's twin of `options_box_surface` — identical formula,
@@ -7068,10 +7103,11 @@ impl App {
 impl crate::App {
     /// The dock's live colour regime — matched window, else sampled frost.
     fn dock_regime(&self) -> Backdrop {
-        Backdrop {
+        Backdrop::palette().unwrap_or(Backdrop {
             matched: self.dock_bar_matched,
             frost: self.dock_pill_color,
-        }
+            ink: None,
+        })
     }
 
     /// Hover wash for a highlighted dock/grid row — the stronger sibling of
@@ -7098,6 +7134,11 @@ impl crate::App {
     /// must not redefine the shell's colour, so while the stage is up we
     /// keep the last colour the desktop had.
     pub(crate) fn border_stops(&self) -> [[f32; 4]; 3] {
+        // Wearing the palette: the frame is its accent, all the way round.
+        if !crate::palette::dynamic() {
+            let accent = crate::palette::linear(crate::palette::current().accent());
+            return [accent; 3];
+        }
         if self.stage.is_on() {
             if let Some(desktop) = self.border_desktop {
                 return desktop;
@@ -7197,11 +7238,20 @@ impl crate::App {
                 byte(c[2])
             )
         };
+        // The windows not in focus: the palette's border colour when the
+        // shell wears it, else the system's own (hyprland.lua's).
+        let inactive = if crate::palette::dynamic() {
+            INACTIVE_BORDER.to_owned()
+        } else {
+            let c = crate::palette::current().raised();
+            format!("rgba({}ff)", crate::palette::hex(c))
+        };
         crate::hypr::eval(&format!(
-            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }} }} }} }})",
+            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }}, inactive_border = '{}' }} }} }})",
             hex(stops[0]),
             hex(stops[1]),
             hex(stops[2]),
+            inactive,
         ));
     }
 
@@ -7248,9 +7298,9 @@ impl crate::App {
     pub(crate) fn quick_colours(&mut self, dt: f32, dock_fill: [f32; 4], dock_ink: [f32; 4]) -> ([f32; 4], [f32; 4], bool) {
         /// τ ≈ 80 ms: there in a quarter of a second.
         const RATE: f32 = 12.0;
-        let (fill_to, ink_to) = match self.wall_guess {
+        let (fill_to, ink_to) = match self.wall_guess.filter(|_| crate::palette::dynamic()) {
             Some(guess) => {
-                let backdrop = Backdrop { matched: None, frost: Some(guess) };
+                let backdrop = Backdrop { matched: None, frost: Some(guess), ink: None };
                 let (mut fill, ink) = backdrop.surface(dock_fill, dock_ink, true);
                 fill[3] = dock_fill[3];
                 (fill, ink)

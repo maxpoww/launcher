@@ -80,6 +80,7 @@ mod panel;
 mod perf;
 mod pager;
 mod pages;
+mod palette;
 mod persist;
 mod phones;
 mod pins;
@@ -1292,6 +1293,8 @@ fn main() -> anyhow::Result<()> {
     app.reassert_floating_mode();
     // The control panel's choices that live outside the compositor.
     controls::reassert();
+    // The palette: the shell wears it, the apps get its files.
+    app.colors_apply(true);
     app.gear_startup();
     // Each app's remembered window place rides its own rule (`window_memory`).
     app.reassert_place_rules();
