@@ -544,12 +544,25 @@ pub(crate) fn spawn(results: Sender<Vec<Mounted>>) {
             loop {
                 // The service's own account of changes, a line at a time.
                 let (tx, rx) = mpsc::channel::<()>();
-                let child = Command::new("gio")
-                    .args(["mount", "-o"])
+                let mut cmd = Command::new("gio");
+                cmd.args(["mount", "-o"])
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn();
+                    .stderr(Stdio::null());
+                // It dies with the dock: left behind by a dock that was
+                // killed, each one kept a connection to the session bus
+                // open for the rest of the login (the bus has 1024 file
+                // descriptors; a bus that runs out dies, and the whole
+                // session with it — 2026-10-14).
+                // SAFETY: only an async-signal-safe call between fork and exec.
+                unsafe {
+                    use std::os::unix::process::CommandExt;
+                    cmd.pre_exec(|| {
+                        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                        Ok(())
+                    });
+                }
+                let child = cmd.spawn();
                 let mut child = match child {
                     Ok(child) => child,
                     Err(e) => {
