@@ -531,7 +531,7 @@ pub fn set_window_mode(target: WindowMode) -> bool {
 ///
 /// Read per call rather than cached: the answer changes with the output, and a
 /// float toggle is far too rare for one `j/monitors` read to matter.
-fn float_size() -> Option<(i64, i64)> {
+pub(crate) fn float_size() -> Option<(i64, i64)> {
     let m = focused_monitor().ok()?;
     let (w, h) = ((m.w * FLOAT_W) as i64, (m.h * FLOAT_H) as i64);
     (w > 1 && h > 1).then_some((w, h))
@@ -845,6 +845,9 @@ pub struct ClientGeometry {
     pub staged: bool,
     /// The workspace it is on (negative: special).
     pub workspace: i64,
+    /// The compositor's focus history: 0 is the focused window, 1 the one
+    /// before it, and so on.
+    pub focus_rank: i64,
 }
 
 /// Every mapped window's geometry (one `j/clients` read).
@@ -884,6 +887,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                     || c["fullscreen"].as_bool().unwrap_or(false),
                 special: workspace < 0,
                 workspace,
+                focus_rank: c["focusHistoryID"].as_i64().unwrap_or(i64::MAX),
                 staged: c["tags"]
                     .as_array()
                     .is_some_and(|t| t.iter().any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))),
@@ -1197,6 +1201,9 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                                 // Window memory: note it, step the app's
                                 // cascade on for its next window.
                                 app.remember_window_opened(&addr);
+                                // A new window maps on top: the side goes
+                                // back over it (`side.rs`).
+                                app.side_focus_changed(&addr);
                                 // FAST LAUNCH's several instances: the next
                                 // one goes now the cascade has stepped.
                                 let class = line.split(">>").nth(1).and_then(|d| d.split(',').nth(2)).unwrap_or("");

@@ -111,6 +111,11 @@ impl WindowMemory {
         }
     }
 
+    /// What is remembered for `class`, if anything.
+    pub(crate) fn place_of(&self, class: &str) -> Option<Place> {
+        self.places.get(class).copied()
+    }
+
     /// `place` is `class`'s place from now on, if that is news.
     fn adopt(&mut self, class: &str, place: Place, how: &str) {
         if self.places.get(class) == Some(&place) {

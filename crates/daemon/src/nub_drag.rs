@@ -321,6 +321,12 @@ impl App {
     /// the pointer is over the current-task pill. `dx`/`dy` are the raw axis
     /// values; the window follows them.
     pub(crate) fn nub_scroll(&mut self, dx: f64, dy: f64) {
+        // A throw is settling: the tail of that swipe is not a new drag
+        // (`side.rs` — it re-grabbed the window just parked and pulled it
+        // straight back out).
+        if self.side_settling() {
+            return;
+        }
         let fresh = match &self.scroll_drag {
             None => true,
             Some(sd) => sd.last_scroll.elapsed() > SCROLL_REGRAB,
