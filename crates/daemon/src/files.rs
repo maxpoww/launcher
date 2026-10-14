@@ -234,6 +234,9 @@ impl App {
     /// The box of moving pictures was left: their loops are let go (they
     /// are tens of megabytes) and each texture gets its still back.
     pub(crate) fn pictures_rest(&mut self) {
+        if !self.moving_pending.is_empty() {
+            self.thumbs.forget_moving();
+        }
         self.moving_pending.clear();
         let base = self.thumb_layer_base();
         for (path, _) in std::mem::take(&mut self.moving) {
@@ -273,7 +276,21 @@ impl App {
                 let slot = self.thumb_next % crate::thumbs::THUMB_CAP;
                 self.thumb_next += 1;
                 // Recycled: the evicted path falls back to its type icon
-                // (and re-queues if it comes on screen again).
+                // (and re-queues if it comes on screen again) — every entry
+                // that showed it, or it would wear whatever lands on the
+                // slot next (a file pinned to the dock showed a wallpaper
+                // once the wallpapers' wall had been round the ring).
+                let evicted: Vec<String> =
+                    self.thumb_map.iter().filter(|(_, v)| v.0 == slot).map(|(k, _)| k.clone()).collect();
+                for gone in &evicted {
+                    let fallback = self.asset(file_asset_name(gone)).unwrap_or((0, true));
+                    for (i, e) in self.entries.iter().enumerate() {
+                        if &e.id == gone {
+                            self.icon_layers[i] = fallback.0;
+                            self.placeholders[i] = fallback.1;
+                        }
+                    }
+                }
                 self.thumb_map.retain(|_, v| v.0 != slot);
                 slot
             }

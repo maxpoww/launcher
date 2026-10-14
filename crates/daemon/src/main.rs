@@ -6997,6 +6997,7 @@ impl KeyboardHandler for App {
             self.cancel_keyboard_handback(KbSurface::Launcher);
             self.fast.enter = None;
             self.fast.open = false;
+            self.quick_gone();
             if self.ui.target() != Target::Open {
                 surface::set_interactive(&self.layer, false);
                 self.interactive = false;

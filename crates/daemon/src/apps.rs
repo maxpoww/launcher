@@ -1072,7 +1072,13 @@ pub(crate) fn prune_caches() {
         for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("icons-") && path.is_dir() && path != mine && unused(&path, OLD_TUNING_FOR) {
+            // (By its newest file, not its own date: reading dates the
+            // files, and a cache read every day gains no new one for weeks.)
+            let idle = |dir: &std::path::Path| {
+                unused(dir, OLD_TUNING_FOR)
+                    && std::fs::read_dir(dir).into_iter().flatten().flatten().all(|f| unused(&f.path(), OLD_TUNING_FOR))
+            };
+            if name.starts_with("icons-") && path.is_dir() && path != mine && idle(&path) {
                 dirs += u32::from(std::fs::remove_dir_all(&path).is_ok());
             }
         }

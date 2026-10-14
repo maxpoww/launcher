@@ -20,7 +20,7 @@ use crate::files::file_asset_name;
 
 /// Texture layers reserved for thumbnails past the package blocks —
 /// slots recycle round-robin once full.
-pub const THUMB_CAP: usize = 64;
+pub const THUMB_CAP: usize = 128;
 
 /// A worker result for one requested file.
 pub enum Event {
@@ -45,7 +45,10 @@ const MOVING_SECS: u32 = 4;
 /// Handle to the thumbnailer thread.
 pub struct Thumbs {
     requests: mpsc::Sender<String>,
-    moving: mpsc::Sender<String>,
+    moving: mpsc::Sender<(String, u64)>,
+    /// Which asking the moving previews are for: one asked for before the
+    /// last [`Thumbs::forget_moving`] is not made.
+    moving_round: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Thumbs {
@@ -58,7 +61,16 @@ impl Thumbs {
     /// [`Event::Moving`], on a thread of its own: a still never waits
     /// behind one).
     pub fn request_moving(&self, path: &str) {
-        let _ = self.moving.send(path.to_owned());
+        let round = self.moving_round.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = self.moving.send((path.to_owned(), round));
+    }
+
+    /// The moving previews asked for so far are not wanted any more (the
+    /// box they were for is gone): the ones still waiting are skipped —
+    /// each is a run of ffmpeg and a dozen megabytes, and the card opened
+    /// and closed five times had sixty of them queued.
+    pub fn forget_moving(&self) {
+        self.moving_round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -163,9 +175,14 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
     if let Err(e) = spawned {
         warn!("cannot spawn thumbnailer thread: {e}");
     }
-    let (moving, moving_rx) = mpsc::channel::<String>();
+    let (moving, moving_rx) = mpsc::channel::<(String, u64)>();
+    let moving_round = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let round_now = moving_round.clone();
     let spawned = std::thread::Builder::new().name("waverunner-moving".into()).spawn(move || {
-        while let Ok(path) = moving_rx.recv() {
+        while let Ok((path, round)) = moving_rx.recv() {
+            if round != round_now.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
             let frames = moving_frames(&path);
             debug!("thumb: {} moving frames for {path}", frames.len());
             if results_moving.send(Event::Moving { path, frames }).is_err() {
@@ -176,7 +193,7 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
     if let Err(e) = spawned {
         warn!("cannot spawn the moving previews' thread: {e}");
     }
-    Thumbs { requests, moving }
+    Thumbs { requests, moving, moving_round }
 }
 
 /// Produce one thumbnail: cache, then in-process decode, then external

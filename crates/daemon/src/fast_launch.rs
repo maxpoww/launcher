@@ -525,9 +525,10 @@ impl App {
     /// Super+Alt+Space: open the bubble, or close it if it is up.
     pub(crate) fn toggle_fast_launch(&mut self) {
         if self.fast.open && self.fast.controls {
-            // The quick controls are up: the launcher takes their place.
+            // The quick controls are up: the launcher takes their place
+            // (and a setting open in its box is left, as on any close).
             self.fast.open = false;
-            self.quick.close_solo();
+            self.quick_gone();
         }
         if self.fast.open {
             self.close_fast_launch();
@@ -585,8 +586,33 @@ impl App {
     /// the box (no hand-back to a window in between).
     pub(crate) fn fast_yield_keyboard_to_box(&mut self) {
         self.fast.open = false;
+        // A setting open in its box goes with the bubble: left up, it stood
+        // under the box that was called, belonging to nothing, and nothing
+        // closed it (the control panel called over the wallpapers' box —
+        // seen in the nested rig, 2026-10-13).
+        self.quick_gone();
         self.sync_input_region();
         self.schedule_frame();
+    }
+
+    /// The quick controls are over, HOWEVER the bubble ended (closed, given
+    /// up to a box, replaced by fast launch, the keyboard gone to a window
+    /// or the lock screen): a setting open in its box is left and folds
+    /// away, and the loops made ready for the wallpapers' box are let go.
+    /// Every one of those ends must come here — a box left up belongs to
+    /// nothing: drawn, deaf, and never closed.
+    pub(crate) fn quick_gone(&mut self) {
+        if let Some(label) = self.fast.boxed.take() {
+            self.quick_left(label);
+            // The box goes as a window does, and nothing is left under it:
+            // the card it came from must not show again on the way out (it
+            // did, for half a second — Max, 2026-10-13).
+            self.fast.card_a = 0.0;
+        }
+        if self.fast.controls {
+            self.pictures_rest();
+        }
+        self.quick.close_solo();
     }
 
     /// Close the bubble and hand the keyboard back to the window you were on.
@@ -595,18 +621,7 @@ impl App {
             return;
         }
         self.fast.open = false;
-        if let Some(label) = self.fast.boxed.take() {
-            self.quick_left(label);
-            // The box goes as a window does, and nothing is left under it:
-            // the card it came from must not show again on the way out (it
-            // did, for half a second — Max, 2026-10-13).
-            self.fast.card_a = 0.0;
-        }
-        // (The loops made ready for the wallpapers' box go with the card.)
-        if self.fast.controls {
-            self.pictures_rest();
-        }
-        self.quick.close_solo();
+        self.quick_gone();
         if self.interactive && self.ui.target() != crate::state::Target::Open {
             self.begin_keyboard_handback(KbSurface::Launcher, None);
             crate::surface::set_interactive(&self.layer, false);

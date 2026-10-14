@@ -112,7 +112,11 @@ pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
     (crate::options::wash(!bright, wash[layer.min(2)]), LAYER_INK[layer.min(2)])
 }
 
-/// The sign on a wallpaper that moves, at `pos`.
+/// The strip at the foot of a picture's tile that the picture leaves free
+/// for its marks.
+const TILE_FOOT: f32 = 22.0;
+
+/// A sign on a wallpaper's tile (▶: it moves), at `pos`.
 fn mark(pos: (f32, f32), scale: f32) -> Label {
     Label {
         text: "▶".to_owned(),
@@ -832,6 +836,13 @@ impl Panel {
     /// Whether a setting is (still) on show, and whether it is folding.
     pub(crate) fn solo_up(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// Whether the open setting, as last read, shows pictures. (Not read
+    /// yet: taken to — the wall is what it will be, and a box that opened
+    /// small would jump.)
+    pub(crate) fn open_has_tiles(&self) -> bool {
+        self.control.as_ref().is_none_or(|v| v.groups.iter().any(|g| g.tiles && !g.choices.is_empty()))
     }
 
     /// Whether the open setting is `label`.
@@ -2131,48 +2142,34 @@ impl Panel {
                 // (The one cursor — the pointer's or the keys': `step`.)
                 let keyed = resting && self.focus == Some(i);
                 // A PICTURE: its preview in a still frame — a wash until the
-                // picture is in, ONE ring where the cursor is, and a small
-                // bar at the foot of the one in use (never a second ring).
+                // picture is in, ONE ring where the cursor is, and a tick on
+                // the foot of the one in use (never a second ring).
                 if let Some(file) = chip.image {
                     let (mx, my) = map(r.x, r.y);
                     let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
                     let radius = TILE_RADIUS * s * cs;
                     let wash = crate::options::wash(!paint.bright, layer_wash[2]);
                     out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
-                    // Its name, small, for as long as there is no preview to
-                    // cover it (a video where none can be made); and ▶ on
-                    // one that moves.
+                    // The picture stands on a FOOT of the tile's own, where
+                    // its marks are written: ▶ on one that moves, ✓ on the
+                    // one in use. (Nothing can be drawn OVER a picture —
+                    // pictures are the topmost layer — so a mark laid on it
+                    // showed only where the picture happened not to reach:
+                    // the ▶ was a sliver, the mark of the one in use nothing.)
+                    let foot = TILE_FOOT * s * cs;
+                    let sign = |text: &str, x: f32| Label {
+                        text: text.to_owned(),
+                        color: Some([paint.ink[0], paint.ink[1], paint.ink[2], 0.9 * ca]),
+                        ..mark((x, tile.y + tile.h - foot + (foot - 18.0 * s * cs) / 2.0), s * cs)
+                    };
                     if crate::controls::wallpaper_moves(&file) {
-                        // (Dark under light: it reads on any picture.)
-                        let (bx, by) = (r.x + 15.0 * s, r.y + r.h - 25.0 * s);
-                        out.labels.push(Label {
-                            color: Some([0.0, 0.0, 0.0, 0.7 * ca]),
-                            ..mark(map(bx + 1.2 * s, by + 1.2 * s), s * cs)
-                        });
-                        out.labels.push(Label { color: Some([1.0, 1.0, 1.0, 0.95 * ca]), ..mark(map(bx, by), s * cs) });
-                    }
-                    if resting {
-                        out.images.push((tile, file));
+                        out.labels.push(sign("▶", tile.x + 15.0 * s * cs));
                     }
                     if chip.on {
-                        // (Dark under light, as the ▶: it reads on any picture.)
-                        let (bw, bh) = (26.0 * s * cs, 4.0 * s * cs);
-                        let (bx, by) = (tile.x + (tile.w - bw) / 2.0, tile.y + tile.h - bh - 7.0 * s * cs);
-                        let o = 1.2 * s * cs;
-                        out.rects.push(RectInst {
-                            rect: Rect::new(bx - o, by - o, bw + 2.0 * o, bh + 2.0 * o),
-                            radius: bh / 2.0 + o,
-                            color: [0.0, 0.0, 0.0, 0.6 * ca],
-                            glass: 0.0,
-                            border: 0.0,
-                        });
-                        out.rects.push(RectInst {
-                            rect: Rect::new(bx, by, bw, bh),
-                            radius: bh / 2.0,
-                            color: [1.0, 1.0, 1.0, 0.95 * ca],
-                            glass: 0.0,
-                            border: 0.0,
-                        });
+                        out.labels.push(sign("✓", tile.x + tile.w - 15.0 * s * cs));
+                    }
+                    if resting {
+                        out.images.push((Rect::new(tile.x, tile.y, tile.w, tile.h - foot), file));
                     }
                     if keyed {
                         let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
@@ -3002,7 +2999,9 @@ impl App {
         let (sw, sh) = (self.buffer_size.0 as f32, self.buffer_size.1 as f32);
         // A setting made of pictures takes nearly the whole screen (Max,
         // 2026-10-13: "casi tan grande como la pantalla completa").
-        let whole = self.quick.open_is("Wallpaper");
+        // (With no picture to show it is a box like any other: one line of
+        // words in a box the screen's size read as something broken.)
+        let whole = self.quick.open_is("Wallpaper") && self.quick.open_has_tiles();
         let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
         let (w, h) = if whole {
             ((sw * QUICK_WHOLE).max(200.0), (screen_h * QUICK_WHOLE).max(QUICK_MIN_H * s))

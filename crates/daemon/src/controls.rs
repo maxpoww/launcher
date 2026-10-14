@@ -59,6 +59,22 @@ pub(crate) struct ControlView {
     pub groups: Vec<Group>,
 }
 
+/// The worker's own door, for a thread of its that finishes later (the
+/// wallpaper's): what it has to save goes back through the worker, which
+/// is the one that writes the settings — two threads writing the file each
+/// from its own reading of it would drop one another's change.
+static TO_WORKER: std::sync::OnceLock<std::sync::Mutex<mpsc::Sender<ControlCommand>>> = std::sync::OnceLock::new();
+
+/// The wallpaper picked and not yet up and saved: the box shows IT as the
+/// one in use meanwhile (the worker reads the setting again right after a
+/// pick, when the file still names the old one — the mark went back to the
+/// old tile and stayed there until the box was opened again).
+static WALLPAPER_WANT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// One wallpaper is put up at a time — a pick's or the start's: two
+/// hand-overs at once would each leave a player up.
+static WALLPAPER_ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What the UI thread knows that the worker cannot ask anyone for.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct UiFacts {
@@ -105,6 +121,7 @@ impl ControlsHandle {
 /// Start the worker. It sleeps until asked: nothing is polled.
 pub(crate) fn spawn(events: Sender<ControlEvent>) -> ControlsHandle {
     let (tx, rx) = mpsc::channel::<ControlCommand>();
+    let _ = TO_WORKER.set(std::sync::Mutex::new(tx.clone()));
     let spawned = std::thread::Builder::new().name("controls".into()).spawn(move || {
         let mut zone = ZonePick::default();
         while let Ok(cmd) = rx.recv() {
@@ -1216,23 +1233,27 @@ const PLAYER_UP: std::time::Duration = std::time::Duration::from_millis(450);
 fn pick_wallpaper(path: String) {
     static WALLPAPER_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mine = WALLPAPER_PICK.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    *WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
     let spawned = std::thread::Builder::new().name("wallpaper".into()).spawn(move || {
-        // One at a time (two hand-overs at once would each leave a player
-        // up); a pick overtaken while it waited is not put up at all.
-        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-        if WALLPAPER_PICK.load(std::sync::atomic::Ordering::SeqCst) != mine {
+        // One at a time; a pick overtaken while it waited is not put up.
+        let _one = WALLPAPER_ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let newest = || WALLPAPER_PICK.load(std::sync::atomic::Ordering::SeqCst) == mine;
+        if !newest() {
             return;
         }
         let shown = show_wallpaper(&path, true);
         if !shown {
             warn!("controls: the wallpaper {path:?} could not be put up");
+        }
+        if !newest() {
             return;
         }
-        if WALLPAPER_PICK.load(std::sync::atomic::Ordering::SeqCst) == mine {
-            let mut s = GolemSettings::load();
-            s.wallpaper = Some(path);
-            s.store();
+        // Up (or not): the worker saves it and reads the setting again, so
+        // the box shows what is true now.
+        let key = if shown { "wallpaper-saved" } else { "wallpaper-failed" };
+        if let Some(door) = TO_WORKER.get() {
+            let cmd = ControlCommand::Set { label: "Wallpaper", key, value: path, ui: UiFacts::default() };
+            let _ = door.lock().unwrap_or_else(|e| e.into_inner()).send(cmd);
         }
     });
     if let Err(e) = spawned {
@@ -1503,7 +1524,8 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         }
         "Wallpaper" => {
             let found = pictures();
-            let now = GolemSettings::load().wallpaper;
+            let want = WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let now = want.or_else(|| GolemSettings::load().wallpaper);
             view.subtitle = if found.is_empty() {
                 tr("Put pictures in Pictures/Wallpapers to choose one here.").to_owned()
             } else if wallpaper_tool().is_none() {
@@ -1695,6 +1717,19 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
                 pick_wallpaper(value.to_owned());
             }
         }
+        // The wallpaper's own thread reporting back (`pick_wallpaper`).
+        "wallpaper-saved" | "wallpaper-failed" => {
+            let mut want = WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner());
+            if want.as_deref() == Some(value) {
+                *want = None;
+            }
+            drop(want);
+            if key == "wallpaper-saved" {
+                let mut s = GolemSettings::load();
+                s.wallpaper = Some(value.to_owned());
+                s.store();
+            }
+        }
         // The wallpapers' box was left: what the picture program kept of the
         // GIFs it prepared (hundreds of megabytes each) goes.
         "wallpaper-leave" => {
@@ -1763,7 +1798,11 @@ pub(crate) fn reassert() {
                 }
             }
             if std::path::Path::new(picture).is_file() {
-                show_wallpaper(picture, false);
+                let _one = WALLPAPER_ONE.lock().unwrap_or_else(|e| e.into_inner());
+                // (A pick made while this waited has the say.)
+                if WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+                    show_wallpaper(picture, false);
+                }
             }
         }
     });
