@@ -844,6 +844,9 @@ The big daemon files are cohesive but long — go straight to the function:
   from places" (`Action::AddPlace|RemovePlace`), a kept place's own row has a menu to take it
   out (`Win::menu_place`), and what is kept here is in every app's open/save dialog, and the
   other way round. The ground's menu shows or puts away dot files (`Action::ToggleHidden`).
+  What was CUT is drawn FADED until it is pasted (`clipboard_files` cut → an icon wash toward the
+  ground at `ring = -1.3`: at -1.0 a tinted icon also wears the dock's bin can; `filer_clip_changed`
+  redraws). With Ctrl held the WHEEL zooms, a notch a step (`Win::zoom_run`).
   HARDENING (a review, 2026-10-14 — keep these): a menu's row acts on the
   thing the menu is ON (its group only while it is one of it — `filer_act`); a click is on what is
   under the pointer NOW (`filer_click` reads the spot again: the folder scrolls under a still

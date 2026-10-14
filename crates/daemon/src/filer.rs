@@ -1316,6 +1316,9 @@ struct Win {
     edge: f32,
     edge_at: (f32, f32),
     edge_timer: bool,
+    /// How far the wheel has turned with Ctrl held since the last step of
+    /// zoom it made.
+    zoom_run: f32,
     /// Where each thing is drawn, as a display slot (its own place in the
     /// list at rest; easing to make room while a drag is over the window).
     slide: Vec<f32>,
@@ -1932,6 +1935,7 @@ impl App {
             edge: 0.0,
             edge_at: (0.0, 0.0),
             edge_timer: false,
+            zoom_run: 0.0,
             slide: Vec::new(),
             gap: None,
             press: None,
@@ -2793,6 +2797,15 @@ impl App {
         );
     }
 
+    /// The clipboard changed: what is cut is drawn faded, so every window
+    /// draws again.
+    pub(crate) fn filer_clip_changed(&mut self) {
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.filer_request_draw(id);
+        }
+    }
+
     /// Remember something done, for Ctrl+Z (the last thirty).
     fn filer_did(&mut self, undo: Undo) {
         self.filer.undo.push(undo);
@@ -3648,6 +3661,12 @@ impl App {
         // MAKE ROOM: what is in hand leaves its place, and while a drag is
         // over the window the rest part around where it would land — each
         // easing to its display slot at the Apps grid's rate.
+        // What was CUT waits, faded, to be pasted somewhere (the clipboard's
+        // newest thing is those files, to be moved).
+        let cut: HashSet<String> = match self.clipboard_files() {
+            Some((paths, true)) => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            _ => HashSet::new(),
+        };
         let held = self.filer.drag.as_ref().filter(|d| !d.dropped);
         let in_hand: HashSet<&str> = held
             .map(|d| d.paths.iter().map(String::as_str).collect())
@@ -3697,12 +3716,16 @@ impl App {
                 ));
             }
             let icon = layout.icon_in(&cell, icon_scale);
+            let faded = cut.contains(&item.path);
             if let Some(layer) = win.layer_of(&item.icon) {
                 grid.icons.push(IconInst {
                     rect: icon,
                     layer,
-                    tint: [0.0; 4],
-                    ring: -1.0,
+                    // (Washed toward the ground it stands on.)
+                    tint: if faded { [ground[0], ground[1], ground[2], 0.6] } else { [0.0; 4] },
+                    // (-1.3: the wash alone — at -1.0 a tinted icon also
+                    // wears the dock's "to the bin" can.)
+                    ring: if faded { -1.3 } else { -1.0 },
                     plate: if item.kind == Kind::Launcher { PLATE_STATIC } else { NO_PLATE },
                 });
             }
@@ -3747,7 +3770,7 @@ impl App {
                     let name = crate::desktop::fit_label(&full, name_w, &mut |t| {
                         renderer.measure_text(t, TEXT_PX, None)
                     });
-                    grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, false));
+                    grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, faded));
                 }
                 if let Some(end) = size_end {
                     let words = if item.kind == Kind::File || item.kind == Kind::Launcher {
@@ -3833,7 +3856,7 @@ impl App {
                         (cell.x + cell.w / 2.0, icon.y + icon.h + LABEL_GAP + n as f32 * LABEL_LINE_PX),
                         label_w,
                         true,
-                        n == 1 && i >= win.deep_from,
+                        faded || (n == 1 && i >= win.deep_from),
                     )
                 });
             }
@@ -4063,6 +4086,21 @@ impl App {
                 value,
                 ..
             } => {
+                // With Ctrl held the wheel ZOOMS (a notch a step, as the
+                // keys): the hand is on it already.
+                if self.modifiers.ctrl {
+                    let Some(win) = self.filer.win_mut(id) else {
+                        return;
+                    };
+                    win.zoom_run += value as f32;
+                    let steps = (win.zoom_run / 15.0).trunc();
+                    if steps != 0.0 {
+                        win.zoom_run -= steps * 15.0;
+                        // (Away from oneself is bigger.)
+                        self.zoom("files", if steps < 0.0 { "in" } else { "out" });
+                    }
+                    return;
+                }
                 self.filer_scroll(id, value as f32 * SCROLL_STEP, true);
             }
             // The fingers left the touchpad: a fast scroll glides on.
