@@ -36,10 +36,52 @@ pub const WORKSPACE_TICKET: &str = "HL_INITIAL_WORKSPACE_TOKEN";
 /// Drop the compositor's ticket from this process (see [`WORKSPACE_TICKET`]).
 /// Call it first thing in `main`, before any thread exists. Returns whether
 /// there was one, for the log.
+///
+/// THE TICKET IS ALSO SPOILED WHERE IT STANDS, in the environment this
+/// process was started with. The compositor does not ask us for it: for each
+/// new window it reads `/proc/<pid>/environ` — that first block, which
+/// `remove_var` leaves as it was. So the daemon's OWN first window (Golem
+/// Files is one, since 2026-10-13) still carried the ticket: it opened on
+/// the workspace the daemon had been started on and took the owner there
+/// (Max, 2026-10-14: *"i just open golem files, and it did not open on the
+/// workspace i was, it took me to another one"*). The name's first letter
+/// is overwritten in that block, so the compositor finds no such variable.
 pub fn drop_workspace_ticket() -> bool {
-    let had = std::env::var_os(WORKSPACE_TICKET).is_some();
+    let had = spoil_in_place(WORKSPACE_TICKET);
     std::env::remove_var(WORKSPACE_TICKET);
+    // (…and under the name it has now.)
+    std::env::remove_var(spoiled(WORKSPACE_TICKET));
     had
+}
+
+/// The name a spoiled variable is left with.
+fn spoiled(name: &str) -> String {
+    format!("X{}", &name[1..])
+}
+
+/// Overwrite the first letter of `name` in the environment block itself (see
+/// [`drop_workspace_ticket`]). Whether it was there.
+fn spoil_in_place(name: &str) -> bool {
+    let Ok(key) = CString::new(name) else {
+        return false;
+    };
+    // SAFETY: called first thing in `main`, before any thread exists and
+    // before anything has set a variable — `getenv` then answers with a
+    // pointer INTO the block the process was started with, just past the
+    // `=` of "NAME=value"; the name stands right before it, in memory that
+    // is ours to write (the top of the stack).
+    unsafe {
+        let value = libc::getenv(key.as_ptr());
+        if value.is_null() {
+            return false;
+        }
+        let first = value.sub(name.len() + 1).cast::<u8>();
+        if *first != name.as_bytes()[0] {
+            return false;
+        }
+        *first = b'X';
+    }
+    true
 }
 
 /// The environment a launched app gets: this process's, less the ticket,
