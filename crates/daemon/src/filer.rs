@@ -352,23 +352,34 @@ pub(crate) struct Layout {
     pub ch: f32,
     /// A list: one column of rows, under a strip naming the columns.
     pub list: bool,
+    /// The CONTENT's zoom (Max, 2026-10-14: "ctrl +/-/0 independent on the
+    /// content than the panel"): the field is laid out `1/zoom` its size
+    /// from its top-left corner — `body` is that laid-out field — and drawn
+    /// `zoom` times bigger from there (`zoom_grid`); the places and the head
+    /// keep their size. A point is brought into the field by [`Self::inward`]
+    /// and out of it by [`Self::outward`].
+    pub zoom: f32,
 }
 
 impl Layout {
     #[cfg(test)]
     pub fn new((w, h): (u32, u32), icon_scale: f32) -> Self {
-        Self::of((w as f32, h as f32), icon_scale, false)
+        Self::of((w as f32, h as f32), icon_scale, false, 1.0)
     }
 
-    /// The same for a size that is not whole (a zoomed window's — `Win::virt`).
-    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool) -> Self {
+    /// A window of `w`×`h`; its field at `zoom`.
+    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool, zoom: f32) -> Self {
+        let zoom = zoom.max(0.1);
         let side_w = if w >= SIDE_FROM { SIDE_W } else { 0.0 };
+        // (The field's own size, as it is laid out: the room it has, `zoom`
+        // times smaller.)
+        let (w, h) = (side_w + (w - side_w) / zoom, h);
         if list {
             // One column as wide as the field: a row is a cell, so all that
             // knows cells (the pointer, the keys, a band, a drag's room)
             // knows rows.
             let top = HEAD_H + LIST_HEAD;
-            let body = Rect::new(side_w, top, (w - side_w).max(1.0), (h - top).max(1.0));
+            let body = Rect::new(side_w, top, (w - side_w).max(1.0), ((h - top) / zoom).max(1.0));
             let room = (body.w - 2.0 * PAD).max(1.0);
             return Self {
                 side_w,
@@ -378,9 +389,10 @@ impl Layout {
                 cw: room,
                 ch: LIST_ROW,
                 list,
+                zoom,
             };
         }
-        let body = Rect::new(side_w, HEAD_H, (w - side_w).max(1.0), (h - HEAD_H).max(1.0));
+        let body = Rect::new(side_w, HEAD_H, (w - side_w).max(1.0), ((h - HEAD_H) / zoom).max(1.0));
         let (cw, ch) = (GRID_CELL_W * icon_scale, CELL_H * icon_scale);
         let room = (body.w - 2.0 * PAD).max(cw);
         let cols = ((room / cw).floor() as usize).max(1);
@@ -392,7 +404,36 @@ impl Layout {
             cw,
             ch,
             list,
+            zoom,
         }
+    }
+
+    /// The field as it is drawn: `body` at the zoom.
+    pub fn shown_body(&self) -> Rect {
+        Rect::new(self.body.x, self.body.y, self.body.w * self.zoom, self.body.h * self.zoom)
+    }
+
+    /// A point of the window brought into the field's own space — when it is
+    /// over the field; a point over the places or the head stays as it is.
+    pub fn inward(&self, p: (f32, f32)) -> (f32, f32) {
+        if !self.shown_body().contains(p) {
+            return p;
+        }
+        (self.body.x + (p.0 - self.body.x) / self.zoom, self.body.y + (p.1 - self.body.y) / self.zoom)
+    }
+
+    /// A point of the field's own space where it is drawn in the window (a
+    /// point that is not in the field stays as it is).
+    pub fn outward(&self, p: (f32, f32)) -> (f32, f32) {
+        if !self.body.contains(p) {
+            return p;
+        }
+        (self.out_x(p.0), self.body.y + (p.1 - self.body.y) * self.zoom)
+    }
+
+    /// An x of the field's own space where it is drawn.
+    pub fn out_x(&self, x: f32) -> f32 {
+        self.body.x + (x - self.body.x) * self.zoom
     }
 
     /// A thing's picture in its cell: the grid's icon, centred under the
@@ -1409,15 +1450,22 @@ impl Win {
     }
 
     fn layout(&self, icon_scale: f32) -> Layout {
-        Layout::of(self.virt(), icon_scale, self.list)
+        Layout::of(self.virt(), icon_scale, self.list, self.zoom)
     }
 
-    /// The size everything is laid out in: the window's, as many times
-    /// smaller as it is zoomed — the renderer draws a logical pixel that
-    /// much bigger, so no layout code knows about the zoom. The pointer is
-    /// brought into it the same way (`filer_pointer`).
+    /// The window's size (the zoom is the field's alone: `Layout::zoom`).
     fn virt(&self) -> (f32, f32) {
-        (self.size.0 as f32 / self.zoom, self.size.1 as f32 / self.zoom)
+        (self.size.0 as f32, self.size.1 as f32)
+    }
+
+    /// Where the pointer is, for what it is over: in the field's own space
+    /// over the field (`Layout::inward`) — except while a menu or a box is
+    /// up, which stand in the window's own space.
+    fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
+        if self.menu.is_some() || self.props.is_some() {
+            return raw;
+        }
+        self.layout(icon_scale).inward(raw)
     }
 
     fn layer_of(&self, key: &str) -> Option<u32> {
@@ -1906,6 +1954,39 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
         name_field: [0.823, 0.799, 0.745, 1.0],
         name_rim: [0.0, 0.0, 0.0, 0.22],
         name_mark: [0.0, 0.0, 0.0, 0.12],
+    }
+}
+
+/// The field drawn `zoom` times bigger from `origin`, its top-left corner
+/// (the card's `view::zoom_scene`, for one grid).
+fn zoom_grid(grid: &mut GridContent, origin: (f32, f32), zoom: f32) {
+    if (zoom - 1.0).abs() < 0.001 {
+        return;
+    }
+    let r = |rect: &mut Rect| {
+        rect.x = origin.0 + (rect.x - origin.0) * zoom;
+        rect.y = origin.1 + (rect.y - origin.1) * zoom;
+        rect.w *= zoom;
+        rect.h *= zoom;
+    };
+    r(&mut grid.clip);
+    for rect in &mut grid.rects {
+        r(&mut rect.rect);
+        rect.radius *= zoom;
+        rect.border *= zoom;
+    }
+    for icon in &mut grid.icons {
+        r(&mut icon.rect);
+    }
+    for label in &mut grid.labels {
+        label.pos.0 = origin.0 + (label.pos.0 - origin.0) * zoom;
+        label.pos.1 = origin.1 + (label.pos.1 - origin.1) * zoom;
+        label.max_w *= zoom;
+        label.font_px *= zoom;
+        label.line_px *= zoom;
+        if let Some(clip) = label.clip.as_mut() {
+            r(clip);
+        }
     }
 }
 
@@ -2487,6 +2568,7 @@ impl App {
     /// A right click at `at`: the menu for the thing under it (which is
     /// selected if it was not — a group stays a group), or the folder's.
     fn filer_open_menu(&mut self, id: u32, at: (f32, f32), item: Option<usize>) {
+        let icon_scale = self.icon_scale();
         let paste = self.clipboard_files().is_some();
         let by_hand = self
             .filer
@@ -2538,6 +2620,8 @@ impl App {
             return;
         }
         win.armed = None;
+        // (A point of the field: the menu stands where it is drawn.)
+        let at = win.layout(icon_scale).outward(at);
         win.menu = Some(Menu::open(item.filter(|_| path.is_some()), many, at, w, h).with_rows(rows, h));
         win.menu_path = path;
         win.props = None;
@@ -3255,7 +3339,7 @@ impl App {
         if let Some(fs) = &win.fscale {
             fs.set_logical_size(width, height);
         }
-        let drawn = scale * win.zoom;
+        let drawn = scale;
         if let Some(renderer) = win.renderer.as_mut() {
             renderer.set_scale(drawn);
             renderer.resize(pw, ph);
@@ -3368,22 +3452,18 @@ impl App {
         }
     }
 
-    /// The owner's zoom of the file windows changed: every window is laid
-    /// out and drawn anew at it.
+    /// The owner's zoom of the file windows changed: every window's field is
+    /// laid out and drawn anew at it (the places and the head keep theirs).
     pub(crate) fn filer_zoomed(&mut self) {
         let zoom = self.files_zoom();
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
-            let scale = self.surface_scale(SurfaceKind::Files(id));
             if let Some(win) = self.filer.win_mut(id) {
                 win.zoom = zoom;
                 // What is up was placed for the other size.
                 win.menu = None;
                 win.menu_path = None;
                 win.props = None;
-                if let Some(renderer) = win.renderer.as_mut() {
-                    renderer.set_scale(scale * zoom);
-                }
             }
             self.filer_relayout(id);
             self.filer_hover(id);
@@ -3726,6 +3806,8 @@ impl App {
                 cols.push((SortKey::Modified, x, row.x + row.w, name_of(SortKey::Modified, tr("Modified"))));
             }
             for (n, (key, x0, x1, words)) in cols.into_iter().enumerate() {
+                // (Laid out in the field's space, drawn where its columns are.)
+                let (x0, x1) = (layout.out_x(x0), layout.out_x(x1));
                 let hit = Rect::new(x0 - 6.0, HEAD_H + 2.0, x1 - x0 + 6.0, LIST_HEAD - 4.0);
                 if win.hover == Spot::Col(n) {
                     scene.rects.push(rect(hit, 7.0, pal.hover));
@@ -4099,6 +4181,7 @@ impl App {
                 pal.thumb,
             ));
         }
+        zoom_grid(&mut grid, (layout.body.x, layout.body.y), layout.zoom);
         scene.grids.push(grid);
         win.hits = hits;
         // The menu and the box, over everything.
@@ -4228,6 +4311,7 @@ impl App {
 
     /// Route a pointer event on window `id`.
     pub(crate) fn filer_pointer(&mut self, id: u32, event: wl_pointer::Event) {
+        let icon_scale = self.icon_scale();
         match event {
             wl_pointer::Event::Enter {
                 serial,
@@ -4239,7 +4323,7 @@ impl App {
                 self.enter_serial = serial;
                 self.cursor_now = None;
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.ptr = Some((surface_x as f32 / win.zoom, surface_y as f32 / win.zoom));
+                    win.ptr = Some(win.point((surface_x as f32, surface_y as f32), icon_scale));
                 }
                 self.filer_hover(id);
             }
@@ -4257,7 +4341,7 @@ impl App {
                 surface_x, surface_y, ..
             } => {
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.ptr = Some((surface_x as f32 / win.zoom, surface_y as f32 / win.zoom));
+                    win.ptr = Some(win.point((surface_x as f32, surface_y as f32), icon_scale));
                 }
                 if !self.filer_travel(id) {
                     self.filer_hover(id);
@@ -4313,6 +4397,9 @@ impl App {
             return;
         };
         let max = win.layout(icon_scale).max_scroll(win.items.len());
+        // (The field scrolls in its own space: a step of the fingers moves it
+        // as far on screen at any zoom.)
+        let by = by / win.zoom;
         if !from_pointer {
             // (A key: a page, eased to.)
             win.gliding = false;
@@ -4733,8 +4820,8 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
-        let at = (x / win.zoom, y / win.zoom);
         let layout = win.layout(icon_scale);
+        let at = layout.inward((x, y));
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
         // In the field: the things not in hand, and which of them — if any
@@ -5584,7 +5671,10 @@ impl App {
                     _ => None,
                 };
                 return match at {
-                    Some((x, y)) => format!("where {:.0} {:.0}", x * win.zoom, y * win.zoom),
+                    Some(p) => {
+                        let (x, y) = win.layout(self.icon_scale()).outward(p);
+                        format!("where {x:.0} {y:.0}")
+                    }
                     None => format!("where nothing: {rest}"),
                 };
             }
@@ -5635,8 +5725,10 @@ impl App {
                 let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
                 match n[..] {
                     [x, y] => {
-                        let zoom = self.filer.win(id).map_or(1.0, |w| w.zoom);
-                        self.filer_drag_over(id, x * zoom, y * zoom);
+                        // (A point of the field, as the other verbs take.)
+                        let icon_scale = self.icon_scale();
+                        let (x, y) = self.filer.win(id).map_or((x, y), |w| w.layout(icon_scale).outward((x, y)));
+                        self.filer_drag_over(id, x, y);
                     }
                     _ => {
                         if let Some(win) = self.filer.win_mut(id) {
@@ -6054,7 +6146,7 @@ mod tests {
 
     #[test]
     fn a_list_is_one_column_of_rows_under_its_strip() {
-        let l = Layout::of((920.0, 600.0), 1.0, true);
+        let l = Layout::of((920.0, 600.0), 1.0, true, 1.0);
         assert_eq!((l.cols, l.ch), (1, LIST_ROW));
         assert_eq!(l.body.y, HEAD_H + LIST_HEAD);
         let (a, b) = (l.cell(0), l.cell(1));
@@ -6066,8 +6158,27 @@ mod tests {
         assert!(f > 0.7);
         // Both columns in a wide window, none in a narrow one.
         assert!(matches!(l.columns(&a), (Some(_), Some(_))));
-        let narrow = Layout::of((320.0, 400.0), 1.0, true);
+        let narrow = Layout::of((320.0, 400.0), 1.0, true, 1.0);
         assert_eq!(narrow.columns(&narrow.cell(0)).1, None);
+    }
+
+    #[test]
+    fn the_zoom_is_the_fields_alone() {
+        let one = Layout::of((1000.0, 600.0), 1.0, false, 1.0);
+        let two = Layout::of((1000.0, 600.0), 1.0, false, 2.0);
+        // The places keep their width; the field still fills the window…
+        assert_eq!(two.side_w, one.side_w);
+        assert_eq!(two.shown_body(), one.body);
+        // …laid out half as big, so half as many things a row.
+        assert!(two.cols < one.cols);
+        // A point over the field goes into its space and comes back out.
+        let p = (two.body.x + 300.0, two.body.y + 100.0);
+        let inside = two.inward(p);
+        assert_eq!(inside, (two.body.x + 150.0, two.body.y + 50.0));
+        assert_eq!(two.outward(inside), p);
+        // A point over the places or the head is left alone.
+        assert_eq!(two.inward((10.0, 200.0)), (10.0, 200.0));
+        assert_eq!(two.inward((500.0, 5.0)), (500.0, 5.0));
     }
 
     #[test]
