@@ -115,7 +115,7 @@ pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
 /// A picture's preview in a setting (the wallpapers): its height for its
 /// width, the gap between two, its corner, and the widest one gets.
 const TILE_ASPECT: f32 = 0.625;
-const TILE_GAP: f32 = 12.0;
+const TILE_GAP: f32 = 9.0;
 const TILE_RADIUS: f32 = 8.0;
 const TILE_MAX_W: f32 = 420.0;
 
@@ -125,7 +125,9 @@ const QUICK_W: f32 = 620.0;
 const QUICK_FOOT: f32 = 44.0;
 const QUICK_MIN_H: f32 = 170.0;
 /// The share of the screen a setting made of pictures takes.
-const QUICK_WHOLE: f32 = 0.9;
+const QUICK_WHOLE: f32 = 0.955;
+/// How far its foot stays off the dock.
+const QUICK_OFF_DOCK: f32 = 16.0;
 
 /// How long the settings and the modules take to trade places.
 const PANEL_SWAP_SECS: f32 = 0.30;
@@ -2969,10 +2971,22 @@ impl App {
         // (With no picture to show it is a box like any other: one line of
         // words in a box the screen's size read as something broken.)
         let whole = self.quick.open_is("Wallpaper") && self.quick.open_has_tiles();
-        let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
-        let (w, h) = if whole {
-            ((sw * QUICK_WHOLE).max(200.0), (screen_h * QUICK_WHOLE).max(QUICK_MIN_H * s))
-        } else {
+        if whole {
+            // From under the bar to clear of the dock, nearly the screen's
+            // width (Max, 2026-10-14: "make the box a little wider and move
+            // it a few pixels up (i dont want it to touch the dock)" — it
+            // was 90 % of the screen each way, centred, and its foot lay on
+            // the dock's top edge).
+            let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
+            let (dock_h, _) = self.scaled_extents();
+            let top = self.options_pill_h() + 16.0 * s;
+            let bottom = screen_h - dock_h - QUICK_OFF_DOCK * s;
+            let w = (sw * QUICK_WHOLE).max(200.0);
+            let h = (bottom - top).max(QUICK_MIN_H * s);
+            let cx = g.card.x + g.card.w / 2.0;
+            return Rect::new(cx - w / 2.0, top, w, h);
+        }
+        let (w, h) = {
             (
                 (QUICK_W * s).min(sw - 40.0 * s).max(200.0),
                 (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(sh - 20.0 * s),
@@ -3081,8 +3095,8 @@ impl App {
         used
     }
 
-    /// A click while the quick box is up: a choice is picked; the box's own
-    /// empty space does nothing; anywhere else closes it.
+    /// A click while the quick box is up: a choice is picked; anywhere
+    /// else — the box's own empty space or outside it — closes it.
     pub(crate) fn quick_click(&mut self, pos: (f32, f32)) {
         let rect = self.quick_rect();
         if !rect.contains(pos) {
@@ -3092,13 +3106,21 @@ impl App {
         let Some(label) = self.quick.open.as_ref().map(|o| self.quick.pills[o.pill].label) else {
             return;
         };
-        if let Some(Some(action)) = self.quick.open_hit(label, pos) {
-            match action {
+        match self.quick.open_hit(label, pos) {
+            Some(Some(action)) => match action {
                 PanelAction::Scale(scale) => self.set_display_scale(scale),
                 PanelAction::Mode { w, h, hz } => self.set_display_mode(w, h, hz),
                 PanelAction::Keep => self.keep_display(),
                 PanelAction::Revert => self.revert_display(),
                 PanelAction::Pick { group, index } => self.control_pick(group, index, true),
+            },
+            // On no choice: the box's own empty space closes it, as its
+            // last line says (Max, 2026-10-14: "the box says click empty
+            // space closes it and it does not" — only a click OUTSIDE the
+            // box did).
+            _ => {
+                self.close_fast_launch();
+                return;
             }
         }
         self.schedule_frame();
