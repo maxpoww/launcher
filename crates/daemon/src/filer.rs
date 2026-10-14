@@ -88,7 +88,7 @@ const RAIL_AIR: f32 = 10.0;
 /// How far the words of an open place reach past the rail.
 const SIDE_WORDS: f32 = 140.0;
 /// A place's icon this small or smaller is drawn as its symbol alone.
-const SYMBOL_FROM: f32 = 25.0; // (0.9× and smaller: Max wanted them sooner than at 20)
+const SYMBOL_FROM: f32 = 40.0; // (Max, 2026-10-14: the size he had set, 1.5× = 42 px, is the last of the folders)
 /// How fast the places open and close (the menus' ease).
 const SIDE_RATE: f32 = 18.0;
 const SIDE_FROM: f32 = 560.0;
