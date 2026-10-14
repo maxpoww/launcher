@@ -717,6 +717,9 @@ pub(crate) struct Panel {
     /// The room a wall of pictures may take top to foot, where the box is
     /// made to hug it (the quick box): 0 = the field's own height.
     tile_room_h: f32,
+    /// How many pictures the page as last laid out holds — its whole grid,
+    /// every row full (`flow_tiles`).
+    tile_cap: std::cell::Cell<usize>,
     /// The wall's height as last laid out: the box opens at it, before the
     /// setting has been read again.
     wall_h: Option<f32>,
@@ -1355,35 +1358,45 @@ impl Panel {
         let fw = self.key.0;
         let gap = TILE_GAP * s;
         let room_w = (fw - 2.0 * MARGIN * s).max(100.0);
-        let pages = choices.len().div_ceil(TILES_PER_PAGE);
-        let dots_h = if pages > 1 { TILE_DOTS_H * s } else { 0.0 };
+        // The dots' room is kept whether or not there are pages: the size
+        // of the previews must not depend on it.
+        let dots_h = TILE_DOTS_H * s;
         // The room top to foot: the box's own height (a box made to hug the
         // wall says how much it may take), less what is above the grid, the
         // dots and the closing hint under it.
         let whole = if self.tile_room_h > 0.0 { self.tile_room_h } else { self.field.h.max(self.key.1) };
         let room_h = (whole - y - 40.0 * s - dots_h).max(TILE_ASPECT * 80.0 * s);
-        // Sized for a full page, so every page is laid on the same grid.
-        let n = choices.len().min(TILES_PER_PAGE);
-        let mut cols = 2;
-        let mut best = (1usize, 0.0f32);
-        while cols <= 12 {
-            let w = (room_w - (cols - 1) as f32 * gap) / cols as f32;
+        // The biggest previews whose grid — as many rows as fit, each one
+        // FULL — holds them all, or a page's worth ([`TILES_PER_PAGE`]) when
+        // there are more. A page holds its whole grid, so every page but the
+        // last is full to the last row (Max, 2026-10-14: "lo que yo quiero es
+        // que todas las filas estén llenas … la página siguiente tiene que
+        // estar por si se desborda la primera" — 63 to a page on a grid of
+        // eight left the eighth row with seven, and the rest on page two).
+        let want = choices.len().min(TILES_PER_PAGE);
+        let mut best: Option<(usize, usize, f32)> = None;
+        for cols in 2..=12usize {
+            let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
             let h = w * TILE_ASPECT;
-            let rows = n.div_ceil(cols);
-            if rows as f32 * h + (rows - 1) as f32 * gap <= room_h && w > best.1 {
-                best = (cols, w);
+            let rows = (((room_h + gap) / (h + gap)).floor() as usize).max(1);
+            if cols * rows >= want && best.is_none_or(|(_, _, bw)| w > bw) {
+                best = Some((cols, rows, w));
             }
-            cols += 1;
         }
-        // (Too many for the box at any size: the smallest, and the last rows
-        // run past the hint.)
-        let (cols, w) = if best.1 > 0.0 { best } else { (12, (room_w - 11.0 * gap) / 12.0) };
-        let w = w.min(TILE_MAX_W * s);
+        // (Too many for the box at any size: the smallest, a page of them.)
+        let (cols, rows_fit, w) = best.unwrap_or_else(|| {
+            let w = (room_w - 11.0 * gap) / 12.0;
+            (12, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
+        });
         let h = w * TILE_ASPECT;
-        let rows = n.div_ceil(cols);
+        let cap = (cols * rows_fit).max(1);
+        self.tile_cap.set(cap);
+        let pages = choices.len().div_ceil(cap);
+        // The grid is as tall as the fullest page.
+        let rows = choices.len().min(cap).div_ceil(cols);
         let page_of = |page: usize| -> Vec<Chip> {
-            let first = page * TILES_PER_PAGE;
-            let on_page = choices.len().saturating_sub(first).min(TILES_PER_PAGE);
+            let first = page * cap;
+            let on_page = choices.len().saturating_sub(first).min(cap);
             (0..on_page)
                 .map(|k| {
                     let (row, col) = (k / cols, k % cols);
@@ -1417,7 +1430,7 @@ impl Panel {
         if pages > 1 {
             out.dots = Some((foot + (dots_h - TILE_DOT * s) / 2.0, pages, page));
         }
-        foot + dots_h + GROUP_GAP * s
+        foot + if pages > 1 { dots_h } else { 0.0 } + GROUP_GAP * s
     }
 
     /// How many pages the open setting's pictures make.
@@ -1425,7 +1438,7 @@ impl Panel {
         self.control
             .as_ref()
             .and_then(|v| v.groups.iter().find(|g| g.tiles))
-            .map_or(1, |g| g.choices.len().div_ceil(TILES_PER_PAGE).max(1))
+            .map_or(1, |g| g.choices.len().div_ceil(self.tile_cap.get().max(1)).max(1))
     }
 
     /// Turn the pictures' page: `dir` +1 the next, -1 the one before, round
