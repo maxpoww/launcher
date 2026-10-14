@@ -103,6 +103,9 @@ const WALL_STEP: Duration = Duration::from_millis(45);
 /// How long the screen is followed closely after a wallpaper is picked (its
 /// fade is a second), before one last look at the settled screen.
 const WALL_WINDOW: Duration = Duration::from_millis(1500);
+/// The longest the preview's colour stands in for a picture that has not
+/// reached the screen yet.
+const WALL_HOLD: Duration = Duration::from_secs(8);
 
 /// Colour histogram for the dominant-colour (mode) sample: quantised RGB key →
 /// (pixel count, r sum, g sum, b sum) so the winning bucket can be averaged.
@@ -591,19 +594,71 @@ impl App {
         self.wall_until = Some(now + WALL_WINDOW);
         tracing::info!("wallpaper: changing; its colour from the preview: {:?}", self.wall_guess);
         self.demand_capture(Demand::Fresh);
+        self.wall_hold_until = Some(now + WALL_HOLD);
+        // (What the desktop gave before: the new picture has arrived when
+        // the dock's sample has left it and settled.)
+        self.wall_from = self.dock_pill_color;
         let timer = calloop::timer::Timer::from_duration(WALL_WINDOW + Duration::from_millis(60));
         let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
             // (A later pick moved the window on: that one's timer ends it.)
             if app.wall_until.is_some_and(|until| std::time::Instant::now() >= until) {
                 app.wall_until = None;
-                app.wall_guess = None;
+                // The preview's colour is NOT let go here: on a slower
+                // computer the new picture is not on the screen yet after a
+                // second and a half, and the box went back to the old
+                // picture's colour, then on to the new one's (Max,
+                // 2026-10-14: "el color de acento cambia al del nuevo fondo,
+                // y vuelve al anterior, y después cambia de vuelta"). It is
+                // let go when the screen shows the new picture
+                // (`wall_arrived`), or at the latest after WALL_HOLD.
                 // The settled screen, read even though nothing moves now.
                 app.demand_capture(Demand::Must);
                 app.schedule_frame();
             }
             calloop::timer::TimeoutAction::Drop
         });
+        let timer = calloop::timer::Timer::from_duration(WALL_HOLD + Duration::from_millis(60));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            if app.wall_hold_until.is_some_and(|until| std::time::Instant::now() >= until) {
+                app.wall_hold_until = None;
+                app.wall_guess = None;
+                app.demand_capture(Demand::Must);
+                app.schedule_frame();
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
         self.schedule_frame();
+    }
+
+    /// While the preview's colour stands in for a new wallpaper: whether the
+    /// screen now shows it — the dock's own sample of the desktop has come
+    /// close to that colour — and if so, the stand-in is let go (the dock's
+    /// colour is the real one from here). Returns whether it is STILL
+    /// awaited.
+    fn wall_arrived(&mut self, dock_moved: bool) -> bool {
+        let Some(guess) = self.wall_guess else {
+            return false;
+        };
+        let apart = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).take(3).map(|(x, y)| (x - y).abs()).sum::<f32>();
+        // There: the dock's sample of the desktop is close to the preview's
+        // colour, or it has left the old picture's and stopped moving (the
+        // preview's foot and the dock's band of the picture are not always
+        // alike).
+        let near = self.dock_pill_color.is_some_and(|c| apart(c, guess) < 0.09);
+        let left_old = match (self.dock_pill_color, self.wall_from) {
+            (Some(c), Some(old)) => apart(c, old) > 0.02 && !dock_moved,
+            _ => false,
+        };
+        let fading = self.wall_until.is_some_and(|until| std::time::Instant::now() < until);
+        if (near || left_old) && !fading {
+            let waited = self.wall_hold_until.map(|until| WALL_HOLD.saturating_sub(until.saturating_duration_since(std::time::Instant::now())));
+            tracing::info!("wallpaper: on the screen after {waited:?}; the preview's colour is let go");
+            self.wall_guess = None;
+            self.wall_hold_until = None;
+            self.schedule_frame();
+            return false;
+        }
+        true
     }
 
     /// Ask for a sample (see [`Demand`]) and move the capture along.
@@ -924,16 +979,18 @@ impl App {
         // A wallpaper is fading in: look at every chance, so each step of
         // its fade is one small step of ours (see `App::wallpaper_changing`).
         let fading = self.wall_until.is_some_and(|until| now < until);
+        // Past its fade, a picture still awaited is looked for briskly.
+        let awaited = self.wall_arrived(dock_changed);
         self.capture_next_at = Some(
             now + if fading {
                 WALL_STEP
-            } else if changed {
+            } else if awaited || changed {
                 SETTLE_BURST
             } else {
                 SAMPLE_INTERVAL
             },
         );
-        if fading {
+        if fading || awaited {
             self.capture_demand = Demand::Fresh;
             self.demand_since = Some(now);
         }

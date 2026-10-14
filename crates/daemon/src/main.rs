@@ -780,6 +780,8 @@ fn main() -> anyhow::Result<()> {
         dock_fill_anim: None,
         wall_until: None,
         wall_guess: None,
+        wall_hold_until: None,
+        wall_from: None,
         quick_fill_anim: None,
         quick_ink_anim: None,
         dock_ink_anim: None,
@@ -1810,6 +1812,11 @@ pub struct App {
     /// (`wallpaper_changing`).
     wall_until: Option<std::time::Instant>,
     wall_guess: Option<[f32; 4]>,
+    /// Until when, at the latest, `wall_guess` stands in for a picture that
+    /// has not reached the screen.
+    wall_hold_until: Option<std::time::Instant>,
+    /// The dock's sample of the desktop when the wallpaper was picked.
+    wall_from: Option<[f32; 4]>,
     /// The quick box's own eased colours: it goes to the new picture's
     /// colour first, ahead of the screen.
     quick_fill_anim: Option<[f32; 4]>,
