@@ -1889,20 +1889,20 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
     }
     Palette {
         // A BRIGHT GREY, a touch warm — not white, and not blue (Max,
-        // 2026-10-14: "too white… reduce a little the blue light"): sRGB
-        // #e3e3e0, the side #d7d7d3, the ink #24231f.
-        ground: [0.768, 0.768, 0.745, 1.0],
-        side: [0.68, 0.68, 0.651, 1.0],
-        ink: [0.018, 0.017, 0.014, 1.0],
+        // 2026-10-14: "too white… reduce a little the blue light", then
+        // "make it warmer"): sRGB #e6e2d9, the side #d9d4c9, the ink #28241c.
+        ground: [0.791, 0.761, 0.694, 1.0],
+        side: [0.694, 0.658, 0.584, 1.0],
+        ink: [0.021, 0.018, 0.012, 1.0],
         hover: [0.0, 0.0, 0.0, 0.05],
         here: [0.0, 0.0, 0.0, 0.08],
         selected: [0.0, 0.0, 0.0, 0.11],
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
         thumb: [0.0, 0.0, 0.0, 0.25],
-        field: [0.871, 0.871, 0.847, 1.0], // #f0f0ed
+        field: [0.888, 0.855, 0.791, 1.0], // #f2eee6
         field_rim: [0.0, 0.0, 0.0, 0.14],
-        name_field: [0.871, 0.871, 0.847, 1.0],
+        name_field: [0.888, 0.855, 0.791, 1.0],
         name_rim: [0.0, 0.0, 0.0, 0.22],
         name_mark: [0.0, 0.0, 0.0, 0.12],
     }
@@ -3194,7 +3194,7 @@ impl App {
     fn filer_panel_paint(&self, rect: Rect, ground: [f32; 4]) -> MenuPaint {
         let mut paint = self.desktop_panel_paint(rect);
         if !crate::look::dark() {
-            paint.fill = [0.855, 0.855, 0.831, 1.0]; // #eeeeeb
+            paint.fill = [0.871, 0.839, 0.776, 1.0]; // #f0ece4
             paint.ink = self.filer_palette().ink;
             paint.wash = [0.0, 0.0, 0.0, 0.06];
             return paint;
