@@ -90,6 +90,30 @@ pub(crate) struct Mounted {
     pub tether: bool,
 }
 
+/// The icon a volume wears (Max, 2026-10-14: a memory card stood there as a
+/// stick): a phone; a MEMORY CARD when it is mounted from a card reader
+/// (`/dev/mmcblk…`); a disc from an optical drive (`/dev/sr…`); else a stick.
+pub(crate) fn volume_icon(v: &Mounted) -> &'static str {
+    if v.phone {
+        return "phone";
+    }
+    icon_of_mount(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &v.path)
+}
+
+/// [`volume_icon`] for a folder, read from a `/proc/mounts` listing.
+fn icon_of_mount(mounts: &str, path: &std::path::Path) -> &'static str {
+    let device = mounts.lines().find_map(|line| {
+        let mut f = line.split_whitespace();
+        let (dev, at) = (f.next()?, f.next()?);
+        (std::path::Path::new(&crate::desktop_send::unescape_mount(at)) == path).then_some(dev)
+    });
+    match device {
+        Some(d) if d.starts_with("/dev/mmcblk") => "media-flash",
+        Some(d) if d.starts_with("/dev/sr") => "drive-optical",
+        _ => "drive-removable-media-usb",
+    }
+}
+
 /// Read `gio mount -li`: the volumes, each with what its drive says about
 /// being removable and where (if anywhere) it is mounted.
 pub(crate) fn parse_listing(listing: &str) -> Vec<Volume> {
@@ -631,6 +655,18 @@ pub(crate) fn spawn(results: Sender<Vec<Mounted>>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_card_reader_is_a_memory_card_and_the_rest_a_stick() {
+        let mounts = "/dev/mmcblk0p1 /run/media/max/NIKON\\0401\\040V2 vfat rw 0 0\n\
+                      /dev/sdc1 /run/media/max/STICK vfat rw 0 0\n\
+                      /dev/sr0 /run/media/max/DISC iso9660 ro 0 0\n";
+        let at = |p: &str| super::icon_of_mount(mounts, std::path::Path::new(p));
+        assert_eq!(at("/run/media/max/NIKON 1 V2"), "media-flash");
+        assert_eq!(at("/run/media/max/STICK"), "drive-removable-media-usb");
+        assert_eq!(at("/run/media/max/DISC"), "drive-optical");
+        assert_eq!(at("/run/media/max/GONE"), "drive-removable-media-usb");
+    }
+
     use super::*;
 
     const LISTING: &str = "\

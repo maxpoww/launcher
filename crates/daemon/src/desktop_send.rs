@@ -63,7 +63,7 @@ pub(crate) fn parse_mounts(mounts: &str) -> Vec<Target> {
 
 /// `/proc/mounts` writes a space in a path as `\040` (and a tab, a newline
 /// and a backslash the same way).
-fn unescape_mount(field: &str) -> String {
+pub(crate) fn unescape_mount(field: &str) -> String {
     let bytes = field.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

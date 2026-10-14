@@ -1687,7 +1687,7 @@ pub(crate) fn places(
         out.push(Place {
             name: v.name.clone(),
             path: v.path.clone(),
-            icon: format!("asset:{}", if v.phone { "phone" } else { "drive-removable-media-usb" }),
+            icon: format!("asset:{}", crate::mounts::volume_icon(v)),
             gap: first,
             start: true,
         });

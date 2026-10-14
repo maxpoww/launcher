@@ -2296,7 +2296,7 @@ impl App {
                 path: v.path.to_string_lossy().into_owned(),
                 name: v.name.clone(),
                 kind: Kind::Volume,
-                icon: format!("asset:{}", if v.phone { "phone" } else { "drive-removable-media-usb" }),
+                icon: format!("asset:{}", crate::mounts::volume_icon(v)),
                 exec: None,
             })
             .collect();
