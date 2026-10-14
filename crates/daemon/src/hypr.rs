@@ -1221,6 +1221,16 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                             // for a window, not for the desktop.
                             app.desktop_drop_keys();
                         }
+                        // A window's state turned — fullscreen on or off, or
+                        // moved between spaces (minimized to the dock, or
+                        // back): leaving a state is going back to the one
+                        // before, so a window of the column's goes back into
+                        // its place (`side.rs`; Max, 2026-10-14: "pantalla
+                        // completa cuando cierra tiene que volver a como
+                        // estaba, igual que todo el resto de los estados").
+                        if name.starts_with("fullscreen") || name.starts_with("movewindow") {
+                            app.side_state_changed();
+                        }
                         // `workspacev2>>ID,NAME` — the space changed. Hand back
                         // the window that was left there, if the way in didn't
                         // (see [`crate::focus_cycle`]).

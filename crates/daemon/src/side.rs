@@ -814,6 +814,16 @@ impl App {
         }
     }
 
+    /// A window's state turned — fullscreen on or off, minimized to the dock
+    /// or back, moved between spaces: leaving a state is going back to the
+    /// one before, so a window of the column's goes back into its place,
+    /// small (its place was kept all along).
+    pub(crate) fn side_state_changed(&mut self) {
+        if !self.side.columns.is_empty() {
+            self.side_layout();
+        }
+    }
+
     /// Something was focused or mapped: the side goes back on top.
     pub(crate) fn side_focus_changed(&mut self, _addr: &str) {
         if !self.side.columns.is_empty() {
