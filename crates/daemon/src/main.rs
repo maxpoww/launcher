@@ -6004,11 +6004,10 @@ impl App {
             if w == 0 || h == 0 {
                 return;
             }
-            // (The panel's zoom is in how big a logical pixel is drawn; the
-            // field's is drawn inside it.)
-            let zoom = self.files_panel_zoom();
+            // (Its zooms are the field's and the places' icons': drawn
+            // inside it, not in how big a logical pixel is.)
             if let Some(renderer) = self.filer_renderer(id) {
-                renderer.set_scale(scale * zoom);
+                renderer.set_scale(scale);
                 renderer.resize(physical(w, scale), physical(h, scale));
             }
             if let Some(fs) = self.filer.scale_slot(id) {

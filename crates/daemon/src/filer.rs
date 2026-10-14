@@ -73,17 +73,25 @@ const MIN_SIZE: (u32, u32) = (380, 260);
 /// The strip along the top: back, forward, the way here.
 const HEAD_H: f32 = 46.0;
 /// The places' column, and the window width under which it is left out.
+/// (The tests' places: as wide as they were before they became a rail.)
+#[cfg(test)]
 const SIDE_W: f32 = 176.0;
 /// The places at rest: a RAIL of their icons only, the field beside it; the
-/// pointer on it opens them to `SIDE_W` OVER the field (Max, 2026-10-14:
-/// "make the sidebar auto hide (only see the icons) and open on hover").
-const SIDE_RAIL: f32 = 46.0;
+/// pointer on it opens them OVER the field (Max, 2026-10-14: "make the
+/// sidebar auto hide (only see the icons) and open on hover"). The rail is
+/// an icon with `RAIL_AIR` on either side (Max: "less air on the small panel,
+/// and the same air to each side"); the icon is `PLACE_ICON` times the
+/// panel's zoom — which is of the places' ICONS alone, not their words
+/// (Max: "zoom more on the panel icons (not the text)").
+const PLACE_ICON: f32 = 22.0;
+const RAIL_AIR: f32 = 10.0;
+/// How far the words of an open place reach past the rail.
+const SIDE_WORDS: f32 = 140.0;
 /// How fast the places open and close (the menus' ease).
 const SIDE_RATE: f32 = 18.0;
 const SIDE_FROM: f32 = 560.0;
 /// One place's row, its icon, and the space over the plugged-in ones.
 const ROW_H: f32 = 30.0;
-const ROW_ICON: f32 = 18.0;
 const ROW_GAP: f32 = 12.0;
 /// Space around the icons' field.
 const PAD: f32 = 10.0;
@@ -370,13 +378,13 @@ pub(crate) struct Layout {
 impl Layout {
     #[cfg(test)]
     pub fn new((w, h): (u32, u32), icon_scale: f32) -> Self {
-        Self::of((w as f32, h as f32), icon_scale, false, 1.0)
+        Self::of((w as f32, h as f32), icon_scale, false, 1.0, SIDE_W)
     }
 
-    /// A window of `w`×`h`; its field at `zoom`.
-    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool, zoom: f32) -> Self {
+    /// A window of `w`×`h`; its field at `zoom`, beside places `rail` wide.
+    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool, zoom: f32, rail: f32) -> Self {
         let zoom = zoom.max(0.1);
-        let side_w = if w >= SIDE_FROM { SIDE_RAIL } else { 0.0 };
+        let side_w = if w >= SIDE_FROM { rail } else { 0.0 };
         // (The field's own size, as it is laid out: the room it has, `zoom`
         // times smaller.)
         let (w, h) = (side_w + (w - side_w) / zoom, h);
@@ -1286,8 +1294,8 @@ struct Win {
     /// The owner's zoom of the file windows' field (`App::files_zoom`),
     /// kept here for the layout…
     zoom: f32,
-    /// …and of their panel, the places and the head (`App::files_panel_zoom`):
-    /// the window is laid out `1/panel` its size and drawn that much bigger.
+    /// …and of their places' ICONS (`App::files_panel_zoom`): the rail and
+    /// the rows grow with them, the words do not.
     panel: f32,
     /// The pointer is over the field (not the panel): what Ctrl +/−/0 zoom.
     over_field: bool,
@@ -1469,15 +1477,32 @@ impl Win {
     }
 
     fn layout(&self, icon_scale: f32) -> Layout {
-        // (The field inside a window already drawn at the panel's zoom.)
-        Layout::of(self.virt(), icon_scale, self.list, self.zoom / self.panel)
+        Layout::of(self.virt(), icon_scale, self.list, self.zoom, self.rail())
     }
 
-    /// The size the window is laid out in: its own, `panel` times smaller —
-    /// the renderer draws a logical pixel that much bigger. (The field has a
-    /// zoom of its own inside it: `Layout::zoom`.)
+    /// The window's size (the field has a zoom of its own: `Layout::zoom`).
     fn virt(&self) -> (f32, f32) {
-        (self.size.0 as f32 / self.panel, self.size.1 as f32 / self.panel)
+        (self.size.0 as f32, self.size.1 as f32)
+    }
+
+    /// A place's icon, at the panel's zoom.
+    fn place_icon(&self) -> f32 {
+        (PLACE_ICON * self.panel).round()
+    }
+
+    /// The places at rest: their icon and the same air on either side.
+    fn rail(&self) -> f32 {
+        self.place_icon() + 2.0 * RAIL_AIR
+    }
+
+    /// The places open: the rail and their words.
+    fn side_open_w(&self) -> f32 {
+        self.rail() + SIDE_WORDS
+    }
+
+    /// A place's row: tall enough for its icon.
+    fn place_row(&self) -> f32 {
+        ROW_H.max(self.place_icon() + 10.0)
     }
 
     /// Where the pointer is, for what it is over: brought into the laid-out
@@ -1485,7 +1510,7 @@ impl Win {
     /// (`Layout::inward`) — except while a menu or a box is up, which stand
     /// in the window's.
     fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
-        let at = (raw.0 / self.panel, raw.1 / self.panel);
+        let at = raw;
         if self.menu.is_some() || self.props.is_some() || self.in_side(at) {
             return at;
         }
@@ -1500,24 +1525,24 @@ impl Win {
 
     /// Whether a point the pointer gave is over the field.
     fn on_field(&self, raw: (f32, f32), icon_scale: f32) -> bool {
-        let at = (raw.0 / self.panel, raw.1 / self.panel);
-        !self.in_side(at) && self.layout(icon_scale).shown_body().contains(at)
+        !self.in_side(raw) && self.layout(icon_scale).shown_body().contains(raw)
     }
 
     /// Open the places while the pointer is on them (the rail, or what they
     /// cover once open); whether that changed.
     fn side_follow(&mut self, rail: f32) -> bool {
-        let reach = if self.side_open { SIDE_W } else { rail };
+        let reach = if self.side_open { self.side_open_w() } else { rail };
         let want = rail > 0.0 && self.at_win.is_some_and(|p| p.0 < reach && p.1 >= HEAD_H);
         std::mem::replace(&mut self.side_open, want) != want
     }
 
     /// What Ctrl +/−/0 zoom now: the field, or the panel under the pointer.
     fn zoom_target(&self) -> &'static str {
-        if self.ptr.is_none() || self.over_field {
-            "files"
-        } else {
+        // (The places' icons while the pointer is on them; else the field.)
+        if self.at_win.is_some_and(|p| self.in_side(p)) {
             "files-panel"
+        } else {
+            "files"
         }
     }
 
@@ -3398,7 +3423,7 @@ impl App {
         if let Some(fs) = &win.fscale {
             fs.set_logical_size(width, height);
         }
-        let drawn = scale * win.panel;
+        let drawn = scale;
         if let Some(renderer) = win.renderer.as_mut() {
             renderer.set_scale(drawn);
             renderer.resize(pw, ph);
@@ -3521,9 +3546,7 @@ impl App {
             if let Some(win) = self.filer.win_mut(id) {
                 win.zoom = zoom;
                 win.panel = panel;
-                if let Some(renderer) = win.renderer.as_mut() {
-                    renderer.set_scale(scale * panel);
-                }
+                let _ = scale;
                 // What is up was placed for the other size.
                 win.menu = None;
                 win.menu_path = None;
@@ -3952,7 +3975,8 @@ impl App {
         if layout.side_w > 0.0 {
             let t = win.side_t;
             let ease = t * t * (3.0 - 2.0 * t);
-            let side_w = layout.side_w + (SIDE_W - layout.side_w) * ease;
+            let (icon, row_h) = (win.place_icon(), win.place_row());
+            let side_w = layout.side_w + (win.side_open_w() - layout.side_w) * ease;
             win.side_now = side_w;
             side.clip = Rect::new(0.0, HEAD_H, side_w, h - HEAD_H);
             side.rects.push(rect(side.clip, 0.0, side_ground));
@@ -3965,7 +3989,9 @@ impl App {
                 if place.gap {
                     y += ROW_GAP;
                 }
-                let row = Rect::new(6.0, y, side_w - 12.0, ROW_H);
+                // (The icon stands in the rail's middle; the row's wash leaves
+                // the same air on either side.)
+                let row = Rect::new(RAIL_AIR / 2.0, y, side_w - RAIL_AIR, row_h);
                 // (`..` is never "here".)
                 let up = place.name == UP;
                 if (win.dir == place.path && !up) || win.drop_place == Some(n) {
@@ -3975,7 +4001,7 @@ impl App {
                 }
                 if let Some(layer) = win.layer_of(&place.icon) {
                     side.icons.push(IconInst {
-                        rect: Rect::new(row.x + 10.0, y + (ROW_H - ROW_ICON) / 2.0, ROW_ICON, ROW_ICON),
+                        rect: Rect::new(RAIL_AIR, y + (row_h - icon) / 2.0, icon, icon),
                         layer,
                         tint: [0.0; 4],
                         ring: -1.0,
@@ -3987,15 +4013,15 @@ impl App {
                         clip: Some(row),
                         ..label(
                             &place.name,
-                            (row.x + 10.0 + ROW_ICON + 9.0, y + (ROW_H - TEXT_LINE) / 2.0),
-                            SIDE_W - ROW_ICON - 38.0,
+                            (layout.side_w + 2.0, y + (row_h - TEXT_LINE) / 2.0),
+                            SIDE_WORDS - 12.0,
                             false,
                             false,
                         )
                     });
                 }
                 hits.places.push(row);
-                y += ROW_H;
+                y += row_h;
             }
         } else {
             win.side_now = 0.0;
@@ -4417,7 +4443,7 @@ impl App {
                 self.cursor_now = None;
                 if let Some(win) = self.filer.win_mut(id) {
                     let raw = (surface_x as f32, surface_y as f32);
-                    win.at_win = Some((raw.0 / win.panel, raw.1 / win.panel));
+                    win.at_win = Some(raw);
                     win.ptr = Some(win.point(raw, icon_scale));
                     win.over_field = win.on_field(raw, icon_scale);
                 }
@@ -4439,7 +4465,7 @@ impl App {
             } => {
                 if let Some(win) = self.filer.win_mut(id) {
                     let raw = (surface_x as f32, surface_y as f32);
-                    win.at_win = Some((raw.0 / win.panel, raw.1 / win.panel));
+                    win.at_win = Some(raw);
                     win.ptr = Some(win.point(raw, icon_scale));
                     win.over_field = win.on_field(raw, icon_scale);
                 }
@@ -4922,7 +4948,7 @@ impl App {
             return;
         };
         let layout = win.layout(icon_scale);
-        let at_win = (x / win.panel, y / win.panel);
+        let at_win = (x, y);
         win.at_win = Some(at_win);
         if win.side_follow(layout.side_w) {
             win.dirty = true;
@@ -5784,7 +5810,7 @@ impl App {
                 return match at {
                     Some(p) => {
                         let (x, y) = win.layout(self.icon_scale()).outward(p);
-                        format!("where {:.0} {:.0}", x * win.panel, y * win.panel)
+                        format!("where {x:.0} {y:.0}")
                     }
                     None => format!("where nothing: {rest}"),
                 };
@@ -5840,7 +5866,7 @@ impl App {
                         let icon_scale = self.icon_scale();
                         let (x, y) = self.filer.win(id).map_or((x, y), |w| {
                             let (x, y) = w.layout(icon_scale).outward((x, y));
-                            (x * w.panel, y * w.panel)
+                            (x, y)
                         });
                         self.filer_drag_over(id, x, y);
                     }
@@ -6260,7 +6286,7 @@ mod tests {
 
     #[test]
     fn a_list_is_one_column_of_rows_under_its_strip() {
-        let l = Layout::of((920.0, 600.0), 1.0, true, 1.0);
+        let l = Layout::of((920.0, 600.0), 1.0, true, 1.0, SIDE_W);
         assert_eq!((l.cols, l.ch), (1, LIST_ROW));
         assert_eq!(l.body.y, HEAD_H + LIST_HEAD);
         let (a, b) = (l.cell(0), l.cell(1));
@@ -6272,14 +6298,14 @@ mod tests {
         assert!(f > 0.7);
         // Both columns in a wide window, none in a narrow one.
         assert!(matches!(l.columns(&a), (Some(_), Some(_))));
-        let narrow = Layout::of((320.0, 400.0), 1.0, true, 1.0);
+        let narrow = Layout::of((320.0, 400.0), 1.0, true, 1.0, SIDE_W);
         assert_eq!(narrow.columns(&narrow.cell(0)).1, None);
     }
 
     #[test]
     fn the_zoom_is_the_fields_alone() {
-        let one = Layout::of((1000.0, 600.0), 1.0, false, 1.0);
-        let two = Layout::of((1000.0, 600.0), 1.0, false, 2.0);
+        let one = Layout::of((1000.0, 600.0), 1.0, false, 1.0, SIDE_W);
+        let two = Layout::of((1000.0, 600.0), 1.0, false, 2.0, SIDE_W);
         // The places keep their width; the field still fills the window…
         assert_eq!(two.side_w, one.side_w);
         assert_eq!(two.shown_body(), one.body);
