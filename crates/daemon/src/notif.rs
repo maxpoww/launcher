@@ -176,13 +176,19 @@ impl BoxMetrics {
 const GLYPH_TRASH: &str = "\u{f014}";
 
 /// Crimson for destructive controls (× dismiss), Shinings "Live" `#E05252`.
-const CRIMSON: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
+fn crimson() -> [f32; 4] {
+    crate::palette::danger_srgb()
+}
 /// Unread-indicator colour — the bell-pill tint/glow and the "+N" count badge.
 /// Matched to the user's Hyprland active window-border colour (`#ffbe98`, a warm
 /// peach) so the unread cue speaks the same accent as the rest of the desktop.
-pub(crate) const AMBER: [f32; 4] = [1.0, 0.745, 0.596, 1.0];
+pub(crate) fn amber() -> [f32; 4] {
+    crate::palette::accent_srgb()
+}
 /// The battery alarm's red (the bell accent while low/beating/critical).
-const BATTERY_RED: [f32; 4] = [0.92, 0.26, 0.21, 1.0];
+fn battery_red() -> [f32; 4] {
+    crate::palette::danger_srgb()
+}
 /// fa-triangle-exclamation — the battery awareness symbol.
 const GLYPH_BATTERY_WARN: &str = "\u{f071}";
 
@@ -1714,7 +1720,7 @@ impl App {
                     radius: chip_h / 2.0,
                     // Border-accent fill (softened relative to the bell, since a
                     // flat chip reads stronger than the bell's blended tint).
-                    color: [AMBER[0], AMBER[1], AMBER[2], 0.2 * a],
+                    color: [amber()[0], amber()[1], amber()[2], 0.2 * a],
                     glass: 0.0,
                     border: 0.0,
                 });
@@ -1825,7 +1831,7 @@ impl App {
         if hovered {
             let close = card_close_rect(full_rect, nm);
             let xc = if self.notif.hit == NotifHit::Close(idx) {
-                CRIMSON
+                crimson()
             } else {
                 dim_ink
             };
@@ -2152,7 +2158,7 @@ impl App {
         // replacing (not stacking on) the unread amber. Always full strength:
         // a dying battery outranks the peek fade.
         if let Some(s) = self.battery_pulse() {
-            let red_fill = [BATTERY_RED[0], BATTERY_RED[1], BATTERY_RED[2], 0.78];
+            let red_fill = [battery_red()[0], battery_red()[1], battery_red()[2], 0.78];
             base = lerp4(base, red_fill, 0.55 * s * alpha);
             let g = 0.30 * s * alpha;
             if g > 0.001 {
@@ -2160,7 +2166,7 @@ impl App {
                     rect,
                     radius,
                     blur: 3.0,
-                    color: [BATTERY_RED[0], BATTERY_RED[1], BATTERY_RED[2], g],
+                    color: [battery_red()[0], battery_red()[1], battery_red()[2], g],
                     edges: [1.0, 1.0, 1.0, 1.0],
                 });
             }
@@ -2170,7 +2176,7 @@ impl App {
             let soft = 1.0;
             let u = (1.0 - self.notif.peek_t) * alpha;
             // Fill: blend the wash toward amber so the pill body reads warm (gently).
-            let amber_fill = [AMBER[0], AMBER[1], AMBER[2], 0.72];
+            let amber_fill = [amber()[0], amber()[1], amber()[2], 0.72];
             base = lerp4(base, amber_fill, 0.33 * u * soft);
             // Glow: a tight amber halo around the pill, bridging the fill to the edge.
             let g = 0.22 * u * soft;
@@ -2179,7 +2185,7 @@ impl App {
                     rect,
                     radius,
                     blur: 3.0,
-                    color: [AMBER[0], AMBER[1], AMBER[2], g],
+                    color: [amber()[0], amber()[1], amber()[2], g],
                     edges: [1.0, 1.0, 1.0, 1.0],
                 });
             }

@@ -38,9 +38,15 @@ const VALUE_X: f32 = 150.0;
 const DIM: f32 = 0.58;
 const LINE_INK: f32 = 0.12;
 /// The switch that is on, the box that is ticked, Apply.
-const ACCENT: [f32; 3] = [0.47, 0.78, 0.745];
+fn accent() -> [f32; 3] {
+    let a = crate::palette::accent_srgb();
+    [a[0], a[1], a[2]]
+}
 /// What takes files off the phone.
-const DANGER: [f32; 3] = [1.0, 0.43, 0.43];
+fn danger() -> [f32; 3] {
+    let d = crate::palette::danger_srgb();
+    [d[0], d[1], d[2]]
+}
 /// How many letters of the small text fit a line of the box (it has no
 /// renderer to measure with: a wrap by count, on the safe side).
 const SAY_CHARS: usize = 64;
@@ -227,7 +233,7 @@ impl Config {
         let switch = |b: &mut Built, y: f32, on: bool, hit: Hit, live: bool| {
             let r = Rect::new(right - 36.0, y + (LINE_PX - 20.0) / 2.0, 36.0, 20.0);
             let fade = if live { 1.0 } else { 0.4 };
-            let ground = if on { tint(ACCENT, 0.9 * fade) } else { at(if lit(hit) { 0.26 } else { 0.18 } * fade) };
+            let ground = if on { tint(accent(), 0.9 * fade) } else { at(if lit(hit) { 0.26 } else { 0.18 } * fade) };
             b.rects.push(RectInst { rect: r, radius: 10.0, color: ground, glass: 0.0, border: 0.0 });
             let knob = if on { r.x + r.w - 17.0 } else { r.x + 3.0 };
             b.rects.push(RectInst { rect: Rect::new(knob, r.y + 3.0, 14.0, 14.0), radius: 7.0, color: [1.0, 1.0, 1.0, 0.95 * ink[3] * fade], glass: 0.0, border: 0.0 });
@@ -248,7 +254,7 @@ impl Config {
         };
         // An amber chip (a red one for what deletes), like the task pill's.
         let chip = |b: &mut Built, r: Rect, word: &str, hit: Hit, danger: bool| {
-            let c = if danger { DANGER } else { [1.0, 0.745, 0.596] };
+            let c = if danger { self::danger() } else { accent() };
             b.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: tint(c, if lit(hit) { 0.42 } else { 0.22 }), glass: 0.0, border: 0.0 });
             b.labels.push(centred(word, r, at(1.0)));
             b.hits.push((hit, r));
@@ -278,7 +284,7 @@ impl Config {
         if self.editing && self.all && !self.phone.name.is_empty() {
             // Selected whole: the first key replaces it.
             let sel_w = (self.phone.name.chars().count() as f32 * FONT_PX * 0.56 + 8.0).min(field.w - 12.0);
-            b.rects.push(RectInst { rect: Rect::new(field.x + 6.0, field.y + 3.0, sel_w, field.h - 6.0), radius: 4.0, color: tint(ACCENT, 0.35), glass: 0.0, border: 0.0 });
+            b.rects.push(RectInst { rect: Rect::new(field.x + 6.0, field.y + 3.0, sel_w, field.h - 6.0), radius: 4.0, color: tint(accent(), 0.35), glass: 0.0, border: 0.0 });
         }
         let typed = if self.editing && !self.all { format!("{}│", self.phone.name) } else { self.phone.name.clone() };
         b.labels.push(text(&typed, (field.x + 10.0, y), field.w - 20.0, FONT_PX, LINE_PX, false, at(0.95)));
@@ -305,7 +311,7 @@ impl Config {
             let (cx, cy) = (x + (i % 2) as f32 * (col_w + 16.0), y + (i / 2) as f32 * ROW_H);
             let on = self.phone.kinds.iter().any(|k| k == kind.key);
             let tick = Rect::new(cx, cy + (LINE_PX - 16.0) / 2.0, 16.0, 16.0);
-            let ground = if on { tint(ACCENT, 0.9) } else { at(if lit(Hit::Kind(i)) { 0.26 } else { 0.16 }) };
+            let ground = if on { tint(accent(), 0.9) } else { at(if lit(Hit::Kind(i)) { 0.26 } else { 0.16 }) };
             b.rects.push(RectInst { rect: tick, radius: 4.0, color: ground, glass: 0.0, border: 0.0 });
             if on {
                 b.labels.push(centred("✓", tick, [0.05, 0.08, 0.08, ink[3]]));
@@ -366,7 +372,7 @@ impl Config {
             let said = crate::i18n::fill(tr("This moves {0} off the phone into {1}. Each file is deleted from the phone only after its copy here has been checked."), &[("0", &(self.would_free().map_or_else(|| "your files".to_owned(), |b| format!("about {}", crate::desktop_props::size_text(b))))), ("1", &self.folder_text())]);
             let lines = wrapped(&said);
             let block_h = 10.0 + lines.len() as f32 * SAY_LINE + 8.0 + 23.0 + 10.0;
-            b.rects.push(RectInst { rect: Rect::new(x - 6.0, top, w + 12.0, block_h), radius: 8.0, color: tint(DANGER, 0.10), glass: 0.0, border: 0.0 });
+            b.rects.push(RectInst { rect: Rect::new(x - 6.0, top, w + 12.0, block_h), radius: 8.0, color: tint(danger(), 0.10), glass: 0.0, border: 0.0 });
             y += 10.0;
             for line in lines {
                 b.labels.push(text(&line, (x + 4.0, y), w - 8.0, FONT_PX, SAY_LINE, false, at(0.92)));
@@ -384,7 +390,7 @@ impl Config {
         b.rects.push(RectInst { rect: cancel, radius: 13.5, color: [wash[0], wash[1], wash[2], wash[3] * if lit(Hit::Cancel) { 1.8 } else { 1.0 }], glass: 0.0, border: 0.0 });
         b.labels.push(centred(tr("Cancel"), cancel, at(0.95)));
         b.hits.push((Hit::Cancel, cancel));
-        b.rects.push(RectInst { rect: apply, radius: 13.5, color: tint(ACCENT, if lit(Hit::Apply) { 0.55 } else { 0.32 }), glass: 0.0, border: 0.0 });
+        b.rects.push(RectInst { rect: apply, radius: 13.5, color: tint(accent(), if lit(Hit::Apply) { 0.55 } else { 0.32 }), glass: 0.0, border: 0.0 });
         b.labels.push(centred(tr("Apply"), apply, at(1.0)));
         b.hits.push((Hit::Apply, apply));
         y += 27.0 + PAD;

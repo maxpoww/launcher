@@ -1335,7 +1335,7 @@ impl App {
                     if l.step > 0 {
                         let d = LINE_PX * s;
                         let chip = Rect::new(row.x + BOX_PAD, row.y + (row.h - d) / 2.0, d, d);
-                        let amber = crate::notif::AMBER;
+                        let amber = crate::notif::amber();
                         scene.rects.push(RectInst {
                             rect: chip,
                             radius: d / 2.0,
@@ -1468,7 +1468,7 @@ impl App {
             // the pointer (the task pill's Cancel is the same chip).
             if let (Some(chip), Some(word)) = (self.phone_pill_chip(long), shown.button) {
                 let lit = ptr.is_some_and(|p| chip.contains(p));
-                let amber = crate::notif::AMBER;
+                let amber = crate::notif::amber();
                 scene.rects.push(RectInst {
                     rect: chip,
                     radius: chip.h / 2.0,

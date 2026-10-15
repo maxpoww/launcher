@@ -327,6 +327,26 @@ pub(crate) fn set(theme: Theme) -> bool {
     true
 }
 
+/// A colour of the palette as plain sRGB fractions, opaque — the space the
+/// shell's fixed signal colours were written in (the bell's chip, the reds).
+pub(crate) fn srgb(c: Rgb) -> [f32; 4] {
+    [f32::from(c[0]) / 255.0, f32::from(c[1]) / 255.0, f32::from(c[2]) / 255.0, 1.0]
+}
+
+/// The accent, the palette's red and its yellow as [`srgb`]: what the shell's
+/// chips, warnings and "this cannot be undone" wear (Max, 2026-10-15: the
+/// palette "as deep as possible"). Golem's own palette gives back exactly
+/// the colours these were before (#ffbe98, #e05252).
+pub(crate) fn accent_srgb() -> [f32; 4] {
+    srgb(current().accent())
+}
+pub(crate) fn danger_srgb() -> [f32; 4] {
+    srgb(current().c[0x08])
+}
+pub(crate) fn warn_srgb() -> [f32; 4] {
+    srgb(current().c[0x0A])
+}
+
 /// A colour of the palette as the renderer wants it: linear, opaque.
 pub(crate) fn linear(c: Rgb) -> [f32; 4] {
     let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0);

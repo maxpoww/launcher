@@ -130,9 +130,14 @@ const NOTE_INK: f32 = 0.5;
 /// A rule between groups: the ink, faint.
 const LINE_INK: f32 = 0.14;
 /// The one colour of its own: a row that throws something away, and its
-/// hover band.
-const RED: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 1.0];
-const HOVER_DANGER: [f32; 4] = [224.0 / 255.0, 82.0 / 255.0, 82.0 / 255.0, 0.16];
+/// hover band — the palette's red.
+fn red() -> [f32; 4] {
+    crate::palette::danger_srgb()
+}
+fn hover_danger() -> [f32; 4] {
+    let r = red();
+    [r[0], r[1], r[2], 0.16]
+}
 
 /// What the menu is painted with: the OPTIONS boxes' adaptive surface
 /// (`App::box_surface_at`), read where the menu is.
@@ -509,7 +514,7 @@ impl Menu {
                         grid.rects.push(RectInst {
                             rect,
                             radius: ROW_RADIUS,
-                            color: fade(if danger { HOVER_DANGER } else { paint.wash }),
+                            color: fade(if danger { hover_danger() } else { paint.wash }),
                             glass: 0.0,
                             border: 0.0,
                         });
@@ -517,7 +522,7 @@ impl Menu {
                     // Hover is weight and full strength, as in every box's
                     // list: the colour itself does not move.
                     let color = if danger {
-                        RED
+                        red()
                     } else if hot {
                         ink_at(1.0)
                     } else {
@@ -730,12 +735,12 @@ mod tests {
         assert_eq!(g.rects[0].rect, m.rect);
         assert_eq!(g.rects[0].color, PAINT.fill, "the boxes' fill");
         assert_eq!(g.rects[0].radius, PAINT.radius);
-        assert_eq!(g.rects[3].color, HOVER_DANGER, "the bin's band is red");
+        assert_eq!(g.rects[3].color, hover_danger(), "the bin's band is red");
         assert_eq!(g.labels.len(), 7);
         assert_eq!(g.labels[3].text, "Move to");
         assert_eq!(g.labels[4].text, "Move to Home");
         assert_eq!(g.labels[5].text, "Move to bin");
-        assert_eq!(g.labels[5].color, Some(RED));
+        assert_eq!(g.labels[5].color, Some(red()));
         assert_eq!(g.labels[5].family, Some(FONT_BOLD), "hovered: bold");
         assert_eq!(g.labels[6].text, "Properties");
         assert_eq!(g.labels[0].family, None);

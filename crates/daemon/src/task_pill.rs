@@ -458,7 +458,7 @@ impl App {
             return;
         }
         let s = self.options_scale();
-        let amber = crate::notif::AMBER;
+        let amber = crate::notif::amber();
         scene.rects.push(RectInst {
             rect: chip,
             radius: chip.h / 2.0,

@@ -325,6 +325,10 @@ The big daemon files are cohesive but long — go straight to the function:
   SIGUSR1/2), hyprlock.conf ($golem_* variables), gtk4.css (libadwaita variables, both looks via
   prefers-color-scheme), gtk3.css, qt.conf (+ qt5ct/qt6ct.conf when nobody else owns them), and
   dconf's accent-color (nearest libadwaita name). Golem's home layer points every app there.
+  SIGNAL COLOURS follow it too (`palette::accent_srgb/danger_srgb/warn_srgb`, sRGB fractions like
+  the consts they replaced): the bell's/task's/phone's chip and the gear's warnings = the accent,
+  every "throw away"/recording/battery red = base08, the bar's warn glyph = base0A, the phone
+  Configure box's accent = the accent. Golem's palette gives back the old #ffbe98 / #e05252.
   The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
   the UI thread in `App::control_pick`).
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,

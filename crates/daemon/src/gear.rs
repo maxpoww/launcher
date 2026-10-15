@@ -62,7 +62,9 @@ const CORES_H: f32 = 30.0;
 /// Pixels of list travel per wheel unit — the other boxes' figure.
 const SCROLL_SPEED: f32 = 3.0;
 /// The accent the bar already uses for "look here" (the unread bell).
-const AMBER: [f32; 3] = [1.0, 0.745, 0.596];
+fn amber() -> [f32; 4] {
+    crate::palette::accent_srgb()
+}
 /// What a sign-in page is asked for: a plain-http address every portal
 /// intercepts, and the one Seam's own check uses.
 const PORTAL_URL: &str = "http://detectportal.firefox.com/canonical.html";
@@ -2197,7 +2199,7 @@ impl App {
                     if !sub.is_empty() {
                         let sub_w = (r.x + r.w - ROW_PAD_X * s - tx).max(0.0);
                         let c = match tone {
-                            Tone::Warn => [AMBER[0], AMBER[1], AMBER[2], 1.0],
+                            Tone::Warn => [amber()[0], amber()[1], amber()[2], 1.0],
                             _ => [col[0], col[1], col[2], col[3] * 0.72],
                         };
                         pen.text(
@@ -2700,7 +2702,7 @@ impl App {
                     dim: false,
                     cache: false,
                     family: None,
-                    color: Some([AMBER[0], AMBER[1], AMBER[2], a]),
+                    color: Some([amber()[0], amber()[1], amber()[2], a]),
                     clip: Some(fr),
                 });
             }

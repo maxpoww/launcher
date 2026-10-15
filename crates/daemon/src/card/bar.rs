@@ -4,7 +4,7 @@
 //! input box a memory is written in (on Memory's page: New, in its place);
 //! at the TOP of an open memory its name, floating over the items.
 
-use super::view::{head_h, Hover, Page, Paint, DANGER, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
+use super::view::{head_h, Hover, Page, Paint, danger, GAP, LIST_PAD, RADIUS, TEXT_LINE, TEXT_PX};
 use crate::content::{GridContent, Label, Rect, RectInst};
 use crate::options::NERD;
 use crate::i18n::tr;
@@ -939,7 +939,7 @@ pub(super) fn draw(
                     rect: Rect::new(br.x + 6.0, br.y + 4.0, br.w - 12.0, br.h - 8.0),
                     radius: 7.0,
                     color: match (live, which) {
-                        (true, BoxBtn::Mic) => [DANGER[0], DANGER[1], DANGER[2], 0.9],
+                        (true, BoxBtn::Mic) => [danger()[0], danger()[1], danger()[2], 0.9],
                         (true, _) => accent(0.9),
                         _ => ink(0.08),
                     },
@@ -981,7 +981,7 @@ pub(super) fn draw(
                 r.w - BTN - 30.0,
                 TEXT_PX + 0.5,
                 false,
-                [DANGER[0], DANGER[1], DANGER[2], 1.0],
+                [danger()[0], danger()[1], danger()[2], 1.0],
                 boxg.clip,
             ));
         } else {
@@ -1077,7 +1077,7 @@ pub(super) fn draw(
             10.0,
             true,
             match (bar.hint_lit, hover == Some(Hover::Undo)) {
-                _ if bar.hint_red => [DANGER[0], DANGER[1], DANGER[2], 1.0],
+                _ if bar.hint_red => [danger()[0], danger()[1], danger()[2], 1.0],
                 (true, true) => accent(1.0),
                 (true, false) => accent(0.85),
                 _ => ink(0.5),

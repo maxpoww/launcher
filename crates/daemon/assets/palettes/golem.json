@@ -4,7 +4,7 @@
   "dark": {
     "base00": "#16171a", "base01": "#1d2026", "base02": "#2a2e35", "base03": "#474c55",
     "base04": "#8a8f98", "base05": "#e6e3dd", "base06": "#f1eee8", "base07": "#faf8f4",
-    "base08": "#f2707a", "base09": "#ffbe98", "base0A": "#f5cf7a", "base0B": "#9fd69a",
+    "base08": "#e05252", "base09": "#ffbe98", "base0A": "#f5cf7a", "base0B": "#9fd69a",
     "base0C": "#86d0c8", "base0D": "#8ab4f0", "base0E": "#c9a2e8", "base0F": "#d8a27c"
   },
   "light": {

@@ -321,7 +321,9 @@ const GLYPH_ONE_TASK: &str = "\u{f2d0}"; // fa-window-maximize
 const GLYPH_WHOLE_DESK: &str = "\u{f009}"; // fa-th-large
 /// Amber wash for a privacy/safety WARNING pill, so it reads as "heads up",
 /// not a button.
-const WARN_COLOR: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
+fn warn_color() -> [f32; 4] {
+    crate::palette::warn_srgb()
+}
 
 /// Whether an affordance is surfaced as an OPTION pill: any actionable control,
 /// plus the privacy/safety WARNINGS worth a persistent glance (a live camera,
@@ -2127,7 +2129,7 @@ impl App {
                     rect: Rect::new(ox, y, ph, ph),
                     text: glyph.to_owned(),
                     family: Some(NERD),
-                    glyph_color: warn.then_some(WARN_COLOR),
+                    glyph_color: warn.then(warn_color),
                 });
                 ox += ph + CTRL_GAP;
             }

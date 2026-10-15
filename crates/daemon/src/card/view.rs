@@ -56,7 +56,10 @@ pub(super) const CLOSE: f32 = 22.0;
 
 pub(super) const CLOSE_INSET: f32 = 4.0;
 
-pub(super) const DANGER: [f32; 3] = [0.878, 0.322, 0.322];
+pub(super) fn danger() -> [f32; 3] {
+    let d = crate::palette::danger_srgb();
+    [d[0], d[1], d[2]]
+}
 
 /// An item's box as last drawn, in surface coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1635,7 +1638,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 .and_then(|f| f.renaming)
                 .filter(|(id, _)| *id == item.id)
                 .map(|(_, typed)| format!("{typed}|"));
-            let danger = [DANGER[0], DANGER[1], DANGER[2], 1.0];
+            let danger = [danger()[0], danger()[1], danger()[2], 1.0];
             match (&renaming, arming) {
                 (Some(typed), _) => put(
                     typed,
@@ -2151,7 +2154,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 15.0,
                 over == Some(Hover::Close(item.id)),
                 over == Some(Hover::Close(item.id)),
-                DANGER,
+                danger(),
             );
         }
         // THE DISK, on every item of every list (Max, 2026-10-10: *"add the
@@ -2185,7 +2188,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             rect: mic,
             radius: mic.w / 2.0,
             color: if listening {
-                [DANGER[0], DANGER[1], DANGER[2], 0.9]
+                [danger()[0], danger()[1], danger()[2], 0.9]
             } else if hot {
                 paint.tone(ZEBRA_HOT)
             } else {
