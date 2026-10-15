@@ -785,6 +785,11 @@ fn qtct_conf(scheme: &Path, t: &Theme) -> String {
 /// and btop pointed at it while it still wears its out-of-the-box theme —
 /// a theme the owner picked in btop is theirs and left alone.
 fn btop_files(t: &Theme) {
+    // Only where btop is: a theme for a program that is not there is clutter
+    // in the owner's config (the laptops ship without it).
+    if !crate::launch::on_path("btop") && !config_home().join("btop").is_dir() {
+        return;
+    }
     let dir = config_home().join("btop");
     crate::persist::write_text("theme", &dir.join("themes").join("golem.theme"), &btop_theme(t));
     let conf = dir.join("btop.conf");

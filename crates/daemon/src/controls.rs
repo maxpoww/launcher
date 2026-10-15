@@ -1381,8 +1381,12 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 vec![choice(tr("Dark"), dark, "on"), choice(tr("Light"), !dark, "off")],
             ));
             // Websites too (Seam's Dark Reader, in the palette's colours), only
-            // while the look is dark — a choice of the dark look, so it is here.
-            view.groups.push(on_off(Some("Dark websites"), "colors-websites", crate::palette::choice().dark_websites));
+            // while the look is dark — a choice of the dark look, so it is here,
+            // and only while the look IS dark (in the light it does nothing, and
+            // a row that does nothing is a question).
+            if dark {
+                view.groups.push(on_off(Some("Dark websites"), "colors-websites", crate::palette::choice().dark_websites));
+            }
         }
         "Colours" => {
             let picked = crate::palette::choice();
