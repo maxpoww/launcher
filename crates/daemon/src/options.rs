@@ -1316,7 +1316,7 @@ pub(crate) fn hover_ink_for(ink: [f32; 4]) -> [f32; 4] {
 /// opaque fill. They can therefore differ, and should: that is not the
 /// inconsistency Max hit earlier, which was a surface using a *stale, static*
 /// answer (the theme's white over a light wallpaper) instead of measuring.
-fn ink_on(bg: [f32; 4]) -> [f32; 4] {
+pub(crate) fn ink_on(bg: [f32; 4]) -> [f32; 4] {
     if luminance(bg) > 0.179 {
         INK_DARK
     } else {

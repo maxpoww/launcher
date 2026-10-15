@@ -540,6 +540,10 @@ impl App {
         let batch = self.fast.batch.take();
         let idle_gen = self.fast.idle_gen.wrapping_add(1);
         self.fast = FastLaunch { batch, idle_gen, ..FastLaunch::opened() };
+        // Its words read on what is behind it HERE, mid-screen — measured as
+        // soon as it is up (a fresh capture), never the dock's ink.
+        self.fast_backdrop = None;
+        self.demand_capture(crate::screencopy::Demand::Fresh);
         self.fast_touch();
         self.arm_fast_idle(IDLE_CLOSE);
         // The big card is the other way to launch: out of the way.

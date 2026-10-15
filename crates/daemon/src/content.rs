@@ -713,6 +713,9 @@ pub struct FastDraw<'a> {
     pub text_box: Rect,
     pub font_px: f32,
     pub line_px: f32,
+    /// The ink its words and pills wear: measured against what the clear
+    /// card really shows (`App::fast_backdrop`), the dock's until then.
+    pub ink: [f32; 4],
 }
 
 /// Geometry shared by scene assembly and hit-testing.
@@ -3376,6 +3379,7 @@ pub fn scene(
     // word at its bottom, over everything.
     if let Some(f) = fast.filter(|f| f.a > 0.0) {
         let a = f.a;
+        let dock_ink = f.ink;
         // The resting dock's own material (Max, 2026-10-02: "more
         // transparent" → "i want that"): its colour at the resting veil —
         // under the compositor's blur threshold, so CLEAR glass, no blur —

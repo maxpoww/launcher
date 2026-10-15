@@ -1403,6 +1403,7 @@ impl App {
             },
             font_px: fast_geo.font_px,
             line_px: fast_geo.line_px,
+            ink: self.fast_backdrop.map(crate::options::ink_on).unwrap_or(dock_ink),
         });
         let scene = content::scene(
             &self.config,

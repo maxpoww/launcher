@@ -605,6 +605,7 @@ fn main() -> anyhow::Result<()> {
         dock_bar_matched: None,
         dock_pill_color: None,
         clip_pill_color: None,
+        fast_backdrop: None,
         bar_want: None,
         dock_want: None,
         clip_want: None,
@@ -1427,6 +1428,11 @@ pub struct App {
     /// clipboard box took whatever the wallpaper is on the opposite side of
     /// the screen from where it actually sits.
     clip_pill_color: Option<[f32; 4]>,
+    /// What the fast launch card really shows under its words: the screen
+    /// read INSIDE the card's footprint, its clear glass over whatever is
+    /// behind (`screencopy::read_fast_backdrop`). `None` until a capture
+    /// lands while it is up.
+    fast_backdrop: Option<[f32; 4]>,
     /// What the bar currently wants sampled (`None` = nothing). Merged with
     /// `dock_want`/`clip_want` into one capture — see
     /// [`screencopy::App::rebuild_capture_target`].

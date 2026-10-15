@@ -671,7 +671,7 @@ impl App {
     }
 
     /// Ask for a sample (see [`Demand`]) and move the capture along.
-    fn demand_capture(&mut self, demand: Demand) {
+    pub(crate) fn demand_capture(&mut self, demand: Demand) {
         if demand > self.capture_demand {
             self.capture_demand = demand;
         }
@@ -970,6 +970,19 @@ impl App {
                 }
             }
         }
+        // The fast launch card is CLEAR glass mid-screen: its words read on
+        // whatever is behind it there — which no slot samples (they skip the
+        // centre third, and read the bar's and the dock's rows). Read it in
+        // the card's own footprint, as the eye sees it (Max, 2026-10-15:
+        // white words on a light card in the light look).
+        if self.fast.visible() {
+            if let Some(c) = self.read_fast_backdrop(&cap) {
+                if self.fast_backdrop != Some(c) {
+                    self.fast_backdrop = Some(c);
+                    dock_changed = true;
+                }
+            }
+        }
         cap.frame.destroy();
         if let Some(buf) = cap.buffer {
             buf.destroy();
@@ -1053,6 +1066,51 @@ impl App {
             self.arm_settle_burst();
         }
         self.options_capture_failing = true;
+    }
+
+    /// The fast launch card's footprint as captured: the average of two rows
+    /// inside it — under its top edge (past the line of light the night look
+    /// draws there) and over its bottom — between its rounded ends. Clear of
+    /// the icons and the words, which sit between those rows. The dock's
+    /// surface spans the output from its top, so the card's logical rect is
+    /// the output's; `options_size.0` is the output's logical width.
+    fn read_fast_backdrop(&mut self, cap: &Capture) -> Option<[f32; 4]> {
+        let sw = self.options_size.0 as f32;
+        if sw <= 0.0 || cap.width == 0 || cap.height == 0 {
+            return None;
+        }
+        let card = self.fast_geometry().card;
+        let px = cap.width as f32 / sw;
+        let x0 = ((card.x + card.h * 0.5) * px).max(0.0) as usize;
+        let x1 = (((card.x + card.w - card.h * 0.5) * px) as usize).min(cap.width as usize);
+        if x1 <= x0 + 4 {
+            return None;
+        }
+        let rows = [card.y + 7.0, card.y + card.h - 7.0].map(|y| ((y * px).max(0.0) as u32).min(cap.height - 1));
+        let pool = self.shm_pool.as_mut()?;
+        let map = pool.mmap();
+        let bytes: &[u8] = &map[..];
+        let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+        for y in rows {
+            let row = if cap.y_invert { cap.height - 1 - y } else { y };
+            let start = (row as usize) * (cap.stride as usize);
+            let Some(rowbytes) = bytes.get(start..start + cap.width as usize * 4) else {
+                continue;
+            };
+            let step = ((x1 - x0) / 64).max(1);
+            for x in (x0..x1).step_by(step) {
+                let (rr, gg, bb) = channels(cap.format, &rowbytes[x * 4..x * 4 + 4]);
+                r += rr as u64;
+                g += gg as u64;
+                b += bb as u64;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return None;
+        }
+        let f = |v: u64| srgb_to_linear((v / n) as f32 / 255.0);
+        Some([f(r), f(g), f(b), 1.0])
     }
 
     /// Read one opaque colour from the captured frame for one wanted row.

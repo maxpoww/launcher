@@ -810,6 +810,16 @@ impl DiskCache {
     /// Cache file for `icon_path`, or `None` if the icon file cannot be
     /// stat'ed (vanished between resolve and now).
     fn file_for(&self, icon_path: &str) -> Option<PathBuf> {
+        // Named by the file it REALLY is: a theme path through a profile
+        // (`/etc/profiles/…/share/icons/…`) stays the same across rebuilds
+        // while the store file behind it changes, and every store file has
+        // the same mtime — a recoloured icon of the same size (silver and
+        // graphite differ only in their colours) kept serving the old raster
+        // (Max, 2026-10-15: fast launch's Golem Files still silver in the
+        // dark, after Golem-Dark was fixed). The store path changes with the
+        // content.
+        let real = std::fs::canonicalize(icon_path).ok();
+        let icon_path = real.as_deref().and_then(|p| p.to_str()).unwrap_or(icon_path);
         let meta = std::fs::metadata(icon_path).ok()?;
         let mtime = meta
             .modified()
