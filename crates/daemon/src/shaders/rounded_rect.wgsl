@@ -14,6 +14,8 @@ struct Globals {
     // bar_edge_y — the banner swells around the module like a snake with the
     // pill inside. x < -9000 = off.
     neck:      vec4<f32>,
+    // x = the night light: 1 in the dark look (renderer.rs `Globals::light`).
+    light:     vec4<f32>,
 };
 
 // Polynomial smooth-min: blends two SDFs with a fillet of radius ~k — the
@@ -149,7 +151,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Layer 4 — bottom vignette: bottom 32 % dims to simulate curvature.
     let norm_y = from_top / rect_h;
-    let vig    = clamp((norm_y - 0.68) / 0.32, 0.0, 1.0) * -0.004;
+    // THE NIGHT LIGHT: in the dark look the glass is lit from ABOVE, hard —
+    // the bottom falls into shadow, the rim catches more, a razor line of
+    // light runs along the top edge, the pointer's reflection is stronger.
+    // Apple's and Material's dark rule: depth by light, not by shadow.
+    let night  = globals.light.x;
+    let vig    = clamp((norm_y - 0.50) / 0.50, 0.0, 1.0) * (-0.004 - night * 0.05);
 
     // Layer 5 — side Fresnel: outer edges brighten at grazing angles.
     // Scaled by in.glass so group boxes (0.5) get half the gradient of the main card (1.0).
@@ -159,7 +166,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Layer 6 — boundary rim glow: thin bright ring at the SDF card edge.
     // Scaled by `in.glass` so group boxes (0.5) get half the glow of the main card (1.0).
-    let boundary = exp(-d * d * 0.45) * 0.04 * in.glass;
+    let boundary = exp(-d * d * 0.45) * (0.04 + night * 0.05) * in.glass;
+    let top_rim  = night * 0.16 * in.glass * exp(-from_top * from_top / 4.0) * clamp(1.0 - edge / 3.0, 0.0, 1.0);
 
     // Layer 8 — iridescent tint on all edges, cursor-driven phase.
     // `in.glass` doubles as an iridescence scale: 1.0 = full (main card),
@@ -204,10 +212,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             * exp(-(in.px.y - cy) * (in.px.y - cy) / (along * along))
             * exp(-from_right * from_right / (thick * thick));
 
-        spotlight *= 0.06;
+        spotlight *= 0.06 + night * 0.08;
     }
 
-    let lum = vig + fresnel + boundary + spotlight;
+    let lum = vig + fresnel + boundary + spotlight + top_rim;
     var rgb  = clamp(in.color.rgb + vec3<f32>(lum), vec3<f32>(0.0), vec3<f32>(1.0));
     rgb     += iri;
 

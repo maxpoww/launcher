@@ -13,6 +13,8 @@ struct Globals {
     thumb_base: f32,     // first texture layer of the thumbnail block; icons
                          // at/above it skip the squircle (file thumbnails
                          // keep their true square corners)
+    neck: vec4<f32>,     // (the rect pipeline's; same buffer)
+    light: vec4<f32>,    // x = the night light, 1 in the dark look
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -225,8 +227,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // still reads at low plate alpha (Max, 2026-09-10: "give the
         // plates a subtle border"). Mirrored CPU-side by `plate_rim` in
         // content.rs for the Recycle Bin tile.
-        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15);
-        let ea = min(in.plate.a + 0.06, 1.0) * edgec;
+        // THE NIGHT LIGHT: a dark plate lit from above — its rim catches the
+        // light at the top and falls dark toward the bottom, so a near-black
+        // tile reads as a milled thing, not a hole (macOS Tahoe's dark icons).
+        let night = globals.light.x;
+        let lit = clamp(0.5 - q.y * 1.6, 0.0, 1.0);
+        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15 + night * (0.50 * lit - 0.12));
+        let ea = min(in.plate.a + 0.06 + night * 0.35 * lit, 1.0) * edgec;
         prgb = rim_rgb * ea + prgb * (1.0 - ea);
         pa = ea + pa * (1.0 - ea);
         prgb = prgb * mask;

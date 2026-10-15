@@ -41,6 +41,11 @@ struct Globals {
     // Banner blister: (bar_edge_y, k, _, _); the sunset module's banner rect
     // smooth-unions with the half-plane above bar_edge_y. x < -9000 = off.
     neck: [f32; 4],
+    // THE NIGHT LIGHT (Max, 2026-10-15: "en dark mode, la iluminacion en
+    // general deberia ser mucho mas dramatica"): x = 1 in the dark look, 0 in
+    // the light. The glass and the icon plates light themselves from above
+    // with it (rounded_rect.wgsl, icon.wgsl); the rest is free.
+    light: [f32; 4],
 }
 
 /// Per-instance data for one rounded rectangle.
@@ -2213,6 +2218,7 @@ impl Renderer {
                 squircle,
                 thumb_base: thumb_base as f32,
                 neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
+                light: [if crate::look::dark() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             }),
         );
 

@@ -1147,6 +1147,10 @@ const STAGE_ONLY: Presence = Presence {
     stage: true,
 };
 
+/// How far a surface falls toward black in the dark look (the night light,
+/// [`Backdrop::surface_wash`]).
+const NIGHT_DIM: f32 = 0.42;
+
 /// The inactive window border hyprland.lua sets, given back when the shell
 /// stops wearing the palette.
 const INACTIVE_BORDER: &str = "rgba(3c3836aa)";
@@ -1380,6 +1384,21 @@ impl Backdrop {
         }
     }
 
+    /// What a SURFACE (a box, the dock) lays over its backdrop: the resting
+    /// wash — or, in the dark look over a dark backdrop, THE NIGHT LIGHT's
+    /// dim (Max, 2026-10-15: "el shell, dock, box, icon plates… deberia ser
+    /// mas oscuro en dark mode… la iluminacion mucho mas dramatica"): the
+    /// surface recedes into the dark instead of being lifted out of it — the
+    /// "base" of Apple's dark backgrounds. The bar's pills keep the lift
+    /// (`rest_wash`): a darkened pill would vanish on a dark wallpaper.
+    fn surface_wash(&self) -> [f32; 4] {
+        if crate::look::dark() && !self.is_bright() {
+            wash(false, NIGHT_DIM)
+        } else {
+            self.rest_wash()
+        }
+    }
+
     /// Hover wash — the stronger sibling of `rest_wash`, same asymmetry.
     fn hover_wash(&self) -> [f32; 4] {
         if self.is_bright() {
@@ -1409,7 +1428,7 @@ impl Backdrop {
     ) -> ([f32; 4], [f32; 4]) {
         match self.get() {
             Some(backdrop) => {
-                let mut fill = box_fill(backdrop, self.rest_wash());
+                let mut fill = box_fill(backdrop, self.surface_wash());
                 let ink = self.ink.unwrap_or_else(|| ink_on(fill));
                 if !opaque {
                     fill[3] = fallback_fill[3];
@@ -7423,8 +7442,19 @@ impl crate::App {
         /// 0.30 read too faint once the rim landed). Same strength for
         /// ALL plates, dock and grid alike.
         const PLATE_ALPHA: f32 = 0.50;
+        // THE NIGHT LIGHT: in the dark look a plate on a dark surface is a
+        // shade DARKER than it and nearly solid (macOS Tahoe's dark icons:
+        // the tile goes dark, the glyph stays), its shape drawn by the light
+        // its rim catches from above (icon.wgsl).
+        const NIGHT_PLATE_DIM_L: f32 = 0.04;
+        const NIGHT_PLATE_ALPHA: f32 = 0.85;
+        let night = crate::look::dark() && luminance(fill) <= 0.179;
         let plate_target = {
-            let (lift, dim, alpha) = (PLATE_LIFT_L, PLATE_DIM_L, PLATE_ALPHA);
+            let (lift, dim, alpha) = if night {
+                (-NIGHT_PLATE_DIM_L, PLATE_DIM_L, NIGHT_PLATE_ALPHA)
+            } else {
+                (PLATE_LIFT_L, PLATE_DIM_L, PLATE_ALPHA)
+            };
             let srgb = [
                 linear_to_srgb(fill[0]).clamp(0.0, 1.0),
                 linear_to_srgb(fill[1]).clamp(0.0, 1.0),
@@ -7432,7 +7462,7 @@ impl crate::App {
             ];
             let (h, s, l) = rgb_to_hsl(srgb[0], srgb[1], srgb[2]);
             let new_l = if luminance(fill) <= 0.179 {
-                (l + lift).min(1.0)
+                (l + lift).clamp(0.0, 1.0)
             } else {
                 (l - dim).max(0.0)
             };
