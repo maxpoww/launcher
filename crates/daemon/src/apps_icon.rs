@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 const SIZE: f32 = 10.5;
 const GAP: f32 = 6.5;
 const ROUND: f32 = 0.55;
-const LEFT_MS: f32 = 480.0;
+const LEFT_MS: f32 = 360.0;
 const RIGHT_MS: f32 = 560.0;
 const REST_MS: f32 = 160.0;
 const DOWN_MS: f32 = 380.0;
