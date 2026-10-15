@@ -1332,6 +1332,10 @@ struct Win {
     side_open: bool,
     side_t: f32,
     side_now: f32,
+    /// The places scrolled (Max, 2026-10-14: "add scroll to the sidebar"):
+    /// where they are and where the wheel sent them.
+    side_scroll: f32,
+    side_scroll_to: f32,
     /// Shown as a list (`settings.files_list`, one choice for every window).
     list: bool,
     /// What the things are ordered by here, biggest or newest first when
@@ -1548,6 +1552,14 @@ impl Win {
         } else {
             symbol
         }
+    }
+
+    /// How far the places can be scrolled: what they need past what the
+    /// window shows of them.
+    fn side_max(&self) -> f32 {
+        let rows = self.places.len() as f32 * self.place_row()
+            + self.places.iter().filter(|p| p.gap).count() as f32 * ROW_GAP;
+        (6.0 + rows + 10.0 - (self.virt().1 - HEAD_H)).max(0.0)
     }
 
     /// A place's row: tall enough for its icon.
@@ -2220,6 +2232,8 @@ impl App {
             side_open: false,
             side_t: 0.0,
             side_now: 0.0,
+            side_scroll: 0.0,
+            side_scroll_to: 0.0,
             list: self.settings.files_list,
             sort: (SortKey::Name, false),
             meta: HashMap::new(),
@@ -3843,9 +3857,13 @@ impl App {
             props.t = t;
             moving |= m;
         }
-        // The places opening or closing.
+        // The places opening or closing, and scrolling.
         let (t, m) = crate::animation::ease_toward(win.side_t, if win.side_open { 1.0 } else { 0.0 }, dt, SIDE_RATE, 0.004);
         win.side_t = t;
+        moving |= m;
+        win.side_scroll_to = win.side_scroll_to.min(win.side_max());
+        let (y, m) = crate::animation::ease_toward(win.side_scroll, win.side_scroll_to, dt, RATE_NOTCH, 0.4);
+        win.side_scroll = y;
         moving |= m;
         win.last_frame = moving.then_some(now);
         self.filer_sync_icons(&mut win, &layout);
@@ -4043,7 +4061,7 @@ impl App {
                 // (Its edge, once it is out over the field.)
                 side.rects.push(rect(Rect::new(side_w - 1.0, HEAD_H, 1.0, h - HEAD_H), 0.0, [0.0, 0.0, 0.0, 0.25 * ease]));
             }
-            let mut y = HEAD_H + 6.0;
+            let mut y = HEAD_H + 6.0 - win.side_scroll;
             for (n, place) in win.places.iter().enumerate() {
                 if place.gap {
                     y += ROW_GAP;
@@ -4051,6 +4069,12 @@ impl App {
                 // (The icon stands in the rail's middle; the row's wash leaves
                 // the same air on either side.)
                 let row = Rect::new(RAIL_AIR / 2.0, y, side_w - RAIL_AIR, row_h);
+                // (Scrolled out of sight: nothing to point at.)
+                if row.y + row.h <= HEAD_H || row.y >= h {
+                    hits.places.push(Rect::new(0.0, 0.0, 0.0, 0.0));
+                    y += row_h;
+                    continue;
+                }
                 // (`..` is never "here".)
                 let up = place.name == UP;
                 if (win.dir == place.path && !up) || win.drop_place == Some(n) {
@@ -4079,8 +4103,16 @@ impl App {
                         )
                     });
                 }
-                hits.places.push(row);
+                hits.places.push(Rect::new(row.x, row.y.max(HEAD_H), row.w, row.y + row.h - row.y.max(HEAD_H)));
                 y += row_h;
+            }
+            // Its thumb, while there is more of them than shows.
+            let max = win.side_max();
+            if max > 0.0 {
+                let shown = h - HEAD_H;
+                let bar_h = (shown * shown / (shown + max)).max(24.0);
+                let bar_y = HEAD_H + 3.0 + (shown - 6.0 - bar_h) * (win.side_scroll / max).clamp(0.0, 1.0);
+                side.rects.push(rect(Rect::new(side_w - 4.0, bar_y, 3.0, bar_h), 1.5, pal.thumb));
             }
         } else {
             win.side_now = 0.0;
@@ -4566,6 +4598,15 @@ impl App {
                         self.zoom(what, if steps < 0.0 { "in" } else { "out" });
                     }
                     return;
+                }
+                // (Over the places: they scroll, not the field.)
+                if let Some(win) = self.filer.win_mut(id).filter(|w| w.at_win.is_some_and(|p| w.in_side(p))) {
+                    let max = win.side_max();
+                    win.side_scroll_to = (win.side_scroll_to + value as f32 * SCROLL_STEP).clamp(0.0, max);
+                    if win.finger {
+                        win.side_scroll = win.side_scroll_to;
+                    }
+                    return self.filer_request_draw(id);
                 }
                 self.filer_scroll(id, value as f32 * SCROLL_STEP, true);
             }
