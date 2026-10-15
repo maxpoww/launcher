@@ -556,6 +556,18 @@ impl Layout {
     }
 }
 
+/// A drag held on `..` (see `Win::up_hold`).
+#[derive(Debug, Clone, Copy)]
+struct UpHold {
+    since: Instant,
+    due: Duration,
+    ups: u32,
+}
+
+/// How long after the first step up the second comes, then each after it.
+const UP_SECOND: Duration = Duration::from_secs(2);
+const UP_NEXT: Duration = Duration::from_secs(1);
+
 /// A rubber band: where it began, where the pointer is, what was selected
 /// before it.
 type Band = ((f32, f32), (f32, f32), HashSet<String>);
@@ -1388,6 +1400,11 @@ struct Win {
     /// it: it goes back there once the drag is let go or leaves (Finder's
     /// spring-loaded folders; a test round, 2026-10-14).
     sprung_from: Option<PathBuf>,
+    /// A drag held on `..`: it climbs (Max, 2026-10-15: "hovering a file on
+    /// .. goes back… held another 2 secs it goes another level up and then a
+    /// level up every second") — since when, after how long the next step,
+    /// how many steps so far.
+    up_hold: Option<UpHold>,
     /// A path to select and bring into view once it is listed (the folder
     /// just come out of).
     reveal: Option<String>,
@@ -2260,6 +2277,7 @@ impl App {
             anchor: None,
             spring: None,
             sprung_from: None,
+            up_hold: None,
             reveal: None,
             scroll: 0.0,
             scroll_to: 0.0,
@@ -5038,6 +5056,14 @@ impl App {
         let at = if win.in_side(at_win) { at_win } else { layout.inward(at_win) };
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
+        // On `..`: held there, the window climbs (`filer_up_tick`).
+        let on_up = place.and_then(|n| win.places.get(n)).is_some_and(|p| p.name == UP);
+        let climb = on_up && win.up_hold.is_none();
+        if !on_up {
+            win.up_hold = None;
+        } else if climb {
+            win.up_hold = Some(UpHold { since: Instant::now(), due: SPRING, ups: 0 });
+        }
         // In the field: the things not in hand, and which of them — if any
         // — stands where the pointer is, the room made counted in.
         let rest: Vec<usize> = (0..win.items.len())
@@ -5102,6 +5128,9 @@ impl App {
         if scrolls {
             self.filer_edge_tick(id);
         }
+        if climb {
+            self.filer_up_tick(id);
+        }
         // Held there `SPRING`, the folder opens under the drag (macOS's
         // spring-loaded folders; the dock's tiles do the same).
         if let Some(i) = sprung {
@@ -5127,6 +5156,42 @@ impl App {
                 calloop::timer::TimeoutAction::Drop
             });
         }
+    }
+
+    /// A drag held on `..` of window `id`: a level up once it has been held
+    /// `SPRING`, another after `UP_SECOND`, then one every `UP_NEXT` — for as
+    /// long as it stays there (`Win::up_hold`). The window stays where it
+    /// climbed to: going up is choosing where to let go, not a peek.
+    fn filer_up_tick(&mut self, id: u32) {
+        let tick = Duration::from_millis(100);
+        let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(tick), move |_, _, app: &mut App| {
+            let state = app
+                .filer
+                .win(id)
+                .filter(|_| app.filer.dnd_active())
+                .and_then(|w| w.up_hold.map(|h| (h, w.dir.parent().map(Path::to_path_buf))));
+            let Some((hold, parent)) = state else {
+                return calloop::timer::TimeoutAction::Drop;
+            };
+            if hold.since.elapsed() < hold.due {
+                return calloop::timer::TimeoutAction::ToDuration(tick);
+            }
+            let Some(parent) = parent else {
+                // (The root: nowhere further.)
+                if let Some(w) = app.filer.win_mut(id) {
+                    w.up_hold = None;
+                }
+                return calloop::timer::TimeoutAction::Drop;
+            };
+            if let Some(w) = app.filer.win_mut(id) {
+                let due = if hold.ups == 0 { UP_SECOND } else { UP_NEXT };
+                w.up_hold = Some(UpHold { since: Instant::now(), due, ups: hold.ups + 1 });
+                w.sprung_from = None;
+            }
+            info!("files: a drag held on .. climbs to {}", parent.display());
+            app.filer_go(id, parent);
+            calloop::timer::TimeoutAction::ToDuration(tick)
+        });
     }
 
     /// Scroll window `id` a step for the drag held at its edge, and again
@@ -5178,6 +5243,9 @@ impl App {
         }
         // (The drag went elsewhere: a window it sprang open goes back.)
         if let Some(id) = self.filer.dnd.as_ref().map(|d| d.win) {
+            if let Some(w) = self.filer.win_mut(id) {
+                w.up_hold = None;
+            }
             self.filer_spring_back(id);
         }
         if let Some(dnd) = self.filer.dnd.take() {
@@ -5196,6 +5264,9 @@ impl App {
     /// off the loop — whoever the source is, a window of ours included.
     pub(crate) fn filer_dnd_drop(&mut self) {
         let back = self.filer.dnd.as_ref().map(|d| d.win);
+        if let Some(w) = back.and_then(|id| self.filer.win_mut(id)) {
+            w.up_hold = None;
+        }
         self.filer_dnd_drop_in();
         // (Let go in a folder the drag sprang open: the window goes back
         // to where it was, the things on their way into that folder.)
