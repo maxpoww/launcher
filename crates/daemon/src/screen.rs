@@ -67,6 +67,9 @@ impl App {
     pub(crate) fn set_screen_temperature(&mut self, k: u32) {
         self.screen.temperature_k = Some(k);
         self.save_screen_state();
+        if k == NEUTRAL_K {
+            self.clear_screen_temperature();
+        }
         self.apply_screen_state();
         self.draw_options();
     }
@@ -97,6 +100,18 @@ impl App {
         let cmd = format!("hyprctl hyprsunset temperature {k} || hyprsunset -t {k}");
         if let Err(e) = crate::launch::launch(&cmd, false, &self.config.launch.terminal) {
             tracing::warn!("screen: applying temperature {k} failed: {e:#}");
+        }
+    }
+
+    /// Turning the warmth OFF is the one moment neutral is not a no-op: a
+    /// hyprsunset may be running with a warm matrix on, and the compositor will
+    /// not drop it on its own. Set it to neutral — never start one for it
+    /// (`|| true`): with no hyprsunset the screen is already neutral. The
+    /// process stays, so the sunset prompt does not ask again the same night.
+    fn clear_screen_temperature(&self) {
+        let cmd = format!("hyprctl hyprsunset temperature {NEUTRAL_K} || true");
+        if let Err(e) = crate::launch::launch(&cmd, false, &self.config.launch.terminal) {
+            tracing::warn!("screen: clearing the temperature failed: {e:#}");
         }
     }
 
