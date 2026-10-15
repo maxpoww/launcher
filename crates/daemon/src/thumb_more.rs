@@ -10,7 +10,7 @@
 //!   file is read from the shared MIME database's globs (`mime/globs2`);
 //! - FFMPEG for what it can read: a video's frame, a song's cover, the
 //!   pictures `image` cannot (HEIC, AVIF, JPEG XL, PSD, EXR, TGA…);
-//! - a camera's RAW photo: its own JPEG inside (`dcraw -e`);
+//! - a camera's RAW photo: its own JPEG inside (`exiftool -b -PreviewImage`);
 //! - drawn here: a TEXT file (code, notes, a log) as a page with its first
 //!   lines, and a FONT as "Aa" in itself.
 
@@ -219,21 +219,30 @@ pub(crate) fn by_ffmpeg(path: &str, ffmpeg: &str, decode: impl Fn(&str) -> Optio
     (run(&words) && out.0.is_file()).then(|| decode(out.path())).flatten()
 }
 
-/// A camera's RAW photo: the JPEG it carries (`dcraw -e -c`).
-pub(crate) fn by_dcraw(path: &str, decode: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
-    if !on_path("dcraw") {
+/// A camera's RAW photo: the JPEG it carries, as `exiftool` gives it out
+/// (`dcraw` would too, but it is unmaintained and nixpkgs marks it
+/// insecure — and this runs on any RAW file that arrives).
+pub(crate) fn by_exiftool(path: &str, decode: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+    if !on_path("exiftool") {
         return None;
     }
-    let out = Scratch::new("dcraw")?;
-    let file = std::fs::File::create(&out.0).ok()?;
-    let ok = Command::new("dcraw")
-        .args(["-e", "-c", path])
-        .stdin(Stdio::null())
-        .stdout(file)
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    (ok && std::fs::metadata(&out.0).is_ok_and(|m| m.len() > 0)).then(|| decode(out.path())).flatten()
+    let out = Scratch::new("exiftool")?;
+    for tag in ["-PreviewImage", "-JpgFromRaw", "-ThumbnailImage"] {
+        let Ok(file) = std::fs::File::create(&out.0) else { return None };
+        let ok = Command::new("exiftool")
+            .args(["-b", tag, path])
+            .stdin(Stdio::null())
+            .stdout(file)
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok && std::fs::metadata(&out.0).is_ok_and(|m| m.len() > 0) {
+            if let Some(px) = decode(out.path()) {
+                return Some(px);
+            }
+        }
+    }
+    None
 }
 
 /// Camera RAW endings.

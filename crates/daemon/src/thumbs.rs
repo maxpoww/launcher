@@ -257,7 +257,7 @@ fn thumbnail(path: &str) -> Option<Vec<u8>> {
     }
     let ffmpeg = ffmpeg_tool();
     let made = crate::thumb_more::by_thumbnailer(path, decode_image)
-        .or_else(|| crate::thumb_more::is_raw(name).then(|| crate::thumb_more::by_dcraw(path, decode_image)).flatten())
+        .or_else(|| crate::thumb_more::is_raw(name).then(|| crate::thumb_more::by_exiftool(path, decode_image)).flatten())
         .or_else(|| older_tools(path, kind))
         .or_else(|| {
             // FFMPEG reads what moves, a song's cover and many a picture.
