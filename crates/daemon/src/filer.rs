@@ -270,7 +270,7 @@ const SPRING: Duration = Duration::from_millis(650);
 
 /// How far a press travels before it is a drag (or a rubber band).
 const DRAG_START: f32 = 6.0;
-// (The band's, the washes' and the scroll thumb's colours are the look's:
+// (The band's and the washes' colours are the look's:
 // `Palette`.)
 
 /// The app's own launcher, written where the dock's index finds it: a tile
@@ -2046,7 +2046,6 @@ pub(crate) struct Palette {
     pub selected: [f32; 4],
     pub band_fill: [f32; 4],
     pub band_line: [f32; 4],
-    pub thumb: [f32; 4],
     /// The search and path fields, and their rim.
     pub field: [f32; 4],
     pub field_rim: [f32; 4],
@@ -2067,7 +2066,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
             selected: [1.0, 1.0, 1.0, 0.16],
             band_fill: [1.0, 1.0, 1.0, 0.07],
             band_line: [1.0, 1.0, 1.0, 0.38],
-            thumb: [1.0, 1.0, 1.0, 0.22],
             field: [0.0, 0.0, 0.0, 0.35],
             field_rim: [1.0, 1.0, 1.0, 0.16],
             name_field: [0.0, 0.0, 0.0, 0.6],
@@ -2088,7 +2086,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
         selected: [0.0, 0.0, 0.0, 0.11],
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
-        thumb: [0.0, 0.0, 0.0, 0.25],
         field: [0.823, 0.799, 0.745, 1.0], // #eae7e0
         field_rim: [0.0, 0.0, 0.0, 0.14],
         name_field: [0.823, 0.799, 0.745, 1.0],
@@ -4106,14 +4103,6 @@ impl App {
                 hits.places.push(Rect::new(row.x, row.y.max(HEAD_H), row.w, row.y + row.h - row.y.max(HEAD_H)));
                 y += row_h;
             }
-            // Its thumb, while there is more of them than shows.
-            let max = win.side_max();
-            if max > 0.0 {
-                let shown = h - HEAD_H;
-                let bar_h = (shown * shown / (shown + max)).max(24.0);
-                let bar_y = HEAD_H + 3.0 + (shown - 6.0 - bar_h) * (win.side_scroll / max).clamp(0.0, 1.0);
-                side.rects.push(rect(Rect::new(side_w - 4.0, bar_y, 3.0, bar_h), 1.5, pal.thumb));
-            }
         } else {
             win.side_now = 0.0;
         }
@@ -4373,17 +4362,7 @@ impl App {
                 ..rect(band, 3.0, pal.band_line)
             });
         }
-        // How far down the folder this is, when it does not all fit.
-        let (content, max) = (layout.content_h(win.items.len()), layout.max_scroll(win.items.len()));
-        if max > 0.0 {
-            let bar_h = (layout.body.h * layout.body.h / content).max(28.0);
-            let y = layout.body.y + 3.0 + (layout.body.h - 6.0 - bar_h) * (win.scroll / max).clamp(0.0, 1.0);
-            grid.rects.push(rect(
-                Rect::new(layout.body.x + layout.body.w - 7.0, y, 4.0, bar_h),
-                2.0,
-                pal.thumb,
-            ));
-        }
+        // (No scroll bars: Max, 2026-10-15, "get rid of the scrollbars".)
         zoom_grid(&mut grid, (layout.body.x, layout.body.y), layout.zoom);
         // The places out over the field: the field ends where they do (the
         // renderer draws every grid's words in one late pass — a name under
