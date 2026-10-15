@@ -225,7 +225,10 @@ impl AppsMotion {
         self.hovered = hover;
         if open != self.open {
             self.open = open;
+            // A hover's round cut short (the click lands mid-turn): its page
+            // goes with it, or the squares came back up off-centre.
             self.round = None;
+            self.pages = 0.0;
             let to = if open { 1.0 } else { 0.0 };
             // (Back up only after a moment: the clock starts below zero.)
             let wait = if open { 0.0 } else { -UP_DELAY_MS };
@@ -318,6 +321,22 @@ mod tests {
         assert!(most > 1.9, "two pages went by");
         assert_eq!(m.place(), (0.0, 0.0), "and it rests as it began");
         assert!(!m.step(true, false, 0.016), "still: one round a hover");
+    }
+
+    #[test]
+    fn a_click_mid_turn_brings_the_squares_back_centred() {
+        let mut m = AppsMotion::default();
+        for _ in 0..10 {
+            m.step(true, false, 0.016); // the round under way
+        }
+        assert!(m.place().0 > 0.0);
+        for _ in 0..60 {
+            m.step(true, true, 0.016); // clicked: the grid opens
+        }
+        for _ in 0..100 {
+            m.step(false, false, 0.016); // closed: back up
+        }
+        assert_eq!(m.place(), (0.0, 0.0), "centred, where they began");
     }
 
     #[test]
