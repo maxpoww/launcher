@@ -851,10 +851,10 @@ fn take_back(undo: Undo) -> Option<String> {
 /// it is in (and the file, to be shown there).
 pub(crate) fn typed_place(text: &str, home: &Path) -> Option<(PathBuf, Option<PathBuf>)> {
     let text = text.trim();
-    let path = match text.strip_prefix('~') {
+    let path = tidy(match text.strip_prefix('~') {
         Some(rest) => home.join(rest.trim_start_matches('/')),
         None => PathBuf::from(text),
-    };
+    });
     if !path.is_absolute() {
         return None;
     }
@@ -864,6 +864,25 @@ pub(crate) fn typed_place(text: &str, home: &Path) -> Option<(PathBuf, Option<Pa
         Some((path.parent()?.to_path_buf(), Some(path)))
     } else {
         None
+    }
+}
+
+/// A path as one writes it: no trailing `/`, no `.` steps (a test round,
+/// 2026-10-14: a path finished with Tab came in as `…/Alfa/`, and the window's
+/// folder then never equalled the same folder reached another way).
+pub(crate) fn tidy(path: PathBuf) -> PathBuf {
+    path.components().collect()
+}
+
+/// What a window's title says for `dir`: the places' own names for Home and
+/// the bin (they read "max" and "files" as folders), else the folder's.
+fn window_title(dir: &Path) -> String {
+    if dir == home() {
+        tr("Home").to_owned()
+    } else if dir == bin_root() {
+        tr("Recycle Bin").to_owned()
+    } else {
+        file_name(dir)
     }
 }
 
@@ -1322,6 +1341,8 @@ struct Win {
     /// A path being typed in the head (Ctrl+L, or a `/` or `~` typed):
     /// Enter goes there.
     go_to: Option<String>,
+    /// The typed path was nothing there: its field is red until the next key.
+    go_bad: bool,
     /// A search of this folder: what is typed (the field is out while this
     /// is `Some`), and everything the folder holds — `items` is then only
     /// what was found.
@@ -1359,6 +1380,10 @@ struct Win {
     /// A drag held on a folder: which, and since when — held long enough,
     /// the folder opens under it.
     spring: Option<(usize, Instant)>,
+    /// Where this window was before a drag held on folders opened them under
+    /// it: it goes back there once the drag is let go or leaves (Finder's
+    /// spring-loaded folders; a test round, 2026-10-14).
+    sprung_from: Option<PathBuf>,
     /// A path to select and bring into view once it is listed (the folder
     /// just come out of).
     reveal: Option<String>,
@@ -2148,7 +2173,7 @@ impl App {
         if let Some(tags) = self.filer.tags.as_ref() {
             tags.set_toplevel_tag(window.xdg_toplevel(), format!("{APP_ID}-{id}"));
         }
-        window.set_title(file_name(&dir));
+        window.set_title(window_title(&dir));
         window.set_min_size(Some(MIN_SIZE));
         let fscale = self
             .filer
@@ -2199,6 +2224,7 @@ impl App {
             sort: (SortKey::Name, false),
             meta: HashMap::new(),
             go_to: None,
+            go_bad: false,
             find: None,
             all: Vec::new(),
             deep: Vec::new(),
@@ -2222,6 +2248,7 @@ impl App {
             cursor: None,
             anchor: None,
             spring: None,
+            sprung_from: None,
             reveal: None,
             scroll: 0.0,
             scroll_to: 0.0,
@@ -2320,6 +2347,7 @@ impl App {
 
     /// Go to `dir`, the folder shown now becoming the way back.
     fn filer_go(&mut self, id: u32, dir: PathBuf) {
+        let dir = tidy(dir);
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -2403,7 +2431,7 @@ impl App {
         win.scroll = 0.0;
         win.scroll_to = 0.0;
         win.failed = false;
-        win.window.set_title(file_name(&dir));
+        win.window.set_title(window_title(&dir));
         if let Some(token) = win.watch.take() {
             self.loop_handle.remove(token);
         }
@@ -3199,7 +3227,11 @@ impl App {
             return;
         };
         let Some((dir, file)) = typed_place(&text, &home()) else {
-            return;
+            // (Nothing there: the field says so, and stays.)
+            if let Some(win) = self.filer.win_mut(id) {
+                win.go_bad = true;
+            }
+            return self.filer_request_draw(id);
         };
         if let Some(win) = self.filer.win_mut(id) {
             win.go_to = None;
@@ -3961,8 +3993,9 @@ impl App {
                 let field = Rect::new(left - 10.0, mid - 13.0, room + 10.0, 26.0);
                 scene.rects.push(rect(field, 13.0, pal.field));
                 scene.rects.push(RectInst {
-                    border: 1.0,
-                    ..rect(field, 13.0, pal.field_rim)
+                    border: if win.go_bad { 1.5 } else { 1.0 },
+                    // (A path that is nothing there: its rim red.)
+                    ..rect(field, 13.0, if win.go_bad { [0.86, 0.18, 0.15, 0.95] } else { pal.field_rim })
                 });
                 let tw = renderer.measure_text(text, TEXT_PX, None);
                 // (A long one shows its end, where the typing is.)
@@ -5062,6 +5095,13 @@ impl App {
                 });
                 if let Some(dir) = open.filter(|_| app.filer.dnd_active()) {
                     info!("files: a drag held on {} opens it", dir.display());
+                    if let Some(win) = app.filer.win_mut(id) {
+                        // (Only the first: a drag through three folders goes
+                        // back to where it began.)
+                        if win.sprung_from.is_none() {
+                            win.sprung_from = Some(win.dir.clone());
+                        }
+                    }
                     app.filer_go(id, dir);
                 }
                 calloop::timer::TimeoutAction::Drop
@@ -5116,6 +5156,10 @@ impl App {
         if dropped {
             return;
         }
+        // (The drag went elsewhere: a window it sprang open goes back.)
+        if let Some(id) = self.filer.dnd.as_ref().map(|d| d.win) {
+            self.filer_spring_back(id);
+        }
         if let Some(dnd) = self.filer.dnd.take() {
             if let Some(win) = self.filer.win_mut(dnd.win) {
                 win.drop_on = None;
@@ -5131,6 +5175,25 @@ impl App {
     /// the folder shown. The list of files is asked of the source and read
     /// off the loop — whoever the source is, a window of ours included.
     pub(crate) fn filer_dnd_drop(&mut self) {
+        let back = self.filer.dnd.as_ref().map(|d| d.win);
+        self.filer_dnd_drop_in();
+        // (Let go in a folder the drag sprang open: the window goes back
+        // to where it was, the things on their way into that folder.)
+        if let Some(id) = back {
+            self.filer_spring_back(id);
+        }
+    }
+
+    /// A window a drag sprang folders open in goes back to where it was.
+    fn filer_spring_back(&mut self, id: u32) {
+        let Some(from) = self.filer.win_mut(id).and_then(|w| w.sprung_from.take()) else {
+            return;
+        };
+        info!("files: back to {} after the drag", from.display());
+        self.filer_go(id, from);
+    }
+
+    fn filer_dnd_drop_in(&mut self) {
         let Some(dnd) = self.filer.dnd.take() else {
             return;
         };
@@ -5502,6 +5565,7 @@ impl App {
         // A path being typed takes every key: Enter goes, Tab completes,
         // Escape leaves.
         if let Some(text) = win.go_to.as_mut() {
+            win.go_bad = false;
             match keysym {
                 Keysym::Return | Keysym::KP_Enter => return self.filer_go_typed(id),
                 Keysym::Escape => win.go_to = None,
@@ -6441,6 +6505,9 @@ mod tests {
             Some((d.join("Documents"), Some(d.join("Documents/note.txt"))))
         );
         assert_eq!(typed_place("nowhere", &d), None);
+        // (A trailing slash or a `.` step is no other folder.)
+        assert_eq!(typed_place("~/Documents/", &d), Some((d.join("Documents"), None)));
+        assert_eq!(typed_place("~/./Documents/", &d), Some((d.join("Documents"), None)));
         assert_eq!(typed_place(&s("nowhere"), &d), None);
         // Two start with "Do": as far as they agree. One: all of it, and its slash.
         assert_eq!(complete_path(&s("D"), &d), s("Do"));
