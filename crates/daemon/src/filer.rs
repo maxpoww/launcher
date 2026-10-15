@@ -1396,10 +1396,12 @@ struct Win {
     /// A drag held on a folder: which, and since when — held long enough,
     /// the folder opens under it.
     spring: Option<(usize, Instant)>,
-    /// Where this window was before a drag held on folders opened them under
-    /// it: it goes back there once the drag is let go or leaves (Finder's
-    /// spring-loaded folders; a test round, 2026-10-14).
-    sprung_from: Option<PathBuf>,
+    /// Where this window was before a drag held on folders (or on `..`) took
+    /// it elsewhere, and how long its way back was then. Let go here, it STAYS
+    /// where the things were let go and its way back is that one folder (Max,
+    /// 2026-10-15: "I want to stay where I dropped… and have / on back"); the
+    /// drag leaving without a drop takes it back there.
+    sprung_from: Option<(PathBuf, usize)>,
     /// A drag held on `..`: it climbs (Max, 2026-10-15: "hovering a file on
     /// .. goes back… held another 2 secs it goes another level up and then a
     /// level up every second") — since when, after how long the next step,
@@ -5148,7 +5150,7 @@ impl App {
                         // (Only the first: a drag through three folders goes
                         // back to where it began.)
                         if win.sprung_from.is_none() {
-                            win.sprung_from = Some(win.dir.clone());
+                            win.sprung_from = Some((win.dir.clone(), win.back.len()));
                         }
                     }
                     app.filer_go(id, dir);
@@ -5186,7 +5188,9 @@ impl App {
             if let Some(w) = app.filer.win_mut(id) {
                 let due = if hold.ups == 0 { UP_SECOND } else { UP_NEXT };
                 w.up_hold = Some(UpHold { since: Instant::now(), due, ups: hold.ups + 1 });
-                w.sprung_from = None;
+                if w.sprung_from.is_none() {
+                    w.sprung_from = Some((w.dir.clone(), w.back.len()));
+                }
             }
             info!("files: a drag held on .. climbs to {}", parent.display());
             app.filer_go(id, parent);
@@ -5268,20 +5272,31 @@ impl App {
             w.up_hold = None;
         }
         self.filer_dnd_drop_in();
-        // (Let go in a folder the drag sprang open: the window goes back
-        // to where it was, the things on their way into that folder.)
-        if let Some(id) = back {
-            self.filer_spring_back(id);
+        // (Let go in a folder the drag took the window to: it stays there,
+        // what was let go selected once it has come, and its way back is the
+        // folder the drag began in — not every folder it passed through.)
+        if let Some(w) = back.and_then(|id| self.filer.win_mut(id)) {
+            if let Some((_, n)) = w.sprung_from.take() {
+                w.back.truncate(n + 1);
+                w.forward.clear();
+            }
         }
+        // (The bar's arrows say what the way back is now.)
+        self.filer_note_nav();
     }
 
-    /// A window a drag sprang folders open in goes back to where it was.
+    /// A drag that took window `id` elsewhere left without a drop: back to
+    /// where it began, its way back as it was.
     fn filer_spring_back(&mut self, id: u32) {
-        let Some(from) = self.filer.win_mut(id).and_then(|w| w.sprung_from.take()) else {
+        let Some((from, n)) = self.filer.win_mut(id).and_then(|w| w.sprung_from.take()) else {
             return;
         };
         info!("files: back to {} after the drag", from.display());
-        self.filer_go(id, from);
+        if let Some(w) = self.filer.win_mut(id) {
+            w.back.truncate(n);
+            w.forward.clear();
+        }
+        self.filer_show(id, from);
     }
 
     fn filer_dnd_drop_in(&mut self) {
