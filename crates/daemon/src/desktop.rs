@@ -589,6 +589,12 @@ fn own_folders() -> &'static [(PathBuf, &'static str)] {
     })
 }
 
+/// Whether `path` is one of the owner's folders (Home, Desktop, Documents…,
+/// Phones): the system made them, they are never thrown away.
+pub(crate) fn is_own_folder(path: &Path) -> bool {
+    own_folders().iter().any(|(p, _)| p == path)
+}
+
 /// A folder's icon: its own symbol when it is one of the owner's folders,
 /// else the plain folder.
 pub(crate) fn folder_icon(path: &Path) -> String {
@@ -4497,13 +4503,23 @@ impl App {
 
     /// Where our own drag's pointer is in the DOCK surface's coordinates
     /// (the bin watches it come); `None` when it is not over the dock.
-    /// Whether what the desktop has in hand could go in the bin: a stick or
-    /// a phone is ejected there, not thrown away, so a drag of only those
-    /// leaves the bin quiet (its orange says "this can be thrown away").
+    /// Whether what is in hand (the desktop's, a file window's) could go in
+    /// the bin: a stick or a phone is ejected there, the system's folders
+    /// never go (`trash::protected`), so a drag of only those leaves the bin
+    /// quiet — its orange says "this can be thrown away".
     pub(crate) fn desktop_drag_throwable(&self) -> bool {
-        self.desktop.drag.as_ref().is_none_or(|d| {
-            d.items.iter().any(|&i| self.desktop.items.get(i).is_some_and(|it| it.kind != Kind::Volume))
-        })
+        let desk = self.desktop.drag.as_ref().is_none_or(|d| {
+            d.items.iter().any(|&i| {
+                self.desktop
+                    .items
+                    .get(i)
+                    .is_some_and(|it| it.kind != Kind::Volume && !crate::trash::protected(Path::new(&it.path)))
+            })
+        });
+        // (Nor a file window's drag of only the system's folders.)
+        let files = !self.filer.dragging()
+            || self.filer.drag_paths().iter().any(|p| !crate::trash::protected(Path::new(p)));
+        desk && files
     }
 
     pub(crate) fn desktop_drag_dock_pos(&self) -> Option<(f32, f32)> {

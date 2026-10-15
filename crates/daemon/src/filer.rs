@@ -1194,6 +1194,26 @@ fn list_bin() -> Vec<Item> {
         .collect()
 }
 
+/// A menu on something of the system's (`trash::protected`) has no "Move to
+/// bin": the row goes, and a separator left alone with it.
+fn keep_systems(rows: Vec<Row>, selected: &HashSet<String>) -> Vec<Row> {
+    if !selected.iter().any(|p| crate::trash::protected(Path::new(p))) {
+        return rows;
+    }
+    let mut kept: Vec<Row> = Vec::new();
+    for row in rows {
+        match row {
+            Row::Item { action: Action::MoveToBin, .. } => {}
+            Row::Sep if kept.last().is_none_or(|r| matches!(r, Row::Sep)) => {}
+            row => kept.push(row),
+        }
+    }
+    if matches!(kept.last(), Some(Row::Sep)) {
+        kept.pop();
+    }
+    kept
+}
+
 /// The rows of a right click: on one thing, on one of `many` selected, or
 /// on the folder itself (`paste`: files are on the clipboard) — and in the
 /// bin, what the bin is for.
@@ -2793,7 +2813,7 @@ impl App {
             placed,
             hidden: win.hidden,
         };
-        let rows = menu_rows(asked);
+        let rows = keep_systems(menu_rows(asked), &win.selected);
         win.asked = Some(asked);
         win.open_with.clear();
         win.asking_apps = false;
@@ -2874,7 +2894,8 @@ impl App {
             return;
         };
         win.asking_apps = false;
-        win.menu = win.menu.take().map(|m| m.with_rows(menu_rows(asked), h));
+        let rows = keep_systems(menu_rows(asked), &win.selected);
+        win.menu = win.menu.take().map(|m| m.with_rows(rows, h));
         self.filer_hover(id);
         self.filer_request_draw(id);
     }
@@ -6400,6 +6421,13 @@ mod tests {
         assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })).first(), Some(&Action::Paste));
         assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })).first(), Some(&Action::NewFolder));
         // An archive can be opened out; anything can be packed.
+        // The system's folders have no "Move to bin" (and no separator left dangling).
+        let home: HashSet<String> = [home().to_string_lossy().into_owned()].into();
+        let kept = keep_systems(menu_rows(asked(true, false)), &home);
+        assert!(!actions(kept.clone()).contains(&Action::MoveToBin));
+        assert!(!matches!(kept.last(), Some(Row::Sep)) && !kept.windows(2).any(|w| matches!(w, [Row::Sep, Row::Sep])));
+        let mine: HashSet<String> = ["/tmp/wr-nobody-made-this".to_owned()].into();
+        assert!(actions(keep_systems(menu_rows(asked(true, false)), &mine)).contains(&Action::MoveToBin));
         let zip = actions(menu_rows(Asked { archive: true, ..asked(true, false) }));
         assert!(zip.contains(&Action::Extract) && zip.contains(&Action::Compress));
         assert!(!one.contains(&Action::Extract) && many.contains(&Action::Compress));

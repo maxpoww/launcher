@@ -198,6 +198,11 @@ impl Trash {
     /// entry. The name is reserved by creating the info file with `O_EXCL`
     /// (collisions retry as `name.2`, `name.3`, …), then the file is moved in.
     pub fn trash(&self, path: &Path) -> io::Result<TrashItem> {
+        // The system's own folders never go in the bin, whoever asks
+        // (`protected`): the one rule every way of throwing away meets.
+        if protected(path) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "one of the system's folders: it stays"));
+        }
         self.ensure_dirs()?;
         // The FOLDER is made real, the name kept: resolving the whole path
         // followed a symlink and binned what it pointed at, leaving the
@@ -292,6 +297,53 @@ fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Make `path` absolute against the CWD without resolving symlinks (used when
 /// `canonicalize` fails, e.g. the file is already gone by the time we format).
+/// WHAT CAN NEVER BE THROWN AWAY (Max, 2026-10-15: "the user can delete only
+/// what the user created"): what the system made —
+/// - the root, Home and every folder above it;
+/// - the owner's folders (Desktop, Documents, Downloads…, as `user-dirs.dirs`
+///   names them), `~/Phones`, `~/Golem` (the system's own checkout), and
+///   everything hidden at the top of Home (`.config`, `.local`…: the apps'
+///   and the system's settings);
+/// - the bin itself and the folders it lives in;
+/// - anything that is not the owner's (`/nix`, `/etc`, another user's);
+/// - a volume's own folder (a stick is ejected, not binned).
+///
+/// Inside those folders, what the owner put there is the owner's to throw.
+pub(crate) fn protected(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // Its folder made real, its own name kept (a link is judged as itself).
+    let abs = match (path.parent().filter(|p| !p.as_os_str().is_empty()), path.file_name()) {
+        (Some(dir), Some(name)) => fs::canonicalize(dir).map(|d| d.join(name)),
+        _ => fs::canonicalize(path),
+    }
+    .or_else(|_| absolutize(path))
+    .unwrap_or_else(|_| path.to_path_buf());
+    let home = fs::canonicalize(crate::filer::home()).unwrap_or_else(|_| crate::filer::home());
+    let Some(parent) = abs.parent() else {
+        return true; // the root
+    };
+    if home.starts_with(&abs) {
+        return true;
+    }
+    if parent == home {
+        let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.starts_with('.') || name == "Phones" || name == "Golem" {
+            return true;
+        }
+    }
+    if crate::desktop::is_own_folder(&abs) || Trash::home().files_root().starts_with(&abs) {
+        return true;
+    }
+    let Ok(meta) = fs::symlink_metadata(&abs) else {
+        return false; // not there: nothing to keep
+    };
+    // SAFETY: geteuid has no preconditions.
+    if meta.uid() != unsafe { libc::geteuid() } {
+        return true;
+    }
+    fs::metadata(parent).is_ok_and(|p| p.dev() != meta.dev() && meta.is_dir())
+}
+
 fn absolutize(path: &Path) -> io::Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -381,6 +433,23 @@ fn now_local_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_systems_folders_stay_and_the_owners_things_go() {
+        let home = crate::filer::home();
+        assert!(protected(Path::new("/")));
+        assert!(protected(&home));
+        assert!(protected(home.parent().unwrap()));
+        assert!(protected(&home.join(".config")));
+        assert!(protected(&home.join("Desktop")));
+        assert!(protected(Path::new("/nix")), "not the owner's");
+        let d = std::env::temp_dir().join(format!("wr-protect-{}", std::process::id()));
+        fs::create_dir_all(d.join("mine")).unwrap();
+        assert!(!protected(&d.join("mine")), "what the owner made goes");
+        let t = Trash { root: d.join("trash") };
+        assert!(t.trash(Path::new("/")).is_err());
+        fs::remove_dir_all(&d).ok();
+    }
 
     // A unique temp root per call so parallel tests never share a trash dir.
     fn unique_id() -> String {
