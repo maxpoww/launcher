@@ -1376,6 +1376,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 110.0,
                 vec![choice(tr("Dark"), dark, "on"), choice(tr("Light"), !dark, "off")],
             ));
+            // Websites too (Seam's Dark Reader, in the palette's colours), only
+            // while the look is dark — a choice of the dark look, so it is here.
+            view.groups.push(on_off(Some("Dark websites"), "colors-websites", crate::palette::choice().dark_websites));
         }
         "Colours" => {
             let picked = crate::palette::choice();
@@ -1407,7 +1410,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 choice(tr(name), picked, crate::palette::slot_name(*slot))
             }));
             view.groups.push(group(Some("Accent colour"), "colors-accent", 96.0, accents));
-            view.groups.push(on_off(Some("Dark websites"), "colors-websites", picked.dark_websites));
         }
         "Brightness" => match brightness() {
             Some(now) => {

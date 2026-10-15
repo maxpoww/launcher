@@ -312,7 +312,9 @@ The big daemon files are cohesive but long — go straight to the function:
 - `palette.rs` — THE PALETTE (Max, 2026-10-14: "the pallete have to be everywhere, like omarchy
   does"): sixteen colours in the base16 layout (base00 ground … base07 brightest ink, base08..0F
   the hues), a dark and a light variant and an accent slot. Golem's own is `assets/palettes/
-  golem.json` (its base01 IS Seam's chrome colour rgb(29,32,38)); the owner's go in
+  golem.json` (its base01 IS Seam's chrome colour rgb(29,32,38); its light greys ARE the light Files
+  Max tuned), beside Catppuccin, Gruvbox and Nord (tinted-theming base16, hues in the standard
+  slots so the accent's names stay true; `every_built_in_palette_reads_and_reads_well`); the owner's go in
   `~/.config/golem/palettes/*.json`. The choice is `colors` in `settings.json` (`ColorChoice`:
   `dynamic`, `palette`, `accent` = a hue slot of the palette). DYNAMIC ON (default) = the shell
   exactly as before (screen sampling); OFF = `Backdrop::palette()` in `options.rs` stands in for
@@ -329,7 +331,8 @@ The big daemon files are cohesive but long — go straight to the function:
   the consts they replaced): the bell's/task's/phone's chip and the gear's warnings = the accent,
   every "throw away"/recording/battery red = base08, the bar's warn glyph = base0A, the phone
   Configure box's accent = the accent. Golem's palette gives back the old #ffbe98 / #e05252.
-  The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
+  "Dark websites" (`colors-websites`) is on the DARK MODE page, not Colours (it is a choice of the
+  dark look; Colours must fit a 900 px field — the panel does not scroll). The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
   the UI thread in `App::control_pick`).
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
   as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its

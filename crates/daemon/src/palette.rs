@@ -45,8 +45,15 @@ pub(crate) type Rgb = [u8; 3];
 /// Golem's palette, the default.
 pub(crate) const GOLEM: &str = "golem";
 
-/// The palettes inside the daemon: (id, file).
-const BUILT_IN: &[(&str, &str)] = &[(GOLEM, include_str!("../assets/palettes/golem.json"))];
+/// The palettes inside the daemon: (id, file), Golem's first. The others are
+/// base16 schemes from tinted-theming (MIT) whose hues sit in the standard
+/// slots, so the accent's names (Red… Brown) stay true for them.
+const BUILT_IN: &[(&str, &str)] = &[
+    (GOLEM, include_str!("../assets/palettes/golem.json")),
+    ("catppuccin", include_str!("../assets/palettes/catppuccin.json")),
+    ("gruvbox", include_str!("../assets/palettes/gruvbox.json")),
+    ("nord", include_str!("../assets/palettes/nord.json")),
+];
 
 /// The eight hues an accent can be, by slot, with their names in the panel.
 pub(crate) const HUES: [(usize, &str); 8] = [
@@ -775,6 +782,20 @@ mod tests {
         assert_eq!(t.ink(), [0x27, 0x25, 0x1f], "ink");
         // And the dock's red stays the dock's red.
         assert_eq!(resolve(&ColorChoice::default(), true).c[0x08], [0xe0, 0x52, 0x52]);
+    }
+
+    #[test]
+    fn every_built_in_palette_reads_and_reads_well() {
+        let all = all();
+        for (id, _) in BUILT_IN {
+            let p = all.iter().find(|p| p.id == *id).unwrap_or_else(|| panic!("{id} parses"));
+            for (dark, c) in [(true, p.dark), (false, p.light)] {
+                let t = Theme { id: p.id.clone(), name: p.name.clone(), dark, dynamic: false, dark_websites: false, c, accent_slot: p.accent };
+                // The ground is on the look's side, and the ink reads on it.
+                assert_eq!(rel_lum(t.bg()) < 0.18, dark, "{id} dark={dark}: ground on the right side");
+                assert!(contrast(rel_lum(t.surface()), rel_lum(t.ink())) >= 4.5, "{id} dark={dark}: ink reads on the surface");
+            }
+        }
     }
 
     #[test]
