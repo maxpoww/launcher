@@ -324,8 +324,9 @@ The big daemon files are cohesive but long — go straight to the function:
   want the banner to be opaque… should stay as it is" — `options_regime`/`clip_regime`); the window border is the accent all round and
   the inactive border base02 (`border_stops`, `push_window_border`). `App::colors_apply` (start,
   a pick, a look change) resolves the `Theme` and `publish`es it on a thread into
-  `~/.local/state/golem/theme/`: colors.json, foot.ini (both variants; running foots switch on
-  SIGUSR1/2), hyprlock.conf ($golem_* variables), gtk4.css (libadwaita variables, both looks via
+  `~/.local/state/golem/theme/`: colors.json, foot.ini (both variants, for new windows; OPEN
+  terminals are recoloured LIVE by colour sequences written into every foot child's pty —
+  `foot_osc`/`foot_ptys`, the pywal way), hyprlock.conf ($golem_* variables), gtk4.css (libadwaita variables, both looks via
   prefers-color-scheme), gtk3.css, qt.conf (+ qt5ct/qt6ct.conf when nobody else owns them), and
   dconf's accent-color (nearest libadwaita name). Golem's home layer points every app there.
   SIGNAL COLOURS follow it too (`palette::accent_srgb/danger_srgb/warn_srgb`, sRGB fractions like

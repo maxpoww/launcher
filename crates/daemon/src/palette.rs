@@ -656,10 +656,82 @@ fn adwaita_accent(c: Rgb) -> &'static str {
 fn poke(t: &Theme, look_changed: bool) {
     let accent = format!("'{}'", adwaita_accent(t.accent()));
     run("dconf", &["write", "/org/gnome/desktop/interface/accent-color", &accent]);
-    if look_changed {
-        // foot: SIGUSR1 = its dark colours, SIGUSR2 = its light ones.
-        signal_all("foot", if t.dark { libc::SIGUSR1 } else { libc::SIGUSR2 });
+    // Every open terminal, at once (a palette, a look): foot reads its
+    // config only at its start, so its windows are told the colours.
+    let _ = look_changed;
+    foot_live(t);
+}
+
+/// THE OPEN TERMINALS FOLLOW, LIVE (Max, 2026-10-15: "we need the themes to
+/// apply live… that is how it works on omarchy"). foot never reads its
+/// config again, but it takes colour sequences from what runs in it: OSC 4
+/// (the sixteen), 10/11/12 (ink, ground, cursor), 17/19 (selection) —
+/// the way pywal recolours terminals. They are written into the terminal
+/// device of every program foot started (its shell): the terminal reads
+/// them as output and changes on the spot, and so does whatever draws with
+/// its colours (yazi, bat, ls, git, the prompt). The order is foot.ini's
+/// (`foot_ini`), so a new window and an old one agree.
+fn foot_osc(t: &Theme) -> String {
+    let c = &t.c;
+    let sixteen = [c[2], c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[5], c[3], c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[7]];
+    let mut out = String::new();
+    for (i, col) in sixteen.iter().enumerate() {
+        out.push_str(&format!("\x1b]4;{i};#{}\x1b\\", hex(*col)));
     }
+    for (code, col) in [(10, c[5]), (11, c[0]), (12, c[5]), (17, c[2]), (19, c[5])] {
+        out.push_str(&format!("\x1b]{code};#{}\x1b\\", hex(col)));
+    }
+    out
+}
+
+fn foot_live(t: &Theme) {
+    let seq = foot_osc(t);
+    for pty in foot_ptys() {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let wrote = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(&pty)
+            .and_then(|mut f| f.write_all(seq.as_bytes()));
+        if let Err(e) = wrote {
+            debug!("palette: {}: {e}", pty.display());
+        }
+    }
+}
+
+/// The terminal devices of the programs every foot of ours started.
+fn foot_ptys() -> Vec<PathBuf> {
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    let procs: Vec<(i32, i32, String, Option<u32>)> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let pid = e.file_name().to_str()?.parse::<i32>().ok()?;
+            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+            // "pid (comm) state ppid …" — comm may hold spaces and parens.
+            let close = stat.rfind(')')?;
+            let comm = stat.get(stat.find('(')? + 1..close)?.to_owned();
+            let ppid = stat[close + 1..].split_whitespace().nth(1)?.parse::<i32>().ok()?;
+            let uid = std::fs::read_to_string(e.path().join("status")).ok().and_then(|s| {
+                s.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
+            });
+            Some((pid, ppid, comm, uid))
+        })
+        .collect();
+    let feet: std::collections::HashSet<i32> =
+        procs.iter().filter(|(_, _, comm, uid)| comm == "foot" && *uid == Some(me)).map(|(pid, ..)| *pid).collect();
+    let mut out: Vec<PathBuf> = procs
+        .iter()
+        .filter(|(_, ppid, _, uid)| feet.contains(ppid) && *uid == Some(me))
+        .filter_map(|(pid, ..)| std::fs::read_link(format!("/proc/{pid}/fd/0")).ok())
+        .filter(|p| p.starts_with("/dev/pts/"))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn run(program: &str, args: &[&str]) {
@@ -675,32 +747,6 @@ fn run(program: &str, args: &[&str]) {
     }
 }
 
-/// Send `sig` to every process of ours named `comm`.
-fn signal_all(comm: &str, sig: libc::c_int) {
-    // SAFETY: getuid has no preconditions.
-    let me = unsafe { libc::getuid() };
-    let Ok(dir) = std::fs::read_dir("/proc") else {
-        return;
-    };
-    for e in dir.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
-            continue;
-        };
-        let Ok(name) = std::fs::read_to_string(e.path().join("comm")) else {
-            continue;
-        };
-        if name.trim() != comm {
-            continue;
-        }
-        let owner = std::fs::read_to_string(e.path().join("status")).ok().and_then(|s| {
-            s.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
-        });
-        if owner == Some(me) {
-            // SAFETY: a plain kill(2) of a process of our own user.
-            unsafe { libc::kill(pid, sig) };
-        }
-    }
-}
 
 // --------------------------------------------------------------- the shell
 
@@ -821,6 +867,10 @@ mod tests {
         let qt = qt_scheme(&t);
         assert_eq!(qt.lines().nth(1).unwrap().split(", ").count(), 22);
         assert_eq!(adwaita_accent([0xff, 0xbe, 0x98]), "orange");
+        let osc = foot_osc(&t);
+        assert!(osc.contains("\x1b]11;#16171a\x1b\\"), "ground");
+        assert!(osc.contains("\x1b]4;1;#e05252\x1b\\"), "red, as foot.ini");
+        assert_eq!(osc.matches("\x1b]4;").count(), 16);
         assert_eq!(adwaita_accent([0x8a, 0xb4, 0xf0]), "blue");
         // Text on the peach accent is the dark end.
         assert_eq!(t.accent_ink(), t.c[0]);
