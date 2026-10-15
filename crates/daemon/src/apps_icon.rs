@@ -29,6 +29,9 @@ const RIGHT_MS: f32 = 560.0;
 const REST_MS: f32 = 160.0;
 const DOWN_MS: f32 = 380.0;
 const UP_MS: f32 = 420.0;
+/// The squares wait this long after the grid closes before coming back up
+/// (Max, 2026-10-15: "delay it 500 ms"); the beat waits with them.
+const UP_DELAY_MS: f32 = 500.0;
 const BEAT: f32 = 0.07;
 const BEAT_MS: f32 = 520.0;
 
@@ -224,8 +227,10 @@ impl AppsMotion {
             self.open = open;
             self.round = None;
             let to = if open { 1.0 } else { 0.0 };
-            self.slide = Some((self.down, to, 0.0, if open { DOWN_MS } else { UP_MS }));
-            self.beat = Some(0.0);
+            // (Back up only after a moment: the clock starts below zero.)
+            let wait = if open { 0.0 } else { -UP_DELAY_MS };
+            self.slide = Some((self.down, to, wait, if open { DOWN_MS } else { UP_MS }));
+            self.beat = Some(wait);
         }
         let mut moved = false;
         if let Some(t) = &mut self.round {
@@ -251,7 +256,7 @@ impl AppsMotion {
         }
         if let Some((from, to, t, len)) = &mut self.slide {
             *t += ms;
-            let k = (*t / *len).min(1.0);
+            let k = (t.max(0.0) / *len).min(1.0);
             // (ease-in-out, the lab's)
             let k2 = if k < 0.5 { 2.0 * k * k } else { 1.0 - (-2.0 * k + 2.0).powi(2) / 2.0 };
             self.down = *from + (*to - *from) * k2;
@@ -277,7 +282,7 @@ impl AppsMotion {
 
     /// The disc's size now (1 at rest): the beat.
     pub(crate) fn scale(&self) -> f32 {
-        let Some(t) = self.beat else { return 1.0 };
+        let Some(t) = self.beat.filter(|t| *t > 0.0) else { return 1.0 };
         let x = t / BEAT_MS;
         let keys = [(0.0, 1.0), (0.35, 1.0 + BEAT), (0.7, 1.0 - BEAT * 0.3), (1.0, 1.0)];
         for w in keys.windows(2) {
@@ -324,10 +329,14 @@ mod tests {
             m.step(false, true, 0.016);
         }
         assert_eq!(m.place().1, 1.0, "gone down while it is open");
+        for _ in 0..25 {
+            m.step(false, false, 0.016);
+        }
+        assert_eq!(m.place().1, 1.0, "still down a moment after it closes");
         for _ in 0..60 {
             m.step(false, false, 0.016);
         }
-        assert_eq!(m.place().1, 0.0, "back up as it closes");
+        assert_eq!(m.place().1, 0.0, "then back up");
         assert_eq!(m.scale(), 1.0);
     }
 }
