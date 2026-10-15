@@ -1900,7 +1900,7 @@ pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
     let mut out = vec![Place {
         name: UP.to_owned(),
         path: parent.to_path_buf(),
-        icon: "asset:folder".to_owned(),
+        icon: "asset:folder-up".to_owned(),
         gap: false,
         start: false,
     }];
