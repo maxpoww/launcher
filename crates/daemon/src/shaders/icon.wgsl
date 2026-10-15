@@ -233,9 +233,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let night = globals.light.x;
         let lit = clamp(0.5 - q.y * 1.6, 0.0, 1.0);
         // Much subtler than the first cut (Max, 2026-10-15: "el borde blanco
-        // mucho mas sutil"): 0.50 / 0.35 drew a white line round the tile.
-        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15 + night * (0.16 * lit - 0.10));
-        let ea = min(in.plate.a + 0.06 + night * 0.10 * lit, 1.0) * edgec;
+        // mucho mas sutil", then "un poco mas sutil"): 0.50 / 0.35 drew a
+        // white line round the tile, 0.16 / 0.10 still read as a border.
+        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15 + night * (0.08 * lit - 0.10));
+        let ea = min(in.plate.a + 0.06 + night * 0.04 * lit, 1.0) * edgec;
         prgb = rim_rgb * ea + prgb * (1.0 - ea);
         pa = ea + pa * (1.0 - ea);
         prgb = prgb * mask;
