@@ -92,10 +92,11 @@ impl crate::App {
         }
         tracing::info!("look: {}", if dark { "dark" } else { "light" });
         self.indexer.request_rescan_fresh();
+        // The palette's other variant first, in the shell and the apps: the
+        // file windows draw from it.
+        self.colors_apply(true);
         self.desktop_look_changed();
         self.filer_look_changed();
-        // The palette's other variant, in the shell and the apps.
-        self.colors_apply(true);
     }
 }
 

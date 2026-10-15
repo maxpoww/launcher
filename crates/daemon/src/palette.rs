@@ -723,6 +723,7 @@ impl crate::App {
             self.reassert_window_border();
             self.draw_options();
             self.draw();
+            self.filer_redraw_all();
         }
     }
 
@@ -762,6 +763,18 @@ mod tests {
         assert!(!light.dynamic);
         assert_eq!(light.accent_slot, 0x0D);
         assert!(rel_lum(light.bg()) > rel_lum(light.ink()), "light: dark ink on a light ground");
+    }
+
+    #[test]
+    fn golems_light_is_the_files_window_max_tuned() {
+        // 2026-10-14: Files' light look, tuned by eye — the palette carries it now.
+        let t = resolve(&ColorChoice::default(), false);
+        assert_eq!(t.surface(), [0xdc, 0xd9, 0xd1], "ground");
+        assert_eq!(t.raised(), [0xce, 0xcb, 0xc2], "side");
+        assert_eq!(t.bg(), [0xea, 0xe7, 0xe0], "fields");
+        assert_eq!(t.ink(), [0x27, 0x25, 0x1f], "ink");
+        // And the dock's red stays the dock's red.
+        assert_eq!(resolve(&ColorChoice::default(), true).c[0x08], [0xe0, 0x52, 0x52]);
     }
 
     #[test]

@@ -2054,8 +2054,11 @@ pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
 
 /// The window's colours in the present look (Max, 2026-10-14: "do the dark
 /// light mode of files"). DARK: the dock's own colour made solid, its ink,
-/// light washes. LIGHT: a pale cool grey, nearly black ink, dark washes — the
-/// same weights, turned over. Colours here are LINEAR light.
+/// light washes — or, with Dynamic colour off, THE PALETTE's surface and ink.
+/// LIGHT: the palette's light greys (Golem's ARE the ones tuned here on
+/// 2026-10-14: ground base01 #dcd9d1, side base02 #cecbc2, fields base00
+/// #eae7e0, ink base05 #27251f), dark washes — the same weights, turned
+/// over. Colours here are LINEAR light.
 pub(crate) struct Palette {
     pub ground: [f32; 4],
     pub side: [f32; 4],
@@ -2074,8 +2077,10 @@ pub(crate) struct Palette {
     pub name_mark: [f32; 4],
 }
 
-fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
+fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palette::Theme) -> Palette {
+    let lin = crate::palette::linear;
     if dark {
+        let (dock, dock_ink) = if theme.dynamic { (dock, dock_ink) } else { (lin(theme.surface()), lin(theme.ink())) };
         return Palette {
             ground: lift(dock, 0.0),
             side: lift(dock, 0.012),
@@ -2096,18 +2101,18 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4]) -> Palette {
         // A BRIGHT GREY, a touch warm — not white, and not blue (Max,
         // 2026-10-14: "too white… reduce a little the blue light", then
         // "make it warmer", "little darker and warmer", "too warm" — half of
-        // that warmth back): sRGB #dcd9d1, the side #cecbc2, the ink #27251f.
-        ground: [0.716, 0.694, 0.638, 1.0],
-        side: [0.617, 0.597, 0.539, 1.0],
-        ink: [0.02, 0.019, 0.014, 1.0],
+        // that warmth back): Golem's light palette carries exactly those.
+        ground: lin(theme.surface()),
+        side: lin(theme.raised()),
+        ink: lin(theme.ink()),
         hover: [0.0, 0.0, 0.0, 0.05],
         here: [0.0, 0.0, 0.0, 0.08],
         selected: [0.0, 0.0, 0.0, 0.11],
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
-        field: [0.823, 0.799, 0.745, 1.0], // #eae7e0
+        field: lin(theme.bg()),
         field_rim: [0.0, 0.0, 0.0, 0.14],
-        name_field: [0.823, 0.799, 0.745, 1.0],
+        name_field: lin(theme.bg()),
         name_rim: [0.0, 0.0, 0.0, 0.22],
         name_mark: [0.0, 0.0, 0.0, 0.12],
     }
@@ -3442,7 +3447,7 @@ impl App {
 
     /// This look's colours of a file window.
     pub(crate) fn filer_palette(&self) -> Palette {
-        palette(crate::look::dark(), self.config.theme.background_rgba(), self.config.theme.text_rgba())
+        palette(crate::look::dark(), self.config.theme.background_rgba(), self.config.theme.text_rgba(), &crate::palette::current())
     }
 
     /// The menu's and the box's paint in a window: the boxes' own surface,
@@ -3771,6 +3776,14 @@ impl App {
 
     /// The look changed: every window lets go of the theme's icons (not the
     /// files' own pictures), asks for them again and draws in its new colours.
+    /// Every file window draws again (the palette changed: no picture to drop).
+    pub(crate) fn filer_redraw_all(&mut self) {
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.filer_request_draw(id);
+        }
+    }
+
     pub(crate) fn filer_look_changed(&mut self) {
         let mut ids = Vec::new();
         for win in self.filer.wins.iter_mut() {

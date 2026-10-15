@@ -8,8 +8,8 @@
     "base0C": "#86d0c8", "base0D": "#8ab4f0", "base0E": "#c9a2e8", "base0F": "#d8a27c"
   },
   "light": {
-    "base00": "#f7f5f1", "base01": "#ece9e3", "base02": "#dedad2", "base03": "#b3aea5",
-    "base04": "#6f6b64", "base05": "#2b2a28", "base06": "#1e1d1b", "base07": "#121110",
+    "base00": "#eae7e0", "base01": "#dcd9d1", "base02": "#cecbc2", "base03": "#b3aea5",
+    "base04": "#6f6b64", "base05": "#27251f", "base06": "#1e1d1b", "base07": "#121110",
     "base08": "#c4384a", "base09": "#c8643a", "base0A": "#a87b12", "base0B": "#3f8a45",
     "base0C": "#23827a", "base0D": "#2f6bc0", "base0E": "#8a4fb8", "base0F": "#95603a"
   }
