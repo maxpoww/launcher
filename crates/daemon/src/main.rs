@@ -44,6 +44,7 @@ mod emoji_table;
 mod filer;
 mod files;
 mod files_icon;
+mod gears_icon;
 mod focus_cycle;
 mod font_index;
 mod fractional;
@@ -891,6 +892,7 @@ fn main() -> anyhow::Result<()> {
         trash_react: 0.0,
         trash_hover: 0.0,
         files_hover: files_icon::Hover::default(),
+        gears_spin: gears_icon::Spin::default(),
         reorder_slot: None,
         grid_drag_page_at: None,
         apps_slide: Vec::new(),
@@ -2135,6 +2137,8 @@ pub struct App {
     trash_hover: f32,
     /// Golem Files' launcher under the pointer: its folders out (`files_icon`).
     files_hover: files_icon::Hover,
+    /// The control panel's gears under the pointer (`gears_icon`).
+    gears_spin: gears_icon::Spin,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,

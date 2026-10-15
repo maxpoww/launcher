@@ -385,6 +385,30 @@ pub(crate) fn bin_lid_figure() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(&crate::look::figure(include_bytes!("../assets/dock/bin-lid.svg")))?.take()))
 }
 
+/// The control panel's gears at rest (`gears_icon`); their turning frames
+/// are drawn meanwhile, off the loop.
+fn gears_figure() -> Option<Vec<u8>> {
+    crate::gears_icon::warm();
+    Some(with_mips(rasterize_svg(crate::gears_icon::svg(0.0).as_bytes())?.take()))
+}
+
+/// The control panel's gears turned by `angle`, ready to upload: the drawn
+/// frame nearest it, each pixel doubled to the icon size (the mips below
+/// are the frame itself), or `None` while it is not drawn yet.
+pub(crate) fn gears_turned(angle: f32) -> Option<Vec<u8>> {
+    let small = crate::gears_icon::frame(angle)?;
+    let (n, k) = (crate::gears_icon::FRAME as usize, (ICON_SIZE / crate::gears_icon::FRAME) as usize);
+    let side = n * k;
+    let mut base = vec![0u8; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            let (s, d) = (((y / k) * n + x / k) * 4, (y * side + x) * 4);
+            base[d..d + 4].copy_from_slice(&small[s..s + 4]);
+        }
+    }
+    Some(with_mips(base))
+}
+
 /// Golem Files' launcher figures, ready to upload (`files_icon::figures`).
 pub(crate) fn files_figures() -> Option<Vec<Vec<u8>>> {
     crate::files_icon::figures()
@@ -395,6 +419,9 @@ pub(crate) fn files_figures() -> Option<Vec<Vec<u8>>> {
 
 /// The ready-to-upload tile of a fixed-tail figure, by entry id.
 pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
+    if id == CONTROL_PANEL_ID {
+        return gears_figure();
+    }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
     Some(with_mips(rasterize_svg(&crate::look::figure(svg))?.take()))

@@ -1058,6 +1058,24 @@ impl App {
         if self.files_hover.step(on_files, dt) {
             self.dirty = true;
         }
+        // The control panel's gears: they turn under the pointer, the frame
+        // for each angle put in its layer.
+        let on_gears = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == apps::CONTROL_PANEL_ID));
+        if self.gears_spin.step(on_gears, dt) {
+            self.dirty = true;
+            let layer = self
+                .entries
+                .iter()
+                .position(|e| e.id == apps::CONTROL_PANEL_ID)
+                .and_then(|i| self.icon_layers.get(i).copied());
+            if let (Some(layer), Some(chain), Some(renderer)) =
+                (layer, apps::gears_turned(self.gears_spin.angle()), self.renderer.as_mut())
+            {
+                renderer.update_icon_layer(layer, &chain);
+            }
+        }
         // A pending drag-to-install tile counts as busy (its "Installing…"
         // note holds from the drop until the rescan swaps in the real app)
         // unless the install failed, when it flashes "Failed" and awaits a
