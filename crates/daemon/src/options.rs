@@ -7446,8 +7446,10 @@ impl crate::App {
         // shade DARKER than it and nearly solid (macOS Tahoe's dark icons:
         // the tile goes dark, the glyph stays), its shape drawn by the light
         // its rim catches from above (icon.wgsl).
-        const NIGHT_PLATE_DIM_L: f32 = 0.04;
-        const NIGHT_PLATE_ALPHA: f32 = 0.85;
+        // Softer than the first cut (Max, 2026-10-15: "el color negro en los
+        // platos… un poco mas debil"): 0.04 / 0.85 read as hard black tiles.
+        const NIGHT_PLATE_DIM_L: f32 = 0.02;
+        const NIGHT_PLATE_ALPHA: f32 = 0.60;
         let night = crate::look::dark() && luminance(fill) <= 0.179;
         let plate_target = {
             let (lift, dim, alpha) = if night {

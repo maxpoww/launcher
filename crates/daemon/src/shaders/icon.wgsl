@@ -232,8 +232,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // tile reads as a milled thing, not a hole (macOS Tahoe's dark icons).
         let night = globals.light.x;
         let lit = clamp(0.5 - q.y * 1.6, 0.0, 1.0);
-        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15 + night * (0.50 * lit - 0.12));
-        let ea = min(in.plate.a + 0.06 + night * 0.35 * lit, 1.0) * edgec;
+        // Much subtler than the first cut (Max, 2026-10-15: "el borde blanco
+        // mucho mas sutil"): 0.50 / 0.35 drew a white line round the tile.
+        let rim_rgb = mix(in.plate.rgb, vec3<f32>(1.0), 0.15 + night * (0.16 * lit - 0.10));
+        let ea = min(in.plate.a + 0.06 + night * 0.10 * lit, 1.0) * edgec;
         prgb = rim_rgb * ea + prgb * (1.0 - ea);
         pa = ea + pa * (1.0 - ea);
         prgb = prgb * mask;
