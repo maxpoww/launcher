@@ -1,0 +1,16 @@
+{
+  "name": "Stock",
+  "accent": "base0D",
+  "dark": {
+    "base00": "#1e1e1e", "base01": "#222226", "base02": "#2e2e32", "base03": "#46464b",
+    "base04": "#9a9996", "base05": "#ffffff", "base06": "#f6f5f4", "base07": "#ffffff",
+    "base08": "#ff7b63", "base09": "#ffa348", "base0A": "#f8e45c", "base0B": "#8ff0a4",
+    "base0C": "#93ddc2", "base0D": "#78aeed", "base0E": "#dc8add", "base0F": "#cdab8f"
+  },
+  "light": {
+    "base00": "#ffffff", "base01": "#fafafb", "base02": "#ebebed", "base03": "#d8d8dc",
+    "base04": "#77767b", "base05": "#2e2e33", "base06": "#1e1e22", "base07": "#000000",
+    "base08": "#c01c28", "base09": "#c64600", "base0A": "#9c6e03", "base0B": "#1b8553",
+    "base0C": "#1f7a7a", "base0D": "#1c71d8", "base0E": "#813d9c", "base0F": "#865e3c"
+  }
+}

@@ -3004,7 +3004,7 @@ mod width_slack {
         }
         let mut fs = FontSystem::new();
         let mut wrapped_bare = 0;
-        for text in ["Search", "Buscar", "Golem Files", "Cancel", "100%", "14:09", "Dark websites", "Catppuccin"] {
+        for text in ["Search", "Buscar", "Golem Files", "Cancel", "100%", "14:09", "Colours on the web", "Colores en la web", "Catppuccin"] {
             let measured = {
                 let mut b = Buffer::new(&mut fs, Metrics::new(15.0, 19.5));
                 b.set_text(&mut fs, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);

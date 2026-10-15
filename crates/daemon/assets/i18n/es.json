@@ -252,7 +252,6 @@
  "Holds {health}% of what it did new": "Conserva el {health}% de su capacidad",
  "Hotspot name": "Nombre del punto de acceso",
  "How": "Cómo",
- "How apps look. Some change the next time they open.": "Cómo se ven las apps. Algunas cambian la próxima vez que se abren.",
  "How far the pointer moves. The mouse follows it too.": "Cuánto se mueve el puntero. El ratón también lo sigue.",
  "How often": "Cada cuánto",
  "IP address": "Dirección IP",
@@ -928,10 +927,10 @@
  "Brown": "Marrón",
  "Colours": "Colores",
  "Palette": "Paleta",
- "Dynamic colour": "Color dinámico",
- "The shell takes its colours from the screen; the apps wear the palette.": "La barra y el dock toman sus colores de la pantalla; las aplicaciones usan la paleta.",
- "Dark websites": "Sitios web oscuros",
+ "Dynamic": "Dinámico",
+ "Colours on apps": "Colores en apps",
+ "Colours on the web": "Colores en la web",
+ "How everything looks. Some apps change the next time they open.": "Cómo se ve todo. Algunas apps cambian la próxima vez que se abren.",
  "Original": "Original",
- "The dock, the boxes and the apps wear the palette.": "El dock, los recuadros y las aplicaciones usan la paleta.",
  "Install": "Instalar"
 }

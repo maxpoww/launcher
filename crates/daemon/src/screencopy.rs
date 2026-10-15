@@ -609,6 +609,11 @@ impl App {
             // (A later pick moved the window on: that one's timer ends it.)
             if app.wall_until.is_some_and(|until| std::time::Instant::now() >= until) {
                 app.wall_until = None;
+                // The Dynamic palette follows the picture (the apps and the
+                // web; the shell reads the screen itself).
+                if crate::palette::dynamic() {
+                    app.colors_apply(false);
+                }
                 // The preview's colour is NOT let go here: on a slower
                 // computer the new picture is not on the screen yet after a
                 // second and a half, and the box went back to the old

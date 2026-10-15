@@ -1115,7 +1115,7 @@ mod tests {
         // when the shell wears the palette (dynamic colour off).
         assert!(lua.contains("hl.config({ misc = { background_color = 0xff16171a } })"), "{lua}");
         assert!(!lua.contains("active_border"), "{lua}");
-        store.colors = Some(crate::palette::ColorChoice { dynamic: false, ..Default::default() });
+        store.colors = Some(crate::palette::ColorChoice { palette: Some(crate::palette::GOLEM.to_owned()), ..Default::default() });
         let lua = store.lua();
         assert!(lua.contains("active_border = { colors = { 'rgba(ffbe98ff)' }, angle = 90 }, inactive_border = 'rgba(2a2e35ff)'"), "{lua}");
         assert!(lua.contains("background_color = 0xff16171a"), "{lua}");

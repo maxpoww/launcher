@@ -69,14 +69,14 @@ type Item = (&'static str, u8, &'static str);
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [Item; 25] = [
+const SETTINGS: [Item; 24] = [
     // (name, first layer, search keywords: what else people call it or
     // look for it by). 5 near, 9 middle, 11 far.
     ("Resolution", 0, "display screen monitor size pixels"),
     ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
     ("Wi-Fi", 0, "wifi wireless network internet connection"),
     ("Sound output", 0, "audio speakers speaker headphones output"),
-    ("Dark mode", 0, "theme appearance light night colours colors"),
+    ("Colours", 0, "dark mode light theme appearance night colors colour color accent palette highlight dynamic websites web apps"),
     ("Brightness", 1, "display screen backlight dim"),
     ("Bluetooth", 1, "wireless devices headphones pairing"),
     ("Volume", 1, "audio sound loud quiet mute"),
@@ -89,7 +89,6 @@ const SETTINGS: [Item; 25] = [
     ("Notifications", 1, "alerts do not disturb dnd messages"),
     ("Keyboard layout", 1, "input language typing keys"),
     ("Power mode", 1, "battery performance energy saver"),
-    ("Colours", 2, "colors colour color accent palette theme appearance highlight dynamic"),
     ("Touchpad speed", 2, "trackpad mouse pointer cursor gestures"),
     ("Language", 2, "region locale translation input"),
     ("Time zone", 2, "clock date time region"),
@@ -105,6 +104,10 @@ const SETTINGS: [Item; 25] = [
 /// The setting whose name, without spaces or capitals, is `name`.
 pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
     let flat = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    // (Dark mode was a page of its own until 2026-10-15: it is Colours' now.)
+    if flat(name) == "darkmode" {
+        return Some("Colours");
+    }
     SETTINGS.iter().map(|s| s.0).find(|label| flat(label) == flat(name))
 }
 
@@ -3074,7 +3077,7 @@ impl App {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
                 }
             }
-            "colors-dynamic" | "colors-palette" | "colors-websites" => {
+            "colors-apps" | "colors-palette" | "colors-web" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {
@@ -3404,9 +3407,9 @@ mod tests {
     #[test]
     fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
         let p = panel();
-        assert_eq!(p.pills.len(), 25);
+        assert_eq!(p.pills.len(), 24);
         let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [5, 9, 11]);
+        assert_eq!(per_layer, [5, 9, 10]);
         assert_clean(&p, "at rest");
         // Up under the dock: the heap starts at the top gap.
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
@@ -3418,14 +3421,14 @@ mod tests {
         let mut p = panel();
         let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [9, 11, 5], "down: the near group goes to the back");
+        assert_eq!(counts(&p), [9, 10, 5], "down: the near group goes to the back");
         assert_clean(&p, "one step down");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [11, 5, 9]);
+        assert_eq!(counts(&p), [10, 5, 9]);
         assert_clean(&p, "two steps down");
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [5, 9, 11], "up undoes it");
+        assert_eq!(counts(&p), [5, 9, 10], "up undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
@@ -3530,10 +3533,10 @@ mod tests {
         assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
-        assert_eq!(layer_sizes(&p), [5, 9, 11], "the layers keep their sizes");
+        assert_eq!(layer_sizes(&p), [5, 9, 10], "the layers keep their sizes");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
-        assert_eq!(layer_sizes(&p), [5, 9, 11]);
+        assert_eq!(layer_sizes(&p), [5, 9, 10]);
         // Whoever it passed stepped back exactly one layer.
         let back: Vec<(&str, u8, u8)> = p
             .pills

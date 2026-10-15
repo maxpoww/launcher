@@ -66,6 +66,27 @@ pub fn exec_app_host(exec: &str) -> Option<&str> {
     url_host(exec_app(exec)?.1)
 }
 
+/// The hosts every webapp launcher opens (`webapp-*.desktop`), sorted and
+/// once each: Seam gives them the palette with the programs, not with the
+/// websites (`palette.rs`, `colors.json`'s `webapp_hosts`).
+pub(crate) fn app_hosts() -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(applications_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(PREFIX) && n.ends_with(".desktop")))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|text| {
+            let exec = text.lines().find_map(|l| l.strip_prefix("Exec="))?;
+            Some(exec_app_host(exec)?.to_ascii_lowercase())
+        })
+        .filter(|h| !h.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The launch command for webapp `slug` at `url_token` (already a single
 /// shell token): the one place the Seam flags live, used by installed webapps
 /// and by opening a link in a webapp.

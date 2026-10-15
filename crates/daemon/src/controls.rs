@@ -160,7 +160,6 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Sound output"
             | "Volume"
             | "Microphone"
-            | "Dark mode"
             | "Brightness"
             | "Night light"
             | "Notifications"
@@ -183,7 +182,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 
 /// The keys `App` carries out itself (see the module docs).
 pub(crate) fn ui_key(key: &str) -> bool {
-    matches!(key, "open" | "night" | "dnd" | "restart" | "colors-dynamic" | "colors-palette" | "colors-websites")
+    matches!(key, "open" | "night" | "dnd" | "restart" | "colors-apps" | "colors-palette" | "colors-web")
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1146,7 +1145,7 @@ fn end_players(pids: &[String]) {
 /// than a full-HD screen — for the picture program to hold UNDER the
 /// player (see `show_wallpaper`). Made once and kept, named by the file and
 /// when it last changed. `None`: it could not be made.
-fn poster(path: &str) -> Option<String> {
+pub(crate) fn poster(path: &str) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1371,47 +1370,20 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 view.groups.push(mute);
             }
         }
-        "Dark mode" => {
-            let dark = dark_now();
-            view.subtitle = tr("How apps look. Some change the next time they open.").to_owned();
-            view.groups.push(group(
-                None,
-                "dark",
-                110.0,
-                vec![choice(tr("Dark"), dark, "on"), choice(tr("Light"), !dark, "off")],
-            ));
-            // Websites too (Seam's Dark Reader, in the palette's colours), only
-            // while the look is dark — a choice of the dark look, so it is here,
-            // and only while the look IS dark (in the light it does nothing, and
-            // a row that does nothing is a question).
-            if dark {
-                view.groups.push(on_off(Some("Dark websites"), "colors-websites", crate::palette::choice().dark_websites));
-            }
-        }
+        // ONE PAGE for how everything looks (Max, 2026-10-15): the look, where
+        // the colours go, then the palettes — the Dynamic one (made from the
+        // wallpaper; the shell keeps reading the screen place by place) first.
         "Colours" => {
+            let dark = dark_now();
             let picked = crate::palette::choice();
-            let theme = crate::palette::resolve(&picked, dark_now());
-            view.subtitle = tr(if picked.dynamic {
-                "The shell takes its colours from the screen; the apps wear the palette."
-            } else {
-                "The dock, the boxes and the apps wear the palette."
-            })
-            .to_owned();
-            view.groups.push(on_off(Some("Dynamic colour"), "colors-dynamic", picked.dynamic));
-            // The palettes — only once there is a choice: one alone would be a
-            // row that picks nothing, and the page must fit a laptop's field.
-            let palettes = crate::palette::all();
-            if palettes.len() > 1 {
-                view.groups.push(group(
-                    Some("Palette"),
-                    "colors-palette",
-                    110.0,
-                    palettes
-                        .into_iter()
-                        .map(|p| choice(p.name.clone(), p.id == theme.id, p.id))
-                        .collect(),
-                ));
-            }
+            view.subtitle = tr("How everything looks. Some apps change the next time they open.").to_owned();
+            view.groups.push(on_off(Some("Dark mode"), "dark", dark));
+            view.groups.push(on_off(Some("Colours on apps"), "colors-apps", picked.apps));
+            view.groups.push(on_off(Some("Colours on the web"), "colors-web", picked.web));
+            let now = picked.palette_id().to_owned();
+            let mut choices = vec![choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID)];
+            choices.extend(crate::palette::all().into_iter().map(|p| choice(p.name.clone(), p.id == now, p.id)));
+            view.groups.push(group(None, "colors-palette", 110.0, choices));
         }
         "Brightness" => match brightness() {
             Some(now) => {
