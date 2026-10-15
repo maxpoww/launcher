@@ -504,7 +504,11 @@ pub(crate) fn assert_dark(dark: bool) {
     let scheme = if dark { "'prefer-dark'" } else { "'prefer-light'" };
     let theme = if dark { "'Adwaita-dark'" } else { "'Adwaita'" };
     run("dconf", &["write", "/org/gnome/desktop/interface/color-scheme", scheme]);
-    run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", theme]);
+    // With adw-gtk3 there, GTK 3's theme is the palette's (`palette::gtk3_live`,
+    // which follows this change); without it, Adwaita in the look's tone.
+    if crate::palette::adw_gtk3(dark).is_none() {
+        run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", theme]);
+    }
     // Golem's icons in the same tone (Max, 2026-10-14): silver `Golem` in the
     // light, graphite `Golem-Dark` in the dark — where they are installed.
     if crate::look::installed("Golem") {

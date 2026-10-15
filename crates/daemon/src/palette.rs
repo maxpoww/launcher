@@ -29,7 +29,7 @@
 //! [`resolve`] makes the [`Theme`] — what is in use now — and [`publish`]
 //! writes it out for everything outside the daemon, in
 //! `~/.local/state/golem/theme/` (`colors.json` for anyone; `foot.ini`,
-//! `hyprlock.conf`, `gtk4.css`, `gtk3.css`, `qt.conf`, `nvim.lua` for the apps Golem's
+//! `hyprlock.conf`, `gtk4.css`, `qt.conf`, `nvim.lua` for the apps Golem's
 //! home layer points there), then tells the running ones.
 
 use std::path::{Path, PathBuf};
@@ -381,7 +381,6 @@ pub(crate) fn write_all(dir: &Path, t: &Theme) {
     put("foot.ini", foot_ini(t));
     put("hyprlock.conf", hyprlock_conf(t));
     put("gtk4.css", gtk4_css(t));
-    put("gtk3.css", gtk3_css(t));
     put("qt.conf", qt_scheme(t));
     put("qt5.conf", qt5_scheme(t));
     put("nvim.lua", nvim_lua(t));
@@ -551,27 +550,111 @@ fn gtk4_css(t: &Theme) -> String {
     )
 }
 
-/// GTK 3 (Adwaita): the named colours it lets a user override — the look
-/// in use only (GTK 3 has no colour-scheme query; its apps restart anyway).
-fn gtk3_css(t: &Theme) -> String {
+/// GTK 3, all of it and LIVE (Max, 2026-10-15: "que te sigo diciendo que
+/// checkees… el que sigue encontrando gaps soy yo"): stock Adwaita bakes its
+/// colours in, but adw-gtk3 — libadwaita's look for GTK 3 — draws with
+/// libadwaita's named colours (window_bg_color, accent_bg_color…), which a
+/// theme of ours can redefine after importing it. And GTK 3 apps reload
+/// their theme when its NAME changes, so the dock writes the palette as a
+/// theme under one of two names and switches dconf's gtk-theme between them
+/// on every change: open Thunar/Inkscape/Blueman windows follow at once.
+/// `base`: adw-gtk3's own stylesheet for the look.
+fn gtk3_theme_css(t: &Theme, base: &Path) -> String {
+    let c = &t.c;
     let h = |x: Rgb| format!("#{}", hex(x));
-    format!(
-        "/* Golem's palette ({}), written by the dock. */\n\
-         @define-color theme_bg_color {};\n@define-color theme_fg_color {};\n\
-         @define-color theme_base_color {};\n@define-color theme_text_color {};\n\
-         @define-color theme_selected_bg_color {};\n@define-color theme_selected_fg_color {};\n\
-         @define-color accent_color {};\n@define-color accent_bg_color {};\n@define-color accent_fg_color {};\n",
+    let ink = |x: Rgb| h(ink_for(t, x));
+    let mut out = format!(
+        "/* Golem's palette ({}) over adw-gtk3, written by the dock. Do not edit: it is rewritten on every change. */\n@import url(\"file://{}\");\n",
         t.name,
-        h(t.surface()),
-        h(t.ink()),
-        h(t.bg()),
-        h(t.ink()),
-        h(t.accent()),
-        h(t.accent_ink()),
-        h(t.accent()),
-        h(t.accent()),
-        h(t.accent_ink()),
-    )
+        base.display(),
+    );
+    for (name, col) in [
+        ("window_bg_color", h(c[1])),
+        ("window_fg_color", h(c[5])),
+        ("view_bg_color", h(c[0])),
+        ("view_fg_color", h(c[5])),
+        ("headerbar_bg_color", h(c[1])),
+        ("headerbar_fg_color", h(c[5])),
+        ("headerbar_backdrop_color", h(c[1])),
+        ("sidebar_bg_color", h(c[1])),
+        ("sidebar_fg_color", h(c[5])),
+        ("sidebar_backdrop_color", h(c[1])),
+        ("card_bg_color", h(c[2])),
+        ("card_fg_color", h(c[5])),
+        ("dialog_bg_color", h(c[2])),
+        ("dialog_fg_color", h(c[5])),
+        ("popover_bg_color", h(c[2])),
+        ("popover_fg_color", h(c[5])),
+        ("thumbnail_bg_color", h(c[2])),
+        ("thumbnail_fg_color", h(c[5])),
+        ("accent_color", h(t.accent())),
+        ("accent_bg_color", h(t.accent())),
+        ("accent_fg_color", h(t.accent_ink())),
+        ("destructive_color", h(c[8])),
+        ("destructive_bg_color", h(c[8])),
+        ("destructive_fg_color", ink(c[8])),
+        ("error_color", h(c[8])),
+        ("error_bg_color", h(c[8])),
+        ("error_fg_color", ink(c[8])),
+        ("success_color", h(c[0xB])),
+        ("success_bg_color", h(c[0xB])),
+        ("success_fg_color", ink(c[0xB])),
+        ("warning_color", h(c[0xA])),
+        ("warning_bg_color", h(c[0xA])),
+        ("warning_fg_color", ink(c[0xA])),
+    ] {
+        out.push_str(&format!("@define-color {name} {col};\n"));
+    }
+    out
+}
+
+/// The palette's darkest or brightest, whichever reads on `bg`.
+fn ink_for(t: &Theme, bg: Rgb) -> Rgb {
+    let a = rel_lum(bg);
+    let (first, last) = (t.c[0x00], t.c[0x07]);
+    if contrast(a, rel_lum(first)) >= contrast(a, rel_lum(last)) {
+        first
+    } else {
+        last
+    }
+}
+
+/// adw-gtk3's stylesheet for a look, where the system keeps it.
+pub(crate) fn adw_gtk3(dark: bool) -> Option<PathBuf> {
+    let name = if dark { "adw-gtk3-dark" } else { "adw-gtk3" };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+    std::iter::once(data_home)
+        .chain(dirs.split(':').map(str::to_owned))
+        .map(|d| PathBuf::from(d).join("themes").join(name).join("gtk-3.0").join("gtk.css"))
+        .find(|p| p.is_file())
+}
+
+/// The two names the GTK 3 theme takes in turn.
+const GTK3_NAMES: [&str; 2] = ["Golem-A", "Golem-B"];
+
+/// Write the GTK 3 theme under the name NOT in use and switch to it.
+fn gtk3_live(t: &Theme) {
+    let Some(base) = adw_gtk3(t.dark) else {
+        return; // No adw-gtk3: Adwaita, set by the Dark mode setting.
+    };
+    let now = std::process::Command::new("dconf")
+        .args(["read", "/org/gnome/desktop/interface/gtk-theme"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
+        .unwrap_or_default();
+    let next = if now == GTK3_NAMES[0] { GTK3_NAMES[1] } else { GTK3_NAMES[0] };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let dir = PathBuf::from(data_home).join("themes").join(next);
+    crate::persist::write_text("theme", &dir.join("gtk-3.0").join("gtk.css"), &gtk3_theme_css(t, &base));
+    crate::persist::write_text(
+        "theme",
+        &dir.join("index.theme"),
+        &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={next}\nComment=Golem's palette over adw-gtk3, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={next}\n"),
+    );
+    run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", &format!("'{next}'")]);
 }
 
 /// Qt (through qt5ct/qt6ct): a colour scheme, one colour per palette role
@@ -873,6 +956,7 @@ fn poke(t: &Theme, look_changed: bool) {
     // config only at its start, so its windows are told the colours.
     let _ = look_changed;
     foot_live(t);
+    gtk3_live(t);
     // btop reads its config again on SIGUSR2 (and with it, its theme).
     signal_all("btop", libc::SIGUSR2);
 }
@@ -1117,6 +1201,10 @@ mod tests {
         assert!(with.contains("[Appearance]\nTheme=com.obsproject.System\nFontScale=10"));
         assert_eq!(with_obs_theme(&with), None, "a theme named is kept");
         assert!(with_obs_theme("[General]\nFirstRun=true\n").unwrap().ends_with("\n[Appearance]\nTheme=com.obsproject.System\n"));
+        let g3 = gtk3_theme_css(&t, Path::new("/x/adw-gtk3-dark/gtk-3.0/gtk.css"));
+        assert!(g3.contains("@import url(\"file:///x/adw-gtk3-dark/gtk-3.0/gtk.css\");"));
+        assert!(g3.contains("@define-color window_bg_color #1d2026;") && g3.contains("@define-color accent_bg_color #ffbe98;"));
+        assert_eq!(g3.matches("@define-color").count(), 33);
         let btop = btop_theme(&t);
         assert!(btop.contains("theme[main_bg]=\"#16171a\"") && btop.contains("theme[title]=\"#ffbe98\""));
         assert_eq!(btop.matches("theme[").count(), 10 + 5 + 27);
