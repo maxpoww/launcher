@@ -1051,6 +1051,21 @@ impl App {
         if hv_moving {
             self.dirty = true;
         }
+        // The dock bin's states, from anywhere in the shell: something of
+        // ours in hand anywhere (an app, a desktop icon, a file window's
+        // things), over the bin, the pointer on it, a file window in it.
+        let bin_dragging = self.desktop.drag.is_some() || self.filer.dragging() || trash_react_target;
+        let on_bin = matches!(self.hover, Some(content::Hit::DockIcon(slot))
+            if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| groups::is_trash(&e.id)));
+        let bin_now = crate::bin_motion::Inputs {
+            hover: on_bin && !bin_dragging,
+            dragging: bin_dragging,
+            over: over_trash,
+            open: self.filer.showing_bin(),
+        };
+        if self.bin_motion.step(bin_now, dt) {
+            self.dirty = true;
+        }
         // Golem Files' launcher under the pointer (no drag): its folders out.
         let on_files = self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
@@ -1452,6 +1467,7 @@ impl App {
                 drag: drag_frame,
                 trash_react: self.trash_react,
                 trash_hover: self.trash_hover,
+                bin: self.bin_motion.pose(),
                 files_fig: self.files_layer.map(|l| (l, self.files_hover.value())),
                 install_hint: self.install_hint(),
                 busy: &busy,

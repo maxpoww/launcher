@@ -28,6 +28,7 @@ struct Instance {
     @location(3) tint: vec4<f32>,      // silhouette tint: rgb + strength (a)
     @location(4) ring: f32,            // >=0 = draw a progress ring, that filled
     @location(5) plate: vec4<f32>,     // squircle plate under the glyph; a <= 0 = none
+    @location(6) rot: f32,             // the quad turned this many radians about its middle
 };
 
 struct VsOut {
@@ -42,7 +43,12 @@ struct VsOut {
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     let corner = vec2<f32>(f32(vi & 1u), f32(vi >> 1u));
-    let px = mix(inst.rect_min, inst.rect_max, corner);
+    let mid = (inst.rect_min + inst.rect_max) * 0.5;
+    let off = mix(inst.rect_min, inst.rect_max, corner) - mid;
+    let c = cos(inst.rot);
+    let s = sin(inst.rot);
+    // (y down: a positive turn is clockwise on screen.)
+    let px = mid + vec2<f32>(off.x * c - off.y * s, off.x * s + off.y * c);
     var out: VsOut;
     let ndc = px / globals.screen * 2.0 - 1.0;
     out.pos = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);

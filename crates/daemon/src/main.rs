@@ -45,6 +45,7 @@ mod filer;
 mod files;
 mod files_icon;
 mod gears_icon;
+mod bin_motion;
 mod focus_cycle;
 mod font_index;
 mod fractional;
@@ -894,6 +895,7 @@ fn main() -> anyhow::Result<()> {
         trash_hover: 0.0,
         files_hover: files_icon::Hover::default(),
         gears_spin: gears_icon::Spin::default(),
+        bin_motion: bin_motion::BinMotion::default(),
         reorder_slot: None,
         grid_drag_page_at: None,
         apps_slide: Vec::new(),
@@ -2145,6 +2147,8 @@ pub struct App {
     files_hover: files_icon::Hover,
     /// The control panel's gears under the pointer (`gears_icon`).
     gears_spin: gears_icon::Spin,
+    /// The dock bin's states, fed from the whole shell (`bin_motion`).
+    bin_motion: bin_motion::BinMotion,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,
@@ -5414,16 +5418,14 @@ impl App {
             Hit::DockIcon(slot) => {
                 let &idx = self.dock_order.get(slot)?;
                 match self.kinds.get(idx)? {
-                    // The Recycle Bin opens as a trash dir-stack (id
-                    // `group:trash`), not a group box — report it as such so
-                    // clicking it again toggles the open stack shut.
+                    // The Recycle Bin opens in a file window: no box.
                     apps::EntryKind::Group
                         if self
                             .entries
                             .get(idx)
                             .is_some_and(|e| groups::is_trash(&e.id)) =>
                     {
-                        Some(BoxTarget::Dir(self.entries[idx].id.clone()))
+                        None
                     }
                     apps::EntryKind::Group => group_of(idx),
                     apps::EntryKind::File => {
@@ -5496,7 +5498,16 @@ impl App {
                             .get(entry_idx)
                             .is_some_and(|e| groups::is_trash(&e.id))
                         {
-                            self.open_trash_stack();
+                            // The bin opens in a file window (Max, 2026-10-15:
+                            // "click on the directory on files, not a box").
+                            // A bin never used yet has no folders: made, it opens empty.
+                            let bin = filer::bin_root();
+                            for dir in [bin.clone(), bin.with_file_name("info")] {
+                                if let Err(e) = std::fs::create_dir_all(&dir) {
+                                    warn!("recycle bin: {}: {e}", dir.display());
+                                }
+                            }
+                            self.filer_open(bin);
                             return;
                         }
                         if let Some(g) = self

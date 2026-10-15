@@ -260,32 +260,6 @@ impl App {
         self.reset_stack_view();
     }
 
-    /// Open the Recycle Bin as a stack showing the FreeDesktop trash contents,
-    /// anchored to the bin's dock tile — the same magnified box a pinned
-    /// directory uses, but its listing comes from [`crate::trash`]. The `id`
-    /// matches the bin's pinned dock entry so the box grows out of it.
-    pub(crate) fn open_trash_stack(&mut self) {
-        let id = format!("group:{}", groups::TRASH_ID);
-        info!("recycle bin: opening trash view");
-        self.group_origin = self.dock_slot_center(&id);
-        self.group_origin_vp_y = None;
-        self.app_group = None;
-        self.dock_stack = None;
-        self.closing_members = None;
-        self.box_from_dock = true;
-        self.dir_stack = Some(DirStack {
-            id,
-            path: crate::trash::Trash::home()
-                .files_root()
-                .to_string_lossy()
-                .into_owned(),
-            members: pages::PagedList::default(),
-            in_grid: self.ui.target() == Target::Open,
-            is_trash: true,
-        });
-        self.reset_stack_view();
-    }
-
     /// Open a dock folder. With the grid up, the box grows out of its dock
     /// icon into the grid (a normal grid box); docked, it opens as a stack
     /// above the icon. Either way it's the same magnified box.

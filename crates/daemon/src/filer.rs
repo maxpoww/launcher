@@ -601,6 +601,9 @@ pub(crate) struct Lifted {
     /// the files (a long copy), but nothing is in hand any more — the
     /// things are drawn in their places again and no later drag is "ours".
     dropped: bool,
+    /// The dock was hidden and came up for this drag (its bin takes
+    /// things): it goes again when they are let go.
+    dock_raised: bool,
 }
 
 /// A drag hovering a file window (anyone's: another app's, the desktop's,
@@ -1748,6 +1751,11 @@ impl Filer {
 
     fn put(&mut self, win: Win) {
         self.wins.push(win);
+    }
+
+    /// A file window is in the bin (the dock's bin stands open meanwhile).
+    pub(crate) fn showing_bin(&self) -> bool {
+        self.wins.iter().any(|w| w.in_bin() != InBin::No)
     }
 
     /// Files of a window are in hand.
@@ -4936,6 +4944,11 @@ impl App {
             && win.sort.0 == SortKey::Name
             && win.find.as_ref().is_none_or(|f| f.is_empty());
         let hole = orderly.then(|| win.items[..i].iter().filter(|it| !paths.contains(&it.path)).count());
+        // The dock comes up for it, as for a desktop icon: its bin is there.
+        let dock_raised = self.ui.target() == crate::state::Target::Hidden;
+        if dock_raised {
+            self.handle_command(waverunner_proto::Command::Show);
+        }
         self.filer.drag = Some(Lifted {
             win: id,
             paths,
@@ -4943,6 +4956,7 @@ impl App {
             _icon: image,
             action: DndAction::empty(),
             dropped: false,
+            dock_raised,
         });
         if let Some(win) = self.filer.win_mut(id) {
             win.gap = hole;
@@ -4954,6 +4968,7 @@ impl App {
     /// long while yet): nothing is in hand any more — every thing is drawn
     /// where it is, so a click lands on what is seen.
     pub(crate) fn filer_drag_dropped(&mut self) {
+        self.filer_dock_back();
         // (Let go over one of our own windows: that window's drop settles
         // it — marked here first, the things would be drawn back in their
         // old places for a frame.)
@@ -5000,7 +5015,16 @@ impl App {
 
     /// Our drag is over: dropped and done, or cancelled. The window it came
     /// from reads its folder again (a move took the files).
+    /// The dock came up for a drag that is let go: it goes again.
+    fn filer_dock_back(&mut self) {
+        if let Some(drag) = self.filer.drag.as_mut().filter(|d| d.dock_raised) {
+            drag.dock_raised = false;
+            self.handle_command(waverunner_proto::Command::Hide);
+        }
+    }
+
     pub(crate) fn filer_drag_end(&mut self, done: bool) {
+        self.filer_dock_back();
         let Some(drag) = self.filer.drag.take() else {
             return;
         };

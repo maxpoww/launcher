@@ -88,8 +88,11 @@ struct IconInstance {
     // draws the icon. Offset 36.
     ring: f32,
     // Squircle plate drawn under the glyph in-shader (rgba; a <= 0 = none).
-    // Offset 40 → the struct is exactly 56 bytes, Pod-clean.
+    // Offset 40.
     plate: [f32; 4],
+    // The quad turned by this many radians about its middle (the dock's bin:
+    // its lid and its can). Offset 56 → 60 bytes, Pod-clean.
+    rot: f32,
 }
 
 /// Per-instance data for the open box's frosted backdrop quad.
@@ -483,13 +486,20 @@ fn mark_icon(
     deps: &FrameDeps,
     layer_gen: &[u32],
 ) {
-    // icon.wgsl: the quad is the rect itself.
+    // icon.wgsl: the quad is the rect itself (a turned one reaches out to
+    // its half diagonal round its middle).
+    let reach = if i.rot == 0.0 {
+        0.0
+    } else {
+        let (w, h) = (i.rect_max[0] - i.rect_min[0], i.rect_max[1] - i.rect_min[1]);
+        ((w * w + h * h).sqrt() - w.min(h)) / 2.0
+    };
     let b = cut(
         [
-            i.rect_min[0] * scale,
-            i.rect_min[1] * scale,
-            i.rect_max[0] * scale,
-            i.rect_max[1] * scale,
+            (i.rect_min[0] - reach) * scale,
+            (i.rect_min[1] - reach) * scale,
+            (i.rect_max[0] + reach) * scale,
+            (i.rect_max[1] + reach) * scale,
         ],
         clip,
     );
@@ -1101,7 +1111,7 @@ impl Renderer {
                             step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &wgpu::vertex_attr_array![
                                 0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
-                                5 => Float32x4
+                                5 => Float32x4, 6 => Float32
                             ],
                         }],
                     },
@@ -1818,7 +1828,12 @@ impl Renderer {
         let n_overlay_shadows = shadows.len() as u32 - n_shadows;
         let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
         let n_rects_unclipped = rects.len() as u32;
-        let mut icons: Vec<IconInstance> = scene.icons.iter().map(icon_instance).collect();
+        let mut icons: Vec<IconInstance> = scene
+            .icons
+            .iter()
+            .enumerate()
+            .map(|(n, i)| IconInstance { rot: scene.icon_rot.get(n).copied().unwrap_or(0.0), ..icon_instance(i) })
+            .collect();
         let n_icons_unclipped = icons.len() as u32;
         // Per grid: (clip, rect range, icon range) into the shared buffers.
         let grid_ranges: Vec<(
@@ -2871,6 +2886,7 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
         tint: i.tint,
         ring: i.ring,
         plate: i.plate,
+        rot: 0.0,
     }
 }
 

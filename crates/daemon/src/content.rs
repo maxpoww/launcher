@@ -176,6 +176,9 @@ pub struct Scene {
     pub rects: Vec<RectInst>,
     /// Dock icon quads (unclipped; they live in the card's top sliver).
     pub icons: Vec<IconInst>,
+    /// Turns (radians) of `icons`, by index; missing = none (the bin's lid
+    /// and can, `bin_motion`).
+    pub icon_rot: Vec<f32>,
     /// Unclipped labels (search box text), clipped per-label.
     pub labels: Vec<Label>,
     /// Section grids (Apps / Install / Files), each clipped to its own
@@ -1559,6 +1562,8 @@ pub struct FrameInput<'a> {
     /// Recycle-bin hover-grow (0 = rest size, 1 = a dragged icon is over it):
     /// swells the bin tile to acknowledge the drop it would accept.
     pub trash_hover: f32,
+    /// The dock bin's states (`bin_motion`).
+    pub bin: crate::bin_motion::Pose,
     /// Golem Files' launcher: its first figure layer and how far its folders
     /// are out (`files_icon`); `None` draws its theme icon.
     pub files_fig: Option<(u32, f32)>,
@@ -1722,6 +1727,44 @@ fn trash_tile_color(plate: [f32; 4], react: f32) -> [f32; 4] {
     ]
 }
 
+/// The dock bin's tile (`bin_motion`): the plate washed toward the traffic
+/// lights' ORANGE (#FF9500, minimize) while something is in hand, toward
+/// their RED (#FF2E2E, close) over it.
+fn bin_tile_color(plate: [f32; 4], orange: f32, red: f32) -> [f32; 4] {
+    let lin = |c: f32| crate::options::srgb_to_linear(c / 255.0);
+    let o = [1.0, lin(149.0), lin(0.0), 0.66];
+    let r = [1.0, lin(46.0), lin(46.0), 0.66];
+    let (ko, kr) = (orange.clamp(0.0, 1.0) * 0.6, red.clamp(0.0, 1.0) * 0.72);
+    std::array::from_fn(|i| lerp(lerp(plate[i], o[i], ko), r[i], kr))
+}
+
+/// The dock bin's can and lid where `bin_motion` says, on `rect` (the
+/// figure's 100 units across it): each turned about its own pivot.
+fn push_bin_posed(scene: &mut Scene, rect: Rect, layer: u32, pose: &crate::bin_motion::Pose) {
+    let u = rect.w / 100.0;
+    // A quad turned by `deg` and scaled (sx, sy) about the pivot (px, py),
+    // then moved by (dx, dy): its middle goes where the pivot sends it.
+    let mut part = |layer: u32, (px, py): (f32, f32), deg: f32, (sx, sy): (f32, f32), (dx, dy): (f32, f32)| {
+        let (s, c) = deg.to_radians().sin_cos();
+        let (ox, oy) = ((50.0 - px) * sx, (50.0 - py) * sy);
+        let (mx, my) = (px + ox * c - oy * s + dx, py + ox * s + oy * c + dy);
+        let (w, h) = (rect.w * sx, rect.h * sy);
+        scene.icon_rot.resize(scene.icons.len(), 0.0);
+        scene.icons.push(IconInst {
+            rect: Rect::new(rect.x + mx * u - w / 2.0, rect.y + my * u - h / 2.0, w, h),
+            layer,
+            tint: [0.0; 4],
+            ring: -1.0,
+            plate: NO_PLATE,
+        });
+        scene.icon_rot.push(deg.to_radians());
+    };
+    let (rot, sx, sy) = pose.can;
+    part(layer, (50.0, 82.0), rot, (sx, sy), (0.0, 0.0));
+    let (dx, dy, rot) = pose.lid;
+    part(layer + 1, (50.0, 30.0), rot, (1.0, 1.0), (dx, dy));
+}
+
 /// Scale `r` by `scale` about its bottom-centre — the dock grow anchor, so a
 /// swelling icon rises off the bar instead of sinking into it.
 fn grow_bottom(r: Rect, scale: f32) -> Rect {
@@ -1793,6 +1836,7 @@ pub fn scene(
         drag,
         trash_react,
         trash_hover,
+        bin,
         files_fig,
         install_hint,
         busy,
@@ -2207,9 +2251,10 @@ pub fn scene(
             .get(entry_idx)
             .is_some_and(|e| crate::groups::is_trash(&e.id))
         {
-            // Swell it while a dragged icon hovers it as the drop target.
-            let rect = grow_bottom(icon_rect, 1.0 + 0.18 * trash_hover);
-            let tile = trash_tile_color(plate, trash_react);
+            // Its states (`bin_motion`): orange while something is in hand,
+            // red and swollen over it, a rim while a file window is in it.
+            let rect = grow_bottom(icon_rect, bin.swell);
+            let tile = bin_tile_color(plate, bin.orange, bin.red);
             scene.rects.push(RectInst {
                 rect,
                 radius: rect.h * 0.22,
@@ -2225,8 +2270,17 @@ pub fn scene(
                 glass: 0.0,
                 border: 1.0,
             });
+            if bin.open > 0.0 {
+                scene.rects.push(RectInst {
+                    rect,
+                    radius: rect.h * 0.22,
+                    color: [1.0, 1.0, 1.0, 0.35 * bin.open],
+                    glass: 0.0,
+                    border: 2.0,
+                });
+            }
             // The metal bin figure (the tile behind it is the plate).
-            push_bin(&mut scene.icons, rect, layer_of(entry_idx), trash_react);
+            push_bin_posed(&mut scene, rect, layer_of(entry_idx), &bin);
             continue;
         }
         if let Some((_, minis)) = group_minis.iter().find(|(e, _)| *e == entry_idx) {

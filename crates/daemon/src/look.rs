@@ -74,6 +74,8 @@ pub(crate) fn figure(svg: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         ("#e6e6e6", "#666a73"),
         ("stop-opacity=\"0.22\"", "stop-opacity=\"0.12\""),
         ("flood-color=\"#fff\" flood-opacity=\"0.5\"", "flood-color=\"#fff\" flood-opacity=\"0.25\""),
+        // (The bin's light, lit as the gears are: weaker on graphite.)
+        ("flood-color=\"#fff\" flood-opacity=\"0.95\"", "flood-color=\"#fff\" flood-opacity=\"0.75\""),
     ] {
         s = s.replace(from, to);
     }

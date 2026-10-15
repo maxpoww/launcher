@@ -1,6 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256">
-  <!-- Golem dock figure: cast silver, from the metal icon lab (Max, 2026-10-01).
-       Drawn at 0.90 of the plate (the dock draws the plate itself). -->
+  <!-- Golem dock figure: cast silver (graphite in the dark, look::figure), lit as
+       the control panel's gears are (Max, 2026-10-15, the Dock Motion Lab): a line
+       of light over each top edge, the shadow thrown down past each bottom one. -->
+  <!-- The can: its slats are openings cut after the bevel, with a depth of their own. -->
   <defs>
     <linearGradient id="cast" x1="0.44" y1="0" x2="0.56" y2="1">
       <stop offset="0" stop-color="#fefefe"/><stop offset="0.38" stop-color="#fafafa"/>
@@ -9,17 +11,27 @@
     <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#fff" stop-opacity="0.22"/><stop offset="0.55" stop-color="#fff" stop-opacity="0"/>
     </linearGradient>
-    <filter id="bevel" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="-1.8" stdDeviation="0" flood-color="#fff" flood-opacity="0.5"/>
-      <feDropShadow dx="0" dy="4" stdDeviation="1.8" flood-color="#000" flood-opacity="0.5"/>
+    <filter id="edge" filterUnits="userSpaceOnUse" x="-20" y="-20" width="140" height="140">
+      <feOffset in="SourceAlpha" dy="3" result="down"/><feGaussianBlur in="down" stdDeviation="1.3" result="soft"/>
+      <feFlood flood-color="#000" flood-opacity="0.7"/><feComposite in2="soft" operator="in" result="shade"/>
+      <feOffset in="SourceAlpha" dy="-1.5" result="up"/>
+      <feFlood flood-color="#fff" flood-opacity="0.95"/><feComposite in2="up" operator="in" result="lit"/>
+      <feMerge><feMergeNode in="shade"/><feMergeNode in="lit"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
+    <filter id="depth" filterUnits="userSpaceOnUse" x="-20" y="-20" width="140" height="140">
+      <feOffset in="SourceAlpha" dy="3" result="down"/><feGaussianBlur in="down" stdDeviation="1.3" result="soft"/>
+      <feFlood flood-color="#000" flood-opacity="0.95"/><feComposite in2="soft" operator="in" result="shade"/>
+      <feOffset in="SourceAlpha" dy="-1.5" result="up"/>
+      <feFlood flood-color="#fff" flood-opacity="0.95"/><feComposite in2="up" operator="in" result="lit"/>
+      <feMerge><feMergeNode in="shade"/><feMergeNode in="lit"/></feMerge>
+    </filter>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="-20" y="-20" width="140" height="140"><rect x="-20" y="-20" width="140" height="140" fill="#fff"/><path d="M36 44 q2 17 0 31 h4 q2 -14 0 -31 Z M48 44 v31 h4 v-31 Z M60 44 q-2 17 0 31 h4 q-2 -14 0 -31 Z" fill="#000"/></mask>
+    <mask id="slats" maskUnits="userSpaceOnUse" x="-20" y="-20" width="140" height="140"><path d="M36 44 q2 17 0 31 h4 q2 -14 0 -31 Z M48 44 v31 h4 v-31 Z M60 44 q-2 17 0 31 h4 q-2 -14 0 -31 Z" fill="#fff"/></mask>
   </defs>
   <g opacity="0.8">
     <g transform="translate(5 5) scale(0.9)">
-      <g filter="url(#bevel)" fill="url(#cast)"><path fill-rule="evenodd" d="M26 36 h48 l-3.5 38 a10 10 0 0 1 -10 9 h-21 a10 10 0 0 1 -10 -9 Z
-        M36 44 q2 17 0 31 h4 q2 -14 0 -31 Z M48 44 v31 h4 v-31 Z M60 44 q-2 17 0 31 h4 q-2 -14 0 -31 Z"/></g>
-      <g fill="url(#gloss)"><path fill-rule="evenodd" d="M26 36 h48 l-3.5 38 a10 10 0 0 1 -10 9 h-21 a10 10 0 0 1 -10 -9 Z
-        M36 44 q2 17 0 31 h4 q2 -14 0 -31 Z M48 44 v31 h4 v-31 Z M60 44 q-2 17 0 31 h4 q-2 -14 0 -31 Z"/></g>
+      <g mask="url(#cut)"><g filter="url(#edge)"><path d="M26 36 h48 l-3.5 38 a10 10 0 0 1 -10 9 h-21 a10 10 0 0 1 -10 -9 Z" fill="url(#cast)"/></g><path d="M26 36 h48 l-3.5 38 a10 10 0 0 1 -10 9 h-21 a10 10 0 0 1 -10 -9 Z" fill="url(#gloss)"/></g>
+      <g mask="url(#slats)"><g filter="url(#depth)"><path fill-rule="evenodd" d="M26 36 h48 l-3.5 38 a10 10 0 0 1 -10 9 h-21 a10 10 0 0 1 -10 -9 Z M36 44 q2 17 0 31 h4 q2 -14 0 -31 Z M48 44 v31 h4 v-31 Z M60 44 q-2 17 0 31 h4 q-2 -14 0 -31 Z" fill="#000"/></g></g>
     </g>
   </g>
 </svg>
