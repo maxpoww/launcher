@@ -639,16 +639,22 @@ fn gtk3_live(t: &Theme) {
     let Some(base) = adw_gtk3(t.dark) else {
         return; // No adw-gtk3: Adwaita, set by the Dark mode setting.
     };
-    let now = std::process::Command::new("dconf")
-        .args(["read", "/org/gnome/desktop/interface/gtk-theme"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
+    let now = out("dconf", &["read", "/org/gnome/desktop/interface/gtk-theme"])
+        .map(|o| o.trim().trim_matches('\'').to_owned())
         .unwrap_or_default();
     let next = if now == GTK3_NAMES[0] { GTK3_NAMES[1] } else { GTK3_NAMES[0] };
     let home = std::env::var("HOME").unwrap_or_default();
     let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let dir = PathBuf::from(data_home).join("themes").join(next);
     crate::persist::write_text("theme", &dir.join("gtk-3.0").join("gtk.css"), &gtk3_theme_css(t, &base));
+    // The theme's GTK 4 half: GTK 4 apps take the theme NAME from the same
+    // setting (at their start, and live), and a theme without a gtk-4.0
+    // stylesheet makes them fall back to GTK's whole Default theme — under
+    // libadwaita's own, which replaces it with an EMPTY one on purpose. So
+    // this half holds only the palette's variables (the user stylesheet's
+    // own text): libadwaita apps stay clean, and the colours are there for
+    // a GTK 4 app without libadwaita.
+    crate::persist::write_text("theme", &dir.join("gtk-4.0").join("gtk.css"), &gtk4_css(t));
     crate::persist::write_text(
         "theme",
         &dir.join("index.theme"),
@@ -1054,18 +1060,51 @@ fn foot_ptys() -> Vec<PathBuf> {
     out
 }
 
+/// Run a program for its effect, or end it at [`PATIENCE`] (a bus that
+/// never answers must not hold the palette thread, and with it every later
+/// change, for good).
 fn run(program: &str, args: &[&str]) {
-    match std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(s) if s.success() => {}
-        other => debug!("palette: {program} {args:?}: {other:?}"),
+    if out(program, args).is_none() {
+        debug!("palette: {program} {args:?} did not succeed");
     }
 }
+
+/// A program's standard output, or `None` when it is missing, failed, or
+/// was ended at [`PATIENCE`].
+fn out(program: &str, args: &[&str]) -> Option<String> {
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let reader = child.stdout.take().map(|mut o| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = o.read_to_string(&mut text);
+            text
+        })
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() < PATIENCE => std::thread::sleep(std::time::Duration::from_millis(15)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let text = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    status.filter(|s| s.success()).map(|_| text)
+}
+
+/// The longest a program asked for a reading or a change may take.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(4);
 
 
 // --------------------------------------------------------------- the shell

@@ -7266,8 +7266,13 @@ impl crate::App {
             let c = crate::palette::current().raised();
             format!("rgba({}ff)", crate::palette::hex(c))
         };
+        // The screen's own ground, where no wallpaper is (and under a
+        // picture that does not cover it): the palette's — in both looks,
+        // dynamic or not. Hyprland forgets it on a config reload like the
+        // border, so it rides the same push.
+        let ground = crate::palette::hex(crate::palette::current().bg());
         crate::hypr::eval(&format!(
-            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }}, inactive_border = '{}' }} }} }})",
+            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }}, inactive_border = '{}' }} }}, misc = {{ background_color = 0xff{ground} }} }})",
             hex(stops[0]),
             hex(stops[1]),
             hex(stops[2]),
