@@ -590,7 +590,13 @@ impl App {
     ///   once more when it has settled.
     pub(crate) fn wallpaper_changing(&mut self, path: &str) {
         let now = std::time::Instant::now();
-        self.wall_guess = self.thumb_map.get(path).and_then(|(_, pixels)| preview_colour(pixels));
+        // (The screen's shape, and the share of it the dock's card takes
+        // in the middle — what the dock's own reading leaves out.)
+        let sw = self.options_size.0 as f32;
+        let sh = self.output_logical_height().unwrap_or(0.0);
+        let aspect = if sw > 0.0 && sh > 0.0 { sw / sh } else { 16.0 / 10.0 };
+        let card = if sw > 0.0 { ((self.config.window.width as f32 + 24.0) / sw).min(0.9) } else { 0.5 };
+        self.wall_guess = self.thumb_map.get(path).and_then(|(_, pixels)| preview_colour(pixels, aspect, card));
         self.wall_until = Some(now + WALL_WINDOW);
         tracing::info!("wallpaper: changing; its colour from the preview: {:?}", self.wall_guess);
         self.demand_capture(Demand::Fresh);
@@ -652,7 +658,10 @@ impl App {
         let fading = self.wall_until.is_some_and(|until| std::time::Instant::now() < until);
         if (near || left_old) && !fading {
             let waited = self.wall_hold_until.map(|until| WALL_HOLD.saturating_sub(until.saturating_duration_since(std::time::Instant::now())));
-            tracing::info!("wallpaper: on the screen after {waited:?}; the preview's colour is let go");
+            tracing::info!(
+                "wallpaper: on the screen after {waited:?}; the preview's colour {guess:?} is let go for the screen's {:?}",
+                self.dock_pill_color
+            );
             self.wall_guess = None;
             self.wall_hold_until = None;
             self.schedule_frame();
@@ -1540,32 +1549,63 @@ mod tests {
     }
 }
 
-/// The colour a picture gives the dock, from its preview (premultiplied
-/// sRGB bytes, the picture centred on a clear square): the mean of its
-/// bottom band — the part of a wallpaper the dock sits on — in the linear
-/// light the sampled colours are in. `None`: no picture in the preview.
-pub(crate) fn preview_colour(pixels: &[u8]) -> Option<[f32; 4]> {
+/// The colour a picture will give the dock, read from its PREVIEW the
+/// moment it is picked — the way the dock itself will read the screen once
+/// the picture is up, so the two agree (Max, 2026-10-14: "el rojo del
+/// principio no es el mismo que el del final, suele ser más fuerte el
+/// primero"). The dock (`read_sample`, `Slot::DockFrost`) averages the
+/// screen's bottom few rows, beside its own card and inside a margin, in
+/// the screen's own (sRGB) values. The picture fills the screen and is cut
+/// to fit (`panscan`, the picture program's crop): the screen's bottom edge
+/// is the picture's, its sides are what is left of the picture's after the
+/// cut. `screen_aspect`: width over height; `card`: the share of the
+/// screen's width the card's columns take, in the middle. The old reading —
+/// the whole bottom eighth, averaged as light — came out stronger than what
+/// the screen then gave.
+pub(crate) fn preview_colour(pixels: &[u8], screen_aspect: f32, card: f32) -> Option<[f32; 4]> {
     let n = crate::apps::ICON_SIZE as usize;
     if pixels.len() < n * n * 4 {
         return None;
     }
     let px = |x: usize, y: usize| &pixels[(y * n + x) * 4..(y * n + x) * 4 + 4];
     let rows: Vec<usize> = (0..n).filter(|&y| px(n / 2, y)[3] > 8).collect();
+    let cols: Vec<usize> = (0..n).filter(|&x| px(x, n / 2)[3] > 8).collect();
     let (top, bottom) = (*rows.first()?, *rows.last()?);
-    // The lowest eighth of the picture.
-    let from = bottom.saturating_sub(((bottom - top) / 8).max(1));
+    let (left, right) = (*cols.first()?, *cols.last()?);
+    let (pw, ph) = ((right - left + 1) as f32, (bottom - top + 1) as f32);
+    let pa = pw / ph;
+    // What of the picture is on the screen: its whole height and a middle
+    // part of its width, or the other way round.
+    let (vis_w, vis_bottom) = if pa > screen_aspect {
+        (pw * screen_aspect / pa, bottom as f32)
+    } else {
+        let vis_h = ph * pa / screen_aspect;
+        (pw, bottom as f32 - (ph - vis_h) / 2.0)
+    };
+    let x0 = left as f32 + (pw - vis_w) / 2.0;
+    // The screen's columns the dock reads, as shares of its width: inside
+    // a margin of a thirty-third, the card's middle left out.
+    let outer = 1.0 / 33.0;
+    let (card_l, card_r) = (0.5 - card / 2.0, 0.5 + card / 2.0);
     let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
-    for y in from..=bottom {
-        for x in 0..n {
-            let p = px(x, y);
+    let y = vis_bottom.round().max(top as f32) as usize;
+    for row in y.saturating_sub(1)..=y {
+        for x in left..=right {
+            let f = (x as f32 + 0.5 - x0) / vis_w;
+            if f < outer || f > 1.0 - outer || (f > card_l && f < card_r) {
+                continue;
+            }
+            let p = px(x, row);
             if p[3] > 8 {
                 let a = f32::from(p[3]) / 255.0;
                 for (c, s) in sum.iter_mut().enumerate() {
-                    *s += srgb_to_linear(f32::from(p[c]) / 255.0 / a);
+                    *s += f32::from(p[c]) / 255.0 / a;
                 }
                 count += 1.0;
             }
         }
     }
-    (count > 0.0).then(|| [sum[0] / count, sum[1] / count, sum[2] / count, 1.0])
+    (count > 0.0).then(|| {
+        [srgb_to_linear(sum[0] / count), srgb_to_linear(sum[1] / count), srgb_to_linear(sum[2] / count), 1.0]
+    })
 }
