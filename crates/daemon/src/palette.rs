@@ -383,6 +383,7 @@ pub(crate) fn write_all(dir: &Path, t: &Theme) {
     put("gtk4.css", gtk4_css(t));
     put("gtk3.css", gtk3_css(t));
     put("qt.conf", qt_scheme(t));
+    put("qt5.conf", qt5_scheme(t));
     put("nvim.lua", nvim_lua(t));
     btop_files(t);
     for app in ["qt5ct", "qt6ct"] {
@@ -392,10 +393,14 @@ pub(crate) fn write_all(dir: &Path, t: &Theme) {
         let ours = match std::fs::symlink_metadata(&conf) {
             Err(_) => true,
             Ok(m) if m.file_type().is_symlink() => false,
-            Ok(_) => std::fs::read_to_string(&conf).is_ok_and(|s| s.contains("golem/theme/qt.conf")),
+            Ok(_) => std::fs::read_to_string(&conf).is_ok_and(|s| s.contains("golem/theme/qt")),
         };
         if ours {
-            crate::persist::write_text("theme", &conf, &qtct_conf(&dir.join("qt.conf"), t));
+            // Qt 5 has one colour role fewer (no Accent): qt5ct takes a scheme
+            // of exactly its count and drops any other whole (VLC came up
+            // light, 2026-10-15).
+            let scheme = if app == "qt5ct" { "qt5.conf" } else { "qt.conf" };
+            crate::persist::write_text("theme", &conf, &qtct_conf(&dir.join(scheme), t));
         }
     }
 }
@@ -608,6 +613,74 @@ fn qt_scheme(t: &Theme) -> String {
         roles(t.ink(), true),
         roles(t.ink(), false),
     )
+}
+
+/// [`qt_scheme`] for Qt 5: its 21 roles (Qt 6 added Accent, the last).
+fn qt5_scheme(t: &Theme) -> String {
+    qt_scheme(t)
+        .lines()
+        .map(|l| match l.split_once('=') {
+            Some((k, v)) if k.ends_with("_colors") => {
+                let mut roles: Vec<&str> = v.split(", ").collect();
+                roles.truncate(21);
+                format!("{k}={}", roles.join(", "))
+            }
+            _ => l.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// What a program needs to wear the palette through Qt — qt5ct/qt6ct as the
+/// platform theme, and where the system keeps Qt's plugins — when the
+/// session does not carry it yet: NixOS puts both in the login profile, so a
+/// session older than Golem's Qt theming has neither (VLC stayed light,
+/// 2026-10-15). Given to every program the dock starts and to the
+/// compositor's own ([`App::colors_apply`]); an owner's own choice of
+/// platform theme is kept.
+pub(crate) fn launch_vars() -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let user = std::env::var("USER").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let roots = [
+        PathBuf::from("/run/current-system/sw/lib"),
+        PathBuf::from(format!("/etc/profiles/per-user/{user}/lib")),
+        PathBuf::from(format!("{home}/.nix-profile/lib")),
+    ];
+    let mut dirs: Vec<String> = std::env::var("QT_PLUGIN_PATH")
+        .map(|v| v.split(':').filter(|s| !s.is_empty()).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let mut have_qtct = false;
+    for root in &roots {
+        let Ok(read) = std::fs::read_dir(root) else {
+            continue;
+        };
+        let mut found: Vec<PathBuf> = read
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("qt-")))
+            .map(|p| p.join("plugins"))
+            .filter(|p| p.is_dir())
+            .collect();
+        found.sort();
+        for p in found {
+            let themes = p.join("platformthemes");
+            have_qtct |= themes.join("libqt5ct.so").exists() || themes.join("libqt6ct.so").exists();
+            let s = p.to_string_lossy().into_owned();
+            if !dirs.contains(&s) {
+                dirs.push(s);
+            }
+        }
+    }
+    if !have_qtct {
+        return out;
+    }
+    if std::env::var("QT_QPA_PLATFORMTHEME").is_err() {
+        out.push(("QT_QPA_PLATFORMTHEME", "qt5ct".to_owned()));
+    }
+    out.push(("QT_PLUGIN_PATH", dirs.join(":")));
+    out
 }
 
 fn qtct_conf(scheme: &Path, t: &Theme) -> String {
@@ -849,6 +922,11 @@ impl crate::App {
     /// it and the apps get it. At start, on a pick in the panel, and when
     /// the look turns dark or light.
     pub(crate) fn colors_apply(&mut self, look_changed: bool) {
+        // Programs the compositor starts (keys, a terminal's children) get
+        // Qt's palette route too, without a new login.
+        for (k, v) in launch_vars() {
+            crate::hypr::eval(&format!("hl.env('{k}', '{v}')"));
+        }
         let theme = resolve(&choice(), crate::look::dark());
         let changed = set(theme);
         if changed || look_changed {
@@ -960,6 +1038,10 @@ mod tests {
         assert!(hyprlock_conf(&t).contains("$golem_accent = rgb(255, 190, 152)"));
         let qt = qt_scheme(&t);
         assert_eq!(qt.lines().nth(1).unwrap().split(", ").count(), 22);
+        let qt5 = qt5_scheme(&t);
+        for l in qt5.lines().skip(1) {
+            assert_eq!(l.split_once('=').unwrap().1.split(", ").count(), 21, "Qt 5's count: {l}");
+        }
         assert_eq!(adwaita_accent([0xff, 0xbe, 0x98]), "orange");
         let btop = btop_theme(&t);
         assert!(btop.contains("theme[main_bg]=\"#16171a\"") && btop.contains("theme[title]=\"#ffbe98\""));

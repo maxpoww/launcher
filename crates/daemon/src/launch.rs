@@ -90,7 +90,8 @@ fn spoil_in_place(name: &str) -> bool {
 /// the rest of the session follows at the next login).
 /// Built in the parent — nothing may allocate between `fork` and `exec`.
 fn launch_env() -> Vec<CString> {
-    let chosen = crate::controls::session_vars(&crate::display::GolemSettings::load());
+    let mut chosen = crate::controls::session_vars(&crate::display::GolemSettings::load());
+    chosen.extend(crate::palette::launch_vars());
     env_with(std::env::vars_os(), &chosen)
 }
 
