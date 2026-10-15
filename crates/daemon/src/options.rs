@@ -2861,12 +2861,19 @@ impl App {
     /// The one place `options_bar_matched`/`options_pill_color` are read
     /// into a [`Backdrop`]; every adaptive-colour method below goes through
     /// this instead of touching those fields directly.
+    ///
+    /// ALWAYS the screen, palette or not: the banner stays as it is (Max,
+    /// 2026-10-15: "i dont want the banner to be opaque… the banner should
+    /// stay as it is") — over the wallpaper, a window's colour when one is
+    /// flush under it, and its ink measured against what is really behind.
+    /// The palette is worn by what opens FROM the bar (the boxes, see
+    /// [`Self::options_box_surface`]).
     fn options_regime(&self) -> Backdrop {
-        Backdrop::palette().unwrap_or(Backdrop {
+        Backdrop {
             matched: self.options_bar_matched,
             frost: self.options_pill_color,
             ink: None,
-        })
+        }
     }
 
     /// Whether the matched bar is bright enough to want dark text/ink.
@@ -2912,9 +2919,6 @@ impl App {
     /// This is the ONLY thing the frost sample feeds — the pills' own washes
     /// and shadows keep their matched-only behaviour.
     pub(crate) fn options_text_color(&self) -> [f32; 4] {
-        if let Some(ink) = Backdrop::palette().and_then(|b| b.ink) {
-            return ink;
-        }
         match self.options_backdrop() {
             Some(bg) => ink_on(bg),
             None => self.config.theme.text_rgba(),
@@ -2958,11 +2962,6 @@ impl App {
     /// the layer drawn BEHIND the sunset module (so they are literally the same
     /// material).
     pub(crate) fn options_bar_fill(&self) -> ([f32; 4], bool) {
-        // Wearing the palette: the bar is a strip of its surface — over a
-        // bare wallpaper too, where the palette's ink must still read.
-        if !crate::palette::dynamic() {
-            return (crate::palette::linear(crate::palette::current().surface()), true);
-        }
         match self.options_bar_matched {
             Some(c) => (c, true),
             None if self.options_paused() || self.config.accessibility.reduce_transparency => {
@@ -2985,7 +2984,7 @@ impl App {
     /// than by one borrowing the other's decision.
     pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
         let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
-        self.options_regime().surface(slab, ink_on(slab), true)
+        Backdrop::palette().unwrap_or(self.options_regime()).surface(slab, ink_on(slab), true)
     }
 
     /// The clipboard box's OWN regime — same matched window (that's genuinely
@@ -2999,11 +2998,11 @@ impl App {
     /// live — the clipboard zebra was violet, notif's was neutral grey, off
     /// the same purple-nebula wallpaper sampled at two different x-positions).
     fn clip_regime(&self) -> Backdrop {
-        Backdrop::palette().unwrap_or(Backdrop {
+        Backdrop {
             matched: self.options_bar_matched,
             frost: self.clip_pill_color,
             ink: None,
-        })
+        }
     }
 
     /// The surface a box at `rect` should wear: the same formula every box on
@@ -3045,7 +3044,7 @@ impl App {
     /// its OWN correctly-positioned frost (see `clip_regime`).
     pub(crate) fn clip_box_surface(&self) -> ([f32; 4], [f32; 4]) {
         let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
-        self.clip_regime().surface(slab, ink_on(slab), true)
+        Backdrop::palette().unwrap_or(self.clip_regime()).surface(slab, ink_on(slab), true)
     }
 
     /// Hover wash — stronger than the resting wash, with the same asymmetry.

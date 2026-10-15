@@ -316,8 +316,9 @@ The big daemon files are cohesive but long — go straight to the function:
   `~/.config/golem/palettes/*.json`. The choice is `colors` in `settings.json` (`ColorChoice`:
   `dynamic`, `palette`, `accent` = a hue slot of the palette). DYNAMIC ON (default) = the shell
   exactly as before (screen sampling); OFF = `Backdrop::palette()` in `options.rs` stands in for
-  every sampled regime (bar, clip, boxes, dock: the palette's surface as a match + its ink), the
-  bar is a solid strip of it (`options_bar_fill`), the window border is the accent all round and
+  the sampled regime of the BOXES and the DOCK (the palette's surface as a match + its ink); the
+  BANNER and its pills stay on the screen's colours whatever the mode (Max, 2026-10-15: "i dont
+  want the banner to be opaque… should stay as it is" — `options_regime`/`clip_regime`); the window border is the accent all round and
   the inactive border base02 (`border_stops`, `push_window_border`). `App::colors_apply` (start,
   a pick, a look change) resolves the `Theme` and `publish`es it on a thread into
   `~/.local/state/golem/theme/`: colors.json, foot.ini (both variants; running foots switch on

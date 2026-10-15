@@ -1383,20 +1383,25 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             view.subtitle = tr(if picked.dynamic {
                 "The shell takes its colours from the screen; the apps wear the palette."
             } else {
-                "Everything wears the palette."
+                "The dock, the boxes and the apps wear the palette."
             })
             .to_owned();
             view.groups.push(on_off(Some("Dynamic colour"), "colors-dynamic", picked.dynamic));
-            view.groups.push(group(
-                Some("Palette"),
-                "colors-palette",
-                110.0,
-                crate::palette::all()
-                    .into_iter()
-                    .map(|p| choice(p.name.clone(), p.id == theme.id, p.id))
-                    .collect(),
-            ));
-            let mut accents = vec![choice(tr("The palette's"), picked.accent.is_none(), "palette")];
+            // The palettes — only once there is a choice: one alone would be a
+            // row that picks nothing, and the page must fit a laptop's field.
+            let palettes = crate::palette::all();
+            if palettes.len() > 1 {
+                view.groups.push(group(
+                    Some("Palette"),
+                    "colors-palette",
+                    110.0,
+                    palettes
+                        .into_iter()
+                        .map(|p| choice(p.name.clone(), p.id == theme.id, p.id))
+                        .collect(),
+                ));
+            }
+            let mut accents = vec![choice(tr("Original"), picked.accent.is_none(), "palette")];
             accents.extend(crate::palette::HUES.iter().map(|(slot, name)| {
                 let picked = picked.accent.is_some() && theme.accent_slot == *slot;
                 choice(tr(name), picked, crate::palette::slot_name(*slot))
