@@ -2330,7 +2330,7 @@ impl App {
                 item.icon = asset_key("asset-audio");
                 continue;
             }
-            if !crate::thumbs::thumbable(&item.name) {
+            if !crate::thumbs::previewable(&item.name) {
                 continue;
             }
             let key = thumb_key(&item.path);

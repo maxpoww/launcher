@@ -162,6 +162,14 @@ fn moving_frames(path: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Whether a file may have a picture of its own, for the file windows and
+/// the desktop: EVERY file is asked for (Max, 2026-10-15: "as many as
+/// possible") — the worker finds one where any of its sources can (see
+/// `thumbnail`), and a file it finds none for keeps its type icon.
+pub fn previewable(_name: &str) -> bool {
+    true
+}
+
 /// Whether a file can plausibly get a real thumbnail (images always,
 /// videos and PDFs via the cache or external tools).
 pub fn thumbable(name: &str) -> bool {
@@ -223,27 +231,50 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
     Thumbs { requests, moving, moving_round }
 }
 
-/// Produce one thumbnail: cache, then in-process decode, then external
-/// tools; `None` when every source comes up empty.
+/// Produce one thumbnail; `None` when every source comes up empty. In
+/// order: the shared cache (another app's), our own kept previews, then by
+/// kind — a picture read here, the system's thumbnailer for its type
+/// (`thumb_more`), FFMPEG, the old tools, and pages drawn here for text and
+/// fonts. What took an outside program is kept for next time.
 fn thumbnail(path: &str) -> Option<Vec<u8>> {
     if let Some(px) = from_xdg_cache(path) {
         return Some(px);
     }
-    let size = ICON_SIZE.to_string();
+    if let Some(px) = kept_preview(path) {
+        return Some(px);
+    }
     let kind = file_asset_name(path);
     debug!("thumb: {path} classified {kind}");
-    match kind {
-        "asset-image" => {
-            // A big picture (a wallpaper is 20 megapixels and more) takes a
-            // moment to read whole: its preview is kept, and read back the
-            // next time instead of made again.
-            if let Some(px) = kept_preview(path) {
-                return Some(px);
-            }
-            let px = decode_image(path)?;
-            keep_preview(path, &px);
-            Some(px)
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let image = kind == "asset-image" || crate::thumb_more::mime_of(name).is_some_and(|m| m.starts_with("image/"));
+    // A picture read here: quick unless big (a wallpaper is 20 megapixels
+    // and more), and a big one's preview is kept.
+    if image {
+        if let Some(px) = decode_image(path) {
+            keep_preview(path, &px, false);
+            return Some(px);
         }
+    }
+    let ffmpeg = ffmpeg_tool();
+    let made = crate::thumb_more::by_thumbnailer(path, decode_image)
+        .or_else(|| crate::thumb_more::is_raw(name).then(|| crate::thumb_more::by_dcraw(path, decode_image)).flatten())
+        .or_else(|| older_tools(path, kind))
+        .or_else(|| {
+            // FFMPEG reads what moves, a song's cover and many a picture.
+            let moving = matches!(kind, "asset-video" | "asset-audio") || image || crate::thumb_more::is_raw(name);
+            moving.then(|| crate::thumb_more::by_ffmpeg(path, ffmpeg.as_deref()?, decode_image)).flatten()
+        })
+        .or_else(|| crate::thumb_more::is_font(name).then(|| crate::thumb_more::font_page(path)).flatten())
+        .or_else(|| (!image && !matches!(kind, "asset-video" | "asset-audio")).then(|| crate::thumb_more::text_page(path)).flatten())?;
+    keep_preview(path, &made, true);
+    Some(made)
+}
+
+/// The tools named before the thumbnailers were read: a video's frame
+/// through `ffmpegthumbnailer`, a PDF's first page through `pdftoppm`.
+fn older_tools(path: &str, kind: &str) -> Option<Vec<u8>> {
+    let size = ICON_SIZE.to_string();
+    match kind {
         "asset-video" => via_tool(path, "ffmpegthumbnailer", |src, dst| {
             vec![
                 "-i".into(),
@@ -281,7 +312,12 @@ fn from_xdg_cache(path: &str) -> Option<Vec<u8>> {
     let base = cache_base().join("thumbnails");
     for size in ["large", "normal"] {
         let png = base.join(size).join(format!("{digest}.png"));
-        if png.exists() {
+        // (Made before the file last changed: stale.)
+        let fresh = match (std::fs::metadata(&png).and_then(|m| m.modified()), std::fs::metadata(path).and_then(|m| m.modified())) {
+            (Ok(made), Ok(changed)) => made >= changed,
+            _ => false,
+        };
+        if fresh {
             if let Some(px) = decode_image(png.to_str()?) {
                 return Some(px);
             }
@@ -296,9 +332,9 @@ const KEEP_FROM_BYTES: u64 = 600 * 1024;
 /// Where the preview of the picture at `path` is kept: named by the file,
 /// its size and when it last changed, so an edited picture gets a new one.
 /// `None`: no such file, or a small one.
-fn kept_path(path: &str) -> Option<PathBuf> {
+fn kept_path(path: &str, always: bool) -> Option<PathBuf> {
     let meta = std::fs::metadata(path).ok()?;
-    if meta.len() < KEEP_FROM_BYTES {
+    if !always && meta.len() < KEEP_FROM_BYTES {
         return None;
     }
     let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
@@ -315,7 +351,7 @@ fn kept_path(path: &str) -> Option<PathBuf> {
 
 /// The kept preview of a picture, if it is there and whole.
 fn kept_preview(path: &str) -> Option<Vec<u8>> {
-    let file = kept_path(path)?;
+    let file = kept_path(path, true)?;
     let bytes = std::fs::read(&file).ok()?;
     crate::apps::still_used(&file);
     // (The same length a freshly made one has: anything else is a stale or
@@ -326,8 +362,8 @@ fn kept_preview(path: &str) -> Option<Vec<u8>> {
 
 /// Keep a preview for next time. Best effort: a full disk only means it is
 /// made again.
-fn keep_preview(path: &str, pixels: &[u8]) {
-    let Some(file) = kept_path(path) else {
+fn keep_preview(path: &str, pixels: &[u8], always: bool) {
+    let Some(file) = kept_path(path, always) else {
         return;
     };
     if let Some(dir) = file.parent() {

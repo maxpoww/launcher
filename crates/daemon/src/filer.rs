@@ -3801,7 +3801,7 @@ impl App {
                 item.icon = crate::desktop::asset_key("asset-audio");
                 continue;
             }
-            if !crate::thumbs::thumbable(&item.name) {
+            if !crate::thumbs::previewable(&item.name) {
                 continue;
             }
             let key = crate::desktop::thumb_key(&item.path);
@@ -4119,7 +4119,13 @@ impl App {
                 hits.cols.push(hit);
             }
         }
-        let steps = crumbs(&win.dir, &win.places);
+        // (A window opened from outside on a folder of its own starts its
+        // steps there, as Home's start at Home.)
+        let mut starts = win.places.clone();
+        if let Some(root) = &win.root {
+            starts.push(Place { name: file_name(root), path: root.clone(), icon: String::new(), gap: false, start: true });
+        }
+        let steps = crumbs(&win.dir, &starts);
         if let Some(renderer) = win.renderer.as_mut() {
             let widths: Vec<f32> = steps
                 .iter()

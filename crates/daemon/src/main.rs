@@ -45,6 +45,7 @@ mod filer;
 mod files;
 mod files_icon;
 mod gears_icon;
+mod thumb_more;
 mod bin_motion;
 mod focus_cycle;
 mod font_index;

@@ -79,7 +79,7 @@ impl App {
             if let Some(&(slot, _)) = self.thumb_map.get(id) {
                 layer = self.thumb_layer_base() + slot as u32;
                 placeholder = false;
-            } else if crate::thumbs::thumbable(name) && self.thumb_pending.insert(id.to_owned()) {
+            } else if crate::thumbs::previewable(name) && self.thumb_pending.insert(id.to_owned()) {
                 self.thumbs.request(id);
             }
         }
