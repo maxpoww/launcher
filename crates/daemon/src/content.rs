@@ -1556,6 +1556,9 @@ pub struct FrameInput<'a> {
     /// Recycle-bin hover-grow (0 = rest size, 1 = a dragged icon is over it):
     /// swells the bin tile to acknowledge the drop it would accept.
     pub trash_hover: f32,
+    /// Golem Files' launcher: its first figure layer and how far its folders
+    /// are out (`files_icon`); `None` draws its theme icon.
+    pub files_fig: Option<(u32, f32)>,
     /// Hint shown centered in an empty Install section (index state /
     /// search prompt); empty string falls back to "No results".
     pub install_hint: &'a str,
@@ -1787,6 +1790,7 @@ pub fn scene(
         drag,
         trash_react,
         trash_hover,
+        files_fig,
         install_hint,
         busy,
         failed,
@@ -2250,6 +2254,23 @@ pub fn scene(
                     ring: -1.0,
                     plate,
                 });
+            }
+            continue;
+        }
+        // Golem Files' launcher: the plate holds still on a blank layer, the
+        // folders over it come out from behind the front one on hover.
+        if let Some((first, out)) =
+            files_fig.filter(|_| entries.get(entry_idx).is_some_and(|e| e.id == crate::filer::APP_ID))
+        {
+            scene.icons.push(IconInst {
+                rect: icon_rect,
+                layer: first + crate::files_icon::BLANK,
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: plate_of(entry_idx),
+            });
+            for (layer, rect) in crate::files_icon::quads(icon_rect, out) {
+                scene.icons.push(IconInst { rect, layer: first + layer, tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
             }
             continue;
         }

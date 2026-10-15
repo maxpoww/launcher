@@ -385,6 +385,14 @@ pub(crate) fn bin_lid_figure() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(&crate::look::figure(include_bytes!("../assets/dock/bin-lid.svg")))?.take()))
 }
 
+/// Golem Files' launcher figures, ready to upload (`files_icon::figures`).
+pub(crate) fn files_figures() -> Option<Vec<Vec<u8>>> {
+    crate::files_icon::figures()
+        .iter()
+        .map(|svg| Some(with_mips(rasterize_svg(svg)?.take())))
+        .collect()
+}
+
 /// The ready-to-upload tile of a fixed-tail figure, by entry id.
 pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;

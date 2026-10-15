@@ -43,6 +43,7 @@ mod emoji;
 mod emoji_table;
 mod filer;
 mod files;
+mod files_icon;
 mod focus_cycle;
 mod font_index;
 mod fractional;
@@ -830,6 +831,7 @@ fn main() -> anyhow::Result<()> {
         pkg_hit_placeholders: Vec::new(),
         pkg_layer_base: 0,
         bin_layer: 0,
+        files_layer: None,
         pkg_state: PkgIndexState::Loading,
         pkg_load_kicked: false,
         busy_ids: HashSet::new(),
@@ -888,6 +890,7 @@ fn main() -> anyhow::Result<()> {
         fast: fast_launch::FastLaunch::default(),
         trash_react: 0.0,
         trash_hover: 0.0,
+        files_hover: files_icon::Hover::default(),
         reorder_slot: None,
         grid_drag_page_at: None,
         apps_slide: Vec::new(),
@@ -1944,6 +1947,8 @@ pub struct App {
     pkg_layer_base: u32,
     /// Texture layer of the Recycle Bin's metal figure (see `apps::dock_figure`).
     bin_layer: u32,
+    /// First of Golem Files' four launcher layers (`files_icon`), once drawn.
+    files_layer: Option<u32>,
     /// Whether the package index is usable yet (drives the Install hint).
     pkg_state: PkgIndexState,
     /// Whether we've asked the nix thread to load the index yet. The index is
@@ -2128,6 +2133,8 @@ pub struct App {
     /// Recycle-bin hover, eased 0→1 while a dragged icon is over the bin as a
     /// drop target: the bin swells to acknowledge the drop it would accept.
     trash_hover: f32,
+    /// Golem Files' launcher under the pointer: its folders out (`files_icon`).
+    files_hover: files_icon::Hover,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no
     /// grid drag in flight).
     reorder_slot: Option<usize>,
@@ -4412,6 +4419,12 @@ impl App {
             icons.push(can);
             icons.push(lid);
         }
+        // Golem Files' launcher: its folders, one layer each, for the hover.
+        self.files_layer = apps::files_figures().map(|figs| {
+            let first = icons.len() as u32;
+            icons.extend(figs);
+            first
+        });
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
             Some(renderer) => {

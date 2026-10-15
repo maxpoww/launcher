@@ -1051,6 +1051,13 @@ impl App {
         if hv_moving {
             self.dirty = true;
         }
+        // Golem Files' launcher under the pointer (no drag): its folders out.
+        let on_files = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::filer::APP_ID));
+        if self.files_hover.step(on_files, dt) {
+            self.dirty = true;
+        }
         // A pending drag-to-install tile counts as busy (its "Installing…"
         // note holds from the drop until the rescan swaps in the real app)
         // unless the install failed, when it flashes "Failed" and awaits a
@@ -1426,6 +1433,7 @@ impl App {
                 drag: drag_frame,
                 trash_react: self.trash_react,
                 trash_hover: self.trash_hover,
+                files_fig: self.files_layer.map(|l| (l, self.files_hover.value())),
                 install_hint: self.install_hint(),
                 busy: &busy,
                 failed: &failed,
