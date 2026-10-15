@@ -355,6 +355,8 @@
  "Add to places": "Añadir a lugares",
  "Remove from places": "Quitar de lugares",
  "Show hidden files": "Mostrar archivos ocultos",
+ "Show the whole system": "Ver todo el sistema",
+ "Only my folders": "Solo mis carpetas",
  "Hide hidden files": "Ocultar archivos ocultos",
  "{n} could not be moved to the bin": "{n} no se pudieron mover a la papelera",
  "Nothing to undo": "Nada que deshacer",

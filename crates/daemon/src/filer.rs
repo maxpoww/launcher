@@ -1062,6 +1062,8 @@ pub(crate) struct Asked {
     pub placed: bool,
     /// Dot files are shown (the ground's row then puts them away).
     pub hidden: bool,
+    /// The windows go above Home, to the whole system.
+    pub whole: bool,
 }
 
 /// The apps `gio mime <type>` names for a kind of file, as desktop ids
@@ -1229,6 +1231,7 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
         folder,
         placed,
         hidden,
+        whole,
     } = asked;
     let row = |label: &'static str, action: Action| Row::Item {
         label,
@@ -1319,6 +1322,12 @@ pub(crate) fn menu_rows(asked: Asked) -> Vec<Row> {
                 row(tr("Hide hidden files"), Action::ToggleHidden)
             } else {
                 row(tr("Show hidden files"), Action::ToggleHidden)
+            },
+            // The way out for whoever needs `/` (`floor`).
+            if whole {
+                row(tr("Only my folders"), Action::ToggleSystem)
+            } else {
+                row(tr("Show the whole system"), Action::ToggleSystem)
             },
         ]);
         // A folder arranged by hand can go back to being in order of name
@@ -1931,6 +1940,19 @@ pub(crate) fn places(
     out
 }
 
+/// THE FLOOR (Max, 2026-10-15: "Files should go from ~/ onwards; an average
+/// user does not want /var, /etc"): a file window lives under a ROOT — Home,
+/// the bin, a stick, a phone, another disk — and goes no higher than the one
+/// it is under; a folder under none is not shown. With the whole system let
+/// in (`Settings::files_whole_system`) there is no floor.
+pub(crate) fn floor<'a>(dir: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
+    roots
+        .iter()
+        .filter(|r| dir.starts_with(r))
+        .max_by_key(|r| r.components().count())
+        .map(PathBuf::as_path)
+}
+
 /// `..` — the folder this one is in — as the first of the places (Max,
 /// 2026-10-14): a click goes up, and it is where things are dragged OUT of
 /// a folder to.
@@ -1940,10 +1962,14 @@ pub(crate) const UP: &str = "..";
 /// (Max, 2026-10-14: "tiene que ser otra carpeta arriba de Home" — not an
 /// arrow, not set apart), then the rest. At the root there is nowhere up:
 /// no `..` at all (Max: hidden, not grey).
-pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
+/// Without the whole system, nothing is above a root either (`floor`).
+pub(crate) fn with_up(places: &[Place], dir: &Path, roots: Option<&[PathBuf]>) -> Vec<Place> {
     let Some(parent) = dir.parent() else {
         return places.to_vec();
     };
+    if roots.is_some_and(|roots| floor(dir, roots).is_none_or(|f| f == dir)) {
+        return places.to_vec();
+    }
     let mut out = vec![Place {
         name: UP.to_owned(),
         path: parent.to_path_buf(),
@@ -2216,6 +2242,12 @@ impl App {
     /// Open a window on `dir` (Home when it is not a folder).
     pub(crate) fn filer_open(&mut self, dir: PathBuf) {
         let dir = if dir.is_dir() { dir } else { home() };
+        // Something of the system's (another app asking to show it): not
+        // without the whole system let in.
+        if !self.filer_may_show(&dir) {
+            warn!("files: {} is the system's: not shown (the whole system is not let in)", dir.display());
+            return;
+        }
         let Some(xdg) = self.filer.xdg.as_ref() else {
             warn!("files: the compositor has no xdg-shell; handing {} to the system", dir.display());
             let exec = format!("xdg-open {}", launch::shell_quote(&dir.to_string_lossy()));
@@ -2393,12 +2425,13 @@ impl App {
         let marks = parse_marks(&std::fs::read_to_string(marks_path()).unwrap_or_default());
         let list = places(&home, &user_dirs, &bin_root(), &marks, &self.desktop.volumes);
         let marked: Vec<PathBuf> = marks.into_iter().map(|(_, p)| p).collect();
+        let (whole, roots) = (self.settings.files_whole_system, self.filer_roots());
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
                 win.marks = marked.clone();
                 // (Each window's own: `..` is the folder ITS folder is in.)
-                let list = with_up(&list, &win.dir);
+                let list = with_up(&list, &win.dir, (!whole).then_some(roots.as_slice()));
                 if win.places != list {
                     win.places = list;
                     // (A drag over them held a place by its number.)
@@ -2409,9 +2442,28 @@ impl App {
         }
     }
 
+    /// The roots a file window lives under (`floor`): Home, the bin, and
+    /// what is plugged in and open.
+    pub(crate) fn filer_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![home(), bin_root()];
+        roots.extend(self.desktop.volumes.iter().filter(|v| !v.closed).map(|v| v.path.clone()));
+        roots
+    }
+
+    /// Whether a file window may show `dir`: under a root, or anywhere with
+    /// the whole system let in.
+    pub(crate) fn filer_may_show(&self, dir: &Path) -> bool {
+        self.settings.files_whole_system || floor(dir, &self.filer_roots()).is_some()
+    }
+
     /// Go to `dir`, the folder shown now becoming the way back.
     fn filer_go(&mut self, id: u32, dir: PathBuf) {
         let dir = tidy(dir);
+        // (Above the floor: nowhere to go, and nothing for the way back.)
+        if !self.filer_may_show(&dir) {
+            info!("files: {} is the system's: staying", dir.display());
+            return;
+        }
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -2451,12 +2503,18 @@ impl App {
 
     /// To the folder this one is in, which comes up with this one selected.
     fn filer_up(&mut self, id: u32) {
+        let roots = self.filer_roots();
+        let whole = self.settings.files_whole_system;
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         let Some(parent) = win.dir.parent().map(Path::to_path_buf) else {
             return;
         };
+        // (No higher than its root.)
+        if !whole && floor(&win.dir, &roots).is_none_or(|f| f == win.dir) {
+            return;
+        }
         win.reveal = Some(win.dir.to_string_lossy().into_owned());
         self.filer_go(id, parent);
     }
@@ -2464,6 +2522,14 @@ impl App {
     /// Show `dir` in window `id`: empty at once, listed off the loop,
     /// watched from now on. History is the caller's.
     fn filer_show(&mut self, id: u32, dir: PathBuf) {
+        // Above the floor (an old step back, the whole system just shut
+        // out): Home instead.
+        let dir = if self.filer_may_show(&dir) {
+            dir
+        } else {
+            info!("files: {} is the system's: Home instead", dir.display());
+            home()
+        };
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -2771,6 +2837,7 @@ impl App {
     fn filer_open_menu(&mut self, id: u32, at: (f32, f32), item: Option<usize>) {
         let icon_scale = self.icon_scale();
         let paste = self.clipboard_files().is_some();
+        let whole = self.settings.files_whole_system;
         let by_hand = self
             .filer
             .win(id)
@@ -2812,6 +2879,7 @@ impl App {
             folder,
             placed,
             hidden: win.hidden,
+            whole,
         };
         let rows = keep_systems(menu_rows(asked), &win.selected);
         win.asked = Some(asked);
@@ -3108,6 +3176,20 @@ impl App {
                 }
                 self.filer_list(id);
             }
+            Action::ToggleSystem => {
+                self.settings.files_whole_system = !self.settings.files_whole_system;
+                self.settings.save();
+                info!("files: the whole system {}", if self.settings.files_whole_system { "let in" } else { "shut out" });
+                // Every window: its `..` again, and out to Home if it stood above.
+                self.filer_places();
+                let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+                for id in ids {
+                    let Some(dir) = self.filer.win(id).map(|w| w.dir.clone()) else { continue };
+                    if !self.filer_may_show(&dir) {
+                        self.filer_go(id, home());
+                    }
+                }
+            }
             Action::NewFolder => self.filer_new_folder(id),
             Action::CleanUp => {
                 info!("files: {} is in order of name again", dir.display());
@@ -3291,7 +3373,7 @@ impl App {
         let Some(text) = self.filer.win(id).and_then(|w| w.go_to.clone()) else {
             return;
         };
-        let Some((dir, file)) = typed_place(&text, &home()) else {
+        let Some((dir, file)) = typed_place(&text, &home()).filter(|(dir, _)| self.filer_may_show(dir)) else {
             // (Nothing there: the field says so, and stays.)
             if let Some(win) = self.filer.win_mut(id) {
                 win.go_bad = true;
@@ -6301,14 +6383,21 @@ mod tests {
             gap: false,
             start: true,
         };
-        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"));
+        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"), None);
         assert_eq!((places[0].name.as_str(), places[0].path.as_path()), (UP, Path::new("/home/max/Documents")));
         // Home follows, right under it; the way here still starts at Home.
         assert!(!places[1].gap && places[1].path == home.path);
         let names: Vec<String> = crumbs(Path::new("/home/max/Documents/Work"), &places).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["Home", "Documents", "Work"]);
         // At the root there is nowhere up: no `..`.
-        let at_root = with_up(std::slice::from_ref(&home), Path::new("/"));
+        let at_root = with_up(std::slice::from_ref(&home), Path::new("/"), None);
+        // The floor: at Home no `..`; under it, `..`; the system's, no root.
+        let roots = [PathBuf::from("/home/max"), PathBuf::from("/run/media/max/STICK")];
+        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max"), Some(&roots)).iter().all(|p| p.name != UP));
+        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents"), Some(&roots)).iter().any(|p| p.name == UP));
+        assert_eq!(floor(Path::new("/run/media/max/STICK/photos"), &roots), Some(Path::new("/run/media/max/STICK")));
+        assert_eq!(floor(Path::new("/etc"), &roots), None);
+        assert_eq!(floor(Path::new("/home"), &roots), None);
         assert_eq!(at_root, [home]);
     }
 
@@ -6399,6 +6488,7 @@ mod tests {
             folder: false,
             placed: false,
             hidden: false,
+            whole: false,
         };
         let actions = |rows: Vec<Row>| -> Vec<Action> {
             rows.into_iter()
@@ -6408,18 +6498,18 @@ mod tests {
                 })
                 .collect()
         };
-        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }));
+        let one = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false }));
         assert_eq!(one.first(), Some(&Action::Open));
         // Properties is last: it is the row the menu turns into a box from.
         assert_eq!(one.last(), Some(&Action::Properties));
         assert!(one.contains(&Action::Rename) && !one.contains(&Action::Paste));
         // A group: nothing that is about ONE thing.
-        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }));
+        let many = actions(menu_rows(Asked { on_item: true, many: true, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false }));
         assert!(!many.contains(&Action::Rename) && !many.contains(&Action::Properties));
         assert!(many.contains(&Action::Cut) && many.contains(&Action::MoveToBin));
         // The folder itself: Paste only with files on the clipboard.
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })).first(), Some(&Action::Paste));
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })).first(), Some(&Action::NewFolder));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false })).first(), Some(&Action::Paste));
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: false, bin: InBin::No, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false })).first(), Some(&Action::NewFolder));
         // An archive can be opened out; anything can be packed.
         // The system's folders have no "Move to bin" (and no separator left dangling).
         let home: HashSet<String> = [home().to_string_lossy().into_owned()].into();
@@ -6458,11 +6548,11 @@ mod tests {
         let less = marks_with(text, Path::new("/home/max/My Work"), false);
         assert_eq!(less, "file:///home/max/Pictures/Wallpapers\nsftp://host/x Remote\n");
         // In the bin: back or gone, and the bin emptied; never a new thing.
-        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }));
+        let binned = actions(menu_rows(Asked { on_item: true, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false }));
         assert!(binned.contains(&Action::PutBack) && binned.contains(&Action::Erase));
         assert!(!binned.contains(&Action::Rename) && !binned.contains(&Action::MoveToBin));
-        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false })), [Action::EmptyBin]);
-        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false }).is_empty());
+        assert_eq!(actions(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Top, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false })), [Action::EmptyBin]);
+        assert!(menu_rows(Asked { on_item: false, many: false, paste: true, bin: InBin::Deeper, by_hand: false, archive: false, file: false, folder: false, placed: false, hidden: false, whole: false }).is_empty());
     }
 
     #[test]

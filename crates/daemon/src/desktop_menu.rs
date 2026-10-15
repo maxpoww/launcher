@@ -88,6 +88,9 @@ pub(crate) enum Action {
     AddPlace,
     RemovePlace,
     ToggleHidden,
+    /// The file windows go above Home, to the whole system, or stay in the
+    /// owner's own (`Settings::files_whole_system`).
+    ToggleSystem,
 }
 
 /// One row: an action, or a rule between groups.
