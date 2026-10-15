@@ -62,10 +62,6 @@ pub(crate) struct Settings {
     /// The file manager's windows show a folder as a LIST (name, size,
     /// date) and not as icons.
     pub(crate) files_list: bool,
-    /// The file manager may go above Home, to the whole system (Max,
-    /// 2026-10-15: off — "Files should go from ~/ onwards"; the way out
-    /// for whoever needs `/`).
-    pub(crate) files_whole_system: bool,
 }
 
 impl Settings {

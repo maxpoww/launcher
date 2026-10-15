@@ -100,6 +100,45 @@ pub(crate) fn volume_icon(v: &Mounted) -> &'static str {
     icon_of_mount(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &v.path)
 }
 
+/// The owner's own DISKS (Max, 2026-10-15): filesystems mounted for good
+/// somewhere of their own (`/mnt/data`, `/data`) that the owner can write
+/// to — roots for the file windows, as a stick is. Not the system's own
+/// mounts, not Home's, not what the volume service brings (sticks, phones).
+pub(crate) fn own_disks() -> Vec<std::path::PathBuf> {
+    let home = crate::filer::home();
+    disks_in(&std::fs::read_to_string("/proc/mounts").unwrap_or_default())
+        .into_iter()
+        .filter(|p| !home.starts_with(p) && !p.starts_with(&home))
+        .filter(|p| {
+            use std::os::unix::ffi::OsStrExt;
+            let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
+            // SAFETY: a valid C string, no other preconditions.
+            unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+        })
+        .collect()
+}
+
+/// The mount points of real disks in a `/proc/mounts` listing, the system's
+/// own places left out.
+fn disks_in(mounts: &str) -> Vec<std::path::PathBuf> {
+    const REAL: [&str; 9] = ["ext4", "ext3", "btrfs", "xfs", "f2fs", "vfat", "exfat", "ntfs", "ntfs3"];
+    const SYSTEM: [&str; 11] = ["/proc", "/sys", "/dev", "/run", "/nix", "/boot", "/efi", "/var", "/tmp", "/etc", "/usr"];
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for line in mounts.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(_), Some(at), Some(kind)) = (f.next(), f.next(), f.next()) else { continue };
+        let at = std::path::PathBuf::from(crate::desktop_send::unescape_mount(at));
+        if !REAL.contains(&kind) || at == std::path::Path::new("/") || at.starts_with("/home") {
+            continue;
+        }
+        if SYSTEM.iter().any(|s| at.starts_with(s)) || out.contains(&at) {
+            continue;
+        }
+        out.push(at);
+    }
+    out
+}
+
 /// [`volume_icon`] for a folder, read from a `/proc/mounts` listing.
 fn icon_of_mount(mounts: &str, path: &std::path::Path) -> &'static str {
     let device = mounts.lines().find_map(|line| {
@@ -655,6 +694,14 @@ pub(crate) fn spawn(results: Sender<Vec<Mounted>>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_owners_disks_are_the_real_ones_outside_the_systems_places() {
+        let mounts = "/dev/nvme0n1p2 / btrfs rw 0 0\n/dev/nvme0n1p1 /boot vfat rw 0 0\n/dev/sda1 /mnt/data ext4 rw 0 0\n\
+                      tmpfs /run tmpfs rw 0 0\n/dev/sdb1 /run/media/max/STICK vfat rw 0 0\n/dev/nvme0n1p2 /nix/store btrfs ro 0 0\n\
+                      /dev/nvme0n1p3 /home btrfs rw 0 0\n/dev/sdc1 /data\\040two xfs rw 0 0\n";
+        assert_eq!(super::disks_in(mounts), vec![std::path::PathBuf::from("/mnt/data"), std::path::PathBuf::from("/data two")]);
+    }
+
     #[test]
     fn a_card_reader_is_a_memory_card_and_the_rest_a_stick() {
         let mounts = "/dev/mmcblk0p1 /run/media/max/NIKON\\0401\\040V2 vfat rw 0 0\n\
