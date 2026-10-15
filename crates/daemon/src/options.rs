@@ -7453,8 +7453,10 @@ impl crate::App {
         // its rim catches from above (icon.wgsl).
         // Softer than the first cut (Max, 2026-10-15: "el color negro en los
         // platos… un poco mas debil"): 0.04 / 0.85 read as hard black tiles.
-        const NIGHT_PLATE_DIM_L: f32 = 0.02;
-        const NIGHT_PLATE_ALPHA: f32 = 0.60;
+        // Softer again (Max, 2026-10-15: "todavia no me gusta… hacelo mas
+        // suave"): the plate no darker than the surface, at 40%.
+        const NIGHT_PLATE_DIM_L: f32 = 0.0;
+        const NIGHT_PLATE_ALPHA: f32 = 0.40;
         let night = crate::look::dark() && luminance(fill) <= 0.179;
         let plate_target = {
             let (lift, dim, alpha) = if night {
