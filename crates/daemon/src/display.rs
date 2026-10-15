@@ -400,6 +400,8 @@ impl GolemSettings {
             out.push_str(LIGHT_EFFECTS_LUA);
             out.push('\n');
         }
+        out.push_str(&self.colours_lua());
+        out.push('\n');
         for line in self.input_lua() {
             out.push_str(&line);
             out.push('\n');
@@ -501,6 +503,26 @@ impl GolemSettings {
 
 /// Blur off, in the compositor's own config call.
 const LIGHT_EFFECTS_LUA: &str = "hl.config({ [\"decoration.blur.enabled\"] = false })";
+
+impl GolemSettings {
+    /// The palette's colours the compositor should start with — the screen's
+    /// ground always, the window borders when the shell wears the palette —
+    /// so a compositor that comes up without the dock (its start, a crash
+    /// recovery) wears them before the dock's live push, instead of
+    /// hyprland.lua's peach (`App::push_window_border` sends the same).
+    fn colours_lua(&self) -> String {
+        let theme = crate::palette::resolve(&self.colors.clone().unwrap_or_default(), self.dark.unwrap_or(true));
+        let ground = crate::palette::hex(theme.bg());
+        if theme.dynamic {
+            return format!("hl.config({{ misc = {{ background_color = 0xff{ground} }} }})");
+        }
+        let accent = crate::palette::hex(theme.accent());
+        let inactive = crate::palette::hex(theme.raised());
+        format!(
+            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ 'rgba({accent}ff)' }}, angle = 90 }}, inactive_border = 'rgba({inactive}ff)' }} }}, misc = {{ background_color = 0xff{ground} }} }})"
+        )
+    }
+}
 
 impl GolemSettings {
     /// Turn the light effects on or off: at once in the compositor, and in
@@ -1085,10 +1107,18 @@ mod tests {
             DisplayChoice { mode: "1440x900@60.00".to_owned(), scale: 1.25, position: None },
         );
         let lua = store.lua();
-        assert!(lua.lines().all(|l| l.starts_with("--") || l.starts_with("hl.monitor(")), "{lua}");
+        assert!(lua.lines().all(|l| l.starts_with("--") || l.starts_with("hl.monitor(") || l.starts_with("hl.config(")), "{lua}");
         assert!(lua.contains(
             r#"hl.monitor({ output = "desc:Apple Computer Inc Color LCD", mode = "1440x900@60.00", position = "auto", scale = 1.25 })"#
         ));
+        // The palette's ground for the compositor's start; the borders only
+        // when the shell wears the palette (dynamic colour off).
+        assert!(lua.contains("hl.config({ misc = { background_color = 0xff16171a } })"), "{lua}");
+        assert!(!lua.contains("active_border"), "{lua}");
+        store.colors = Some(crate::palette::ColorChoice { dynamic: false, ..Default::default() });
+        let lua = store.lua();
+        assert!(lua.contains("active_border = { colors = { 'rgba(ffbe98ff)' }, angle = 90 }, inactive_border = 'rgba(2a2e35ff)'"), "{lua}");
+        assert!(lua.contains("background_color = 0xff16171a"), "{lua}");
     }
 
     #[test]
