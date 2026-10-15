@@ -48,6 +48,11 @@ struct Globals {
     light: [f32; 4],
 }
 
+/// Physical px of room a label's layout width gets beyond its box (see the
+/// shaping in `draw`): absorbs the f32 rounding between a width measured in
+/// logical px and the same text shaped in physical px.
+const WIDTH_SLACK: f32 = 0.5;
+
 /// Per-instance data for one rounded rectangle.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1894,9 +1899,18 @@ impl Renderer {
                 font_system,
                 Metrics::new(label.font_px * scale, label.line_px * scale),
             );
+            // A hair of slack on the width. A box that hugs its text is sized
+            // from `measure_text` in logical px and laid out here in physical
+            // px: the same shaping, scaled twice through f32, lands an ulp on
+            // either side of the box — and when the text comes out the wider
+            // by that ulp, cosmic-text wraps its last glyph onto a second line
+            // the box never shows. The ASUS at scale 0.67 read "Searc" under
+            // its dock box (2026-10-15); the dev box at 1.25 happened to round
+            // the other way. Half a pixel can never show as overflow and ends
+            // the coin toss for every label at once.
             buffer.set_size(
                 font_system,
-                Some(label.max_w * scale),
+                Some(label.max_w * scale + WIDTH_SLACK),
                 Some(label.line_px * scale),
             );
             let (family, weight) = resolve_family(label.family);
@@ -2961,5 +2975,54 @@ impl Drop for NoVblankWait {
         if self.0 {
             std::env::remove_var("vblank_mode");
         }
+    }
+}
+
+#[cfg(test)]
+mod width_slack {
+    use super::WIDTH_SLACK;
+    use glyphon::cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
+
+    /// How many lines `text` takes at `px`, laid out in a box `width` wide.
+    fn lines(fs: &mut FontSystem, text: &str, px: f32, width: f32) -> usize {
+        let mut b = Buffer::new(fs, Metrics::new(px, px * 1.3));
+        b.set_size(fs, Some(width), Some(px * 1.3));
+        b.set_text(fs, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+        b.shape_until_scroll(fs, false);
+        b.lines.iter().map(|l| l.layout_opt().as_ref().map_or(0, Vec::len)).sum()
+    }
+
+    /// The dock's path: a pill measured at the logical size, the label shaped
+    /// at the physical size into a box of the measured width × the scale.
+    /// Without the slack the last glyph wraps away at some scales (the ASUS's
+    /// 0.67: "Searc"); with it, never.
+    #[test]
+    fn a_label_in_a_box_of_its_own_measured_width_never_wraps() {
+        if std::env::var_os("FONTCONFIG_FILE").is_none() && !std::path::Path::new("/etc/fonts/fonts.conf").exists() {
+            eprintln!("no fontconfig here: skipped");
+            return;
+        }
+        let mut fs = FontSystem::new();
+        let mut wrapped_bare = 0;
+        for text in ["Search", "Buscar", "Golem Files", "Cancel", "100%", "14:09", "Dark websites", "Catppuccin"] {
+            let measured = {
+                let mut b = Buffer::new(&mut fs, Metrics::new(15.0, 19.5));
+                b.set_text(&mut fs, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+                b.shape_until_scroll(&mut fs, false);
+                b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+            };
+            for scale in [0.5f32, 0.6666667, 0.75, 0.8, 1.0, 1.25, 1.5, 1.6666666, 2.0] {
+                // The pill's own arithmetic (content.rs): padding added to make
+                // the pill, taken off again for the label's box — a round trip
+                // that need not come back to the same float.
+                let pad = crate::options::PILL_PAD_X * scale;
+                let (px, width) = (15.0 * scale, ((measured + 2.0 * pad) - 2.0 * pad) * scale);
+                if lines(&mut fs, text, px, width) > 1 {
+                    wrapped_bare += 1;
+                }
+                assert_eq!(lines(&mut fs, text, px, width + WIDTH_SLACK), 1, "{text:?} at {scale} wraps with the slack");
+            }
+        }
+        eprintln!("bare boxes that wrapped: {wrapped_bare}");
     }
 }
