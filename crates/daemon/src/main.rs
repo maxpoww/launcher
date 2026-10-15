@@ -45,6 +45,7 @@ mod filer;
 mod files;
 mod files_icon;
 mod gears_icon;
+mod apps_icon;
 mod thumb_more;
 mod bin_motion;
 mod focus_cycle;
@@ -896,6 +897,7 @@ fn main() -> anyhow::Result<()> {
         trash_hover: 0.0,
         files_hover: files_icon::Hover::default(),
         gears_spin: gears_icon::Spin::default(),
+        apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
         reorder_slot: None,
         grid_drag_page_at: None,
@@ -2148,6 +2150,9 @@ pub struct App {
     files_hover: files_icon::Hover,
     /// The control panel's gears under the pointer (`gears_icon`).
     gears_spin: gears_icon::Spin,
+    /// The apps button: its pages under the pointer, its squares down while
+    /// the grid is open (`apps_icon`).
+    apps_motion: apps_icon::AppsMotion,
     /// The dock bin's states, fed from the whole shell (`bin_motion`).
     bin_motion: bin_motion::BinMotion,
     /// Drag-to-reorder: the make-room gap's display slot (`None` = no

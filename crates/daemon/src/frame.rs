@@ -1074,6 +1074,29 @@ impl App {
         if self.files_hover.step(on_files, dt) {
             self.dirty = true;
         }
+        // The apps button: its pages turn under the pointer, its squares go
+        // down while the grid is open (a frame for each place, its layer).
+        let on_apps = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == apps::APPS_GRID_ID));
+        let grid_open = self.ui.target() == crate::state::Target::Open && !self.control_panel;
+        if self.apps_motion.step(on_apps, grid_open, dt) {
+            self.dirty = true;
+            // (Every entry that is the button: the dock's and the grid's.)
+            let layers: Vec<u32> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.id == apps::APPS_GRID_ID)
+                .filter_map(|(i, _)| self.icon_layers.get(i).copied())
+                .collect();
+            let (pages, down) = self.apps_motion.place();
+            if let (Some(chain), Some(renderer)) = (apps::apps_moved(pages, down), self.renderer.as_mut()) {
+                for layer in layers {
+                    renderer.update_icon_layer(layer, &chain);
+                }
+            }
+        }
         // The control panel's gears: they turn under the pointer, the frame
         // for each angle put in its layer.
         let on_gears = self.gesture.dragging.is_none()
@@ -1470,6 +1493,7 @@ impl App {
                 trash_hover: self.trash_hover,
                 bin: self.bin_motion.pose(),
                 files_fig: self.files_layer.map(|l| (l, self.files_hover.value())),
+                apps_beat: self.apps_motion.scale(),
                 install_hint: self.install_hint(),
                 busy: &busy,
                 failed: &failed,

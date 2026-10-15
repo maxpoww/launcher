@@ -1567,6 +1567,8 @@ pub struct FrameInput<'a> {
     /// Golem Files' launcher: its first figure layer and how far its folders
     /// are out (`files_icon`); `None` draws its theme icon.
     pub files_fig: Option<(u32, f32)>,
+    /// The apps button's beat (1 = rest; `apps_icon`).
+    pub apps_beat: f32,
     /// Hint shown centered in an empty Install section (index state /
     /// search prompt); empty string falls back to "No results".
     pub install_hint: &'a str,
@@ -1838,6 +1840,7 @@ pub fn scene(
         trash_hover,
         bin,
         files_fig,
+        apps_beat,
         install_hint,
         busy,
         failed,
@@ -2329,6 +2332,24 @@ pub fn scene(
             for (layer, rect) in crate::files_icon::quads(icon_rect, out) {
                 scene.icons.push(IconInst { rect, layer: first + layer, tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
             }
+            continue;
+        }
+        // The apps button beating: the figure grows about its middle, its
+        // plate holds still (on the Files launcher's blank layer).
+        if let (Some((first, _)), true) = (
+            files_fig,
+            apps_beat != 1.0 && entries.get(entry_idx).is_some_and(|e| e.id == crate::apps::APPS_GRID_ID),
+        ) {
+            scene.icons.push(IconInst {
+                rect: icon_rect,
+                layer: first + crate::files_icon::BLANK,
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: plate_of(entry_idx),
+            });
+            let (w, h) = (icon_rect.w * apps_beat, icon_rect.h * apps_beat);
+            let rect = Rect::new(icon_rect.x + (icon_rect.w - w) / 2.0, icon_rect.y + (icon_rect.h - h) / 2.0, w, h);
+            scene.icons.push(IconInst { rect, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
             continue;
         }
         scene.icons.push(IconInst {

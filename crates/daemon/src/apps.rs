@@ -396,8 +396,13 @@ fn gears_figure() -> Option<Vec<u8>> {
 /// frame nearest it, each pixel doubled to the icon size (the mips below
 /// are the frame itself), or `None` while it is not drawn yet.
 pub(crate) fn gears_turned(angle: f32) -> Option<Vec<u8>> {
-    let small = crate::gears_icon::frame(angle)?;
-    let (n, k) = (crate::gears_icon::FRAME as usize, (ICON_SIZE / crate::gears_icon::FRAME) as usize);
+    Some(frame_chain(&crate::gears_icon::frame(angle)?, crate::gears_icon::FRAME))
+}
+
+/// A drawn frame of `frame` px square, each pixel doubled to the icon size
+/// (the mips below are the frame itself).
+fn frame_chain(small: &[u8], frame: u32) -> Vec<u8> {
+    let (n, k) = (frame as usize, (ICON_SIZE / frame) as usize);
     let side = n * k;
     let mut base = vec![0u8; side * side * 4];
     for y in 0..side {
@@ -406,7 +411,19 @@ pub(crate) fn gears_turned(angle: f32) -> Option<Vec<u8>> {
             base[d..d + 4].copy_from_slice(&small[s..s + 4]);
         }
     }
-    Some(with_mips(base))
+    with_mips(base)
+}
+
+/// The apps button at rest (`apps_icon`); its frames are drawn meanwhile.
+fn apps_figure() -> Option<Vec<u8>> {
+    crate::apps_icon::warm();
+    Some(with_mips(rasterize_svg(crate::apps_icon::svg(0.0, 0.0).as_bytes())?.take()))
+}
+
+/// The apps button with its squares `pages` to the left and `down` of a
+/// drop down, ready to upload, once that frame is drawn.
+pub(crate) fn apps_moved(pages: f32, down: f32) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::apps_icon::frame(pages, down)?, crate::apps_icon::FRAME))
 }
 
 /// Golem Files' launcher figures, ready to upload (`files_icon::figures`).
@@ -421,6 +438,9 @@ pub(crate) fn files_figures() -> Option<Vec<Vec<u8>>> {
 pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     if id == CONTROL_PANEL_ID {
         return gears_figure();
+    }
+    if id == APPS_GRID_ID {
+        return apps_figure();
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
