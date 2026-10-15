@@ -11,15 +11,17 @@
 //! The owner's choice lives under `colors` in `~/.config/golem/settings.json`:
 //!
 //! - `dynamic` — on (the default): the shell keeps colouring itself from the
-//!   screen, exactly as it always has; off: the bar, the dock, the boxes and
-//!   the window borders wear the palette instead.
+//!   screen, exactly as it always has (the banner always does); off: the
+//!   dock, the boxes and the window borders wear the palette instead.
 //! - `palette` — which one (absent: Golem's).
-//! - `accent` — one of the palette's own hues (`base0D`…); absent: the
-//!   palette's accent. An accent is always a colour OF the palette, so a
-//!   pick survives a change of palette and still matches it.
 //! - `dark_websites` — off by default: websites stay as they are made. On:
 //!   Seam darkens them (Dark Reader) while the look is dark — it reads this
 //!   from `colors.json` (Golem's `seam/golem-chrome.js`, DARK WEBSITES).
+//!
+//! The ACCENT is the palette's own (its file names the slot) — never chosen
+//! apart from it (Max, 2026-10-15: "the acent colour should come from the
+//! pallete, not apart"). A palette that wants another accent is another
+//! palette.
 //!
 //! The dark/light choice stays the "Dark mode" setting's; it picks the
 //! palette's variant.
@@ -47,24 +49,12 @@ pub(crate) const GOLEM: &str = "golem";
 
 /// The palettes inside the daemon: (id, file), Golem's first. The others are
 /// base16 schemes from tinted-theming (MIT) whose hues sit in the standard
-/// slots, so the accent's names (Red… Brown) stay true for them.
+/// slots (red in base08… brown in base0F), as every role here assumes.
 const BUILT_IN: &[(&str, &str)] = &[
     (GOLEM, include_str!("../assets/palettes/golem.json")),
     ("catppuccin", include_str!("../assets/palettes/catppuccin.json")),
     ("gruvbox", include_str!("../assets/palettes/gruvbox.json")),
     ("nord", include_str!("../assets/palettes/nord.json")),
-];
-
-/// The eight hues an accent can be, by slot, with their names in the panel.
-pub(crate) const HUES: [(usize, &str); 8] = [
-    (0x08, "Red"),
-    (0x09, "Orange"),
-    (0x0A, "Yellow"),
-    (0x0B, "Green"),
-    (0x0C, "Cyan"),
-    (0x0D, "Blue"),
-    (0x0E, "Purple"),
-    (0x0F, "Brown"),
 ];
 
 /// The owner's colour choice, as saved in `settings.json`.
@@ -74,8 +64,6 @@ pub(crate) struct ColorChoice {
     pub dynamic: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub palette: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accent: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dark_websites: bool,
 }
@@ -86,7 +74,7 @@ fn yes() -> bool {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { dynamic: true, palette: None, accent: None, dark_websites: false }
+        Self { dynamic: true, palette: None, dark_websites: false }
     }
 }
 
@@ -293,7 +281,7 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         .or_else(|| palettes.iter().find(|p| p.id == GOLEM))
         .cloned()
         .unwrap_or_else(|| parse(GOLEM, BUILT_IN[0].1).expect("Golem's palette parses"));
-    let accent_slot = choice.accent.as_deref().and_then(slot).filter(|s| *s >= 8).unwrap_or(p.accent);
+    let accent_slot = p.accent;
     Theme {
         id: p.id,
         name: p.name,
@@ -741,7 +729,6 @@ impl crate::App {
             match key {
                 "colors-dynamic" => c.dynamic = value == "on",
                 "colors-palette" => c.palette = (value != GOLEM).then(|| value.to_owned()),
-                "colors-accent" => c.accent = slot(value).filter(|s| *s >= 8).map(slot_name),
                 "colors-websites" => c.dark_websites = value == "on",
                 _ => return,
             }
@@ -766,9 +753,12 @@ mod tests {
         assert!(dark.dynamic && dark.dark);
         assert_eq!(dark.accent(), [0xff, 0xbe, 0x98]);
         assert!(rel_lum(dark.bg()) < rel_lum(dark.ink()), "dark: light ink on a dark ground");
-        let light = resolve(&ColorChoice { dynamic: false, palette: None, accent: Some("base0D".into()), dark_websites: false }, false);
+        let light = resolve(&ColorChoice { dynamic: false, palette: None, dark_websites: false }, false);
         assert!(!light.dynamic);
-        assert_eq!(light.accent_slot, 0x0D);
+        assert_eq!(light.accent_slot, 0x09, "the palette's own accent, always");
+        // An old settings file that still names an accent of its own: ignored.
+        let old: ColorChoice = serde_json::from_str(r#"{"dynamic":false,"accent":"base0D"}"#).unwrap();
+        assert_eq!(resolve(&old, true).accent_slot, 0x09);
         assert!(rel_lum(light.bg()) > rel_lum(light.ink()), "light: dark ink on a light ground");
     }
 

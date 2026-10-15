@@ -316,7 +316,8 @@ The big daemon files are cohesive but long — go straight to the function:
   Max tuned), beside Catppuccin, Gruvbox and Nord (tinted-theming base16, hues in the standard
   slots so the accent's names stay true; `every_built_in_palette_reads_and_reads_well`); the owner's go in
   `~/.config/golem/palettes/*.json`. The choice is `colors` in `settings.json` (`ColorChoice`:
-  `dynamic`, `palette`, `accent` = a hue slot of the palette). DYNAMIC ON (default) = the shell
+  `dynamic`, `palette`, `dark_websites`); the ACCENT is always the palette's own (its file's
+  `accent` slot — Max, 2026-10-15: "should come from the pallete, not apart"; no picker). DYNAMIC ON (default) = the shell
   exactly as before (screen sampling); OFF = `Backdrop::palette()` in `options.rs` stands in for
   the sampled regime of the BOXES and the DOCK (the palette's surface as a match + its ink); the
   BANNER and its pills stay on the screen's colours whatever the mode (Max, 2026-10-15: "i dont
