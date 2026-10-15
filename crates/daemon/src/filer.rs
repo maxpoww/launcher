@@ -4962,6 +4962,8 @@ impl App {
             win.gap = hole;
         }
         self.filer_request_draw(id);
+        // The dock's bin reacts to it (`bin_motion`): a frame for it to see.
+        self.schedule_frame();
     }
 
     /// Our drag was let go somewhere (its target may read the files for a
@@ -4969,6 +4971,7 @@ impl App {
     /// where it is, so a click lands on what is seen.
     pub(crate) fn filer_drag_dropped(&mut self) {
         self.filer_dock_back();
+        self.schedule_frame();
         // (Let go over one of our own windows: that window's drop settles
         // it — marked here first, the things would be drawn back in their
         // old places for a frame.)
@@ -5025,6 +5028,7 @@ impl App {
 
     pub(crate) fn filer_drag_end(&mut self, done: bool) {
         self.filer_dock_back();
+        self.schedule_frame();
         let Some(drag) = self.filer.drag.take() else {
             return;
         };

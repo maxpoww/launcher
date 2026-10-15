@@ -4497,6 +4497,15 @@ impl App {
 
     /// Where our own drag's pointer is in the DOCK surface's coordinates
     /// (the bin watches it come); `None` when it is not over the dock.
+    /// Whether what the desktop has in hand could go in the bin: a stick or
+    /// a phone is ejected there, not thrown away, so a drag of only those
+    /// leaves the bin quiet (its orange says "this can be thrown away").
+    pub(crate) fn desktop_drag_throwable(&self) -> bool {
+        self.desktop.drag.as_ref().is_none_or(|d| {
+            d.items.iter().any(|&i| self.desktop.items.get(i).is_some_and(|it| it.kind != Kind::Volume))
+        })
+    }
+
     pub(crate) fn desktop_drag_dock_pos(&self) -> Option<(f32, f32)> {
         // (A drag out of a file manager window is ours too.)
         if self.desktop.drag.is_none() && !self.filer.dragging() {

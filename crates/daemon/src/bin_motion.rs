@@ -110,8 +110,11 @@ impl BinMotion {
             self.drop = Some(Swallow { t: 0.0, lid: p.lid, red: p.red, swell: p.swell });
             (self.lift, self.wide, self.aside, self.orange, self.red, self.shake) = (0.0, 0.0, 0.0, 0.0, 0.0, None);
         }
-        // The can shakes as the pointer comes on it, and as a drag begins.
-        if (now.hover && !was.hover && !now.dragging) || (now.dragging && !was.dragging) {
+        // The can shakes as the pointer comes on it, and as a drag begins —
+        // never while it swallows: the hover waits for the swallow to end,
+        // then comes in whole (the lid lifts, the can shakes).
+        let swallowing = self.drop.is_some();
+        if !swallowing && ((now.hover && !was.hover && !now.dragging) || (now.dragging && !was.dragging)) {
             self.shake = Some(0.0);
         }
         let mut moving = false;
@@ -138,6 +141,10 @@ impl BinMotion {
             d.t += dt / DROP_SECS;
             if d.t >= 1.0 {
                 self.drop = None;
+                // The pointer still on it: now the hover.
+                if now.hover {
+                    self.shake = Some(0.0);
+                }
             }
             moving = true;
         }
@@ -210,5 +217,21 @@ mod tests {
         assert!(rest.red < 0.01 && rest.lid.1.abs() < 0.05 && (rest.swell - 1.0).abs() < 0.01 && rest.can == (0.0, 1.0, 1.0));
         run(&mut m, Inputs { open: true, ..Default::default() }, 0.6);
         assert!(m.pose().open > 0.95 && m.pose().lid.0 > 13.0, "open: the lid aside");
+    }
+
+    #[test]
+    fn let_go_with_the_pointer_on_it_the_swallow_comes_first_then_the_hover() {
+        let mut m = BinMotion::default();
+        run(&mut m, Inputs { dragging: true, over: true, ..Default::default() }, 0.6);
+        // Let go: the pointer is on the bin with nothing in hand any more.
+        let hover = Inputs { hover: true, ..Default::default() };
+        m.step(hover, 0.016);
+        run(&mut m, hover, 0.5);
+        assert!(m.shake.is_none() && m.lift < 0.01, "no hover while it swallows");
+        run(&mut m, hover, 0.4);
+        assert!(m.drop.is_none(), "swallowed");
+        assert!(m.shake.is_some() || m.lift > 0.5, "then the hover comes in");
+        run(&mut m, hover, 0.6);
+        assert!(m.pose().lid.1 < -7.0, "the lid lifted for the hover");
     }
 }
