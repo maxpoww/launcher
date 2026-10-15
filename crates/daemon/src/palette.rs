@@ -386,6 +386,7 @@ pub(crate) fn write_all(dir: &Path, t: &Theme) {
     put("qt5.conf", qt5_scheme(t));
     put("nvim.lua", nvim_lua(t));
     btop_files(t);
+    obs_system_theme();
     for app in ["qt5ct", "qt6ct"] {
         let conf = config_home().join(app).join(format!("{app}.conf"));
         // Ours to write: absent, or already pointing at the theme. One
@@ -723,6 +724,74 @@ fn btop_files(t: &Theme) {
     }
 }
 
+/// OBS draws with its own themes (Yami, its default, is its own grey) — but
+/// its "System" theme draws with Qt's palette, which is ours (Max,
+/// 2026-10-15: "y porque obs no cambia?"). Put on it while OBS has no theme
+/// of the owner's choosing, and never while it runs: it writes its config
+/// back when it closes.
+fn obs_system_theme() {
+    let ini = config_home().join("obs-studio").join("user.ini");
+    let Ok(text) = std::fs::read_to_string(&ini) else {
+        return; // Never opened: Golem's OBS fit seeds it with this theme.
+    };
+    if running(&["obs", ".obs-wrapped"]) {
+        return;
+    }
+    if let Some(out) = with_obs_theme(&text) {
+        crate::persist::write_text("theme", &ini, &out);
+    }
+}
+
+/// `user.ini` with the System theme under `[Appearance]`, or `None` when it
+/// already names a theme.
+fn with_obs_theme(text: &str) -> Option<String> {
+    const THEME: &str = "Theme=com.obsproject.System";
+    let mut in_appearance = false;
+    for l in text.lines() {
+        let l = l.trim();
+        if l.starts_with('[') {
+            in_appearance = l == "[Appearance]";
+        } else if in_appearance && l.starts_with("Theme=") {
+            return None;
+        }
+    }
+    let mut out = String::new();
+    let mut done = false;
+    for l in text.lines() {
+        out.push_str(l);
+        out.push('\n');
+        if !done && l.trim() == "[Appearance]" {
+            out.push_str(THEME);
+            out.push('\n');
+            done = true;
+        }
+    }
+    if !done {
+        if !out.ends_with("\n\n") && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("[Appearance]\n");
+        out.push_str(THEME);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Whether a process of ours by one of these names is running.
+fn running(names: &[&str]) -> bool {
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
+        std::fs::read_to_string(e.path().join("comm")).is_ok_and(|n| names.contains(&n.trim()))
+            && std::fs::read_to_string(e.path().join("status")).ok().is_some_and(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Uid:"))
+                    .and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
+                    == Some(me)
+            })
+    })
+}
+
 fn btop_theme(t: &Theme) -> String {
     let c = &t.c;
     let h = |i: usize| format!("#{}", hex(c[i]));
@@ -1043,6 +1112,11 @@ mod tests {
             assert_eq!(l.split_once('=').unwrap().1.split(", ").count(), 21, "Qt 5's count: {l}");
         }
         assert_eq!(adwaita_accent([0xff, 0xbe, 0x98]), "orange");
+        let ini = "[General]\nFirstRun=true\n\n[Appearance]\nFontScale=10\n";
+        let with = with_obs_theme(ini).expect("no theme yet");
+        assert!(with.contains("[Appearance]\nTheme=com.obsproject.System\nFontScale=10"));
+        assert_eq!(with_obs_theme(&with), None, "a theme named is kept");
+        assert!(with_obs_theme("[General]\nFirstRun=true\n").unwrap().ends_with("\n[Appearance]\nTheme=com.obsproject.System\n"));
         let btop = btop_theme(&t);
         assert!(btop.contains("theme[main_bg]=\"#16171a\"") && btop.contains("theme[title]=\"#ffbe98\""));
         assert_eq!(btop.matches("theme[").count(), 10 + 5 + 27);
