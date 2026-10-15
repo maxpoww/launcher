@@ -384,6 +384,7 @@ pub(crate) fn write_all(dir: &Path, t: &Theme) {
     put("gtk3.css", gtk3_css(t));
     put("qt.conf", qt_scheme(t));
     put("nvim.lua", nvim_lua(t));
+    btop_files(t);
     for app in ["qt5ct", "qt6ct"] {
         let conf = config_home().join(app).join(format!("{app}.conf"));
         // Ours to write: absent, or already pointing at the theme. One
@@ -617,6 +618,76 @@ fn qtct_conf(scheme: &Path, t: &Theme) -> String {
     )
 }
 
+/// btop (Omarchy themes it too): a `golem` theme in btop's own themes folder,
+/// and btop pointed at it while it still wears its out-of-the-box theme —
+/// a theme the owner picked in btop is theirs and left alone.
+fn btop_files(t: &Theme) {
+    let dir = config_home().join("btop");
+    crate::persist::write_text("theme", &dir.join("themes").join("golem.theme"), &btop_theme(t));
+    let conf = dir.join("btop.conf");
+    match std::fs::read_to_string(&conf) {
+        Ok(text) => {
+            let mut changed = false;
+            let lines: Vec<String> = text
+                .lines()
+                .map(|l| {
+                    let v = l.trim_start().strip_prefix("color_theme").map(|r| r.trim_start().trim_start_matches('=').trim().trim_matches('"'));
+                    match v {
+                        Some("Default") | Some("") => {
+                            changed = true;
+                            "color_theme = \"golem\"".to_owned()
+                        }
+                        _ => l.to_owned(),
+                    }
+                })
+                .collect();
+            if changed {
+                crate::persist::write_text("theme", &conf, &(lines.join("\n") + "\n"));
+            }
+        }
+        // Never started: it takes the rest of its settings from its defaults.
+        Err(_) => crate::persist::write_text("theme", &conf, "color_theme = \"golem\"\n"),
+    }
+}
+
+fn btop_theme(t: &Theme) -> String {
+    let c = &t.c;
+    let h = |i: usize| format!("#{}", hex(c[i]));
+    let a = format!("#{}", hex(t.accent()));
+    let mut out = format!("# Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change.\n", t.name);
+    let mut put = |k: &str, v: &str| out.push_str(&format!("theme[{k}]=\"{v}\"\n"));
+    put("main_bg", &h(0));
+    put("main_fg", &h(5));
+    put("title", &a);
+    put("hi_fg", &a);
+    put("selected_bg", &h(2));
+    put("selected_fg", &h(7));
+    put("inactive_fg", &h(3));
+    put("graph_text", &h(4));
+    put("meter_bg", &h(2));
+    put("proc_misc", &a);
+    for k in ["cpu_box", "mem_box", "net_box", "proc_box", "div_line"] {
+        put(k, &h(3));
+    }
+    // Graphs run through the palette's hues: cool to hot, green to blue.
+    for (k, (s, m, e)) in [
+        ("temp", (0xD, 0xA, 0x8)),
+        ("cpu", (0xB, 0xA, 0x8)),
+        ("free", (0xB, 0xC, 0xD)),
+        ("cached", (0xD, 0xC, 0xB)),
+        ("available", (0xC, 0xB, 0xA)),
+        ("used", (0xA, 0x9, 0x8)),
+        ("download", (0xC, 0xD, 0xE)),
+        ("upload", (0xE, 0x9, 0x8)),
+        ("process", (0xB, 0xA, 0x8)),
+    ] {
+        put(&format!("{k}_start"), &h(s));
+        put(&format!("{k}_mid"), &h(m));
+        put(&format!("{k}_end"), &h(e));
+    }
+    out
+}
+
 /// Neovim (mini.base16, Golem's home layer loads this at each start).
 fn nvim_lua(t: &Theme) -> String {
     let palette: String = t.c.iter().enumerate().map(|(i, c)| format!("    {} = '#{}',\n", slot_name(i), hex(*c))).collect();
@@ -660,6 +731,29 @@ fn poke(t: &Theme, look_changed: bool) {
     // config only at its start, so its windows are told the colours.
     let _ = look_changed;
     foot_live(t);
+    // btop reads its config again on SIGUSR2 (and with it, its theme).
+    signal_all("btop", libc::SIGUSR2);
+}
+
+/// Send `sig` to every process of ours named `comm`.
+fn signal_all(comm: &str, sig: libc::c_int) {
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        if !std::fs::read_to_string(e.path().join("comm")).is_ok_and(|n| n.trim() == comm) {
+            continue;
+        }
+        let owner = std::fs::read_to_string(e.path().join("status")).ok().and_then(|s| {
+            s.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
+        });
+        if owner == Some(me) {
+            // SAFETY: a plain kill(2) of a process of our own user.
+            unsafe { libc::kill(pid, sig) };
+        }
+    }
 }
 
 /// THE OPEN TERMINALS FOLLOW, LIVE (Max, 2026-10-15: "we need the themes to
@@ -867,6 +961,9 @@ mod tests {
         let qt = qt_scheme(&t);
         assert_eq!(qt.lines().nth(1).unwrap().split(", ").count(), 22);
         assert_eq!(adwaita_accent([0xff, 0xbe, 0x98]), "orange");
+        let btop = btop_theme(&t);
+        assert!(btop.contains("theme[main_bg]=\"#16171a\"") && btop.contains("theme[title]=\"#ffbe98\""));
+        assert_eq!(btop.matches("theme[").count(), 10 + 5 + 27);
         let osc = foot_osc(&t);
         assert!(osc.contains("\x1b]11;#16171a\x1b\\"), "ground");
         assert!(osc.contains("\x1b]4;1;#e05252\x1b\\"), "red, as foot.ini");
