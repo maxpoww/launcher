@@ -130,6 +130,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if in.glass < -0.5 {
             cov = select(0.0, 1.0, sd < 0.0);
         }
+        // THE NIGHT LIGHT on the solid boxes too (Max, 2026-10-15: the boxes
+        // and menus lit like the dock): a filled panel of box size — not a
+        // pill, a row, a frame or a whole window's ground — catches a line of
+        // light along its top and falls into shadow toward its bottom.
+        let w = in.rect_max.x - in.rect_min.x;
+        let h = in.rect_max.y - in.rect_min.y;
+        let whole = w >= globals.screen.x - 2.0 && h >= globals.screen.y - 2.0;
+        if globals.light.x > 0.0 && in.border <= 0.0 && in.glass > -0.5 && h >= 80.0 && w >= 120.0 && !whole {
+            let from_top = in.px.y - in.rect_min.y;
+            let edge = max(-sd, 0.0);
+            let top = 0.10 * exp(-from_top * from_top / 4.0) * clamp(1.0 - edge / 3.0, 0.0, 1.0);
+            let vig = clamp((from_top / h - 0.5) / 0.5, 0.0, 1.0) * -0.04;
+            rgb = clamp(rgb + vec3<f32>((top + vig) * globals.light.x), vec3<f32>(0.0), vec3<f32>(1.0));
+        }
         let a   = in.color.a * globals.alpha * cov;
         return vec4<f32>(rgb * a, a);
     }
