@@ -1080,7 +1080,12 @@ impl App {
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == apps::APPS_GRID_ID));
         let grid_open = self.ui.target() == crate::state::Target::Open && !self.control_panel;
-        if self.apps_motion.step(on_apps, grid_open, dt) {
+        // (Holding pins, the hover spits them first; the pages after.)
+        let spat = self
+            .layout_at(self.ui.extent())
+            .dock_overflow
+            .is_none_or(|o| self.dock_pin_off >= o.max_off - 0.02);
+        if self.apps_motion.step(on_apps, grid_open, spat, dt) {
             self.dirty = true;
             // (Every entry that is the button: the dock's and the grid's.)
             let layers: Vec<u32> = self
@@ -1494,6 +1499,7 @@ impl App {
                 bin: self.bin_motion.pose(),
                 files_fig: self.files_layer.map(|l| (l, self.files_hover.value())),
                 apps_beat: self.apps_motion.scale(),
+                apps_stencil: self.apps_stencil,
                 install_hint: self.install_hint(),
                 busy: &busy,
                 failed: &failed,

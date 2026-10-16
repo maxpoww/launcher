@@ -620,6 +620,10 @@ pub struct DockOverflow {
     pub apps_slot: usize,
     pub hidden_right: usize,
     pub max_off: f32,
+    /// Where the window of shown pins stands (0 = the first `cap` shown).
+    pub off: f32,
+    /// How many pins the window shows.
+    pub cap: usize,
 }
 
 /// The QUICK BOX (Super+H, `panel.rs`): one setting in a box of its own
@@ -1202,6 +1206,8 @@ pub fn layout(
             apps_slot: pins,
             hidden_right: (0..pins).filter(|&i| i as f32 >= off && pin_f(i) < 0.5).count(),
             max_off,
+            off,
+            cap: pin_cap,
         }),
         dock_basin_w: basin_w,
         sections,
@@ -1569,6 +1575,8 @@ pub struct FrameInput<'a> {
     pub files_fig: Option<(u32, f32)>,
     /// The apps button's beat (1 = rest; `apps_icon`).
     pub apps_beat: f32,
+    /// Its stencil layer: its plate cut by its squares while it holds pins.
+    pub apps_stencil: Option<u32>,
     /// Hint shown centered in an empty Install section (index state /
     /// search prompt); empty string falls back to "No results".
     pub install_hint: &'a str,
@@ -1841,6 +1849,7 @@ pub fn scene(
         bin,
         files_fig,
         apps_beat,
+        apps_stencil,
         install_hint,
         busy,
         failed,
@@ -2131,12 +2140,31 @@ pub fn scene(
     // Dock icons: slot index → entry index via dock_order. `dock_slide`
     // parts the row around a hovering drag; a dock-origin drag's own
     // icon is hidden (its ghost is in hand).
+    // THE OVERFLOW AS A LINE (Max, 2026-10-16): the pins that do not fit
+    // go on, a slot apart, BEHIND the apps button — which is drawn over them
+    // with its plate cut by its squares while it holds one — and are cut
+    // off at the row's left edge and at the button's right side; never one
+    // over another, never shrunk. Those at the window's ends are drawn after
+    // the loop, cut (`edge`), the button over them (`apps_top`).
+    let overflow = layout.dock_overflow;
+    let mut edge_pins: Vec<(usize, usize, f32)> = Vec::new();
+    let mut apps_top: Vec<IconInst> = Vec::new();
+    let mut apps_drawn: Option<Rect> = None;
     for slot in 0..layout.dock_slots.len() {
         let Some(&entry_idx) = dock_order.get(slot) else {
             break;
         };
         if dock_hidden == Some(entry_idx) {
             continue;
+        }
+        if let Some(ov) = overflow.filter(|o| slot < o.apps_slot) {
+            let s = slot as f32 - ov.off;
+            if s < 0.0 || s > ov.cap as f32 - 1.0 {
+                if s > -1.0 && s < ov.cap as f32 + 1.0 {
+                    edge_pins.push((slot, entry_idx, s));
+                }
+                continue;
+            }
         }
         // A pin folded into the overflow tile (or slid off the left end)
         // shrinks away with its slot.
@@ -2334,22 +2362,35 @@ pub fn scene(
             }
             continue;
         }
-        // The apps button beating: the figure grows about its middle, its
-        // plate holds still (on the Files launcher's blank layer).
-        if let (Some((first, _)), true) = (
-            files_fig,
-            apps_beat != 1.0 && entries.get(entry_idx).is_some_and(|e| e.id == crate::apps::APPS_GRID_ID),
-        ) {
-            scene.icons.push(IconInst {
-                rect: icon_rect,
-                layer: first + crate::files_icon::BLANK,
-                tint: [0.0; 4],
-                ring: -1.0,
-                plate: plate_of(entry_idx),
-            });
-            let (w, h) = (icon_rect.w * apps_beat, icon_rect.h * apps_beat);
-            let rect = Rect::new(icon_rect.x + (icon_rect.w - w) / 2.0, icon_rect.y + (icon_rect.h - h) / 2.0, w, h);
-            scene.icons.push(IconInst { rect, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
+        // THE APPS BUTTON: while it holds pins it and its plate grow, the
+        // plate cut by its squares (the stencil) so the pin behind shows
+        // through; its beat grows the figure (its plate holding still).
+        if entries.get(entry_idx).is_some_and(|e| e.id == crate::apps::APPS_GRID_ID) {
+            let held = overflow.map_or(0.0, |o| (o.max_off - o.off).clamp(0.0, 1.0));
+            let about = |r: Rect, k: f32| {
+                let (w, h) = (r.w * k, r.h * k);
+                Rect::new(r.x + (r.w - w) / 2.0, r.y + (r.h - h) / 2.0, w, h)
+            };
+            let tile = about(icon_rect, 1.0 + crate::apps_icon::HOLDING_GROW * held);
+            let figure = about(tile, apps_beat);
+            let mut quads = Vec::new();
+            match (apps_stencil.filter(|_| held > 0.01), files_fig) {
+                (Some(stencil), _) => {
+                    quads.push(IconInst { rect: tile, layer: stencil, tint: [0.0; 4], ring: -1.45, plate: plate_of(entry_idx) });
+                    quads.push(IconInst { rect: figure, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
+                }
+                (None, Some((first, _))) if apps_beat != 1.0 => {
+                    quads.push(IconInst { rect: tile, layer: first + crate::files_icon::BLANK, tint: [0.0; 4], ring: -1.0, plate: plate_of(entry_idx) });
+                    quads.push(IconInst { rect: figure, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
+                }
+                _ => quads.push(IconInst { rect: tile, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.0, plate: plate_of(entry_idx) }),
+            }
+            if overflow.is_some() {
+                apps_top.extend(quads);
+            } else {
+                scene.icons.extend(quads);
+            }
+            apps_drawn = Some(tile);
             continue;
         }
         scene.icons.push(IconInst {
@@ -2408,47 +2449,46 @@ pub fn scene(
             }
         }
     }
-    // The overflow tile's count: how many pins are folded into it, on a
-    // small pill at the Apps tile's top-right corner.
-    if let Some(ov) = layout.dock_overflow.filter(|o| o.hidden_right > 0) {
-        if let (Some(slot), Some(&vcx)) = (layout.dock_slots.get(ov.apps_slot), dock_vcx.get(ov.apps_slot)) {
-            let scale = dock_scales.get(ov.apps_slot).copied().unwrap_or(1.0);
-            let size = (dock_icon * scale).min(slot.h.min(dock_slot) + MAGNIFY_HEADROOM);
-            let top = slot.y + slot.h - DOCK_BASELINE_PAD * icon_scale - size;
-            let font_px = 10.0 * icon_scale.max(1.0);
-            let text = ov.hidden_right.to_string();
-            let pill_h = font_px + 4.0;
-            let pill_w = (text.len() as f32 * font_px * 0.62 + 7.0).max(pill_h);
-            let rect = Rect::new(vcx + size / 2.0 - pill_w * 0.75, top - pill_h * 0.25, pill_w, pill_h);
-            let bg = dock_bg;
-            scene.rects.push(RectInst {
-                rect,
-                radius: pill_h / 2.0,
-                color: [bg[0], bg[1], bg[2], bg[3].max(0.9)],
-                glass: 0.0,
-                border: 0.0,
-            });
-            scene.rects.push(RectInst {
-                rect,
-                radius: pill_h / 2.0,
-                color: plate_rim([bg[0], bg[1], bg[2], bg[3].max(0.9)]),
-                glass: 0.0,
-                border: 1.0,
-            });
-            scene.labels.push(Label {
-                text,
-                pos: (rect.x + pill_w / 2.0, rect.y + (pill_h - font_px * 1.3) / 2.0),
-                max_w: pill_w,
-                font_px,
-                line_px: font_px * 1.3,
-                centered: true,
-                dim: false,
-                cache: true,
-                family: Some(FONT_BOLD),
-                color: Some(dock_ink),
-                clip: None,
+    // The overflow's line ends: the pins half out at the row's left edge and
+    // those going in behind the apps button, full size, a slot apart, cut at
+    // the row's start and at the button's right side (short of its round
+    // corner, so nothing shows past it); then the button over them. (The
+    // count pill this replaced is gone: the last one in shows behind.)
+    if let (Some(ov), Some(apps)) = (overflow, apps_drawn) {
+        let apps_cx = dock_vcx.get(ov.apps_slot).copied().unwrap_or(apps.x + apps.w / 2.0);
+        let mut edge = GridContent {
+            clip: Rect::new(
+                layout.dock_slots.first().map_or(0.0, |r| r.x),
+                0.0,
+                (apps.x + apps.w * 0.78) - layout.dock_slots.first().map_or(0.0, |r| r.x),
+                surface.1,
+            ),
+            ..Default::default()
+        };
+        let drop = 1.0 + (stretch - 1.0) * DOCK_STRETCH_GAIN;
+        for &(slot, entry_idx, s) in &edge_pins {
+            let Some(slot_rect) = layout.dock_slots.get(slot) else { continue };
+            let cx = if s < 0.0 {
+                dock_vcx.get(slot + 1).map_or(apps_cx, |x| x - dock_slot)
+            } else {
+                apps_cx + (s - ov.cap as f32) * dock_slot
+            };
+            let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
+            let size = dock_icon;
+            edge.icons.push(IconInst {
+                rect: Rect::new(cx - size / 2.0, baseline - size * drop, size, size * drop),
+                layer: layer_of(entry_idx),
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: plate_of(entry_idx),
             });
         }
+        scene.grids.push(edge);
+        scene.grids.push(GridContent {
+            clip: Rect::new(0.0, 0.0, surface.0, surface.1),
+            icons: std::mem::take(&mut apps_top),
+            ..Default::default()
+        });
     }
     // Hover tooltip: the hovered dock icon's app name in a pill above it
     // (dock icons carry no label of their own, unlike grid cells). Gated

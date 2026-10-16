@@ -837,6 +837,7 @@ fn main() -> anyhow::Result<()> {
         pkg_layer_base: 0,
         bin_layer: 0,
         files_layer: None,
+        apps_stencil: None,
         pkg_state: PkgIndexState::Loading,
         pkg_load_kicked: false,
         busy_ids: HashSet::new(),
@@ -1962,6 +1963,8 @@ pub struct App {
     bin_layer: u32,
     /// First of Golem Files' four launcher layers (`files_icon`), once drawn.
     files_layer: Option<u32>,
+    /// The apps button's stencil layer (`apps_icon::stencil_svg`).
+    apps_stencil: Option<u32>,
     /// Whether the package index is usable yet (drives the Install hint).
     pkg_state: PkgIndexState,
     /// Whether we've asked the nix thread to load the index yet. The index is
@@ -4439,6 +4442,12 @@ impl App {
             icons.push(can);
             icons.push(lid);
         }
+        // The apps button's stencil: its plate cut by its squares while it
+        // holds pins (`apps_icon`).
+        self.apps_stencil = apps::apps_stencil().map(|chain| {
+            icons.push(chain);
+            icons.len() as u32 - 1
+        });
         // Golem Files' launcher: its folders, one layer each, for the hover.
         self.files_layer = apps::files_figures().map(|figs| {
             let first = icons.len() as u32;

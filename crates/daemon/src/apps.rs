@@ -420,6 +420,11 @@ fn apps_figure() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::svg(0.0, 0.0).as_bytes())?.take()))
 }
 
+/// The apps button's stencil (its nine squares), ready to upload.
+pub(crate) fn apps_stencil() -> Option<Vec<u8>> {
+    Some(with_mips(rasterize_svg(crate::apps_icon::stencil_svg().as_bytes())?.take()))
+}
+
 /// The apps button with its squares `pages` to the left and `down` of a
 /// drop down, ready to upload, once that frame is drawn.
 pub(crate) fn apps_moved(pages: f32, down: f32) -> Option<Vec<u8>> {

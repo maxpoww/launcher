@@ -74,6 +74,26 @@ fn stroke_cov(d: f32, half: f32, aa: f32) -> f32 {
     return 1.0 - smoothstep(half - aa, half + aa, abs(d));
 }
 
+// The squircle plate at `uv` (premultiplied rgba): the frosted rounded square
+// with its hairline rim (see the plate branch at the end of fs_main).
+fn plate_px(uv: vec2<f32>, plate: vec4<f32>, px: f32) -> vec4<f32> {
+    let q = uv - vec2<f32>(0.5);
+    let inset = 0.0234375;
+    let rad = 0.21875;
+    let dpl = sd_box(q, vec2<f32>(0.5 - inset - rad)) - rad;
+    let fillc = fill_cov(dpl, px);
+    let edgec = stroke_cov(dpl, 0.0098, px);
+    var pa = plate.a * fillc;
+    var prgb = plate.rgb * pa;
+    let night = globals.light.x;
+    let lit = clamp(0.5 - q.y * 1.6, 0.0, 1.0);
+    let rim_rgb = mix(plate.rgb, vec3<f32>(1.0), 0.15 + night * (0.08 * lit - 0.10));
+    let ea = min(plate.a + 0.06 + night * 0.04 * lit, 1.0) * edgec;
+    prgb = rim_rgb * ea + prgb * (1.0 - ea);
+    pa = ea + pa * (1.0 - ea);
+    return vec4<f32>(prgb, pa);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(icons, icon_sampler, in.uv, i32(in.layer));
@@ -95,6 +115,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let e = pow(abs(p.x), n) + pow(abs(p.y), n);
         let w = max(fwidth(e), 1e-5);
         mask = 1.0 - smoothstep(1.0 - w, 1.0 + w, e);
+    }
+    // PLATE WITH HOLES (ring in (-1.5, -1.4)): the apps button holding pins
+    // (`apps_icon`): the plate alone, cut where the layer is opaque — its
+    // squares — so what stands behind the button shows through them.
+    if (in.ring < -1.4 && in.ring > -1.5) {
+        // (Opaque enough that what is behind reads as behind it: Max's 85%.)
+        let pl = plate_px(in.uv, vec4<f32>(in.plate.rgb, max(in.plate.a, 0.85)), px);
+        let keep = (1.0 - texel.a) * mask;
+        return vec4<f32>(pl.rgb * keep, pl.a * keep) * globals.alpha;
     }
     // Recycle-bin mode (ring <= -2): a plain garbage-can glyph on a fully
     // transparent background — a clean monochrome icon that sits among the

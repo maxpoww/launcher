@@ -104,6 +104,27 @@ pub(crate) fn svg(dx: f32, dy: f32) -> String {
     )
 }
 
+/// The nine squares where they rest, opaque on clear: the STENCIL the
+/// shader cuts the plate with while the button holds pins (`ring` -1.45).
+pub(crate) fn stencil_svg() -> String {
+    let (o, pitch, rx) = (origin(), SIZE + GAP, SIZE * ROUND / 2.0);
+    let mut h = String::new();
+    for j in 0..3 {
+        for i in 0..3 {
+            h.push_str(&format!(
+                r##"<rect x="{:.2}" y="{:.2}" width="{SIZE}" height="{SIZE}" rx="{rx:.2}" fill="#fff"/>"##,
+                o + pitch * i as f32,
+                o + pitch * j as f32
+            ));
+        }
+    }
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256"><g transform="translate(5 5) scale(.9)">{h}</g></svg>"#)
+}
+
+/// How much the button and its plate grow while it holds pins (Max,
+/// 2026-10-16: "the plate bigger and the squares bigger when there is an icon in").
+pub(crate) const HOLDING_GROW: f32 = 0.125;
+
 /// THE FRAMES: `page()` across (the squares moved left 0..page units — every
 /// page alike, so that is every place a turn passes) and `page()` down.
 pub(crate) const FRAME: u32 = 128;
@@ -202,6 +223,8 @@ fn ease(p: f32) -> f32 {
 #[derive(Default)]
 pub(crate) struct AppsMotion {
     hovered: bool,
+    /// This hover's round has played (one a hover).
+    played: bool,
     open: bool,
     /// The hover's round, ms in (None = still).
     round: Option<f32>,
@@ -215,12 +238,18 @@ pub(crate) struct AppsMotion {
 }
 
 impl AppsMotion {
-    /// Step by `dt` seconds with the pointer on the button or not and the
-    /// grid open or not; whether anything moved.
-    pub(crate) fn step(&mut self, hover: bool, open: bool, dt: f32) -> bool {
+    /// Step by `dt` seconds with the pointer on the button or not, the
+    /// grid open or not, and `ready` — the pins it held all spat out first
+    /// (Max: "on hover, first it spits the apps it has inside, then the
+    /// hover's animation"); whether anything moved.
+    pub(crate) fn step(&mut self, hover: bool, open: bool, ready: bool, dt: f32) -> bool {
         let ms = dt * 1000.0;
-        if hover && !self.hovered && !open && self.round.is_none() && self.slide.is_none() {
+        if !hover {
+            self.played = false;
+        }
+        if hover && !self.played && ready && !open && self.round.is_none() && self.slide.is_none() {
             self.round = Some(0.0);
+            self.played = true;
         }
         self.hovered = hover;
         if open != self.open {
@@ -313,28 +342,28 @@ mod tests {
     fn a_hover_turns_two_pages_and_one_back_then_rests() {
         let mut m = AppsMotion::default();
         let mut most: f32 = 0.0;
-        m.step(true, false, 0.016);
+        m.step(true, false, true, 0.016);
         for _ in 0..400 {
-            m.step(true, false, 0.016);
+            m.step(true, false, true, 0.016);
             most = most.max(m.place().0);
         }
         assert!(most > 1.9, "two pages went by");
         assert_eq!(m.place(), (0.0, 0.0), "and it rests as it began");
-        assert!(!m.step(true, false, 0.016), "still: one round a hover");
+        assert!(!m.step(true, false, true, 0.016), "still: one round a hover");
     }
 
     #[test]
     fn a_click_mid_turn_brings_the_squares_back_centred() {
         let mut m = AppsMotion::default();
         for _ in 0..10 {
-            m.step(true, false, 0.016); // the round under way
+            m.step(true, false, true, 0.016); // the round under way
         }
         assert!(m.place().0 > 0.0);
         for _ in 0..60 {
-            m.step(true, true, 0.016); // clicked: the grid opens
+            m.step(true, true, true, 0.016); // clicked: the grid opens
         }
         for _ in 0..100 {
-            m.step(false, false, 0.016); // closed: back up
+            m.step(false, false, true, 0.016); // closed: back up
         }
         assert_eq!(m.place(), (0.0, 0.0), "centred, where they began");
     }
@@ -342,18 +371,18 @@ mod tests {
     #[test]
     fn the_grid_open_sends_the_squares_down_and_back_with_a_beat() {
         let mut m = AppsMotion::default();
-        m.step(false, true, 0.016);
+        m.step(false, true, true, 0.016);
         assert!(m.scale() != 1.0 || m.beat.is_some());
         for _ in 0..60 {
-            m.step(false, true, 0.016);
+            m.step(false, true, true, 0.016);
         }
         assert_eq!(m.place().1, 1.0, "gone down while it is open");
         for _ in 0..25 {
-            m.step(false, false, 0.016);
+            m.step(false, false, true, 0.016);
         }
         assert_eq!(m.place().1, 1.0, "still down a moment after it closes");
         for _ in 0..60 {
-            m.step(false, false, 0.016);
+            m.step(false, false, true, 0.016);
         }
         assert_eq!(m.place().1, 0.0, "then back up");
         assert_eq!(m.scale(), 1.0);
