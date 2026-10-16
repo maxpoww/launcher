@@ -132,6 +132,10 @@ const TILE_DOTS_H: f32 = 22.0;
 const TILE_DOT: f32 = 6.0;
 const TILE_RADIUS: f32 = 8.0;
 const TILE_MAX_W: f32 = 420.0;
+/// The palettes stand in two lines (the rest turn as pages).
+const PALETTE_ROWS: usize = 2;
+/// The quick Colours box: wide and short, a share of the screen's width.
+const QUICK_COLOURS_W: f32 = 0.72;
 
 /// The quick box (Super+H): its width, the room under its content for the
 /// closing hint, and its least height — design pixels.
@@ -1548,10 +1552,12 @@ impl Panel {
         // PALETTES AS BIG AS THE WALLPAPERS' PREVIEWS (Max, 2026-10-16: "the
         // palette rectangles, not the whole box"): the wallpaper box's tile
         // width, in whatever box this is — as many across as that fits.
+        // Two lines of them (Max, 2026-10-16: "i want two lines … a horizontal
+        // rectangle"), the rest on pages.
         let best = if swatches && self.wall_tile > 0.0 {
             Some(self.wall_tile.min(room_w)).map(|w| {
                 let cols = (((room_w + gap) / (w + gap)).floor() as usize).max(1);
-                (cols, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
+                (cols, PALETTE_ROWS, w)
             })
         } else {
             best
@@ -3621,9 +3627,12 @@ impl App {
             let cx = g.card.x + g.card.w / 2.0;
             return Rect::new(cx - w / 2.0, top + (room - h) / 2.0, w, h);
         }
+        // Colours with its palettes up: a wide, short box (a horizontal
+        // rectangle — Max, 2026-10-16).
+        let wide = self.quick.open_is("Colours") && self.quick.open_has_tiles();
         let (w, h) = {
             (
-                (QUICK_W * s).min(sw - 40.0 * s).max(200.0),
+                if wide { (sw * QUICK_COLOURS_W).max(QUICK_W * s).min(sw - 40.0 * s) } else { (QUICK_W * s).min(sw - 40.0 * s).max(200.0) },
                 (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(sh - 20.0 * s),
             )
         };
@@ -3666,9 +3675,7 @@ impl App {
     fn quick_ensure(&mut self, rect: Rect) {
         // (The wall is laid out for the room it MAY take; the box then hugs
         // what it took.)
-        // (Colours: its box keeps its width but may grow down the screen, so
-        // the palettes — a wallpaper's preview in size — stand in rows.)
-        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") || self.quick.open_is("Colours") { self.quick_wall_room().1 } else { 0.0 };
+        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") { self.quick_wall_room().1 } else { 0.0 };
         self.quick.wall_tile = self.wallpaper_tile_w();
         if let Some(h) = self.quick.open_height().filter(|_| self.quick.open_is("Wallpaper") && self.quick.open_has_tiles()) {
             self.quick.wall_h = Some(h);
