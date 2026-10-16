@@ -182,7 +182,11 @@ pub(crate) fn is_control(label: &str) -> bool {
 
 /// The keys `App` carries out itself (see the module docs).
 pub(crate) fn ui_key(key: &str) -> bool {
-    matches!(key, "open" | "night" | "dnd" | "restart" | "colors-apps" | "colors-palette" | "colors-web")
+    matches!(
+        key,
+        "open" | "night" | "dnd" | "restart" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+            | "colors-apps-look" | "colors-web-look" | "colors-icons-look"
+    )
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1378,8 +1382,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let picked = crate::palette::choice();
             view.subtitle = tr("How everything looks. Some apps change the next time they open.").to_owned();
             view.groups.push(on_off(Some("Dark mode"), "dark", dark));
-            view.groups.push(on_off(Some("Colours on apps"), "colors-apps", picked.apps));
-            view.groups.push(on_off(Some("Colours on the web"), "colors-web", picked.web));
+            // (Until the new Colours page: the sliders as on/off — on = the palette as made.)
+            view.groups.push(on_off(Some("Colours on apps"), "colors-apps", picked.apps_level() != Some(0)));
+            view.groups.push(on_off(Some("Colours on the web"), "colors-web", picked.web_level() != Some(0)));
             let now = picked.palette_id().to_owned();
             let mut choices = vec![choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID)];
             choices.extend(crate::palette::all().into_iter().map(|p| choice(p.name.clone(), p.id == now, p.id)));

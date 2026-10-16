@@ -3077,7 +3077,7 @@ impl App {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
                 }
             }
-            "colors-apps" | "colors-palette" | "colors-web" => {
+            "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {

@@ -67,32 +67,59 @@ const STOCK: &str = include_str!("../assets/palettes/stock.json");
 /// slots (red in base08… brown in base0F), as every role here assumes.
 const BUILT_IN: &[(&str, &str)] = &[
     (GOLEM, include_str!("../assets/palettes/golem.json")),
-    ("gruvbox", include_str!("../assets/palettes/gruvbox.json")),
 ];
 
-/// The owner's colour choice, as saved in `settings.json`.
+/// THE CURATED BOX (Max, 2026-10-16; made in ~/Golem/work/palettes): the
+/// palettes the Colours page offers, in its order — greys and neutrals, the
+/// twelve colours of the artist's wheel, the combinations, the bold ones,
+/// colour-blind safe and high contrast. Each carries its SOUL (the six
+/// colours its thumbnail shows) and, where gold would not read on paper, an
+/// accent of its own for the light look. (Dynamic is made, not listed here.)
+const CURATED: &str = include_str!("../assets/palettes/golem-palettes.json");
+
+/// The owner's colour choice, as saved in `settings.json` (Max, 2026-10-16:
+/// the Colours page). Three sliders say how much of the palette goes where —
+/// `apps` (the programs' and webapps' grounds), `web` (the pages in Seam),
+/// `icons` (the dock's icons) — each 0 = OFF (their own colours), 1..100 a
+/// walk from neutral grey through the palette as made to its colour at full
+/// strength, in even visible steps ([`tint`]). `None` = the palette as made
+/// (what a fresh setting is: the knob never moves by itself). Beside each, a
+/// Dark/Light of its own: `None` follows the system look until clicked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ColorChoice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub palette: Option<String>,
-    #[serde(default = "yes")]
-    pub apps: bool,
-    /// (Once `dark_websites`, when it only worked in the dark look.)
-    #[serde(default, alias = "dark_websites")]
-    pub web: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_tint: Option<u8>,
+    /// (Always written: null — as made — must not read back as the default, off.)
+    #[serde(default = "web_off")]
+    pub web_tint: Option<u8>,
+    #[serde(default)]
+    pub icons_tint: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_dark: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_dark: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons_dark: Option<bool>,
+    /// Before 2026-10-16 the apps and the web were switches; read once.
+    #[serde(default, skip_serializing)]
+    pub apps: Option<bool>,
+    #[serde(default, skip_serializing, alias = "dark_websites")]
+    pub web: Option<bool>,
     /// Before 2026-10-15 the screen's colours were a switch of their own
     /// beside the palettes; read once, never written again.
     #[serde(default, skip_serializing)]
     pub dynamic: Option<bool>,
 }
 
-fn yes() -> bool {
-    true
+fn web_off() -> Option<u8> {
+    Some(0)
 }
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps: true, web: false, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, apps_dark: None, web_dark: None, icons_dark: None, apps: None, web: None, dynamic: None }
     }
 }
 
@@ -106,6 +133,22 @@ impl ColorChoice {
             (None, Some(false)) => GOLEM,
         }
     }
+    /// The Apps slider, the old switch carried over (off → 0).
+    pub(crate) fn apps_level(&self) -> Option<u8> {
+        if self.apps == Some(false) && self.apps_tint.is_none() { Some(0) } else { self.apps_tint }
+    }
+    /// The Web slider, the old switch carried over (on → as made).
+    pub(crate) fn web_level(&self) -> Option<u8> {
+        if self.web == Some(true) && self.web_tint == Some(0) { None } else { self.web_tint }
+    }
+    /// Written back without the old switches, their meaning moved to the sliders.
+    pub(crate) fn settled(mut self) -> Self {
+        self.apps_tint = self.apps_level();
+        self.web_tint = self.web_level();
+        self.apps = None;
+        self.web = None;
+        self
+    }
 }
 
 /// A palette file.
@@ -113,7 +156,15 @@ impl ColorChoice {
 struct PaletteFile {
     name: String,
     #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
     accent: Option<String>,
+    /// The accent in the light look, when it is another (gold on paper).
+    #[serde(default)]
+    accent_light: Option<String>,
+    /// The six colours of its thumbnail.
+    #[serde(default)]
+    soul: Vec<String>,
     dark: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     light: Option<std::collections::BTreeMap<String, String>>,
@@ -126,8 +177,13 @@ pub(crate) struct Palette {
     pub name: String,
     pub dark: [Rgb; 16],
     pub light: [Rgb; 16],
-    /// The slot of its accent (8..=15).
+    /// The slot of its accent (8..=15) in the dark look…
     pub accent: usize,
+    /// …and in the light one (the same unless the file names another).
+    pub accent_light: usize,
+    /// The six colours of its thumbnail (empty for an older file).
+    pub soul: Vec<Rgb>,
+    pub family: String,
 }
 
 /// What is in use now: one variant of one palette, with the accent picked.
@@ -144,6 +200,16 @@ pub(crate) struct Theme {
     pub web: bool,
     pub c: [Rgb; 16],
     pub accent_slot: usize,
+    /// The sliders and their looks (see [`ColorChoice`]); the looks resolved.
+    pub apps_tint: Option<u8>,
+    pub web_tint: Option<u8>,
+    pub icons_tint: u8,
+    pub apps_dark: bool,
+    pub web_dark: bool,
+    pub icons_dark: bool,
+    /// Both looks as the programs wear them (tinted, or the makers' own with
+    /// the palette's accent): what writes both at once (foot, GTK 4) reads.
+    pub pair: Option<([Rgb; 16], usize, [Rgb; 16], usize)>,
 }
 
 impl Theme {
@@ -253,7 +319,9 @@ fn parse(id: &str, text: &str) -> Option<Palette> {
         None => turned_over(&dark),
     };
     let accent = file.accent.as_deref().and_then(slot).filter(|s| *s >= 8).unwrap_or(0x0D);
-    Some(Palette { id: id.to_owned(), name: file.name, dark, light, accent })
+    let accent_light = file.accent_light.as_deref().and_then(slot).filter(|s| *s >= 8).unwrap_or(accent);
+    let soul = file.soul.iter().filter_map(|h| parse_hex(h)).collect();
+    Some(Palette { id: id.to_owned(), name: file.name, dark, light, accent, accent_light, soul, family: file.family.unwrap_or_default() })
 }
 
 /// The owner's own palettes' directory.
@@ -276,9 +344,24 @@ pub(crate) fn theme_dir() -> PathBuf {
         .join("theme")
 }
 
-/// Every palette there is: Golem's first, then the owner's by name.
+/// The curated box, read once.
+fn curated() -> &'static [Palette] {
+    static ONCE: std::sync::OnceLock<Vec<Palette>> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let files: Vec<serde_json::Value> = serde_json::from_str(CURATED).unwrap_or_default();
+        files
+            .iter()
+            .filter_map(|v| {
+                let id = v.get("id")?.as_str()?.to_owned();
+                parse(&id, &v.to_string())
+            })
+            .collect()
+    })
+}
+
+/// Every palette there is: the curated box in its order, then the owner's by name.
 pub(crate) fn all() -> Vec<Palette> {
-    let mut out: Vec<Palette> = BUILT_IN.iter().filter_map(|(id, text)| parse(id, text)).collect();
+    let mut out: Vec<Palette> = curated().to_vec();
     let mut own: Vec<Palette> = std::fs::read_dir(own_dir())
         .into_iter()
         .flatten()
@@ -289,7 +372,7 @@ pub(crate) fn all() -> Vec<Palette> {
                 return None;
             }
             let id = p.file_stem()?.to_str()?.to_owned();
-            if BUILT_IN.iter().any(|(b, _)| *b == id) {
+            if BUILT_IN.iter().any(|(b, _)| *b == id) || curated().iter().any(|c| c.id == id) {
                 return None;
             }
             parse(&id, &std::fs::read_to_string(&p).ok()?)
@@ -314,16 +397,24 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         all().into_iter().find(|p| p.id == want)
     }
     .unwrap_or_else(golem);
-    let accent_slot = p.accent;
+    let apps_tint = choice.apps_level();
+    let web_tint = choice.web_level();
     Theme {
         dynamic: want == DYNAMIC_ID,
         id: if want == DYNAMIC_ID { DYNAMIC_ID.to_owned() } else { p.id },
         name: p.name,
         dark,
-        apps: choice.apps,
-        web: choice.web,
+        apps: apps_tint != Some(0),
+        web: web_tint != Some(0),
         c: if dark { p.dark } else { p.light },
-        accent_slot,
+        accent_slot: if dark { p.accent } else { p.accent_light },
+        apps_tint,
+        web_tint,
+        icons_tint: choice.icons_tint,
+        apps_dark: choice.apps_dark.unwrap_or(dark),
+        web_dark: choice.web_dark.unwrap_or(dark),
+        icons_dark: choice.icons_dark.unwrap_or(dark),
+        pair: None,
     }
 }
 
@@ -333,9 +424,10 @@ fn golem() -> Palette {
 
 /// The makers' colours, in the same look as `t`: what the programs wear
 /// when the palette is kept off them.
+#[cfg(test)]
 pub(crate) fn stock(t: &Theme) -> Theme {
     let p = parse("stock", STOCK).expect("the Stock palette parses");
-    Theme { id: p.id, name: p.name, c: if t.dark { p.dark } else { p.light }, accent_slot: p.accent, ..t.clone() }
+    Theme { id: p.id, name: p.name, c: if t.dark { p.dark } else { p.light }, accent_slot: p.accent, pair: None, ..t.clone() }
 }
 
 // ------------------------------------------------------------ dynamic
@@ -509,12 +601,182 @@ pub(crate) fn from_pixels(px: &[[u8; 3]]) -> Palette {
         c[8..].copy_from_slice(&h);
         c
     };
+    let dark = join(dark_greys, dark_hues);
     Palette {
         id: DYNAMIC_ID.to_owned(),
         name: "Dynamic".to_owned(),
-        dark: join(dark_greys, dark_hues),
+        soul: vec![dark[accent_slot], dark[7], dark[5], dark[3], dark[2], dark[1]],
+        dark,
         light: join(light_greys, light_hues),
         accent: accent_slot,
+        accent_light: accent_slot,
+        family: "dynamic".to_owned(),
+    }
+}
+
+// ------------------------------------------------------------ the tint
+
+/// THE TINT (Max, 2026-10-16): how much of the palette a slider puts on the
+/// grounds — base00..04 keep their lightness and go from no colour (1) through
+/// the palette as made to its colour at full strength, the last tenth the
+/// colour itself, saturated. The slider walks this path in EVEN VISIBLE steps
+/// (the OKLab distance the grounds travel), so no stretch is dead and none
+/// jumps. Grey palettes stay grey. The same maths as the approved mockup.
+pub(crate) mod tint {
+    use super::Rgb;
+
+    fn lin(v: f32) -> f32 {
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    }
+    fn gam(v: f32) -> f32 {
+        if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+    }
+    pub(crate) fn lab(c: Rgb) -> [f32; 3] {
+        let [r, g, b] = c.map(|v| lin(f32::from(v) / 255.0));
+        let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+        [
+            0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+            1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+            0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+        ]
+    }
+    fn raw(l_: f32, a: f32, b: f32) -> [f32; 3] {
+        let l = (l_ + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+        let m = (l_ - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+        let s = (l_ - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+        [
+            4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+            -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+            -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+        ]
+    }
+    fn hex_of(c: [f32; 3]) -> Rgb {
+        c.map(|v| (gam(v.clamp(0.0, 1.0)) * 255.0).round() as u8)
+    }
+    fn lch(c: Rgb) -> (f32, f32, f32) {
+        let [l, a, b] = lab(c);
+        (l, a.hypot(b), b.atan2(a).to_degrees().rem_euclid(360.0))
+    }
+    /// OKLCH → sRGB, chroma reduced until it fits.
+    fn from_lch(l: f32, mut c: f32, h: f32) -> Rgb {
+        let (sin, cos) = h.to_radians().sin_cos();
+        for _ in 0..40 {
+            let rgb = raw(l, c * cos, c * sin);
+            if rgb.iter().all(|v| (-1e-4..=1.0 + 1e-4).contains(v)) {
+                return hex_of(rgb);
+            }
+            c *= 0.92;
+        }
+        hex_of(raw(l, c * cos, c * sin))
+    }
+
+    const MAXC: [f32; 5] = [0.100, 0.125, 0.135, 0.120, 0.085];
+
+    /// The grounds at `u` on the path (0 no colour, 50 as made, 100 full).
+    pub(crate) fn at(c: &[Rgb; 16], own: Rgb, u: f32, dark: bool) -> [Rgb; 16] {
+        if (u - 50.0).abs() < 1e-3 {
+            return *c;
+        }
+        let (_, ac, ah) = lch(own);
+        let mut out = *c;
+        for k in 0..5 {
+            let (l, c0, h0) = lch(c[k]);
+            let (mut cc, mut h, mut l2) = (c0, h0, l);
+            if u < 50.0 {
+                cc = c0 * u / 50.0;
+            } else if ac > 0.03 {
+                let f = (u - 50.0) / 50.0;
+                cc = c0 + (MAXC[k] - c0) * f;
+                h = h0 + (((ah - h0 + 540.0) % 360.0) - 180.0) * (f * 1.5).min(1.0);
+                let w = if k < 3 { 1.0 } else { 0.5 };
+                l2 = if dark { l + 0.075 * f * w } else { l - 0.06 * f * w };
+            }
+            if u > 90.0 && ac > 0.03 {
+                let g = (u - 90.0) / 10.0;
+                let lr = if dark { [0.36, 0.40, 0.46, 0.55, 0.82][k] } else { [0.86, 0.80, 0.74, 0.64, 0.36][k] };
+                l2 += (lr - l2) * g;
+                cc += (0.32 - cc) * g;
+                h = ah;
+            }
+            out[k] = from_lch(l2, cc.max(0.0), h.rem_euclid(360.0));
+        }
+        out
+    }
+
+    /// The path's cumulative visible distance (101 steps) and where "as made" falls on the slider.
+    fn path(c: &[Rgb; 16], own: Rgb, dark: bool) -> ([f32; 101], f32) {
+        let mut cum = [0.0f32; 101];
+        let mut prev: Option<[[f32; 3]; 4]> = None;
+        for u in 0..=100 {
+            let x = at(c, own, u as f32, dark);
+            let labs = [lab(x[0]), lab(x[1]), lab(x[2]), lab(x[3])];
+            if let Some(p) = prev {
+                let d: f32 = (0..4).map(|k| ((labs[k][0] - p[k][0]).powi(2) + (labs[k][1] - p[k][1]).powi(2) + (labs[k][2] - p[k][2]).powi(2)).sqrt()).sum();
+                cum[u] = cum[u - 1] + d / 4.0;
+            }
+            prev = Some(labs);
+        }
+        let total = cum[100].max(1e-6);
+        (cum, 1.0 + cum[50] / total * 99.0)
+    }
+
+    /// Where "as made" falls on the slider (1..100) for this palette and look.
+    #[cfg(test)]
+    pub(crate) fn made_at(c: &[Rgb; 16], own: Rgb, dark: bool) -> f32 {
+        path(c, own, dark).1
+    }
+
+    /// The palette at a slider value: `None` as made; 0 (off) is the caller's.
+    pub(crate) fn walk(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
+        let Some(s) = level.filter(|s| *s > 0) else { return *c };
+        let (cum, made) = path(c, own, dark);
+        if (f32::from(s) - made).abs() <= 1.5 {
+            return *c;
+        }
+        let want = (f32::from(s) - 1.0) / 99.0 * cum[100];
+        let mut u = 100.0;
+        for i in 1..=100 {
+            if cum[i] >= want {
+                let (a, b) = (cum[i - 1], cum[i]);
+                u = (i - 1) as f32 + if b > a { (want - a) / (b - a) } else { 0.0 };
+                break;
+            }
+        }
+        at(c, own, u, dark)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::palette::{contrast, rel_lum};
+
+        #[test]
+        fn the_path_goes_grey_made_full_and_stays_readable() {
+            let p = crate::palette::all().into_iter().find(|p| p.id == "jade").expect("jade is in the box");
+            let own = p.dark[p.accent];
+            let grey = walk(&p.dark, own, true, Some(1));
+            assert!(lch(grey[1]).1 < 0.004, "1 is neutral grey: {:?}", grey[1]);
+            assert_eq!(walk(&p.dark, own, true, None), p.dark, "None is the palette as made");
+            let made = made_at(&p.dark, own, true).round() as u8;
+            assert_eq!(walk(&p.dark, own, true, Some(made)), p.dark, "the as-made point gives the palette as made");
+            let full = walk(&p.dark, own, true, Some(100));
+            assert!(lch(full[1]).1 > 0.08, "100 is the colour itself: {:?}", full[1]);
+            for v in [1u8, 25, 50, 75, 90, 100] {
+                for (c, dark) in [(&p.dark, true), (&p.light, false)] {
+                    let x = walk(c, own, dark, Some(v));
+                    assert!(contrast(rel_lum(x[5]), rel_lum(x[1])) >= 4.5, "text reads at {v} (dark={dark})");
+                }
+            }
+        }
+
+        #[test]
+        fn a_grey_palette_stays_grey() {
+            let p = crate::palette::all().into_iter().find(|p| p.id == "charcoal").expect("charcoal is in the box");
+            let x = walk(&p.dark, p.dark[p.accent], true, Some(100));
+            assert!(lch(x[1]).1 < 0.01, "{:?}", x[1]);
+        }
     }
 }
 
@@ -573,12 +835,12 @@ pub(crate) fn linear(c: Rgb) -> [f32; 4] {
     [f(c[0]), f(c[1]), f(c[2]), 1.0]
 }
 
-fn rel_lum(c: Rgb) -> f32 {
+pub(crate) fn rel_lum(c: Rgb) -> f32 {
     let l = linear(c);
     0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2]
 }
 
-fn contrast(a: f32, b: f32) -> f32 {
+pub(crate) fn contrast(a: f32, b: f32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
@@ -626,13 +888,48 @@ fn write_shared(dir: &Path, shell: &Theme) {
     crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &crate::webapps::app_hosts()));
 }
 
-/// What the programs wear: the theme, or the makers' colours when the
-/// palette is kept off them (`apps` off).
+/// What the programs wear: the palette walked to the Apps slider in the apps'
+/// own look; at 0 (off) the makers' own colours, the palette's accent kept
+/// (Max, 2026-10-16: off leaves the grounds, the accent still paints).
 pub(crate) fn for_apps(t: &Theme) -> Theme {
-    if t.apps {
-        t.clone()
-    } else {
-        stock(t)
+    let pal = palette_of(&t.id).unwrap_or_else(golem);
+    let own = pal.dark[pal.accent];
+    let (dark_v, light_v) = match t.apps_tint {
+        Some(0) => {
+            let st = parse("stock", STOCK).expect("the Stock palette parses");
+            let (mut d, mut l) = (st.dark, st.light);
+            d[st.accent] = pal.dark[pal.accent];
+            l[st.accent] = pal.light[pal.accent_light];
+            // (the palette's accent goes where the makers keep theirs)
+            let pair = (d, st.accent, l, st.accent);
+            return Theme {
+                c: if t.apps_dark { d } else { l },
+                accent_slot: st.accent,
+                dark: t.apps_dark,
+                pair: Some(pair),
+                ..t.clone()
+            };
+        }
+        level => (tint::walk(&pal.dark, own, true, level), tint::walk(&pal.light, own, false, level)),
+    };
+    let pair = (dark_v, pal.accent, light_v, pal.accent_light);
+    Theme {
+        c: if t.apps_dark { dark_v } else { light_v },
+        accent_slot: if t.apps_dark { pal.accent } else { pal.accent_light },
+        dark: t.apps_dark,
+        pair: Some(pair),
+        ..t.clone()
+    }
+}
+
+/// Both looks of what the programs wear: the theme's own pair, else the palette's.
+fn both(t: &Theme, pal: Option<Palette>) -> ([Rgb; 16], usize, [Rgb; 16], usize) {
+    if let Some(p) = t.pair {
+        return p;
+    }
+    match pal {
+        Some(p) => (p.dark, p.accent, p.light, p.accent_light),
+        None => (t.c, t.accent_slot, t.c, t.accent_slot),
     }
 }
 
@@ -642,6 +939,7 @@ fn palette_of(id: &str) -> Option<Palette> {
     match id {
         DYNAMIC_ID => dynamic_palette(),
         "stock" => parse("stock", STOCK),
+        GOLEM => Some(golem()),
         _ => all().into_iter().find(|p| p.id == id),
     }
 }
@@ -692,10 +990,19 @@ fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
     m.insert("dynamic".into(), t.dynamic.into());
     m.insert("apps".into(), t.apps.into());
     m.insert("web".into(), t.web.into());
+    // THE WEB: its own look and its own slider — the palette's variant in the
+    // web look, walked to the Web slider; Seam gives Dark Reader its ground,
+    // its ink and the look (`web_dark`).
+    let pal = palette_of(&shell.id).unwrap_or_else(golem);
+    let wv = if shell.web_dark { pal.dark } else { pal.light };
+    let wv = tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint);
+    m.insert("web_dark".into(), shell.web_dark.into());
+    m.insert("web_bg".into(), format!("#{}", hex(wv[1])).into());
+    m.insert("web_ink".into(), format!("#{}", hex(wv[5])).into());
     // (What a Seam from before 2026-10-15 reads: it only darkened.)
-    m.insert("dark_websites".into(), (t.web && t.dark).into());
-    m.insert("web_bg".into(), format!("#{}", hex(shell.surface())).into());
-    m.insert("web_ink".into(), format!("#{}", hex(shell.ink())).into());
+    m.insert("dark_websites".into(), (t.web && shell.web_dark).into());
+    m.insert("icons_tint".into(), shell.icons_tint.into());
+    m.insert("icons_dark".into(), shell.icons_dark.into());
     m.insert("webapp_hosts".into(), webapp_hosts.to_vec().into());
     for (i, c) in t.c.iter().enumerate() {
         m.insert(slot_name(i), format!("#{}", hex(*c)).into());
@@ -722,8 +1029,8 @@ fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
 /// [`poke`]) and the one to start in.
 fn foot_ini(t: &Theme) -> String {
     let pal = palette_of(&t.id);
-    let variant = |c: &[Rgb; 16]| {
-        let accent = c[t.accent_slot];
+    let variant = |c: &[Rgb; 16], acc: usize| {
+        let accent = c[acc];
         let h = |i: usize| hex(c[i]);
         format!(
             "background={bg}\nforeground={fg}\ncursor={bg} {fg}\nselection-background={sel}\nselection-foreground={fg}\n\
@@ -746,17 +1053,14 @@ fn foot_ini(t: &Theme) -> String {
             b7 = h(7),
         )
     };
-    let (dark, light) = match pal {
-        Some(p) => (p.dark, p.light),
-        None => (t.c, t.c),
-    };
+    let (dark, da, light, la) = both(t, pal);
     format!(
         "# Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change.\n\
          [main]\ninitial-color-theme={}\n\n[colors-dark]\n{}\n[colors-light]\n{}",
         t.name,
         if t.dark { "dark" } else { "light" },
-        variant(&dark),
-        variant(&light),
+        variant(&dark, da),
+        variant(&light, la),
     )
 }
 
@@ -781,12 +1085,9 @@ fn hyprlock_conf(t: &Theme) -> String {
 /// apps; a palette or accent change reaches them at their next start.
 fn gtk4_css(t: &Theme) -> String {
     let pal = palette_of(&t.id);
-    let (dark, light) = match pal {
-        Some(p) => (p.dark, p.light),
-        None => (t.c, t.c),
-    };
-    let block = |c: &[Rgb; 16]| {
-        let th = Theme { c: *c, ..t.clone() };
+    let (dark, da, light, la) = both(t, pal);
+    let block = |c: &[Rgb; 16], acc: usize| {
+        let th = Theme { c: *c, accent_slot: acc, ..t.clone() };
         let h = |x: Rgb| format!("#{}", hex(x));
         let vars = [
             ("accent-bg-color", h(th.accent())),
@@ -827,8 +1128,8 @@ fn gtk4_css(t: &Theme) -> String {
         "/* Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change. */\n\
          :root {{\n{}}}\n\n@media (prefers-color-scheme: dark) {{\n  :root {{\n{}  }}\n}}\n",
         t.name,
-        block(&light),
-        block(&dark).lines().map(|l| format!("  {l}\n")).collect::<String>(),
+        block(&light, la),
+        block(&dark, da).lines().map(|l| format!("  {l}\n")).collect::<String>(),
     )
 }
 
@@ -1437,8 +1738,36 @@ impl crate::App {
                     c.palette = Some(value.to_owned());
                     c.dynamic = None;
                 }
-                "colors-apps" => c.apps = value == "on",
-                "colors-web" => c.web = value == "on",
+                // A slider: "0".."100", "made" (the palette as made); the old "on"/"off" too.
+                "colors-apps" | "colors-web" | "colors-icons" => {
+                    let level = match value {
+                        "made" | "on" => None,
+                        "off" => Some(0),
+                        v => match v.parse::<u8>() {
+                            Ok(n) => Some(n.min(100)),
+                            Err(_) => return,
+                        },
+                    };
+                    c = c.settled();
+                    match key {
+                        "colors-apps" => c.apps_tint = level,
+                        "colors-web" => c.web_tint = level,
+                        _ => c.icons_tint = level.unwrap_or(50),
+                    }
+                }
+                // A slider's own look: "dark" / "light" (from then on it is the owner's).
+                "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
+                    let dark = match value {
+                        "dark" => Some(true),
+                        "light" => Some(false),
+                        _ => return,
+                    };
+                    match key {
+                        "colors-apps-look" => c.apps_dark = dark,
+                        "colors-web-look" => c.web_dark = dark,
+                        _ => c.icons_dark = dark,
+                    }
+                }
                 _ => return,
             }
             s.colors = Some(c);
@@ -1456,43 +1785,84 @@ mod tests {
         ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }
     }
 
+    /// A theme of a palette as made, in a look.
+    fn plain(p: &Palette, dark: bool) -> Theme {
+        Theme {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            dark,
+            dynamic: false,
+            apps: true,
+            web: false,
+            c: if dark { p.dark } else { p.light },
+            accent_slot: if dark { p.accent } else { p.accent_light },
+            apps_tint: None,
+            web_tint: Some(0),
+            icons_tint: 0,
+            apps_dark: dark,
+            web_dark: dark,
+            icons_dark: dark,
+            pair: None,
+        }
+    }
+
     #[test]
     fn the_old_choices_carry_over() {
         let read = |j: &str| serde_json::from_str::<ColorChoice>(j).unwrap();
-        // Nothing chosen: the Dynamic palette, the programs wearing it, the web as made.
+        // Nothing chosen: Dynamic, the apps as made, the web off, the icons off.
         let none = read("{}");
-        assert_eq!((none.palette_id(), none.apps, none.web), (DYNAMIC_ID, true, false));
+        assert_eq!((none.palette_id(), none.apps_level(), none.web_level(), none.icons_tint), (DYNAMIC_ID, None, Some(0), 0));
         // The old switch on (the screen's colours): Dynamic, whatever palette it named.
         assert_eq!(read(r#"{"dynamic":true,"palette":"nord"}"#).palette_id(), DYNAMIC_ID);
-        // Off: the palette it named; dark websites on → colours on the web.
-        let max = read(r#"{"dynamic":false,"palette":"fluor","dark_websites":true}"#);
-        assert_eq!((max.palette_id(), max.web), ("fluor", true));
-        // Written back: no `dynamic`, the palette by name.
-        let back = serde_json::to_value(ColorChoice { palette: Some("nord".into()), ..max }).unwrap();
-        assert_eq!(back, serde_json::json!({"palette": "nord", "apps": true, "web": true}));
+        // The old switches: apps off → 0; dark websites on → the web as made.
+        let old = read(r#"{"dynamic":false,"palette":"fluor","dark_websites":true,"apps":false}"#);
+        assert_eq!((old.palette_id(), old.apps_level(), old.web_level()), ("fluor", Some(0), None));
+        // Written back: the sliders, no old switch; as made survives the trip.
+        let back = serde_json::to_value(old.settled()).unwrap();
+        assert_eq!(back, serde_json::json!({"palette": "fluor", "apps_tint": 0, "web_tint": null, "icons_tint": 0}));
+        assert_eq!(read(&back.to_string()).web_level(), None);
     }
 
     #[test]
-    fn a_web_switch_leaves_the_programs_alone() {
-        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, true);
-        assert!(same_for_apps(&t, &Theme { web: true, ..t.clone() }));
-        assert!(!same_for_apps(&t, &Theme { dark: false, ..t.clone() }));
-        assert!(!same_for_apps(&for_apps(&t), &for_apps(&Theme { apps: false, ..t.clone() })));
-    }
-
-    #[test]
-    fn the_stock_colours_read_well() {
+    fn a_web_change_leaves_the_programs_alone() {
         let t = resolve(&golem_choice(), true);
+        assert!(same_for_apps(&for_apps(&t), &for_apps(&Theme { web: true, web_tint: Some(80), ..t.clone() })));
+        assert!(!same_for_apps(&for_apps(&t), &for_apps(&Theme { apps_tint: Some(90), ..t.clone() })));
+        assert!(!same_for_apps(&for_apps(&t), &for_apps(&Theme { apps_dark: false, ..t.clone() })));
+    }
+
+    #[test]
+    fn apps_off_wear_the_makers_colours_with_the_palettes_accent() {
+        let t = resolve(&golem_choice(), true);
+        let s = stock(&t);
+        let off = for_apps(&Theme { apps_tint: Some(0), apps: false, ..t.clone() });
+        assert_eq!(off.c[1], s.c[1], "the makers' ground");
+        assert_eq!(off.accent(), t.accent(), "the palette's accent kept");
         for dark in [true, false] {
             let s = stock(&Theme { dark, ..t.clone() });
-            assert_eq!(s.id, "stock");
             assert_eq!(rel_lum(s.bg()) < 0.18, dark);
             assert!(contrast(rel_lum(s.surface()), rel_lum(s.ink())) >= 4.5);
         }
-        assert_eq!(adwaita_accent(stock(&t).accent()), "blue", "libadwaita's own accent");
-        let off = Theme { apps: false, ..t.clone() };
-        assert_eq!(for_apps(&off).id, "stock");
-        assert_eq!(for_apps(&t).id, GOLEM);
+        // The apps' own look: light apps on a dark system.
+        let light_apps = for_apps(&Theme { apps_dark: false, ..t.clone() });
+        assert!(!light_apps.dark && rel_lum(light_apps.bg()) > 0.5);
+    }
+
+    #[test]
+    fn the_curated_box_is_whole_and_reads() {
+        let all = all();
+        assert!(all.len() >= 116, "{}", all.len());
+        assert_eq!(all[0].id, "fog", "the box starts with the greys");
+        for p in all.iter().take(116) {
+            assert_eq!(p.soul.len(), 6, "{}: six capsules", p.id);
+            for dark in [true, false] {
+                let t = plain(p, dark);
+                assert!(contrast(rel_lum(t.surface()), rel_lum(t.ink())) >= 7.0, "{} dark={dark}: ink", p.id);
+                assert!(contrast(rel_lum(t.surface()), rel_lum(t.accent())) >= 3.0, "{} dark={dark}: accent", p.id);
+            }
+        }
+        let klimt = all.iter().find(|p| p.id == "klimt").unwrap();
+        assert_ne!(klimt.accent, klimt.accent_light, "gold does not read on paper: another accent there");
     }
 
     #[test]
@@ -1503,7 +1873,7 @@ mod tests {
         let p = from_pixels(&px);
         assert_eq!(p.accent, 0x0B, "green, in green's slot");
         for (dark, c) in [(true, p.dark), (false, p.light)] {
-            let t = Theme { id: p.id.clone(), name: p.name.clone(), dark, dynamic: true, apps: true, web: false, c, accent_slot: p.accent };
+            let t = Theme { c, dynamic: true, ..plain(&p, dark) };
             assert_eq!(rel_lum(t.bg()) < 0.18, dark, "dark={dark}");
             assert!(contrast(rel_lum(t.surface()), rel_lum(t.ink())) >= 4.5, "dark={dark}: ink reads");
             assert!(contrast(rel_lum(t.surface()), rel_lum(t.accent())) >= 3.0, "dark={dark}: the accent shows");
@@ -1553,11 +1923,11 @@ mod tests {
 
     #[test]
     fn every_built_in_palette_reads_and_reads_well() {
-        let all = all();
-        for (id, _) in BUILT_IN {
-            let p = all.iter().find(|p| p.id == *id).unwrap_or_else(|| panic!("{id} parses"));
+        // (Golem's palette is the fallback behind the box, not one of its tiles.)
+        for (id, text) in BUILT_IN {
+            let p = &parse(id, text).unwrap_or_else(|| panic!("{id} parses"));
             for (dark, c) in [(true, p.dark), (false, p.light)] {
-                let t = Theme { id: p.id.clone(), name: p.name.clone(), dark, dynamic: false, apps: true, web: false, c, accent_slot: p.accent };
+                let t = Theme { c, ..plain(p, dark) };
                 // The ground is on the look's side, and the ink reads on it.
                 assert_eq!(rel_lum(t.bg()) < 0.18, dark, "{id} dark={dark}: ground on the right side");
                 assert!(contrast(rel_lum(t.surface()), rel_lum(t.ink())) >= 4.5, "{id} dark={dark}: ink reads on the surface");
