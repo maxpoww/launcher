@@ -62,9 +62,9 @@ fn icon_filter(rgb: vec3<f32>) -> vec3<f32> {
     let f = globals.filt[0];
     let k = f.x;
     let n = i32(f.z);
-    if (k <= 0.0) { return rgb; }
+    if (k <= 0.0 && f.y < 0.5) { return rgb; }
     var out = rgb;
-    if (n > 0) {
+    if (n > 0 && k > 0.0) {
         let lab = to_oklab(rgb);
         let c = length(lab.yz);
         let h = atan2(lab.z, lab.y);
@@ -312,7 +312,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var a = texel.a;
     // The palette's ICON FILTER, on app icons only (thumbnails keep their colours).
     var painted = texel.rgb;
-    if (globals.filt[0].x > 0.0 && f32(in.layer) < globals.thumb_base && a > 0.004) {
+    if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5) && f32(in.layer) < globals.thumb_base && a > 0.004) {
         painted = icon_filter(texel.rgb / a) * a;
     }
     var rgb = mix(painted, in.tint.rgb * a, in.tint.a);

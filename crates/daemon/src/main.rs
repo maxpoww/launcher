@@ -7416,6 +7416,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if app.control_panel && app.gesture.press_pos.is_some() {
                     app.panel_drag(pos);
                 }
+                if let Some(from) = app.fast.slide_from {
+                    app.slider_to(from, pos, true);
+                }
                 // Edge-crossing jelly poke: fire whenever the pointer crosses
                 // the card boundary (inside ↔ outside), regardless of click.
                 {
@@ -7584,9 +7587,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
             // FAST LAUNCH: a click on an icon launches it, anywhere else
             // closes the bubble.
             wl_pointer::Event::Button { button, state, .. } if button == BTN_LEFT && app.fast.open => {
+                // A press on a slider of the quick box: it drags the knob.
+                if state == WEnum::Value(wl_pointer::ButtonState::Pressed) {
+                    app.fast.slide_from = app.pointer_pos.filter(|&p| app.fast.boxed.is_some() && app.quick.on_slider(p));
+                }
                 if state == WEnum::Value(wl_pointer::ButtonState::Released) {
                     if let Some(pos) = app.pointer_pos {
-                        if app.fast.boxed.is_some() {
+                        if let Some(from) = app.fast.slide_from.take() {
+                            // Let go: the knob stays where it was taken, the box stays up.
+                            app.slider_to(from, pos, true);
+                        } else if app.fast.boxed.is_some() {
                             app.quick_click(pos);
                         } else {
                             app.fast_click(pos);
@@ -7602,6 +7612,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.gesture.press_pos = app.pointer_pos;
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
+                        let slide_from = app.gesture.press_pos.filter(|&f| app.control_panel && app.panel.on_slider(f));
                         app.gesture.press_pos = None;
                         if app.box_drag.is_some() {
                             app.drop_box_drag();
@@ -7631,8 +7642,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                             }) {
                                 // The control panel's field: a pill opens
                                 // its setting; an open setting's empty space
-                                // folds it back.
-                                app.panel_click(pos);
+                                // folds it back. A press that began on a
+                                // slider only sets the knob — let go
+                                // anywhere, nothing closes.
+                                match slide_from {
+                                    Some(from) => app.slider_to(from, pos, false),
+                                    None => app.panel_click(pos),
+                                }
                             } else if app.ui.target() == Target::Open {
                                 // Dismiss only if the click landed outside the
                                 // card bounds (transparent surface margin).

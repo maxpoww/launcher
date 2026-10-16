@@ -1363,6 +1363,18 @@ impl Panel {
         }
     }
 
+    /// Whether a press at `pos` is on a slider (its whole row).
+    pub(crate) fn on_slider(&self, pos: (f32, f32)) -> bool {
+        let Some(label) = self.open_control_label() else { return false };
+        let Some(content) = self.open_content(label) else { return false };
+        let f = self.field;
+        content.sliders.iter().any(|sl| {
+            content.chips[sl.stops.clone()]
+                .iter()
+                .any(|c| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(pos))
+        })
+    }
+
     /// What the last click asked for, once.
     fn take_action(&mut self) -> Option<PanelAction> {
         self.action.take()
@@ -1465,8 +1477,16 @@ impl Panel {
         let first = out.chips.len();
         let lit = stops.iter().position(|c| c.on).unwrap_or(0);
         for (ci, c) in stops.iter().enumerate() {
+            // Each stop takes its share of the WHOLE row — up into the caption
+            // and down to the next row, the ends out to the field's edge and
+            // to the look pair — so a click near the slider catches it
+            // instead of landing on empty space (Max, 2026-10-16: "i miss and
+            // close the box all the time").
+            let x0 = if ci == 0 { 0.0 } else { track.x + (ci as f32 - 0.5) * step };
+            let x1 = if ci + 1 == stops.len() { right + 14.0 * s } else { track.x + (ci as f32 + 0.5) * step };
+            let (top, bottom) = (y - 27.0 * s, y + h + GROUP_GAP * s * 0.6);
             out.chips.push(Chip {
-                rect: Rect::new(track.x + (ci as f32 - 0.5) * step, y, step, h),
+                rect: Rect::new(x0, top, x1 - x0, bottom - top),
                 text: String::new(),
                 on: c.on,
                 action: PanelAction::Pick { group, index: ci as u8 },
@@ -3257,8 +3277,16 @@ impl App {
     /// slider drags its knob.
     pub(crate) fn panel_drag(&mut self, pos: (f32, f32)) {
         let Some(from) = self.gesture.press_pos else { return };
-        if let Some((group, index)) = self.panel.slide(from, pos) {
-            self.control_pick(group, index, false);
+        self.slider_to(from, pos, false);
+    }
+
+    /// A press that began on a slider at `from`, now at `pos`: the knob
+    /// goes to the stop under the pointer's x (the control panel's or,
+    /// `quick`, the quick box's).
+    pub(crate) fn slider_to(&mut self, from: (f32, f32), pos: (f32, f32), quick: bool) {
+        let panel = if quick { &self.quick } else { &self.panel };
+        if let Some((group, index)) = panel.slide(from, pos) {
+            self.control_pick(group, index, quick);
             self.schedule_frame();
         }
     }

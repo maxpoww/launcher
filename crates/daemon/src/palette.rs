@@ -243,11 +243,13 @@ impl Theme {
     pub(crate) fn accent_ink(&self) -> Rgb {
         let a = rel_lum(self.accent());
         let (first, last) = (self.c[0x00], self.c[0x07]);
-        if contrast(a, rel_lum(first)) >= contrast(a, rel_lum(last)) {
-            first
-        } else {
-            last
+        let best = if contrast(a, rel_lum(first)) >= contrast(a, rel_lum(last)) { first } else { last };
+        if contrast(a, rel_lum(best)) >= 4.5 {
+            return best;
         }
+        // A mid-tone accent neither end reads on (the sweep: Braun's
+        // #d14118 took 4.2:1): pure black or white, whichever reads better.
+        if contrast(a, 0.0) >= contrast(a, 1.0) { [0, 0, 0] } else { [255, 255, 255] }
     }
 }
 
@@ -443,6 +445,10 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
     .unwrap_or_else(golem);
     let apps_tint = choice.apps_level();
     let web_tint = choice.web_level();
+    // (The shell's own hues kept readable too: Fluor's and Golem's light
+    // accents stood at 2.5:1 on their surface.)
+    let (mut c, acc) = if dark { (p.dark, p.accent) } else { (p.light, p.accent_light) };
+    readable(&mut c, dark, acc);
     Theme {
         dynamic: want == DYNAMIC_ID,
         id: if want == DYNAMIC_ID { DYNAMIC_ID.to_owned() } else { p.id },
@@ -450,8 +456,8 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         dark,
         apps: apps_tint != Some(0),
         web: web_tint != Some(0),
-        c: if dark { p.dark } else { p.light },
-        accent_slot: if dark { p.accent } else { p.accent_light },
+        c,
+        accent_slot: acc,
         apps_tint,
         web_tint,
         icons_tint: choice.icons_tint,
@@ -937,7 +943,7 @@ fn same_for_apps(a: &Theme, b: &Theme) -> bool {
 /// Only the file every reader shares (`colors.json`: Seam's web switches).
 fn write_shared(dir: &Path, shell: &Theme) {
     let t = &for_apps(shell);
-    crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &crate::webapps::app_hosts()));
+    crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &choice(), &crate::webapps::app_hosts()));
 }
 
 /// What the programs wear: the palette walked to the Apps slider in the apps'
@@ -952,6 +958,8 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
             let (mut d, mut l) = (st.dark, st.light);
             d[st.accent] = pal.dark[pal.accent];
             l[st.accent] = pal.light[pal.accent_light];
+            readable(&mut d, true, st.accent);
+            readable(&mut l, false, st.accent);
             // (the palette's accent goes where the makers keep theirs)
             let pair = match (t.apps_dark != t.dark, t.apps_dark) {
                 (true, true) => (d, st.accent, d, st.accent),
@@ -968,6 +976,9 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
         }
         level => (tint::walk(&pal.dark, own, true, level), tint::walk(&pal.light, own, false, level)),
     };
+    let (mut dark_v, mut light_v) = (dark_v, light_v);
+    readable(&mut dark_v, true, pal.accent);
+    readable(&mut light_v, false, pal.accent_light);
     let mut pair = (dark_v, pal.accent, light_v, pal.accent_light);
     if t.apps_dark != t.dark {
         // The apps keep a look of their own: both halves wear it, since
@@ -1035,13 +1046,36 @@ fn set_icon_filter(t: &Theme) {
         let all: Vec<(f32, f32, f32)> = soul.iter().map(|&c| tint::lch(c)).collect();
         let cmax = all.iter().map(|t| t.1).fold(0.0f32, f32::max);
         let targets: Vec<_> = all.into_iter().filter(|t| t.1 > 0.03 && t.1 >= cmax * 0.55).take(6).collect();
-        f[0] = [f32::from(t.icons_tint) / 100.0, if t.icons_dark { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
+        // Dark icons dim at Off too when their Dark was clicked (Off = no
+        // colour, not no dark).
+        let dim = if t.icons_tint > 0 { t.icons_dark } else { choice().icons_dark == Some(true) };
+        f[0] = [f32::from(t.icons_tint) / 100.0, if dim { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
         for (k, (l, c, h)) in targets.into_iter().enumerate() {
             f[k + 1] = [l, c, h.to_radians(), 0.0];
         }
     }
     if let Ok(mut g) = ICON_FILTER.lock() {
         *g = f;
+    }
+}
+
+/// THE FLOORS (the sweep, 2026-10-16): after a tint the hues may sink into
+/// the grounds (a light ground tinted toward the accent's own hue left the
+/// accent at 2.4:1 on it; Fluor's yellow on white). Each hue is moved in
+/// LIGHTNESS only — its hue and chroma kept — until the accent reads 3:1 on
+/// the surface and every other hue 2.5:1 on the ground.
+fn readable(c: &mut [Rgb; 16], dark: bool, acc: usize) {
+    for k in 8..16 {
+        let (ground, floor) = if k == acc { (c[1], 3.0) } else { (c[0], 2.5) };
+        let (mut l, ch, h) = tint::lch(c[k]);
+        let mut x = c[k];
+        let mut n = 0;
+        while contrast(rel_lum(x), rel_lum(ground)) < floor && n < 60 {
+            l = (l + if dark { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
+            x = tint::from_lch(l, ch, h);
+            n += 1;
+        }
+        c[k] = x;
     }
 }
 
@@ -1073,7 +1107,7 @@ fn palette_of(id: &str) -> Option<Palette> {
 pub(crate) fn write_all(dir: &Path, shell: &Theme) {
     let t = &for_apps(shell);
     let put = |name: &str, text: String| crate::persist::write_text("theme", &dir.join(name), &text);
-    put("colors.json", colors_json(t, shell, &crate::webapps::app_hosts()));
+    put("colors.json", colors_json(t, shell, &choice(), &crate::webapps::app_hosts()));
     put("foot.ini", foot_ini(t));
     put("hyprlock.conf", hyprlock_conf(shell));
     put("gtk4.css", gtk4_css(t));
@@ -1106,20 +1140,34 @@ pub(crate) fn write_all(dir: &Path, shell: &Theme) {
 /// websites, the palette's own ground and ink (`shell`: `web_bg`,
 /// `web_ink`), whether they wear it (`web`), and the webapps' hosts, which
 /// follow `apps` instead.
-fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
+fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[String]) -> String {
     let mut m = serde_json::Map::new();
     m.insert("name".into(), t.name.clone().into());
     m.insert("palette".into(), t.id.clone().into());
     m.insert("dark".into(), t.dark.into());
     m.insert("dynamic".into(), t.dynamic.into());
-    m.insert("apps".into(), t.apps.into());
-    m.insert("web".into(), t.web.into());
+    // OFF IS NOT LIGHT (Max, 2026-10-16: "the mode off on the sliders
+    // should off the colours but not the dark mode … i want dark mode on my
+    // apps but not colour"): a slider at Off whose Dark was CLICKED still
+    // darkens — neutral greys (the palette walked to 0), no colour. Left to
+    // follow the system, Off leaves sites as they are made.
+    let apps_dark_off = !t.apps && picked.apps_dark == Some(true);
+    let web_dark_off = !t.web && picked.web_dark == Some(true);
+    m.insert("apps".into(), (t.apps || apps_dark_off).into());
+    m.insert("web".into(), (t.web || web_dark_off).into());
     // THE WEB: its own look and its own slider — the palette's variant in the
     // web look, walked to the Web slider; Seam gives Dark Reader its ground,
     // its ink and the look (`web_dark`).
     let pal = palette_of(&shell.id).unwrap_or_else(golem);
     let wv = if shell.web_dark { pal.dark } else { pal.light };
-    let wv = tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint);
+    // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
+    let mut wv = if web_dark_off { tint::at(&wv, pal.dark[pal.accent], 0.0, true) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
+    if web_dark_off {
+        // …and the ink with no colour either (Hacker's is green: ASUS,
+        // 2026-10-16, "the text on wikipedia is green").
+        let (l, _, _) = tint::lch(wv[5]);
+        wv[5] = tint::from_lch(l, 0.0, 0.0);
+    }
     m.insert("web_dark".into(), shell.web_dark.into());
     m.insert("web_bg".into(), format!("#{}", hex(wv[1])).into());
     m.insert("web_ink".into(), format!("#{}", hex(wv[5])).into());
@@ -1129,7 +1177,7 @@ fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
     m.insert("icons_dark".into(), shell.icons_dark.into());
     // A webapp kept in its own colours: out of the webapps, and named so
     // Seam leaves its site alone even with the web on.
-    let skipped = crate::webapps::hosts_of(&choice().skip);
+    let skipped = crate::webapps::hosts_of(&picked.skip);
     m.insert("webapp_hosts".into(), webapp_hosts.iter().filter(|h| !skipped.contains(h)).cloned().collect::<Vec<_>>().into());
     m.insert("web_skip".into(), skipped.into());
     for (i, c) in t.c.iter().enumerate() {
@@ -1685,24 +1733,28 @@ fn poke(t: &Theme, look_changed: bool) {
 }
 
 /// GtkSourceView (GNOME Text Editor's writing area, Builder…): a colour
-/// scheme of the palette. The area does not take the GTK theme's colours,
-/// it has a scheme of its own; and a scheme is read once, so — as for
-/// GTK 3 — it is written under the name NOT in use and the editor is
-/// switched to it (`org.gnome.TextEditor style-scheme`, live). An owner who
+/// scheme of the palette — the area does not take the GTK theme's colours.
+/// ONE name, rewritten: an app reads its schemes once, at its start (the
+/// ASUS, 2026-10-16: switching between two names to make it re-read showed
+/// a PREVIOUS palette's copy — Jade's green under Braun), so a change
+/// reaches an editor at its next start, as GTK 4's colours do. An owner who
 /// picked another scheme in the editor keeps it.
 fn sourceview_live(t: &Theme) {
-    const NAMES: [&str; 2] = ["golem-a", "golem-b"];
+    const NAME: &str = "golem";
     let key = "/org/gnome/TextEditor/style-scheme";
     let now = out("dconf", &["read", key]).map(|o| o.trim().trim_matches('\'').to_owned()).unwrap_or_default();
-    if !now.is_empty() && !NAMES.contains(&now.as_str()) {
-        return;
-    }
-    let next = if now == NAMES[0] { NAMES[1] } else { NAMES[0] };
+    let ours = now.is_empty() || now == NAME || now == "golem-a" || now == "golem-b";
     let home = std::env::var("HOME").unwrap_or_default();
     let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let dir = PathBuf::from(data_home).join("gtksourceview-5").join("styles");
-    crate::persist::write_text("theme", &dir.join(format!("{next}.xml")), &sourceview_scheme(t, next));
-    run("dconf", &["write", key, &format!("'{next}'")]);
+    crate::persist::write_text("theme", &dir.join(format!("{NAME}.xml")), &sourceview_scheme(t, NAME));
+    // (The two names of the first cut go.)
+    for old in ["golem-a", "golem-b"] {
+        let _ = std::fs::remove_file(dir.join(format!("{old}.xml")));
+    }
+    if ours && now != NAME {
+        run("dconf", &["write", key, &format!("'{NAME}'")]);
+    }
 }
 
 fn sourceview_scheme(t: &Theme, id: &str) -> String {
@@ -2019,6 +2071,150 @@ mod tests {
         assert_eq!(x.matches("<style ").count(), 23);
     }
 
+    /// THE SWEEP (Max, 2026-10-16: "i wonder how many other bugs like that
+    /// we have"): every palette × every look × slider levels × the system's
+    /// look, against rules that must always hold. Reports every breach.
+    /// `cargo test -- --ignored the_sweep --nocapture`
+    #[test]
+    #[ignore]
+    fn the_sweep() {
+        use std::collections::BTreeMap;
+        let mut bad: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        let mut note = |rule: &'static str, what: String| bad.entry(rule).or_default().push(what);
+        let chroma = |c: Rgb| tint::lch(c).1;
+        let lum = rel_lum;
+        let ratio = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
+        let mut ids: Vec<String> = all().into_iter().map(|p| p.id).collect();
+        ids.push(GOLEM.to_owned());
+        let levels = [Some(0u8), Some(1), Some(25), None, Some(75), Some(100)];
+        let looks = [None, Some(true), Some(false)];
+        let mut n = 0;
+        for id in &ids {
+            for sys in [true, false] {
+                for lv in levels {
+                    for look in looks {
+                        n += 1;
+                        let tag = format!("{id} sys={} lvl={lv:?} look={look:?}", if sys { "dark" } else { "light" });
+                        // ---- APPS ----
+                        let c = ColorChoice { palette: Some(id.clone()), apps_tint: lv, apps_dark: look, ..Default::default() };
+                        let t = for_apps(&resolve(&c, sys));
+                        let dark = look.unwrap_or(sys);
+                        if t.dark != dark {
+                            note("A1 apps look not the asked one", tag.clone());
+                        }
+                        if dark && lum(t.c[0]) > 0.2 || !dark && lum(t.c[0]) < 0.35 {
+                            note("A2 apps ground the wrong brightness for its look", format!("{tag} ground #{}", hex(t.c[0])));
+                        }
+                        for g in [0, 1] {
+                            if ratio(t.c[5], t.c[g]) < 4.5 {
+                                note("A3 apps text under 4.5:1 on a ground", format!("{tag} base05 #{} on base0{g} #{} = {:.2}", hex(t.c[5]), hex(t.c[g]), ratio(t.c[5], t.c[g])));
+                            }
+                        }
+                        if ratio(t.accent(), t.c[1]) < 3.0 {
+                            note("A4 apps accent under 3:1 on the surface", format!("{tag} accent #{} on #{} = {:.2}", hex(t.accent()), hex(t.c[1]), ratio(t.accent(), t.c[1])));
+                        }
+                        for k in 8..16 {
+                            if ratio(t.c[k], t.c[0]) < 2.5 {
+                                note("A5 a terminal hue under 2.5:1 on the ground", format!("{tag} base{k:02X} #{} on #{} = {:.2}", hex(t.c[k]), hex(t.c[0]), ratio(t.c[k], t.c[0])));
+                            }
+                        }
+                        if lv == Some(0) && (0..8).any(|k| chroma(t.c[k]) > 0.02) {
+                            note("A6 apps Off still coloured", format!("{tag} grounds {:?}", (0..8).map(|k| hex(t.c[k])).collect::<Vec<_>>()));
+                        }
+                        let ini = foot_ini(&t);
+                        let want = if dark { "initial-color-theme=dark" } else { "initial-color-theme=light" };
+                        if !ini.contains(want) {
+                            note("A7 foot starts in the other look", tag.clone());
+                        }
+                        // GTK 4 picks its half by the SYSTEM's look: an apps look of
+                        // its own must be in both halves.
+                        if look.is_some_and(|d| d != sys) {
+                            let css = gtk4_css(&t);
+                            let want = format!("--window-bg-color: #{};", hex(t.c[1]));
+                            if css.matches(&want).count() < 2 {
+                                note("A8 GTK 4 not in the apps' own look under the system's", tag.clone());
+                            }
+                        }
+                        // ---- THE SHELL (the dock's boxes when not Dynamic) ----
+                        let sh = resolve(&ColorChoice { palette: Some(id.clone()), ..Default::default() }, sys);
+                        if ratio(sh.ink(), sh.surface()) < 4.5 {
+                            note("S1 shell text under 4.5:1 on its surface", format!("{id} sys={sys} ink #{} on #{}", hex(sh.ink()), hex(sh.surface())));
+                        }
+                        if ratio(sh.accent(), sh.surface()) < 3.0 {
+                            note("S2 shell accent under 3:1 on its surface", format!("{id} sys={sys} accent #{} on #{} = {:.2}", hex(sh.accent()), hex(sh.surface()), ratio(sh.accent(), sh.surface())));
+                        }
+                        if ratio(sh.accent_ink(), sh.accent()) < 4.5 {
+                            note("S3 text on the accent under 4.5:1", format!("{id} sys={sys} #{} on #{}", hex(sh.accent_ink()), hex(sh.accent())));
+                        }
+                        // ---- WEB ----
+                        let c = ColorChoice { palette: Some(id.clone()), web_tint: lv, web_dark: look, ..Default::default() };
+                        let shell = resolve(&c, sys);
+                        let json: serde_json::Value = serde_json::from_str(&colors_json(&for_apps(&shell), &shell, &c, &[])).unwrap();
+                        let on = json["web"].as_bool().unwrap_or(false);
+                        let bg = parse_hex(json["web_bg"].as_str().unwrap_or("")).unwrap_or([0; 3]);
+                        let ink = parse_hex(json["web_ink"].as_str().unwrap_or("")).unwrap_or([0; 3]);
+                        let wdark = json["web_dark"].as_bool().unwrap_or(true);
+                        let expect_on = lv != Some(0) || look == Some(true);
+                        if on != expect_on {
+                            note("W1 web on/off not what the slider + look say", format!("{tag} web={on}"));
+                        }
+                        if on {
+                            if wdark != dark {
+                                note("W2 web look not the asked one", format!("{tag} web_dark={wdark}"));
+                            }
+                            if wdark && lum(bg) > 0.2 || !wdark && lum(bg) < 0.35 {
+                                note("W3 web ground the wrong brightness for its look", format!("{tag} bg #{}", hex(bg)));
+                            }
+                            if ratio(ink, bg) < 4.5 {
+                                note("W4 web text under 4.5:1", format!("{tag} ink #{} on #{} = {:.2}", hex(ink), hex(bg), ratio(ink, bg)));
+                            }
+                            if lv == Some(0) && (chroma(bg) > 0.01 || chroma(ink) > 0.01) {
+                                note("W5 web Off still coloured", format!("{tag} bg #{} ink #{}", hex(bg), hex(ink)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("\nTHE SWEEP: {n} cases, {} palettes", ids.len());
+        for (rule, list) in &bad {
+            let mut pals: Vec<&str> = list.iter().map(|w| w.split(' ').next().unwrap_or("")).collect();
+            pals.dedup();
+            println!("\n{rule}: {} cases, palettes {:?}", list.len(), { let mut p = pals.clone(); p.sort(); p.dedup(); p });
+            let mut by: BTreeMap<String, usize> = BTreeMap::new();
+            for w in list { let k: Vec<&str> = w.split(' ').skip(1).take(3).collect(); *by.entry(k.join(" ")).or_default() += 1; }
+            println!("    by case: {by:?}");
+            for w in list.iter().take(4) {
+                println!("    {w}");
+            }
+        }
+        assert!(bad.is_empty(), "{} rules broken", bad.len());
+    }
+
+    #[test]
+    fn off_takes_the_colour_not_the_dark() {
+        let off = |web_dark| {
+            let c = ColorChoice { palette: Some(GOLEM.to_owned()), web_tint: Some(0), web_dark, ..Default::default() };
+            let t = resolve(&c, true);
+            let json: serde_json::Value = serde_json::from_str(&colors_json(&for_apps(&t), &t, &c, &[])).unwrap();
+            json
+        };
+        // Its Dark clicked: the web stays dark, in greys with no colour.
+        let dark = off(Some(true));
+        assert_eq!(dark["web"], true);
+        assert_eq!(dark["web_dark"], true);
+        let bg = parse_hex(dark["web_bg"].as_str().unwrap()).unwrap();
+        assert!(tint::lch(bg).1 < 0.01, "neutral, not the palette's colour");
+        // A palette whose ink is coloured (Hacker): the ink goes grey too.
+        let c = ColorChoice { palette: Some("hacker".to_owned()), web_tint: Some(0), web_dark: Some(true), ..Default::default() };
+        let t = resolve(&c, true);
+        let json: serde_json::Value = serde_json::from_str(&colors_json(&for_apps(&t), &t, &c, &[])).unwrap();
+        let ink = parse_hex(json["web_ink"].as_str().unwrap()).unwrap();
+        assert!(tint::lch(ink).1 < 0.01, "Hacker's green ink, greyed: {ink:?}");
+        // Left to follow the system, Off leaves the sites as they are made.
+        assert_eq!(off(None)["web"], false);
+    }
+
     #[test]
     fn a_program_is_known_by_its_first_word() {
         assert_eq!(program_of("env FOO=1 /usr/bin/gnome-text-editor --new-window"), "gnome-text-editor");
@@ -2211,7 +2407,7 @@ mod tests {
         assert_eq!(adwaita_accent([0x8a, 0xb4, 0xf0]), "blue");
         // Text on the peach accent is the dark end.
         assert_eq!(t.accent_ink(), t.c[0]);
-        let json: serde_json::Value = serde_json::from_str(&colors_json(&t, &t, &["open.spotify.com".to_owned()])).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&colors_json(&t, &t, &ColorChoice::default(), &["open.spotify.com".to_owned()])).unwrap();
         assert_eq!(json["accent"], "#ffbe98");
         assert_eq!(json["web"], false, "websites stay as made unless asked");
         assert_eq!(json["apps"], true);
