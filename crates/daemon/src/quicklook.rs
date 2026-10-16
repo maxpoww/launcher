@@ -491,6 +491,46 @@ fn text_of(path: &Path) -> Option<Vec<String>> {
     )
 }
 
+/// A folder's things, a line each ("    4.1 MB  photo.jpg", a folder with
+/// a `/`), folders first, then by name; how many there are. `None` for an
+/// empty folder (it is shown as what it is).
+fn folder_list(path: &Path) -> Option<(Vec<String>, usize)> {
+    let mut things: Vec<(bool, String, u64)> = std::fs::read_dir(path)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .take(TEXT_LINES)
+        .map(|e| {
+            let meta = e.metadata().ok();
+            let dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
+            (
+                dir,
+                e.file_name().to_string_lossy().into_owned(),
+                meta.map_or(0, |m| m.len()),
+            )
+        })
+        .collect();
+    if things.is_empty() {
+        return None;
+    }
+    things.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+    let n = things.len();
+    let lines = things
+        .into_iter()
+        .map(|(dir, name, size)| {
+            if dir {
+                format!("{:>10}  {name}/", "")
+            } else {
+                format!("{:>10}  {name}", crate::desktop_props::size_text(size))
+            }
+        })
+        .collect();
+    Some((lines, n))
+}
+
 fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32) -> Prepared {
     let pic = Pic::of(&within_tiles(img));
     let bytes = pic.bytes();
@@ -648,6 +688,24 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         }
         if let Some(img) = kinds::thumbnailed(path, max) {
             return picture(img, format!("{kind} · {size_text}"), app, 0);
+        }
+    }
+    // A FOLDER: what is in it, folders first, as an archive's list is.
+    if dir {
+        if let Some((lines, n)) = folder_list(path) {
+            let bytes = lines.iter().map(String::len).sum();
+            return Prepared {
+                body: Body::Text { lines },
+                meta: format!(
+                    "{} · {}",
+                    tr("Folder"),
+                    fill(tr("{n} things"), &[("n", &n)])
+                ),
+                app,
+                pages: 0,
+                video: None,
+                bytes,
+            };
         }
     }
     let mut lines = Vec::new();
