@@ -1130,7 +1130,13 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     let pal = palette_of(&shell.id).unwrap_or_else(golem);
     let wv = if shell.web_dark { pal.dark } else { pal.light };
     // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
-    let wv = if web_dark_off { tint::at(&wv, pal.dark[pal.accent], 0.0, true) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
+    let mut wv = if web_dark_off { tint::at(&wv, pal.dark[pal.accent], 0.0, true) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
+    if web_dark_off {
+        // …and the ink with no colour either (Hacker's is green: ASUS,
+        // 2026-10-16, "the text on wikipedia is green").
+        let (l, _, _) = tint::lch(wv[5]);
+        wv[5] = tint::from_lch(l, 0.0, 0.0);
+    }
     m.insert("web_dark".into(), shell.web_dark.into());
     m.insert("web_bg".into(), format!("#{}", hex(wv[1])).into());
     m.insert("web_ink".into(), format!("#{}", hex(wv[5])).into());
@@ -2044,6 +2050,12 @@ mod tests {
         assert_eq!(dark["web_dark"], true);
         let bg = parse_hex(dark["web_bg"].as_str().unwrap()).unwrap();
         assert!(tint::lch(bg).1 < 0.01, "neutral, not the palette's colour");
+        // A palette whose ink is coloured (Hacker): the ink goes grey too.
+        let c = ColorChoice { palette: Some("hacker".to_owned()), web_tint: Some(0), web_dark: Some(true), ..Default::default() };
+        let t = resolve(&c, true);
+        let json: serde_json::Value = serde_json::from_str(&colors_json(&for_apps(&t), &t, &c, &[])).unwrap();
+        let ink = parse_hex(json["web_ink"].as_str().unwrap()).unwrap();
+        assert!(tint::lch(ink).1 < 0.01, "Hacker's green ink, greyed: {ink:?}");
         // Left to follow the system, Off leaves the sites as they are made.
         assert_eq!(off(None)["web"], false);
     }
