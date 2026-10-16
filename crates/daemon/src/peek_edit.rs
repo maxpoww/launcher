@@ -408,15 +408,8 @@ pub(crate) fn whole_picture(path: &std::path::Path) -> Option<RgbaImage> {
         });
         return got.into_inner();
     }
-    Some(
-        image::ImageReader::open(path)
-            .ok()?
-            .with_guessed_format()
-            .ok()?
-            .decode()
-            .ok()?
-            .to_rgba8(),
-    )
+    // (Turned as its camera says: what is saved is upright, as it was seen.)
+    Some(crate::peek_kinds::open_oriented(path)?.to_rgba8())
 }
 
 #[cfg(test)]

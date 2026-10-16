@@ -340,7 +340,8 @@ fn kept_path(path: &str, always: bool) -> Option<PathBuf> {
     let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     // FNV-1a over the three: a name for a cache file, not a secret.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in path.bytes().chain(meta.len().to_le_bytes()).chain(changed.to_le_bytes()) {
+    // ("o1": made turned as the camera says — the ones made before were not.)
+    for b in path.bytes().chain(meta.len().to_le_bytes()).chain(changed.to_le_bytes()).chain(*b"o1") {
         h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
     }
     let cache = std::env::var_os("XDG_CACHE_HOME")
@@ -381,13 +382,15 @@ fn decode_image(path: &str) -> Option<Vec<u8>> {
     if path.to_ascii_lowercase().ends_with(".svg") {
         return crate::apps::rasterize_icon_file(path, path);
     }
-    let img = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
-    let thumb = img.thumbnail(ICON_SIZE, ICON_SIZE).to_rgba8();
+    // A JPEG decoded small straight away; anything turned as its camera says.
+    let lower = path.to_ascii_lowercase();
+    let jpeg = (lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
+        .then(|| crate::peek_kinds::jpeg_scaled(std::path::Path::new(path), (ICON_SIZE, ICON_SIZE)))
+        .flatten();
+    let thumb = match jpeg {
+        Some((img, _)) => img,
+        None => crate::peek_kinds::open_oriented(std::path::Path::new(path))?.thumbnail(ICON_SIZE, ICON_SIZE).to_rgba8(),
+    };
     // Center the (aspect-kept) thumbnail on a transparent square and
     // premultiply — the icon pipeline is premultiplied throughout.
     let (tw, th) = (thumb.width(), thumb.height());

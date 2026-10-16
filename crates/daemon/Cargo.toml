@@ -54,6 +54,9 @@ bytemuck = { version = "1", features = ["derive"] }
 freedesktop-icons = { workspace = true }
 resvg = { workspace = true }
 image = { workspace = true }
+# A JPEG decoded straight at 1/2, 1/4 or 1/8 of its size (Quick Look: a camera's
+# photo at the size it is shown, without decoding all of it).
+jpeg-decoder = { version = "0.3", default-features = false }
 md5 = { workspace = true }
 glyphon = { workspace = true }
 memmap2 = "0.9"

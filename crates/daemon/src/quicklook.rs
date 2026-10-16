@@ -418,12 +418,15 @@ fn decode(path: &Path, max: (u32, u32)) -> Option<(image::RgbaImage, (u32, u32))
         });
         return got.into_inner();
     }
-    let img = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
+    // A JPEG: decoded small straight away (the IDCT shrinks it).
+    if name.ends_with(".jpg") || name.ends_with(".jpeg") {
+        if let Some((mut img, own)) = kinds::jpeg_scaled(path, max) {
+            premultiply(&mut img);
+            return Some((img, own));
+        }
+    }
+    // (Turned as its camera says.)
+    let img = kinds::open_oriented(path)?;
     let own = (img.width(), img.height());
     // (`thumbnail`: the quick reduction; a picture smaller stays as it is.)
     let img = if own.0 > max.0 || own.1 > max.1 {

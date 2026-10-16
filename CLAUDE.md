@@ -774,8 +774,12 @@ The big daemon files are cohesive but long — go straight to the function:
   own thumbnail blown up at once (SOFT layer), the sharp body fades in; what the keys are on and
   its neighbours are PREPARED in the background as they move (`filer_peek_near` from
   `filer_draw` → `peek_want`: one nice-10 thread, newest first, stale dropped) within `BUDGET`.
-  Measured on the dev box: 12 MP JPEG 75 ms, 24 MP 290 ms (DCT-scaled JPEG decode is the next
-  lever). PHASE 2 (`peek_kinds.rs`, what reads each kind, all on the worker): a PDF a PAGE at a time
+  A JPEG is decoded STRAIGHT SMALL (`peek_kinds::jpeg_scaled`,
+  the `jpeg-decoder` crate's IDCT scaling to 1/2–1/8, no default features): a realistic 24 MP photo
+  250 → 110 ms on the dev box (a very noisy one only 1.5×: entropy decoding is most of it). Every
+  picture is TURNED AS ITS CAMERA SAYS (EXIF orientation: `open_oriented`), in Quick Look, the
+  editor (what is saved is upright) and the Files thumbnails (kept previews salted "o1" so the
+  old sideways ones are made again). PHASE 2 (`peek_kinds.rs`, what reads each kind, all on the worker): a PDF a PAGE at a time
   (`mutool draw`, else `pdftoppm`; PgUp/PgDn or the wheel turn it, the next page prepared ahead,
   "2 / 3" pill in a grid of its own over the page — a grid's fills draw under its pictures; the
   cache is keyed by (path, page)); a VIDEO = a frame a tenth in + length/size (`ffprobe`/`ffmpeg`);

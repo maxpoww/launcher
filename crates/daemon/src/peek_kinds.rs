@@ -109,6 +109,90 @@ fn fit(aspect: f32, max: (u32, u32)) -> (u32, u32) {
     (w.round().max(1.0) as u32, h.round().max(1.0) as u32)
 }
 
+// ── pictures ────────────────────────────────────────────────────────────
+
+/// A picture read whole, turned as its camera says (EXIF orientation: a
+/// phone's photo taken upright is stored on its side).
+pub(crate) fn open_oriented(path: &Path) -> Option<image::DynamicImage> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    Some(img)
+}
+
+/// A JPEG's orientation, from its header alone.
+fn jpeg_orientation(path: &Path) -> image::metadata::Orientation {
+    use image::ImageDecoder;
+    std::fs::File::open(path)
+        .ok()
+        .and_then(|f| image::codecs::jpeg::JpegDecoder::new(std::io::BufReader::new(f)).ok())
+        .and_then(|mut d| d.orientation().ok())
+        .unwrap_or(image::metadata::Orientation::NoTransforms)
+}
+
+/// A JPEG decoded straight at the smallest of 1/1, 1/2, 1/4, 1/8 of its
+/// size still as big as `max` asks (the IDCT does the shrinking: a 24 MP
+/// photo for a 1200 px frame is decoded at 1/4 — a sixteenth of the work),
+/// then brought to `max`, turned as its camera says. Straight RGBA, and its
+/// own size (as turned). `None`: not a JPEG this reads (CMYK, 16 bits…).
+pub(crate) fn jpeg_scaled(path: &Path, max: (u32, u32)) -> Option<(RgbaImage, (u32, u32))> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut dec = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
+    dec.read_info().ok()?;
+    let info = dec.info()?;
+    let own = (u32::from(info.width), u32::from(info.height));
+    // (The size it is shown at, its shape kept.)
+    let (tw, th) = fit(
+        own.0 as f32 / own.1.max(1) as f32,
+        (max.0.min(own.0), max.1.min(own.1)),
+    );
+    let (sw, sh) = dec
+        .scale(
+            tw.min(u32::from(u16::MAX)) as u16,
+            th.min(u32::from(u16::MAX)) as u16,
+        )
+        .ok()?;
+    let pixels = dec.decode().ok()?;
+    let (sw, sh) = (u32::from(sw), u32::from(sh));
+    let rgba: Vec<u8> = match dec.info()?.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => pixels
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&l| [l, l, l, 255]).collect(),
+        _ => return None,
+    };
+    let img = RgbaImage::from_raw(sw, sh, rgba)?;
+    let img = if (sw, sh) == (tw, th) {
+        img
+    } else {
+        image::imageops::thumbnail(&img, tw, th)
+    };
+    let mut dynamic = image::DynamicImage::ImageRgba8(img);
+    let orientation = jpeg_orientation(path);
+    dynamic.apply_orientation(orientation);
+    let turned = matches!(
+        orientation,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    );
+    Some((
+        dynamic.to_rgba8(),
+        if turned { (own.1, own.0) } else { own },
+    ))
+}
+
 // ── PDF ─────────────────────────────────────────────────────────────────
 
 /// How many pages, and the first one's shape (width / height).
@@ -539,6 +623,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_big_jpeg_is_decoded_small_and_its_shape_kept() {
+        let d = std::env::temp_dir().join(format!("pk-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("big.jpg");
+        let img = image::RgbImage::from_fn(1600, 1200, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        });
+        img.save(&f).unwrap();
+        let (small, own) = jpeg_scaled(&f, (500, 500)).unwrap();
+        assert_eq!(own, (1600, 1200));
+        assert_eq!(small.dimensions(), (500, 375));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn kinds_are_told_by_their_names() {
         assert!(is_pdf("Informe.PDF"));
         assert!(
@@ -552,5 +651,28 @@ mod tests {
         assert_eq!(clock(3725.0), "1:02:05");
         assert_eq!(fit(2.0, (800, 600)), (800, 400));
         assert_eq!(fit(0.5, (800, 600)), (300, 600));
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    /// `QL_BENCH=<a big jpeg> cargo test --release -- --ignored jpeg_bench --nocapture`
+    #[test]
+    #[ignore]
+    fn jpeg_bench() {
+        let Some(path) = std::env::var_os("QL_BENCH") else {
+            return;
+        };
+        let path = std::path::Path::new(&path);
+        for _ in 0..2 {
+            let t = std::time::Instant::now();
+            let full = image::open(path).unwrap();
+            let _ = full.thumbnail(1180, 690);
+            let a = t.elapsed();
+            let t = std::time::Instant::now();
+            let _ = super::jpeg_scaled(path, (1180, 690)).unwrap();
+            let b = t.elapsed();
+            eprintln!("image (zune) whole + thumbnail: {a:?} · jpeg-decoder scaled: {b:?}");
+        }
     }
 }
