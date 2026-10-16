@@ -120,8 +120,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // (`apps_icon`): the plate alone, cut where the layer is opaque — its
     // squares — so what stands behind the button shows through them.
     if (in.ring < -1.4 && in.ring > -1.5) {
-        // (Opaque enough that what is behind reads as behind it: Max's 85%.)
-        let pl = plate_px(in.uv, vec4<f32>(in.plate.rgb, max(in.plate.a, 0.85)), px);
+        // (See-through enough that what is behind shows: Max, 2026-10-16, "more transparent".)
+        let pl = plate_px(in.uv, vec4<f32>(in.plate.rgb, max(in.plate.a, 0.6)), px);
         let keep = (1.0 - texel.a) * mask;
         return vec4<f32>(pl.rgb * keep, pl.a * keep) * globals.alpha;
     }
