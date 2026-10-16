@@ -810,7 +810,11 @@ The big daemon files are cohesive but long — go straight to the function:
   Home/End, PgUp/PgDn, Enter keeps the indent, Tab, Backspace/Delete; Ctrl+S over (original kept
   in versions), Ctrl+Shift+S beside; tabs, `\r\n` and the last newline come back as they were
   read. A saved file's pictures in the file windows and on the desktop are let go and made anew
-  (`App::thumb_stale`). Not built: trimming video/audio, signing a PDF — the lab has them.
+  (`App::thumb_stale`). A VIDEO or a SONG is
+  CUT (`peek_trim.rs`): two handles on a line as long as it lasts, "Take the sound away" for a
+  video; saved with `ffmpeg -ss a -to b -c copy` (no re-encoding: quick anywhere, the cut on the
+  keyframe before), over (original kept) or beside. Rig: `peek cut <a> <b>|mute|save|copy|cancel`.
+  Not built: signing a PDF — the lab has it.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the

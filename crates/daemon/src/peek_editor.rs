@@ -268,9 +268,11 @@ impl App {
                 && p.video.is_none()
         });
         let text = self.peek_shown().is_some_and(|(_, p)| p.whole_text);
-        ((picture && shown_picture) || text)
+        let cut = self.trim_able().is_some();
+        ((picture && shown_picture) || text || cut)
             && up.edit.is_none()
             && up.text_edit.is_none()
+            && up.trim_edit.is_none()
             && !up.closing
     }
 
@@ -301,6 +303,10 @@ impl App {
         // Text is written straight in the frame (`peek_text`).
         if self.peek_shown().is_some_and(|(_, p)| p.whole_text) {
             return self.text_begin();
+        }
+        // A video or a song is cut (`peek_trim`).
+        if self.trim_able().is_some() {
+            return self.trim_begin();
         }
         let Some(tx) = self.peek_edit_channel() else {
             return;
@@ -378,6 +384,16 @@ impl App {
                     .is_some()
                 {
                     self.text_saved(tag, result);
+                    return;
+                }
+                if self
+                    .peek
+                    .up
+                    .as_ref()
+                    .and_then(|u| u.trim_edit.as_ref())
+                    .is_some()
+                {
+                    self.trim_saved(result);
                     return;
                 }
                 let ours = self
@@ -1222,6 +1238,22 @@ impl App {
         let mut words = what.split_whitespace();
         let verb = words.next().unwrap_or("");
         let rest: Vec<&str> = words.collect();
+        // A cut: `cut <from s> <to s>`, `mute`, `save`, `copy`, `cancel`.
+        if self.peek.up.as_ref().is_some_and(|u| u.trim_edit.is_some()) {
+            match verb {
+                "cut" => {
+                    let a = rest.first().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    let b = rest.get(1).and_then(|v| v.parse().ok()).unwrap_or(f32::MAX);
+                    self.trim_set(a, b, None);
+                }
+                "mute" => self.trim_set(f32::NAN, f32::NAN, Some(())),
+                "save" => self.trim_save(SaveAs::Same),
+                "copy" => self.trim_save(SaveAs::Copy),
+                "cancel" => self.trim_key(Keysym::Escape),
+                _ => {}
+            }
+            return "cutting".to_owned();
+        }
         // Text being written: `type <words>`, `key enter|back|up|down|
         // left|right|home|end|escape`, `save`, `copy`, `cancel`.
         if self.peek.up.as_ref().is_some_and(|u| u.text_edit.is_some()) {

@@ -959,5 +959,9 @@
  "Could not save: {why}": "No se pudo guardar: {why}",
  "edited": "editado",
  "Brightness": "Brillo",
- "Editing · line {n}": "Editando · línea {n}"
+ "Editing · line {n}": "Editando · línea {n}",
+ "Take the sound away": "Quitar el sonido",
+ "{n} s": "{n} s",
+ "without sound · cut at the nearest keyframe": "sin sonido · corta en el keyframe más cercano",
+ "not re-encoded · cut at the nearest keyframe": "sin recodificar · corta en el keyframe más cercano"
 }

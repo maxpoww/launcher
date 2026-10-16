@@ -200,7 +200,7 @@ pub(crate) struct Up {
     /// A video's newest frame not yet on the screen, how many it has shown,
     /// and their size.
     frame: Option<Vec<u8>>,
-    frames: u32,
+    pub(crate) frames: u32,
     /// Frames come in since it last started (re)playing.
     frames_of_play: u32,
     frame_size: (u32, u32),
@@ -208,8 +208,9 @@ pub(crate) struct Up {
     pub(crate) edit: Option<crate::peek_editor::Edit>,
     /// A word for a moment ("Saved"), since when.
     pub(crate) notice: Option<(String, Instant)>,
-    /// THE PENCIL on text (`peek_text`).
+    /// THE PENCIL on text (`peek_text`), on a video or a song (`peek_trim`).
     pub(crate) text_edit: Option<crate::peek_text::TextEdit>,
+    pub(crate) trim_edit: Option<crate::peek_trim::TrimEdit>,
 }
 
 impl Up {
@@ -1007,6 +1008,7 @@ impl App {
             edit: None,
             notice: None,
             text_edit: None,
+            trim_edit: None,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1101,11 +1103,9 @@ impl App {
     fn peek_autoplay(&mut self) {
         let video = self.peek_shown().is_some_and(|(_, p)| p.video.is_some());
         if video
-            && self
-                .peek
-                .up
-                .as_ref()
-                .is_some_and(|u| u.play.is_none() && u.frames == 0 && !u.closing)
+            && self.peek.up.as_ref().is_some_and(|u| {
+                u.play.is_none() && u.frames == 0 && !u.closing && u.trim_edit.is_none()
+            })
         {
             self.peek_play_from(0.0);
         }
@@ -1227,6 +1227,10 @@ impl App {
             self.text_key(key, utf8);
             return true;
         }
+        if self.peek.up.as_ref().is_some_and(|u| u.trim_edit.is_some()) {
+            self.trim_key(key);
+            return true;
+        }
         if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) {
             self.edit_key(key, utf8);
             return true;
@@ -1291,6 +1295,12 @@ impl App {
         use smithay_client_toolkit::reexports::client::WEnum;
         // The pencil taken: the pointer is the editor's.
         if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) && self.edit_pointer(event) {
+            return;
+        }
+        if self.peek.up.as_ref().is_some_and(|u| u.trim_edit.is_some())
+            && matches!(event, Event::Motion { .. } | Event::Button { .. })
+        {
+            self.trim_pointer(event);
             return;
         }
         if self.peek.up.as_ref().is_some_and(|u| u.text_edit.is_some()) {
@@ -1980,6 +1990,17 @@ impl App {
                 }
             }
             _ => soft_square(&mut g, 1.0),
+        }
+        // THE PENCIL on a video or a song: the cut, over what is shown.
+        if up.trim_edit.is_some() {
+            let mut over = GridContent {
+                clip: g.clip,
+                ..Default::default()
+            };
+            self.trim_push(&mut g, &mut over, r, open, ink, ground);
+            scene.grids.push(g);
+            scene.grids.push(over);
+            return;
         }
         // THE HEAD: its icon, its name and what it is, Open, ×.
         let parts = parts(r);
