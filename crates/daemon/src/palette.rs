@@ -592,13 +592,40 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
     let spawned = std::thread::Builder::new().name("palette".into()).spawn(move || {
         static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-        write_all(&theme_dir(), &theme);
-        poke(&for_apps(&theme), look_changed);
+        // What the programs wear may be what they wear already (a change of
+        // the web switch only): then only the shared file is written, and no
+        // app is told to reload (GTK's theme flipped name on every switch).
+        static LAST: std::sync::Mutex<Option<Theme>> = std::sync::Mutex::new(None);
+        let apps = for_apps(&theme);
+        let same = {
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            let same = last.as_ref().is_some_and(|l| same_for_apps(l, &apps));
+            *last = Some(apps.clone());
+            same
+        };
+        if same {
+            write_shared(&theme_dir(), &theme);
+        } else {
+            write_all(&theme_dir(), &theme);
+            poke(&apps, look_changed);
+        }
         info!("palette: {} ({}), accent {}", theme.name, if theme.dark { "dark" } else { "light" }, slot_name(theme.accent_slot));
     });
     if let Err(e) = spawned {
         warn!("palette: no thread to write the theme ({e})");
     }
+}
+
+/// Whether two themes dress the programs alike: the same colours, accent and
+/// look (the web switch and the name aside).
+fn same_for_apps(a: &Theme, b: &Theme) -> bool {
+    a.id == b.id && a.c == b.c && a.dark == b.dark && a.accent_slot == b.accent_slot
+}
+
+/// Only the file every reader shares (`colors.json`: Seam's web switches).
+fn write_shared(dir: &Path, shell: &Theme) {
+    let t = &for_apps(shell);
+    crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &crate::webapps::app_hosts()));
 }
 
 /// What the programs wear: the theme, or the makers' colours when the
@@ -1445,6 +1472,14 @@ mod tests {
         // Written back: no `dynamic`, the palette by name.
         let back = serde_json::to_value(ColorChoice { palette: Some("nord".into()), ..max }).unwrap();
         assert_eq!(back, serde_json::json!({"palette": "nord", "apps": true, "web": true}));
+    }
+
+    #[test]
+    fn a_web_switch_leaves_the_programs_alone() {
+        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, true);
+        assert!(same_for_apps(&t, &Theme { web: true, ..t.clone() }));
+        assert!(!same_for_apps(&t, &Theme { dark: false, ..t.clone() }));
+        assert!(!same_for_apps(&for_apps(&t), &for_apps(&Theme { apps: false, ..t.clone() })));
     }
 
     #[test]
