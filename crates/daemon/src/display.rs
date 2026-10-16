@@ -927,6 +927,12 @@ impl App {
             }
             // A click on a choice of the open setting, without a pointer:
             // its group and its place there, counted from 0.
+            // A colour setting without the page: `colours colors-apps 70`,
+            // `colours colors-web-look light`, `colours colors-palette jade`.
+            (Some("colours"), Some(key)) => {
+                let value = words.next().unwrap_or("");
+                self.colors_pick(key, value);
+            }
             (Some("pick"), Some(group)) => {
                 let index = words.next().and_then(|w| w.parse::<u8>().ok()).unwrap_or(0);
                 match group.parse::<u8>() {
