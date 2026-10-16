@@ -2615,6 +2615,7 @@ dependencies = [
  "libc",
  "md5",
  "memmap2 0.9.11",
+ "naga",
  "options-engine",
  "options-notify",
  "pollster",

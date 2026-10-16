@@ -15,7 +15,88 @@ struct Globals {
                          // keep their true square corners)
     neck: vec4<f32>,     // (the rect pipeline's; same buffer)
     light: vec4<f32>,    // x = the night light, 1 in the dark look
+    filt: array<vec4<f32>, 7>, // THE ICON FILTER: [0] = (strength, dark icons, targets, _), [1..] = OKLCH targets
 };
+
+// ---- the icon filter (palette::icon_filter) ----
+fn lin1(v: f32) -> f32 { return select(pow((v + 0.055) / 1.055, 2.4), v / 12.92, v <= 0.04045); }
+fn gam1(v: f32) -> f32 { return select(1.055 * pow(v, 1.0 / 2.4) - 0.055, v * 12.92, v <= 0.0031308); }
+// Linear sRGB <-> OKLab.
+fn to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+    let l_ = pow(max(l, 0.0), 1.0 / 3.0);
+    let m_ = pow(max(m, 0.0), 1.0 / 3.0);
+    let s_ = pow(max(s, 0.0), 1.0 / 3.0);
+    return vec3<f32>(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+}
+fn from_oklab(c: vec3<f32>) -> vec3<f32> {
+    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+    return vec3<f32>(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+// OKLCH -> linear sRGB, the chroma brought in until it fits.
+fn lch_rgb(l: f32, c0: f32, h: f32) -> vec3<f32> {
+    var c = c0;
+    var rgb = from_oklab(vec3<f32>(l, c * cos(h), c * sin(h)));
+    for (var i = 0; i < 12; i = i + 1) {
+        if (all(rgb >= vec3<f32>(-0.001)) && all(rgb <= vec3<f32>(1.001))) { break; }
+        c = c * 0.85;
+        rgb = from_oklab(vec3<f32>(l, c * cos(h), c * sin(h)));
+    }
+    return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+// One straight (linear) colour through the filter.
+fn icon_filter(rgb: vec3<f32>) -> vec3<f32> {
+    let f = globals.filt[0];
+    let k = f.x;
+    let n = i32(f.z);
+    if (k <= 0.0) { return rgb; }
+    var out = rgb;
+    if (n > 0) {
+        let lab = to_oklab(rgb);
+        let c = length(lab.yz);
+        let h = atan2(lab.z, lab.y);
+        var painted: vec3<f32>;
+        if (c < 0.03) {
+            var best = globals.filt[1];
+            for (var i = 2; i <= n; i = i + 1) { if (globals.filt[i].y > best.y) { best = globals.filt[i]; } }
+            painted = lch_rgb(lab.x, 0.035, best.z);
+        } else {
+            var best = globals.filt[1];
+            var bd = 99.0;
+            for (var i = 1; i <= n; i = i + 1) {
+                let t = globals.filt[i];
+                let d = abs(atan2(sin(t.z - h), cos(t.z - h)));
+                if (d < bd) { bd = d; best = t; }
+            }
+            painted = lch_rgb(lab.x * 0.5 + best.x * 0.5, best.y, best.z);
+        }
+        // Mixed in sRGB, as the mockup's.
+        let a = vec3<f32>(gam1(rgb.r), gam1(rgb.g), gam1(rgb.b));
+        let b = vec3<f32>(gam1(painted.r), gam1(painted.g), gam1(painted.b));
+        let m = mix(a, b, k);
+        out = vec3<f32>(lin1(m.r), lin1(m.g), lin1(m.b));
+    }
+    // Dark icons: the lights come down, the colours stay.
+    if (f.y > 0.5) {
+        let lab = to_oklab(out);
+        let l2 = select(lab.x * 0.96, 0.45 + (lab.x - 0.45) * 0.55, lab.x > 0.45);
+        out = clamp(from_oklab(vec3<f32>(l2, lab.y * 0.92, lab.z * 0.92)), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return out;
+}
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var icons: texture_2d_array<f32>;
@@ -229,7 +310,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // icon's own coverage, so only the opaque pixels redden and transparent
     // corners stay clear. `tint.a` is the blend strength (0 = untinted).
     var a = texel.a;
-    var rgb = mix(texel.rgb, in.tint.rgb * a, in.tint.a);
+    // The palette's ICON FILTER, on app icons only (thumbnails keep their colours).
+    var painted = texel.rgb;
+    if (globals.filt[0].x > 0.0 && f32(in.layer) < globals.thumb_base && a > 0.004) {
+        painted = icon_filter(texel.rgb / a) * a;
+    }
+    var rgb = mix(painted, in.tint.rgb * a, in.tint.a);
     // Trim the icon's corners to the squircle here — *before* the X — so the
     // X, composited next, is exempt and can spill a little past the squircle.
     rgb = rgb * mask;

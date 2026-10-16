@@ -69,6 +69,19 @@ pub fn exec_app_host(exec: &str) -> Option<&str> {
 /// The hosts every webapp launcher opens (`webapp-*.desktop`), sorted and
 /// once each: Seam gives them the palette with the programs, not with the
 /// websites (`palette.rs`, `colors.json`'s `webapp_hosts`).
+/// The sites of these webapps (desktop ids `webapp-<slug>`), by their entries.
+pub(crate) fn hosts_of(ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| id.starts_with(PREFIX))
+        .filter_map(|id| std::fs::read_to_string(applications_dir().join(format!("{id}.desktop"))).ok())
+        .filter_map(|text| {
+            let exec = text.lines().find_map(|l| l.strip_prefix("Exec="))?;
+            Some(exec_app_host(exec)?.to_ascii_lowercase())
+        })
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
 pub(crate) fn app_hosts() -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(applications_dir())
         .into_iter()
