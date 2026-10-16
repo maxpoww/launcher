@@ -2377,7 +2377,8 @@ pub fn scene(
             match (apps_stencil.filter(|_| held > 0.01), files_fig) {
                 (Some(stencil), _) => {
                     quads.push(IconInst { rect: tile, layer: stencil, tint: [0.0; 4], ring: -1.45, plate: plate_of(entry_idx) });
-                    quads.push(IconInst { rect: figure, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
+                    // (The figure faded too, a ghost: "todo más transparente".)
+                    quads.push(IconInst { rect: figure, layer: layer_of(entry_idx), tint: [0.0; 4], ring: -1.18, plate: [0.0, 0.0, 0.0, 0.65] });
                 }
                 (None, Some((first, _))) if apps_beat != 1.0 => {
                     quads.push(IconInst { rect: tile, layer: first + crate::files_icon::BLANK, tint: [0.0; 4], ring: -1.0, plate: plate_of(entry_idx) });

@@ -121,7 +121,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // squares — so what stands behind the button shows through them.
     if (in.ring < -1.4 && in.ring > -1.5) {
         // (See-through enough that what is behind shows: Max, 2026-10-16, "more transparent".)
-        let pl = plate_px(in.uv, vec4<f32>(in.plate.rgb, max(in.plate.a, 0.6)), px);
+        let pl = plate_px(in.uv, vec4<f32>(in.plate.rgb, max(in.plate.a, 0.35)), px);
         let keep = (1.0 - texel.a) * mask;
         return vec4<f32>(pl.rgb * keep, pl.a * keep) * globals.alpha;
     }
@@ -242,6 +242,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let cc = vec3<f32>(0.45, 0.08, 0.06);
         rgb = cc * can + rgb * (1.0 - can);
         a = can + a * (1.0 - can);
+    }
+    // GHOST (ring in (-1.2, -1.16)): the glyph faded to `plate.a`, no plate —
+    // the apps button's figure while it holds pins, see-through.
+    if (in.ring < -1.16 && in.ring > -1.2) {
+        return vec4<f32>(rgb, a) * in.plate.a * globals.alpha;
     }
     // Squircle plate under the glyph (plate.a > 0): the frosted rounded
     // square that used to be BAKED white into the icon texture, now drawn
