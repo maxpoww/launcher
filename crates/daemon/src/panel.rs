@@ -1533,10 +1533,8 @@ impl Panel {
         // eight left the eighth row with seven, and the rest on page two).
         let want = choices.len().min(TILES_PER_PAGE);
         let mut best: Option<(usize, usize, f32)> = None;
-        // Palettes stand in rows of NINE (Max, 2026-10-16: the box is 13 × 9).
         let swatches = choices.iter().any(|c| !c.swatch.is_empty());
-        let span = if swatches { 9..=9usize } else { 2..=12usize };
-        for cols in span {
+        for cols in 2..=12usize {
             let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
             let h = w * TILE_ASPECT;
             let rows = (((room_h + gap) / (h + gap)).floor() as usize).max(1);
@@ -1544,14 +1542,28 @@ impl Panel {
                 best = Some((cols, rows, w));
             }
         }
-        // (Too many for the box at any size: the smallest, a page of them.)
-        // (Palettes: nine across whatever the room; what does not fit turns a page.)
-        let best = best.or_else(|| {
-            swatches.then(|| {
-                let w = ((room_w - 8.0 * gap) / 9.0).min(TILE_MAX_W * s);
-                (9, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
+        // PALETTES AS BIG AS THE WALLPAPERS (Max, 2026-10-16): the size a
+        // page of pictures gets with the WHOLE box to itself, as many across
+        // as that size fits, as many rows as the room under the sliders
+        // holds — the rest on further pages.
+        let best = if swatches {
+            let full_h = (whole - WALL_TOP * s - 40.0 * s - dots_h).max(TILE_ASPECT * 80.0 * s);
+            let mut size: Option<f32> = None;
+            for cols in 2..=12usize {
+                let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
+                let rows = (((full_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1);
+                if cols * rows >= want && size.is_none_or(|bw| w > bw) {
+                    size = Some(w);
+                }
+            }
+            size.map(|w| {
+                let cols = (((room_w + gap) / (w + gap)).floor() as usize).max(1);
+                (cols, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
             })
-        });
+        } else {
+            best
+        };
+        // (Too many for the box at any size: the smallest, a page of them.)
         let (cols, rows_fit, w) = best.unwrap_or_else(|| {
             let w = (room_w - 11.0 * gap) / 12.0;
             (12, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
