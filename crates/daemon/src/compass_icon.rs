@@ -145,7 +145,7 @@ fn figure(needle: f32, plate: f32, part: Part) -> String {
 <mask id="cut" {bx}><rect x="-20" y="-20" width="140" height="140" fill="#fff"/><g {turn}>{cut}</g></mask>
 <mask id="pl" {bx}><circle cx="50" cy="50" r="40" fill="#fff"/><g {turn}>{cut}</g></mask>
 <mask id="op" {bx}><g {turn}>{open}</g></mask></defs>
-<g opacity="{opacity}"><g transform="translate(-6.25 -7.5) scale(1.125)">
+<g opacity="{opacity}"><g transform="translate(-3.75 -5) scale(1.075)">
 {body}
 </g></g></svg>"##,
         s0 = stops[0],
