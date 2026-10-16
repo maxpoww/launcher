@@ -659,6 +659,11 @@ pub(crate) mod tint {
         let [l, a, b] = lab(c);
         (l, a.hypot(b), b.atan2(a).to_degrees().rem_euclid(360.0))
     }
+    /// A hue of the wheel (`turn` 0..1), bright and clear: Dynamic's swatch.
+    pub(crate) fn hue(turn: f32) -> Rgb {
+        from_lch(0.74, 0.14, turn * 360.0)
+    }
+
     /// OKLCH → sRGB, chroma reduced until it fits.
     fn from_lch(l: f32, mut c: f32, h: f32) -> Rgb {
         let (sin, cos) = h.to_radians().sin_cos();

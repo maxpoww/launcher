@@ -34,6 +34,9 @@ pub(crate) struct Choice {
     pub on: bool,
     /// What a pick of it sends back (with its group's key).
     pub value: String,
+    /// A PALETTE: the colours its swatch is painted with (ground first, then
+    /// its soul), drawn in place of a picture. Empty for every other choice.
+    pub swatch: Vec<[u8; 3]>,
 }
 
 /// A group of choices under an optional caption. A caption with no choices
@@ -49,6 +52,12 @@ pub(crate) struct Group {
     /// The choices are PICTURES (each one's `value` is its file): shown as
     /// a grid of previews, as big as the box lets them all be.
     pub tiles: bool,
+    /// The choices are the stops of a SLIDER (0..=100 by `SLIDER_STEP`),
+    /// drawn as a track with a knob on the lit one.
+    pub slider: bool,
+    /// Laid on the same row as the group before it (a slider's own
+    /// [Dark][Light] pair), at its right end.
+    pub beside: bool,
 }
 
 /// What an open setting shows.
@@ -262,7 +271,7 @@ fn run(program: &str, args: &[&str]) -> bool {
 }
 
 fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice {
-    Choice { text: text.into(), on, value: value.into() }
+    Choice { text: text.into(), on, value: value.into(), swatch: Vec::new() }
 }
 
 fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: Vec<Choice>) -> Group {
@@ -270,7 +279,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -281,7 +290,33 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false }
+}
+
+/// A slider's stops, and where the palette AS MADE sits on it.
+pub(crate) const SLIDER_STEP: u8 = 5;
+const MADE: u8 = 50;
+
+/// A slider from 0 to 100, the stop nearest `level` lit.
+fn slider(key: &'static str, level: u8) -> Group {
+    let lit = (level + SLIDER_STEP / 2) / SLIDER_STEP;
+    let choices = (0..=100 / SLIDER_STEP).map(|i| choice(String::new(), i == lit, (i * SLIDER_STEP).to_string())).collect();
+    Group { slider: true, ..group(None, key, 0.0, choices) }
+}
+
+/// What a slider's level is called: Off, as made, full, or its number.
+fn level_text(level: u8) -> String {
+    match level {
+        0 => tr("Off").to_owned(),
+        MADE => tr("as made").to_owned(),
+        100 => tr("full colour").to_owned(),
+        n => format!("{n}%"),
+    }
+}
+
+/// [Dark][Light], with the values each sends.
+fn look_pair(caption: Option<&'static str>, key: &'static str, dark: bool, dark_value: &'static str, light_value: &'static str) -> Group {
+    group(caption, key, 84.0, vec![choice(tr("Dark"), dark, dark_value), choice(tr("Light"), !dark, light_value)])
 }
 
 /// On / Off.
@@ -1381,14 +1416,31 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let dark = dark_now();
             let picked = crate::palette::choice();
             view.subtitle = tr("How everything looks. Some apps change the next time they open.").to_owned();
-            view.groups.push(on_off(Some("Dark mode"), "dark", dark));
-            // (Until the new Colours page: the sliders as on/off — on = the palette as made.)
-            view.groups.push(on_off(Some("Colours on apps"), "colors-apps", picked.apps_level() != Some(0)));
-            view.groups.push(on_off(Some("Colours on the web"), "colors-web", picked.web_level() != Some(0)));
+            view.groups.push(look_pair(None, "dark", dark, "on", "off"));
+            // The three sliders (Max, 2026-10-16): 0 = Off (the makers' own
+            // colours), the middle = the palette as made, the end = full
+            // colour; each with a [Dark][Light] of its own that follows the
+            // system's until it is clicked.
+            let apps = picked.apps_level().unwrap_or(MADE);
+            let web = picked.web_level().unwrap_or(MADE);
+            for (name, key, look_key, level, own) in [
+                ("Apps", "colors-apps", "colors-apps-look", apps, picked.apps_dark),
+                ("Web", "colors-web", "colors-web-look", web, picked.web_dark),
+                ("Icons", "colors-icons", "colors-icons-look", picked.icons_tint, picked.icons_dark),
+            ] {
+                let caption = format!("{} · {}", tr(name), level_text(level));
+                view.groups.push(Group { caption: Some(caption), ..slider(key, level) });
+                view.groups.push(Group { beside: true, ..look_pair(None, look_key, own.unwrap_or(dark), "dark", "light") });
+            }
             let now = picked.palette_id().to_owned();
-            let mut choices = vec![choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID)];
-            choices.extend(crate::palette::all().into_iter().map(|p| choice(p.name.clone(), p.id == now, p.id)));
-            view.groups.push(group(None, "colors-palette", 110.0, choices));
+            let ground = |p: &crate::palette::Palette| if dark { p.dark[0] } else { p.light[0] };
+            let mut choices = vec![Choice { swatch: Vec::new(), ..choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID) }];
+            choices.extend(crate::palette::all().into_iter().map(|p| {
+                let mut swatch = vec![ground(&p)];
+                swatch.extend(if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() });
+                Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
+            }));
+            view.groups.push(Group { tiles: true, ..group(None, "colors-palette", 110.0, choices) });
         }
         "Brightness" => match brightness() {
             Some(now) => {

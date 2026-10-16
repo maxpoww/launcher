@@ -542,6 +542,20 @@ struct Chip {
     action: PanelAction,
     /// A picture's file: the choice is a preview of it, not a pill.
     image: Option<String>,
+    /// A palette: its swatch's colours (ground, then its soul).
+    swatch: Vec<[u8; 3]>,
+    /// A stop of a slider: not drawn by itself (the slider is), only clicked.
+    seg: bool,
+    /// A palette's swatch (Dynamic's has no colours: it is drawn as a wheel).
+    palette: bool,
+}
+
+/// A slider as drawn: its track, the lit stop's place on it (0..=1), and
+/// which chips are its stops.
+struct Slider {
+    track: Rect,
+    value: f32,
+    stops: std::ops::Range<usize>,
 }
 
 /// A real setting's content at rest, in field coordinates: what
@@ -561,6 +575,7 @@ struct OpenContent {
     ghosts: Vec<Chip>,
     ghost_slide: f32,
     dots: Option<(f32, usize, usize)>,
+    sliders: Vec<Slider>,
 }
 
 /// The pill that became the whole card.
@@ -1345,9 +1360,64 @@ impl Panel {
             let in_row = (total - row * per_row).min(per_row);
             let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
             let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
-            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None });
+            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None, swatch: Vec::new(), seg: false, palette: false });
         }
         y + rows as f32 * h + (rows - 1) as f32 * row_gap + GROUP_GAP * s
+    }
+
+    /// Lay a SLIDER out from `y` down, across the field, with its own pair
+    /// of pills (`pair`, the group laid beside it) at its right end. Its
+    /// stops are chips that are not drawn: a click lands on the nearest, and
+    /// the keys walk them a stop at a time.
+    fn flow_slider(
+        &self,
+        out: &mut OpenContent,
+        y: f32,
+        group: u8,
+        stops: &[crate::controls::Choice],
+        pair: Option<(u8, &crate::controls::Group)>,
+    ) -> f32 {
+        let s = self.scale;
+        let fw = self.key.0;
+        let h = CHIP_H * s;
+        let (left, mut right) = (MARGIN * 2.0 * s, fw - MARGIN * 2.0 * s);
+        if let Some((pg, g)) = pair {
+            let (w, gap) = (g.width * s * 0.8, 8.0 * s);
+            let n = g.choices.len() as f32;
+            let x0 = right - n * w - (n - 1.0) * gap;
+            for (ci, c) in g.choices.iter().enumerate() {
+                out.chips.push(Chip {
+                    rect: Rect::new(x0 + ci as f32 * (w + gap), y + 4.0 * s, w, h - 8.0 * s),
+                    text: c.text.clone(),
+                    on: c.on,
+                    action: PanelAction::Pick { group: pg, index: ci as u8 },
+                    image: None,
+                    swatch: Vec::new(),
+                    seg: false,
+                    palette: false,
+                });
+            }
+            right = x0 - 22.0 * s;
+        }
+        let n = stops.len().max(2);
+        let track = Rect::new(left, y + h / 2.0 - 3.0 * s, (right - left).max(40.0 * s), 6.0 * s);
+        let step = track.w / (n - 1) as f32;
+        let first = out.chips.len();
+        let lit = stops.iter().position(|c| c.on).unwrap_or(0);
+        for (ci, c) in stops.iter().enumerate() {
+            out.chips.push(Chip {
+                rect: Rect::new(track.x + (ci as f32 - 0.5) * step, y, step, h),
+                text: String::new(),
+                on: c.on,
+                action: PanelAction::Pick { group, index: ci as u8 },
+                image: None,
+                swatch: Vec::new(),
+                seg: true,
+                palette: false,
+            });
+        }
+        out.sliders.push(Slider { track, value: lit as f32 / (n - 1) as f32, stops: first..out.chips.len() });
+        y + h + GROUP_GAP * s * 0.6
     }
 
     /// Lay PICTURES out as a grid of previews from `y` down: as many columns
@@ -1382,7 +1452,10 @@ impl Panel {
         // eight left the eighth row with seven, and the rest on page two).
         let want = choices.len().min(TILES_PER_PAGE);
         let mut best: Option<(usize, usize, f32)> = None;
-        for cols in 2..=12usize {
+        // Palettes stand in rows of NINE (Max, 2026-10-16: the box is 13 × 9).
+        let swatches = choices.iter().any(|c| !c.swatch.is_empty());
+        let span = if swatches { 9..=9usize } else { 2..=12usize };
+        for cols in span {
             let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
             let h = w * TILE_ASPECT;
             let rows = (((room_h + gap) / (h + gap)).floor() as usize).max(1);
@@ -1416,7 +1489,10 @@ impl Panel {
                         text: c.text.clone(),
                         on: c.on,
                         action: PanelAction::Pick { group, index: (first + k) as u8 },
-                        image: Some(c.value.clone()),
+                        image: (!swatches).then(|| c.value.clone()),
+                        swatch: c.swatch.clone(),
+                        seg: false,
+                        palette: swatches,
                     }
                 })
                 .collect()
@@ -1490,6 +1566,7 @@ impl Panel {
             ghosts: Vec::new(),
             ghost_slide: 0.0,
             dots: None,
+            sliders: Vec::new(),
         };
         if !self.modules && crate::controls::is_control(label) {
             // Not read yet: the bare card, for the moment the read takes.
@@ -1503,8 +1580,16 @@ impl Panel {
             let wall = view.groups.iter().any(|g| g.tiles && !g.choices.is_empty());
             let mut y = if wall { WALL_TOP * s } else { top };
             for (gi, g) in view.groups.iter().enumerate() {
+                if g.beside {
+                    continue; // (laid out with the slider before it)
+                }
                 if let Some(c) = &g.caption {
                     y = self.caption(&mut out, y, c.clone());
+                }
+                if g.slider {
+                    let pair = view.groups.get(gi + 1).filter(|n| n.beside).map(|n| (gi as u8 + 1, n));
+                    y = self.flow_slider(&mut out, y, gi as u8, &g.choices, pair);
+                    continue;
                 }
                 if g.tiles {
                     y = self.flow_tiles(&mut out, y, gi as u8, &g.choices);
@@ -2287,9 +2372,75 @@ impl Panel {
                     });
                 }
             };
+            // A PALETTE: its swatch, the ground with its soul as a band of
+            // stripes along the foot; Dynamic (no colours: it is made from
+            // the wallpaper) as a wheel of hues. The one in use, ringed.
+            let swatch_at = |out: &mut PanelDraw, r: Rect, dx: f32, colours: &[[u8; 3]], on: bool, keyed: bool| {
+                if r.x + dx < 0.0 || r.x + dx + r.w > fw {
+                    return;
+                }
+                let lin = |c: [u8; 3], a: f32| {
+                    let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0);
+                    [f(c[0]), f(c[1]), f(c[2]), a * ca]
+                };
+                let (x, y0) = (r.x + dx, r.y);
+                let radius = TILE_RADIUS * s;
+                if colours.is_empty() {
+                    let n = 12;
+                    for k in 0..n {
+                        let c = crate::palette::tint::hue(k as f32 / n as f32);
+                        let w = r.w / n as f32;
+                        rect(out, x + k as f32 * w, y0, w + 0.5, r.h, if k == 0 || k == n - 1 { radius } else { 0.0 }, lin(c, 1.0));
+                    }
+                } else {
+                    rect(out, x, y0, r.w, r.h, radius, lin(colours[0], 1.0));
+                    let soul = &colours[1..];
+                    let band = r.h * 0.38;
+                    let pad = r.w * 0.1;
+                    let w = (r.w - 2.0 * pad) / soul.len().max(1) as f32;
+                    for (k, c) in soul.iter().enumerate() {
+                        rect(out, x + pad + k as f32 * w, y0 + r.h - pad * 0.6 - band, w, band, 2.0 * s, lin(*c, 1.0));
+                    }
+                }
+                if on || keyed {
+                    let grow = 3.0 * s;
+                    let (mx, my) = map(x - grow, y0 - grow);
+                    out.rects.push(RectInst {
+                        rect: Rect::new(mx, my, (r.w + 2.0 * grow) * cs, (r.h + 2.0 * grow) * cs),
+                        radius: (radius + grow) * cs,
+                        color: [paint.ink[0], paint.ink[1], paint.ink[2], if keyed { 0.95 } else { 0.6 } * ca],
+                        glass: 0.0,
+                        border: (if keyed { 2.4 } else { 1.6 } * s * cs).max(1.2),
+                    });
+                }
+            };
             for chip in content.ghosts {
                 if let Some(file) = chip.image {
                     tile_at(out, chip.rect, content.ghost_slide, file, false);
+                } else if chip.palette {
+                    swatch_at(out, chip.rect, content.ghost_slide, &chip.swatch, chip.on, false);
+                }
+            }
+            // The SLIDERS: a quiet track, filled to the knob, the knob ringed
+            // when the keys are on it.
+            for sl in &content.sliders {
+                let t = sl.track;
+                let ink_c = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], a];
+                rect(out, t.x, t.y, t.w, t.h, t.h / 2.0, crate::options::wash(!paint.bright, layer_wash[1]));
+                let kx = t.x + t.w * sl.value;
+                rect(out, t.x, t.y, (kx - t.x).max(t.h), t.h, t.h / 2.0, ink_c(0.55));
+                let knob = 22.0 * s;
+                rect(out, kx - knob / 2.0, t.y + t.h / 2.0 - knob / 2.0, knob, knob, knob / 2.0, ink_c(0.95));
+                if resting && self.focus.is_some_and(|f| sl.stops.contains(&f)) {
+                    let g = knob + 8.0 * s;
+                    let (mx, my) = map(kx - g / 2.0, t.y + t.h / 2.0 - g / 2.0);
+                    out.rects.push(RectInst {
+                        rect: Rect::new(mx, my, g * cs, g * cs),
+                        radius: g / 2.0 * cs,
+                        color: ink_c(0.9 * ca),
+                        glass: 0.0,
+                        border: (2.0 * s * cs).max(1.5),
+                    });
                 }
             }
             // The pages' dots under the wall: the one that is up, brighter.
@@ -2307,6 +2458,13 @@ impl Panel {
                 let keyed = resting && self.focus == Some(i);
                 if let Some(file) = chip.image {
                     tile_at(out, r, content.slide, file, keyed && content.slide.abs() < 0.5);
+                    continue;
+                }
+                if chip.seg {
+                    continue;
+                }
+                if chip.palette {
+                    swatch_at(out, r, content.slide, &chip.swatch, chip.on, keyed && content.slide.abs() < 0.5);
                     continue;
                 }
                 let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
