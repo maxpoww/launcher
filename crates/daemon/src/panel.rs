@@ -1464,6 +1464,13 @@ impl Panel {
             }
         }
         // (Too many for the box at any size: the smallest, a page of them.)
+        // (Palettes: nine across whatever the room; what does not fit turns a page.)
+        let best = best.or_else(|| {
+            swatches.then(|| {
+                let w = ((room_w - 8.0 * gap) / 9.0).min(TILE_MAX_W * s);
+                (9, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
+            })
+        });
         let (cols, rows_fit, w) = best.unwrap_or_else(|| {
             let w = (room_w - 11.0 * gap) / 12.0;
             (12, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
