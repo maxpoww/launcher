@@ -2469,13 +2469,21 @@ pub fn scene(
         let drop = 1.0 + (stretch - 1.0) * DOCK_STRETCH_GAIN;
         for &(slot, entry_idx, s) in &edge_pins {
             let Some(slot_rect) = layout.dock_slots.get(slot) else { continue };
+            // Its size and place as the row will have them once it is out —
+            // magnified as its neighbours are under the pointer — so the
+            // hand-over to its own slot is seamless (it came out small and
+            // then jumped up to size, Max 2026-10-16).
+            let scale = dock_scales.get(slot).copied().unwrap_or(1.0);
+            let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM);
+            let own_vw = dock_slot + dock_icon * (scale - 1.0);
+            let step = (dock_vw.get(ov.apps_slot).copied().unwrap_or(dock_slot) + own_vw) / 2.0;
             let cx = if s < 0.0 {
-                dock_vcx.get(slot + 1).map_or(apps_cx, |x| x - dock_slot)
+                dock_vcx.get(slot + 1).map_or(apps_cx, |x| x - own_vw)
             } else {
-                apps_cx + (s - ov.cap as f32) * dock_slot
+                // (cap - 1 → its own slot; cap → behind the button's middle.)
+                apps_cx + (s - ov.cap as f32) * step
             };
             let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
-            let size = dock_icon;
             edge.icons.push(IconInst {
                 rect: Rect::new(cx - size / 2.0, baseline - size * drop, size, size * drop),
                 layer: layer_of(entry_idx),
