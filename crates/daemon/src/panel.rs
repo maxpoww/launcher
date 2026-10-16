@@ -3206,6 +3206,12 @@ impl App {
         let mut apps: Vec<(u32, String, String)> = self
             .entries
             .iter()
+            .enumerate()
+            // Real apps only: a .desktop of its own (not a home folder, an
+            // icon asset or the shell's own tiles), with a name.
+            .filter(|(i, e)| self.kinds.get(*i) == Some(&crate::apps::EntryKind::App) && e.path.is_some() && !e.name.trim().is_empty())
+            .map(|(_, e)| e)
+            .filter(|e| !e.id.starts_with("golem-") && !e.id.starts_with("waverunner"))
             .filter(|e| !e.id.starts_with("webapp-") || self.managed_webapps.contains(&e.id["webapp-".len()..]))
             .map(|e| (self.usage.count(&e.id), e.id.clone(), e.name.clone()))
             .collect();
