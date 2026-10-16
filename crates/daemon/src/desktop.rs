@@ -3641,6 +3641,11 @@ impl App {
         // open and go back as the arrows, Enter and Escape do. With Ctrl
         // they stay what they were — Ctrl+A, Ctrl+X…)
         let keysym = if self.modifiers.ctrl { keysym } else { crate::panel::left_hand(keysym) };
+        // QUICK LOOK up from here: its keys first (the arrows walk on, and
+        // it follows them).
+        if self.peek_key(crate::quicklook::DESKTOP, keysym) {
+            return;
+        }
         let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
         // A menu or a box up: Escape puts it away; nothing else is for it.
         if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() {
@@ -3728,10 +3733,31 @@ impl App {
                     self.desktop.selected.clear();
                     self.desktop.selected.insert(self.desktop.items[i].path.clone());
                     self.request_desktop_draw();
+                    if self.peek.up.as_ref().is_some_and(|u| u.win == crate::quicklook::DESKTOP) {
+                        self.desktop_peek_open();
+                    }
                 }
             }
+            // QUICK LOOK (Max, 2026-10-16: "from any part of the shell").
+            Keysym::space => self.desktop_peek_open(),
             _ => {}
         }
+    }
+
+    /// The selected icon (the first of several), shown by Quick Look.
+    fn desktop_peek_open(&mut self) {
+        let Some((i, item)) = self.desktop.items.iter().enumerate().find(|(_, it)| self.desktop.selected.contains(&it.path)) else {
+            return;
+        };
+        let Some(slot) = self.desktop.slots.get(i).copied().flatten() else { return };
+        let thing = crate::quicklook::Thing {
+            path: std::path::PathBuf::from(&item.path),
+            name: item.name.clone(),
+            thumb: self.desktop.chains.get(&item.icon).cloned(),
+            // (The top surface lies where the desktop does: a point is the same on both.)
+            icon: icon_rect(&self.desktop.grid.rect(slot), self.desktop_icon_scale()),
+        };
+        self.peek_show(crate::quicklook::DESKTOP, thing);
     }
 
     /// A window was clicked (the keyboard went to another one): a click
@@ -3791,6 +3817,11 @@ impl App {
 
     /// Draw one desktop frame.
     pub(crate) fn draw_desktop(&mut self) {
+        // (The selected icon prepared for Quick Look before Space.)
+        if let Some(it) = self.desktop.items.iter().find(|it| self.desktop.selected.contains(&it.path)) {
+            let path = it.path.clone();
+            self.peek_follow_keys(crate::quicklook::DESKTOP, &path, vec![std::path::PathBuf::from(&path)]);
+        }
         let (w, h) = self.desktop_size;
         if w == 0 || h == 0 {
             return;
@@ -5202,6 +5233,21 @@ impl App {
     pub(crate) fn desktop_debug(&mut self, what: &str) -> String {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
+        }
+        // `key space|escape|left|right|up|down`: as if pressed with the
+        // desktop holding the keys (Quick Look's rig).
+        if let Some(rest) = what.strip_prefix("key ") {
+            let key = match rest.trim() {
+                "space" => Keysym::space,
+                "escape" => Keysym::Escape,
+                "left" => Keysym::Left,
+                "right" => Keysym::Right,
+                "up" => Keysym::Up,
+                "down" => Keysym::Down,
+                other => return format!("no key {other}"),
+            };
+            self.desktop_shortcut(key);
+            return format!("key {}", rest.trim());
         }
         // `menu [n]`: the menu on item n (or the wallpaper's, mid-surface);
         // `pick <row>`: choose that row of the open menu.

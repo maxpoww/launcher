@@ -50,6 +50,10 @@ use crate::i18n::{fill, tr};
 use crate::peek_kinds as kinds;
 use crate::App;
 
+/// What `Up::win` is when Quick Look came from the DESKTOP's icons (a file
+/// window's id never gets there).
+pub(crate) const DESKTOP: u32 = u32::MAX;
+
 /// A tile is one layer of the icon array; it carries `STEP` texels of the
 /// picture and the one beyond each edge again, so neighbours overlap.
 const TILE: u32 = ICON_SIZE;
