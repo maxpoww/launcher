@@ -311,11 +311,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // corners stay clear. `tint.a` is the blend strength (0 = untinted).
     var a = texel.a;
     // The palette's ICON FILTER, on app icons only (thumbnails keep their colours).
-    var px = texel.rgb;
+    var painted = texel.rgb;
     if (globals.filt[0].x > 0.0 && f32(in.layer) < globals.thumb_base && a > 0.004) {
-        px = icon_filter(texel.rgb / a) * a;
+        painted = icon_filter(texel.rgb / a) * a;
     }
-    var rgb = mix(px, in.tint.rgb * a, in.tint.a);
+    var rgb = mix(painted, in.tint.rgb * a, in.tint.a);
     // Trim the icon's corners to the squircle here — *before* the X — so the
     // X, composited next, is exempt and can spill a little past the squircle.
     rgb = rgb * mask;
