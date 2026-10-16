@@ -901,7 +901,11 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
             d[st.accent] = pal.dark[pal.accent];
             l[st.accent] = pal.light[pal.accent_light];
             // (the palette's accent goes where the makers keep theirs)
-            let pair = (d, st.accent, l, st.accent);
+            let pair = match (t.apps_dark != t.dark, t.apps_dark) {
+                (true, true) => (d, st.accent, d, st.accent),
+                (true, false) => (l, st.accent, l, st.accent),
+                _ => (d, st.accent, l, st.accent),
+            };
             return Theme {
                 c: if t.apps_dark { d } else { l },
                 accent_slot: st.accent,
@@ -912,7 +916,12 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
         }
         level => (tint::walk(&pal.dark, own, true, level), tint::walk(&pal.light, own, false, level)),
     };
-    let pair = (dark_v, pal.accent, light_v, pal.accent_light);
+    let mut pair = (dark_v, pal.accent, light_v, pal.accent_light);
+    if t.apps_dark != t.dark {
+        // The apps keep a look of their own: both halves wear it, since
+        // GTK 4 picks its half by the SYSTEM's look (prefers-color-scheme).
+        pair = if t.apps_dark { (dark_v, pal.accent, dark_v, pal.accent) } else { (light_v, pal.accent_light, light_v, pal.accent_light) };
+    }
     Theme {
         c: if t.apps_dark { dark_v } else { light_v },
         accent_slot: if t.apps_dark { pal.accent } else { pal.accent_light },
