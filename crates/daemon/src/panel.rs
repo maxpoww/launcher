@@ -3609,7 +3609,9 @@ impl App {
         // 2026-10-13: "casi tan grande como la pantalla completa").
         // (With no picture to show it is a box like any other: one line of
         // words in a box the screen's size read as something broken.)
-        let whole = self.quick.open_is("Wallpaper") && self.quick.open_has_tiles();
+        // (Colours too, while its palettes are up — Max, 2026-10-16: "make the
+        // palettes rectangles as big as the wallpapers".)
+        let whole = (self.quick.open_is("Wallpaper") || self.quick.open_is("Colours")) && self.quick.open_has_tiles();
         if whole {
             // From under the bar to clear of the dock, nearly the screen's
             // width (Max, 2026-10-14: "make the box a little wider and move
@@ -3652,8 +3654,8 @@ impl App {
     fn quick_ensure(&mut self, rect: Rect) {
         // (The wall is laid out for the room it MAY take; the box then hugs
         // what it took.)
-        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") { self.quick_wall_room().1 } else { 0.0 };
-        if let Some(h) = self.quick.open_height().filter(|_| self.quick.open_is("Wallpaper") && self.quick.open_has_tiles()) {
+        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") || self.quick.open_is("Colours") { self.quick_wall_room().1 } else { 0.0 };
+        if let Some(h) = self.quick.open_height().filter(|_| (self.quick.open_is("Wallpaper") || self.quick.open_is("Colours")) && self.quick.open_has_tiles()) {
             self.quick.wall_h = Some(h);
         }
         let scale = self.options_scale() * self.fast_zoom();
