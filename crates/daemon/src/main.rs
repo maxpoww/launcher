@@ -6334,6 +6334,11 @@ impl App {
             self.desktop_config_key(keysym, utf8);
             return;
         }
+        // A field of the Colours setting being typed in takes every key.
+        if self.colours_typing() {
+            self.colours_type(keysym, utf8);
+            return;
+        }
         // A desktop icon's name being typed takes every key.
         if self.desktop.rename.is_some() {
             self.desktop_key(keysym, utf8);

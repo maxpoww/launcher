@@ -702,6 +702,10 @@ impl App {
         }
         // A setting is open in its box: Escape folds it; nothing is typed.
         if self.fast.boxed.is_some() {
+            if self.colours_typing() {
+                self.colours_type(keysym, utf8);
+                return;
+            }
             self.quick_key(keysym);
             return;
         }

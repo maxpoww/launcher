@@ -927,6 +927,23 @@ impl App {
             }
             // A click on a choice of the open setting, without a pointer:
             // its group and its place there, counted from 0.
+            // Typing into the Colours field that has the keys: `type #3a7bd5`,
+            // `type enter`, `type backspace`, `type escape`.
+            (Some("type"), Some(first)) => {
+                use smithay_client_toolkit::seat::keyboard::Keysym;
+                let rest: Vec<&str> = std::iter::once(first).chain(words.by_ref()).collect();
+                match rest.join(" ").as_str() {
+                    "enter" => self.colours_type(Keysym::Return, None),
+                    "backspace" => self.colours_type(Keysym::BackSpace, None),
+                    "escape" => self.colours_type(Keysym::Escape, None),
+                    text => {
+                        for ch in text.chars() {
+                            let mut b = [0u8; 4];
+                            self.colours_type(Keysym::NoSymbol, Some(ch.encode_utf8(&mut b)));
+                        }
+                    }
+                }
+            }
             // A colour setting without the page: `colours colors-apps 70`,
             // `colours colors-web-look light`, `colours colors-palette jade`.
             (Some("colours"), Some(key)) => {

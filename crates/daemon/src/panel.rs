@@ -1308,6 +1308,10 @@ impl Panel {
         if let Ok(mut e) = crate::controls::EDITOR.lock() {
             *e = None;
         }
+        if let Ok(mut t) = crate::controls::TYPING.lock() {
+            *t = None;
+        }
+        crate::controls::field_typed("colors-apps-find", "", false);
         self.open_control_label()
     }
 
@@ -3295,6 +3299,47 @@ impl App {
         }
     }
 
+    /// A text field of Colours is being typed in (and Colours is up).
+    pub(crate) fn colours_typing(&self) -> bool {
+        let on = |p: &Panel| p.open_control_label() == Some("Colours");
+        crate::controls::TYPING.lock().is_ok_and(|t| t.is_some()) && (on(&self.panel) || on(&self.quick))
+    }
+
+    /// A key while a field of Colours has the keys: letters go in,
+    /// Backspace takes one out, Enter keeps it, Escape leaves it.
+    pub(crate) fn colours_type(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        let Some((key, mut text)) = crate::controls::TYPING.lock().ok().and_then(|t| t.clone()) else {
+            return;
+        };
+        let mut done = false;
+        let mut leave = false;
+        match keysym {
+            Keysym::Escape => leave = true,
+            Keysym::Return | Keysym::KP_Enter => {
+                done = true;
+                leave = true;
+            }
+            Keysym::BackSpace => {
+                text.pop();
+            }
+            _ => match utf8 {
+                Some(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) && text.chars().count() < 40 => text.push_str(t),
+                _ => return,
+            },
+        }
+        crate::controls::field_typed(key, &text, done);
+        if let Ok(mut t) = crate::controls::TYPING.lock() {
+            *t = if leave { None } else { Some((key, text)) };
+        }
+        if done && key != "colors-apps-find" {
+            crate::palette::set_preview(crate::controls::editor_draft());
+            self.colors_apply(false);
+        }
+        let ui = self.ui_facts();
+        self.controls_send(ControlCommand::Read("Colours", ui));
+        self.schedule_frame();
+    }
+
     /// The editor's preview lasts only while the editor is up: a panel
     /// closed (or another setting opened) mid-edit puts the palette in use
     /// back.
@@ -3426,6 +3471,12 @@ impl App {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
                 }
             }
+            // A click on a text field: it takes the keys (`colours_type`).
+            "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" => {
+                if let Ok(mut t) = crate::controls::TYPING.lock() {
+                    *t = crate::controls::field_start(key);
+                }
+            }
             // The "+" tile after the palettes opens the editor.
             "colors-palette" if value == "new" => {
                 crate::controls::editor_open();
@@ -3449,6 +3500,10 @@ impl App {
             }
             "colors-apps-list" => {
                 crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
+                crate::controls::field_typed("colors-apps-find", "", false);
+                if let Ok(mut t) = crate::controls::TYPING.lock() {
+                    *t = None;
+                }
             }
             "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
                 self.colors_pick(key, &value);

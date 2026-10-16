@@ -58,6 +58,8 @@ pub(crate) struct Group {
     /// Laid on the same row as the group before it (a slider's own
     /// [Dark][Light] pair), at its right end.
     pub beside: bool,
+    /// A TEXT FIELD: its one choice shows the text (a click takes the keys).
+    pub field: bool,
     /// The choices are COLOUR CELLS (their `swatch`), this many to a row:
     /// the palette editor's field and hue strip. 0 = not cells.
     pub cells: usize,
@@ -73,6 +75,70 @@ pub(crate) struct Editor {
     pub cur: usize,
     /// The hue of the field, in degrees.
     pub hue: f32,
+    /// Its name (empty: "My palette N" at Save).
+    pub name: String,
+}
+
+/// THE FIELD BEING TYPED IN (Colours: the editor's colour and name, the
+/// apps list's search): its key and its text. One at a time.
+pub(crate) static TYPING: std::sync::Mutex<Option<(&'static str, String)>> = std::sync::Mutex::new(None);
+
+/// The search of the apps list (kept while the list is up).
+pub(crate) static APPS_FIND: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The field of `key`: its text (the one being typed, with a caret, when it
+/// is this one), else `shown`, else `hint`.
+fn field(key: &'static str, shown: &str, hint: &str, width: f32) -> Group {
+    let typing = TYPING.lock().ok().and_then(|t| t.clone()).filter(|(k, _)| *k == key);
+    let on = typing.is_some();
+    let text = match typing {
+        Some((_, t)) => format!("{t}▏"),
+        None if !shown.is_empty() => shown.to_owned(),
+        None => hint.to_owned(),
+    };
+    Group { field: true, ..group(None, key, width, vec![choice(text, on, "__focus")]) }
+}
+
+/// The keys a field can be, and the text it starts with when clicked.
+pub(crate) fn field_start(key: &str) -> Option<(&'static str, String)> {
+    match key {
+        "colors-edit-hex" => {
+            let e = EDITOR.lock().ok()?.clone()?;
+            Some(("colors-edit-hex", crate::palette::hex(e.soul[e.cur])))
+        }
+        "colors-edit-name" => Some(("colors-edit-name", EDITOR.lock().ok()?.as_ref()?.name.clone())),
+        "colors-apps-find" => Some(("colors-apps-find", APPS_FIND.lock().ok()?.clone())),
+        _ => None,
+    }
+}
+
+/// What typed text does: live for the search, at Enter (`done`) for the rest.
+pub(crate) fn field_typed(key: &str, text: &str, done: bool) {
+    match key {
+        "colors-apps-find" => {
+            if let Ok(mut f) = APPS_FIND.lock() {
+                *f = text.to_owned();
+            }
+        }
+        "colors-edit-hex" if done => {
+            let t = text.trim().trim_start_matches('#');
+            let full = if t.len() == 3 { t.chars().flat_map(|c| [c, c]).collect::<String>() } else { t.to_owned() };
+            if let (Ok(mut g), Some(c)) = (EDITOR.lock(), crate::palette::parse_hex(&format!("#{full}"))) {
+                if let Some(e) = g.as_mut() {
+                    e.soul[e.cur] = c;
+                    e.hue = crate::palette::tint::lch(c).2;
+                }
+            }
+        }
+        "colors-edit-name" if done => {
+            if let Ok(mut g) = EDITOR.lock() {
+                if let Some(e) = g.as_mut() {
+                    e.name = text.trim().chars().take(40).collect();
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) static EDITOR: std::sync::Mutex<Option<Editor>> = std::sync::Mutex::new(None);
@@ -102,7 +168,7 @@ pub(crate) fn editor_open() {
         .unwrap_or([[0xff, 0xbe, 0x98], [0x1d, 0x20, 0x26], [0x2a, 0x2e, 0x36], [0x1d, 0x20, 0x26], [0xe6, 0xe6, 0xe0], [0x44, 0x48, 0x50]]);
     let hue = crate::palette::tint::lch(soul[0]).2;
     if let Ok(mut g) = EDITOR.lock() {
-        *g = Some(Editor { soul, cur: 0, hue });
+        *g = Some(Editor { soul, cur: 0, hue, name: String::new() });
     }
 }
 
@@ -138,7 +204,7 @@ pub(crate) fn editor_pick(key: &str, value: &str, saved: &mut Option<String>) ->
                 if let Some(e) = g.take() {
                     let n = (1..100).find(|n| !crate::palette::all().iter().any(|p| p.id == format!("mine-{n}"))).unwrap_or(1);
                     let id = format!("mine-{n}");
-                    let name = crate::i18n::fill(tr("My palette {n}"), &[("n", &n.to_string())]);
+                    let name = if e.name.is_empty() { crate::i18n::fill(tr("My palette {n}"), &[("n", &n.to_string())]) } else { e.name.clone() };
                     let p = crate::palette_gen::direct(&id, &name, e.soul);
                     if crate::palette::save_own(&p).is_ok() {
                         *saved = Some(id);
@@ -293,7 +359,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
-        "open" | "night" | "dnd" | "restart" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+        "open" | "night" | "dnd" | "restart" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look"
     )
 }
@@ -379,7 +445,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0 }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -390,7 +456,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0 }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -1513,7 +1579,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // the colours go, then the palettes — the Dynamic one (made from the
         // wallpaper; the shell keeps reading the screen place by place) first.
         "Colours" if EDITOR.lock().is_ok_and(|g| g.is_some()) => {
-            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0 });
+            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0, name: String::new() });
             view.subtitle = tr("Pick a place, then its colour. Each goes exactly there.").to_owned();
             let roles = crate::palette_gen::ROLES
                 .iter()
@@ -1521,15 +1587,15 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 .map(|(i, r)| Choice { swatch: vec![e.soul[i]], ..choice(tr(r), i == e.cur, i.to_string()) })
                 .collect();
             view.groups.push(group(None, "colors-edit-role", 104.0, roles));
-            let mut field = Vec::new();
+            let mut cells = Vec::new();
             for row in 0..FIELD_ROWS {
                 for col in 0..FIELD_COLS {
                     let c = field_colour(col, row, e.hue);
                     let v = format!("#{}", crate::palette::hex(c));
-                    field.push(Choice { swatch: vec![c], ..choice(String::new(), c == e.soul[e.cur], v) });
+                    cells.push(Choice { swatch: vec![c], ..choice(String::new(), c == e.soul[e.cur], v) });
                 }
             }
-            view.groups.push(Group { cells: FIELD_COLS, ..group(None, "colors-edit-colour", 0.0, field) });
+            view.groups.push(Group { cells: FIELD_COLS, ..group(None, "colors-edit-colour", 0.0, cells) });
             let hues = (0..HUES)
                 .map(|k| {
                     let h = 360.0 * k as f32 / HUES as f32;
@@ -1540,15 +1606,21 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 })
                 .collect();
             view.groups.push(Group { cells: HUES, ..group(None, "colors-edit-hue", 0.0, hues) });
+            // The place's colour typed as #rrggbb, and the palette's name.
+            view.groups.push(field("colors-edit-hex", &format!("#{}", crate::palette::hex(e.soul[e.cur])), "", 150.0));
+            view.groups.push(field("colors-edit-name", &e.name, tr("Name it (click to type)"), 320.0));
             view.groups.push(group(None, "colors-edit", 120.0, vec![choice(tr("Save"), false, "save"), choice(tr("Cancel"), false, "cancel")]));
         }
         "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
             let picked = crate::palette::choice();
             view.subtitle = tr("Lit: the app wears your colours. Off: its own. Most used first.").to_owned();
             view.groups.push(group(None, "colors-apps-list", 120.0, vec![choice(tr("‹  Back"), false, "back")]));
+            let find = APPS_FIND.lock().map(|f| f.to_lowercase()).unwrap_or_default();
+            view.groups.push(field("colors-apps-find", &find, tr("Search (click to type)"), 320.0));
             let apps = ui
                 .apps
                 .iter()
+                .filter(|(_, name)| find.is_empty() || name.to_lowercase().contains(&find))
                 .take(APPS_SHOWN)
                 .map(|(id, name)| choice(name.clone(), !picked.skip.contains(id), id.clone()))
                 .collect();
