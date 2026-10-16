@@ -228,6 +228,8 @@ pub(crate) struct AppsMotion {
     open: bool,
     /// The hover's round, ms in (None = still).
     round: Option<f32>,
+    /// The page back to the right as the pointer leaves: (from, to, ms in).
+    back: Option<(f32, f32, f32)>,
     /// The squares' drop: (from, to, ms in, of ms).
     slide: Option<(f32, f32, f32, f32)>,
     /// How far down they stand (0 up .. 1 gone).
@@ -244,10 +246,20 @@ impl AppsMotion {
     /// hover's animation"); whether anything moved.
     pub(crate) fn step(&mut self, hover: bool, open: bool, ready: bool, dt: f32) -> bool {
         let ms = dt * 1000.0;
+        // Leaving: the page back to the right (Max, 2026-10-16: "the two to
+        // the left on hover, the one to the right only when I leave"), from
+        // wherever the pages stood to the page edge just behind them.
+        if !hover && self.hovered && (self.round.is_some() || self.pages > 0.0) && !self.open {
+            self.round = None;
+            let from = self.pages;
+            let to = (from.ceil() - 1.0).max(0.0);
+            self.back = Some((from, to, 0.0));
+        }
         if !hover {
             self.played = false;
         }
-        if hover && !self.played && ready && !open && self.round.is_none() && self.slide.is_none() {
+        if hover && !self.played && ready && !open && self.round.is_none() && self.slide.is_none() && self.back.is_none() {
+            self.pages = 0.0; // (any whole page is this one)
             self.round = Some(0.0);
             self.played = true;
         }
@@ -257,6 +269,7 @@ impl AppsMotion {
             // A hover's round cut short (the click lands mid-turn): its page
             // goes with it, or the squares came back up off-centre.
             self.round = None;
+            self.back = None;
             self.pages = 0.0;
             let to = if open { 1.0 } else { 0.0 };
             // (Back up only after a moment: the clock starts below zero.)
@@ -267,10 +280,10 @@ impl AppsMotion {
         let mut moved = false;
         if let Some(t) = &mut self.round {
             *t += ms;
-            // Two pages left, one back, a rest after each (the page back is
-            // Max's again, 2026-10-16, once a pin coming out stopped jumping).
-            let (l, r, p) = (LEFT_MS, RIGHT_MS, REST_MS);
-            let steps = [(l, 0.0, 1.0), (p, 1.0, 1.0), (l, 1.0, 2.0), (p, 2.0, 2.0), (r, 2.0, 1.0), (p, 1.0, 1.0)];
+            // Two pages left, a rest between, and there they stay while the
+            // pointer does (the page back comes as it leaves: `back`).
+            let (l, p) = (LEFT_MS, REST_MS);
+            let steps = [(l, 0.0, 1.0), (p, 1.0, 1.0), (l, 1.0, 2.0)];
             let mut at = *t;
             let mut done = true;
             for (len, from, to) in steps {
@@ -282,8 +295,18 @@ impl AppsMotion {
                 at -= len;
             }
             if done {
-                self.pages = 0.0; // (a page on looks as it began)
+                self.pages = 2.0;
                 self.round = None;
+            }
+            moved = true;
+        }
+        if let Some((from, to, t)) = &mut self.back {
+            *t += ms;
+            let k = (*t / RIGHT_MS).min(1.0);
+            self.pages = *from + (*to - *from) * ease(k);
+            if k >= 1.0 {
+                self.pages = 0.0; // (a whole page: as it began)
+                self.back = None;
             }
             moved = true;
         }
@@ -340,17 +363,21 @@ mod tests {
     }
 
     #[test]
-    fn a_hover_turns_two_pages_then_rests() {
+    fn a_hover_turns_two_pages_left_and_leaving_one_back() {
         let mut m = AppsMotion::default();
-        let mut most: f32 = 0.0;
         m.step(true, false, true, 0.016);
-        for _ in 0..400 {
+        for _ in 0..200 {
             m.step(true, false, true, 0.016);
-            most = most.max(m.place().0);
         }
-        assert!(most > 1.9, "two pages went by");
-        assert_eq!(m.place(), (0.0, 0.0), "and it rests as it began");
-        assert!(!m.step(true, false, true, 0.016), "still: one round a hover");
+        assert_eq!(m.place().0, 2.0, "two pages went by, and there it stays");
+        assert!(!m.step(true, false, true, 0.016), "still while the pointer stays");
+        let mut least: f32 = 2.0;
+        for _ in 0..100 {
+            m.step(false, false, true, 0.016);
+            least = least.min(if m.place().0 == 0.0 { 1.0 } else { m.place().0 });
+        }
+        assert!(least < 1.1, "one page back as it left");
+        assert_eq!(m.place(), (0.0, 0.0), "and at rest");
     }
 
     #[test]
