@@ -67,9 +67,7 @@ const STOCK: &str = include_str!("../assets/palettes/stock.json");
 /// slots (red in base08… brown in base0F), as every role here assumes.
 const BUILT_IN: &[(&str, &str)] = &[
     (GOLEM, include_str!("../assets/palettes/golem.json")),
-    ("catppuccin", include_str!("../assets/palettes/catppuccin.json")),
     ("gruvbox", include_str!("../assets/palettes/gruvbox.json")),
-    ("nord", include_str!("../assets/palettes/nord.json")),
 ];
 
 /// The owner's colour choice, as saved in `settings.json`.
