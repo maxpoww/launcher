@@ -193,6 +193,104 @@ pub(crate) fn jpeg_scaled(path: &Path, max: (u32, u32)) -> Option<(RgbaImage, (u
     ))
 }
 
+/// A MOVING PICTURE (an animated GIF or WebP): its frames at the size they
+/// are shown, premultiplied RGBA, and how long each stays (ms).
+pub(crate) struct Anim {
+    pub size: (u32, u32),
+    pub frames: Vec<(Vec<u8>, u32)>,
+}
+
+impl Anim {
+    /// The frame at `ms` into it, going round.
+    pub(crate) fn at(&self, ms: f32) -> usize {
+        let total: u32 = self.frames.iter().map(|f| f.1).sum();
+        if total == 0 {
+            return 0;
+        }
+        let mut t = (ms as u32) % total;
+        for (i, (_, d)) in self.frames.iter().enumerate() {
+            if t < *d {
+                return i;
+            }
+            t -= d;
+        }
+        0
+    }
+}
+
+/// How much a moving picture's frames may hold.
+const ANIM_BYTES: usize = 48 << 20;
+
+/// An animated GIF or WebP, its frames brought within `max` (and, all
+/// together, within `ANIM_BYTES`). `None`: not animated (one frame), or not
+/// read.
+pub(crate) fn animation(path: &Path, max: (u32, u32)) -> Option<Anim> {
+    use image::AnimationDecoder;
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let frames: Vec<image::Frame> = if name.ends_with(".gif") {
+        image::codecs::gif::GifDecoder::new(reader)
+            .ok()?
+            .into_frames()
+            .take(2000)
+            .collect::<Result<_, _>>()
+            .ok()?
+    } else if name.ends_with(".webp") {
+        let decoder = image::codecs::webp::WebPDecoder::new(reader).ok()?;
+        if !decoder.has_animation() {
+            return None;
+        }
+        decoder
+            .into_frames()
+            .take(2000)
+            .collect::<Result<_, _>>()
+            .ok()?
+    } else {
+        return None;
+    };
+    if frames.len() < 2 {
+        return None;
+    }
+    let (w0, h0) = frames[0].buffer().dimensions();
+    let (mut w, mut h) = fit(w0 as f32 / h0.max(1) as f32, (max.0.min(w0), max.1.min(h0)));
+    // (All the frames within the budget: smaller when there are many.)
+    let need = frames.len() * (w * h * 4) as usize;
+    if need > ANIM_BYTES {
+        let k = (ANIM_BYTES as f32 / need as f32).sqrt();
+        w = ((w as f32 * k) as u32).max(16);
+        h = ((h as f32 * k) as u32).max(16);
+    }
+    let frames = frames
+        .into_iter()
+        .map(|f| {
+            let (num, den) = f.delay().numer_denom_ms();
+            // (Browsers treat a delay under 20 ms as 100 ms.)
+            let ms = num.checked_div(den).unwrap_or(100);
+            let ms = if ms < 20 { 100 } else { ms };
+            let img = f.into_buffer();
+            let mut img = if img.dimensions() == (w, h) {
+                img
+            } else {
+                image::imageops::thumbnail(&img, w, h)
+            };
+            // (Premultiplied, as every picture drawn is.)
+            for px in img.pixels_mut() {
+                let a = u32::from(px[3]);
+                if a < 255 {
+                    for c in 0..3 {
+                        px[c] = (u32::from(px[c]) * a / 255) as u8;
+                    }
+                }
+            }
+            (img.into_raw(), ms)
+        })
+        .collect();
+    Some(Anim {
+        size: (w, h),
+        frames,
+    })
+}
+
 // ── PDF ─────────────────────────────────────────────────────────────────
 
 /// How many pages, and the first one's shape (width / height).

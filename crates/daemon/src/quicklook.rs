@@ -160,6 +160,9 @@ pub(crate) struct Prepared {
     pub whole_text: bool,
     /// A photo's own size (what zooming in reads it back at).
     pub own: (u32, u32),
+    /// A moving picture's frames (an animated GIF or WebP): played round,
+    /// over its first frame.
+    pub anim: Option<Arc<kinds::Anim>>,
     bytes: usize,
 }
 
@@ -222,6 +225,9 @@ pub(crate) struct Up {
     pub(crate) trim_edit: Option<crate::peek_trim::TrimEdit>,
     /// A photo zoomed and moved (`peek_zoom`).
     pub(crate) zoom: crate::peek_zoom::Zoom,
+    /// A moving picture: how far into it (ms), and the frame shown.
+    anim_ms: f32,
+    anim_frame: Option<usize>,
 }
 
 impl Up {
@@ -583,6 +589,7 @@ fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32)
         video: None,
         whole_text: false,
         own: (0, 0),
+        anim: None,
         bytes,
     }
 }
@@ -616,6 +623,28 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
     let kind = kind_word(&name);
     let size_text = crate::desktop_props::size_text(size);
     if !dir {
+        // A MOVING PICTURE: its frames, its first one as the picture.
+        if let Some(anim) = kinds::animation(path, max) {
+            let (w, h) = anim.size;
+            if let Some(first) = image::RgbaImage::from_raw(w, h, anim.frames[0].0.clone()) {
+                let own = image::image_dimensions(path).unwrap_or((w, h));
+                let n = anim.frames.len();
+                let bytes = anim.frames.iter().map(|f| f.0.len()).sum::<usize>();
+                // (Its frames are premultiplied already.)
+                let meta = format!(
+                    "{kind} · {size_text} · {} × {} · {}",
+                    own.0,
+                    own.1,
+                    fill(tr("{n} frames"), &[("n", &n)])
+                );
+                let p = picture(first, meta, app.clone(), 0);
+                return Prepared {
+                    anim: Some(Arc::new(anim)),
+                    bytes: p.bytes + bytes,
+                    ..p
+                };
+            }
+        }
         if is_picture(&name) {
             // (Its own size first: the tiles decide how big it is decoded.)
             let own = image::image_dimensions(path).unwrap_or(max);
@@ -688,6 +717,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     video: None,
                     whole_text: false,
                     own: (0, 0),
+                    anim: None,
                     bytes,
                 };
             }
@@ -716,6 +746,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     video: None,
                     whole_text: false,
                     own: (0, 0),
+                    anim: None,
                     bytes,
                 };
             }
@@ -739,6 +770,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 video: None,
                 whole_text: whole,
                 own: (0, 0),
+                anim: None,
                 bytes,
             };
         }
@@ -762,6 +794,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 video: None,
                 whole_text: false,
                 own: (0, 0),
+                anim: None,
                 bytes,
             };
         }
@@ -807,6 +840,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         video: None,
         whole_text: false,
         own: (0, 0),
+        anim: None,
         bytes: 1024,
     }
 }
@@ -1040,6 +1074,8 @@ impl App {
             text_edit: None,
             trim_edit: None,
             zoom: crate::peek_zoom::Zoom::new(),
+            anim_ms: 0.0,
+            anim_frame: None,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1551,6 +1587,8 @@ impl App {
             return false;
         };
         let ready = self.peek_shown().is_some();
+        // A moving picture goes round on its own clock.
+        let anim = self.peek_shown().and_then(|(_, p)| p.anim.clone());
         let Some(up) = self.peek.up.as_mut() else {
             return false;
         };
@@ -1567,11 +1605,25 @@ impl App {
             return true;
         }
         // (A song playing moves its line on.)
+        if let Some(anim) = anim.as_ref().filter(|_| !up.closing && up.zoom.k <= 1.001) {
+            up.anim_ms += dt * 1000.0;
+            let i = anim.at(up.anim_ms);
+            if up.anim_frame != Some(i) {
+                up.anim_frame = Some(i);
+                up.frame = Some(anim.frames[i].0.clone());
+                up.frame_size = anim.size;
+            }
+        }
         let noticing = up
             .notice
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
-        up.t < 1.0 || (ready && up.sharp < 1.0) || up.play.is_some() || noticing || zoom_waiting
+        up.t < 1.0
+            || (ready && up.sharp < 1.0)
+            || up.play.is_some()
+            || noticing
+            || zoom_waiting
+            || anim.is_some()
     }
 
     /// Put what is shown in the top surface's layers.
@@ -1848,6 +1900,10 @@ impl App {
                     zoom_grid = Some(zg);
                 } else {
                     tiles_in(&mut g, pic, into, a, 0);
+                    // A MOVING PICTURE: its frames over its first.
+                    if prepared.is_some_and(|p| p.anim.is_some()) && up.frames > 0 && !up.closing {
+                        scene.video = Some((scene.grids.len(), clipped(into, 0, 1.0)));
+                    }
                 }
                 let pages = prepared.map_or(0, |p| p.pages);
                 if pages > 1 {
