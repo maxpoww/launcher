@@ -1102,6 +1102,28 @@ impl App {
                 }
             }
         }
+        // Seam's compass: the pointer coming on it swings its needle (the
+        // plate the other way), a click turns it round; each pose's frame
+        // put in its layer.
+        let on_seam = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::compass_icon::SEAM_ID));
+        if self.compass.step(on_seam, dt) {
+            self.dirty = true;
+            let layers: Vec<u32> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.id == crate::compass_icon::SEAM_ID)
+                .filter_map(|(i, _)| self.icon_layers.get(i).copied())
+                .collect();
+            let (needle, plate) = self.compass.pose();
+            if let (Some(chain), Some(renderer)) = (apps::compass_at(needle, plate), self.renderer.as_mut()) {
+                for layer in layers {
+                    renderer.update_icon_layer(layer, &chain);
+                }
+            }
+        }
         // The control panel's gears: they turn under the pointer, the frame
         // for each angle put in its layer.
         let on_gears = self.gesture.dragging.is_none()

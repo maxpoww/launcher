@@ -420,6 +420,12 @@ fn apps_figure() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::svg(0.0, 0.0).as_bytes())?.take()))
 }
 
+/// Seam's compass with its needle and its plate where they are, ready to
+/// upload, once both are drawn.
+pub(crate) fn compass_at(needle: f32, plate: f32) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::compass_icon::frame(needle, plate)?, crate::compass_icon::FRAME))
+}
+
 /// The apps button's stencil (its nine squares), ready to upload.
 pub(crate) fn apps_stencil() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::stencil_svg().as_bytes())?.take()))
@@ -446,6 +452,11 @@ pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     }
     if id == APPS_GRID_ID {
         return apps_figure();
+    }
+    // Seam wears the compass (`compass_icon`), its frames drawn meanwhile.
+    if id == crate::compass_icon::SEAM_ID {
+        crate::compass_icon::warm();
+        return Some(with_mips(rasterize_svg(crate::compass_icon::rest_svg().as_bytes())?.take()));
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
