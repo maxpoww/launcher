@@ -117,6 +117,7 @@ impl App {
         let rects: &[(i32, i32, i32, i32)] = if up { &[(0, 0, w as i32, h as i32)] } else { &[] };
         crate::surface::set_input_rects(&self.compositor, layer, rects);
         self.desktop_top.input_on = up;
+        tracing::debug!("desktop top: takes the pointer: {up}");
     }
 
     /// Draw the top surface now, or once the frame in flight has been
@@ -197,6 +198,9 @@ impl App {
             .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
             .unwrap_or(0.0);
         let moving = self.desktop_ease_panels(dt) | self.peek_ease(dt);
+        // (Quick Look may have just gone back into its icon: the pointer goes
+        // back to the windows with it — else every click stayed the desktop's.)
+        self.sync_desktop_top_input();
         self.desktop_top.last_frame = moving.then_some(now);
         let mut scene = Scene {
             alpha: 1.0,
