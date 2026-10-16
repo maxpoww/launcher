@@ -3666,7 +3666,9 @@ impl App {
     fn quick_ensure(&mut self, rect: Rect) {
         // (The wall is laid out for the room it MAY take; the box then hugs
         // what it took.)
-        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") { self.quick_wall_room().1 } else { 0.0 };
+        // (Colours: its box keeps its width but may grow down the screen, so
+        // the palettes — a wallpaper's preview in size — stand in rows.)
+        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") || self.quick.open_is("Colours") { self.quick_wall_room().1 } else { 0.0 };
         self.quick.wall_tile = self.wallpaper_tile_w();
         if let Some(h) = self.quick.open_height().filter(|_| self.quick.open_is("Wallpaper") && self.quick.open_has_tiles()) {
             self.quick.wall_h = Some(h);
