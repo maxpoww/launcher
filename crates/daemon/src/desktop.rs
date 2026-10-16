@@ -3983,6 +3983,11 @@ impl App {
         {
             self.desktop_end_rename(true);
         }
+        // QUICK LOOK is up (on the top surface): the pointer is its.
+        if self.peek.is_up() && self.desktop_top_ready() {
+            self.peek_pointer(&event);
+            return;
+        }
         // A phone's Configure box is up: the pointer is its.
         if self.desktop_config_up() {
             self.desktop_config_pointer(&event);

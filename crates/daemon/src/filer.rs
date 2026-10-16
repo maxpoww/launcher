@@ -2408,6 +2408,10 @@ impl App {
         if self.filer.keys == Some(id) {
             self.filer.keys = None;
         }
+        if self.peek.up.as_ref().is_some_and(|u| u.win == id) {
+            self.peek.up = None;
+            self.request_desktop_top_draw();
+        }
         info!("files: window {id} closed");
         self.filer_note_session();
         self.filer_note_nav();
@@ -3951,6 +3955,10 @@ impl App {
 
     /// Draw one frame of window `id`.
     fn filer_draw(&mut self, id: u32) {
+        // (What the keys are on, and its neighbours, prepared for Quick Look.)
+        if let Some((at, near)) = self.filer_peek_near(id) {
+            self.peek_follow_keys(id, &at, near);
+        }
         let icon_scale = self.icon_scale();
         let pal = self.filer_palette();
         let (ground, side_ground, ink) = (pal.ground, pal.side, pal.ink);
@@ -5747,6 +5755,69 @@ impl App {
         }
     }
 
+    // ── Quick Look ──────────────────────────────────────────────────────
+
+    /// What the keys are on in window `id`: the one Quick Look shows.
+    fn filer_peek_at(&self, id: u32) -> Option<usize> {
+        let win = self.filer.win(id)?;
+        win.cursor
+            .filter(|&i| win.items.get(i).is_some_and(|it| win.selected.contains(&it.path)))
+            .or_else(|| win.items.iter().position(|it| win.selected.contains(&it.path)))
+    }
+
+    /// Thing `i` of window `id`, with its icon where it is on the screen.
+    fn filer_peek_thing(&self, id: u32, i: usize) -> Option<crate::quicklook::Thing> {
+        let icon_scale = self.icon_scale();
+        let win = self.filer.win(id)?;
+        let item = win.items.get(i)?;
+        let layout = win.layout(icon_scale);
+        let icon = layout.icon_in(&layout.cell(i), icon_scale);
+        let (x, y) = layout.outward((icon.x, icon.y - win.scroll));
+        let side = icon.w * layout.zoom;
+        // The window's corner on its screen (it has the keyboard: it is the
+        // active one).
+        let origin = crate::hypr::active_window_geom()
+            .zip(crate::hypr::focused_monitor().ok())
+            .map_or((0.0, 0.0), |((wx, wy, _, _), m)| (wx as f32 - m.x as f32, wy as f32 - m.y as f32));
+        Some(crate::quicklook::Thing {
+            path: PathBuf::from(&item.path),
+            name: item.name.clone(),
+            thumb: win.chains.get(&item.icon).cloned(),
+            icon: Rect::new(origin.0 + x, origin.1 + y, side, side),
+        })
+    }
+
+    /// Space: Quick Look on what the keys are on.
+    fn filer_peek_open(&mut self, id: u32) {
+        let Some(i) = self.filer_peek_at(id) else { return };
+        if let Some(thing) = self.filer_peek_thing(id, i) {
+            self.peek_show(id, thing);
+        }
+    }
+
+    /// The keys walked with Quick Look up: it shows where they went.
+    fn filer_peek_follow(&mut self, id: u32) {
+        if self.peek.up.as_ref().is_some_and(|u| u.win == id) {
+            self.filer_peek_open(id);
+        }
+    }
+
+    /// What the keys are on and the things round it, to be prepared (that
+    /// one last: it is taken first).
+    fn filer_peek_near(&self, id: u32) -> Option<(String, Vec<PathBuf>)> {
+        let i = self.filer_peek_at(id)?;
+        let win = self.filer.win(id)?;
+        let cols = win.layout(self.icon_scale()).cols as isize;
+        let near = [-cols, cols, -1, 1, 0]
+            .into_iter()
+            .filter_map(|d| usize::try_from(i as isize + d).ok())
+            .filter_map(|j| win.items.get(j))
+            .filter(|it| it.kind == Kind::File)
+            .map(|it| PathBuf::from(&it.path))
+            .collect();
+        Some((win.items[i].path.clone(), near))
+    }
+
     // ── the keyboard ────────────────────────────────────────────────────
 
     /// Put the keys on item `i` (it alone selected) and bring it into view.
@@ -5772,6 +5843,11 @@ impl App {
 
     /// A key while window `id` has the keyboard.
     pub(crate) fn filer_key(&mut self, id: u32, keysym: Keysym, utf8: Option<&str>) {
+        // QUICK LOOK up for this window: its keys first (the arrows walk on
+        // here, and it follows them).
+        if self.peek_key(id, keysym) {
+            return;
+        }
         let icon_scale = self.icon_scale();
         let (ctrl, alt) = (self.modifiers.ctrl, self.modifiers.alt);
         let Some(win) = self.filer.win_mut(id) else {
@@ -5880,6 +5956,7 @@ impl App {
                 };
                 if let Some(to) = to {
                     self.filer_walk_to(id, to);
+                    self.filer_peek_follow(id);
                 }
             }
             Keysym::Home => self.filer_walk_to(id, 0),
@@ -5948,6 +6025,8 @@ impl App {
                 self.filer_open(dir);
             }
             Keysym::w if ctrl => self.filer_close(id),
+            // QUICK LOOK (Max, 2026-10-16: "press space on a file").
+            Keysym::space if !ctrl && !alt => self.filer_peek_open(id),
             _ => {
                 // TYPING SEARCHES (Max, 2026-10-13: "¿por qué no empieza a
                 // buscar con solo typear?" — the clipboard box's way): the
@@ -6100,6 +6179,8 @@ impl App {
                     "enter" => Keysym::Return,
                     "back" => Keysym::BackSpace,
                     "escape" => Keysym::Escape,
+                    "space" => Keysym::space,
+                    "pgdown" => Keysym::Page_Down,
                     "home" => Keysym::Home,
                     "end" => Keysym::End,
                     "f2" => Keysym::F2,

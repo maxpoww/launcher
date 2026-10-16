@@ -932,5 +932,7 @@
  "Colours on the web": "Colores en la web",
  "How everything looks. Some apps change the next time they open.": "Cómo se ve todo. Algunas apps cambian la próxima vez que se abren.",
  "Original": "Original",
- "Install": "Instalar"
+ "Install": "Instalar",
+ "Open with {app}": "Abrir con {app}",
+ "{n} lines": "{n} líneas"
 }

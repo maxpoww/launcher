@@ -42,6 +42,12 @@ pub(crate) struct Top {
     /// Whether its last frame showed a panel (so one more is drawn to
     /// take it off).
     pub(crate) drawn: bool,
+    /// QUICK LOOK draws here too (`quicklook.rs`): its icon array is
+    /// allocated, the picture whose tiles are in it, the soft picture and
+    /// badge are written.
+    pub(crate) peek_layers: bool,
+    pub(crate) peek_tiles: Option<std::path::PathBuf>,
+    pub(crate) peek_soft: bool,
 }
 
 impl App {
@@ -96,7 +102,7 @@ impl App {
     /// The surface takes the pointer everywhere while a menu or a box is
     /// up, and nowhere otherwise.
     fn sync_desktop_top_input(&mut self) {
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up();
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up();
         if up == self.desktop_top.input_on {
             return;
         }
@@ -116,7 +122,7 @@ impl App {
             return;
         }
         self.sync_desktop_top_input();
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up();
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up();
         if !up && !self.desktop_top.drawn {
             return;
         }
@@ -186,14 +192,19 @@ impl App {
             .last_frame
             .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
             .unwrap_or(0.0);
-        let moving = self.desktop_ease_panels(dt);
+        let moving = self.desktop_ease_panels(dt) | self.peek_ease(dt);
         self.desktop_top.last_frame = moving.then_some(now);
         let mut scene = Scene {
             alpha: 1.0,
             ..Default::default()
         };
         self.desktop_push_panels(&mut scene);
+        // (Quick Look over the menus: they are not up together.)
+        self.peek_upload();
+        self.peek_push(&mut scene);
         self.desktop_top.drawn = !scene.grids.is_empty();
+        // (Quick Look's layers are pictures: no squircle on them.)
+        let thumb_base = if self.peek.is_up() { 0 } else { u32::MAX };
         let squircle = self.config.theme.icon_squircle;
         let top = &mut self.desktop_top;
         let Some(renderer) = top.renderer.as_mut() else {
@@ -206,7 +217,7 @@ impl App {
             [1.0, 1.0, 1.0, 1.0],
             None,
             squircle,
-            u32::MAX,
+            thumb_base,
             top.visible.as_mut(),
             &mut || {
                 if let (Some(layer), false) = (layer, *pending) {

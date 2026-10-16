@@ -758,6 +758,25 @@ The big daemon files are cohesive but long — go straight to the function:
   box as a part); THE EMOJI'S PAGE has its kinds along the top (the one in view marked:
   `BarView::kind_now`, `Bottom::first_in_view`), the grid under them, and at the bottom a line of hint
   where the search shows once something is typed. Not done: a drop on the clipboard's page.
+- `quicklook.rs` — QUICK LOOK (Max, 2026-10-16, the lab https://claude.ai/artifact/MGRESgAmUyjC6rq1GL3ytn):
+  Space in a file window shows the thing the keys are on, big, over everything, GROWING OUT OF
+  ITS ICON (`peek_show`; the icon's place = `filer_peek_thing`: the cell, the window's corner from
+  `hypr::active_window_geom`); arrows walk with it up (`filer_peek_follow`), Space/Escape shrink
+  it back, Enter opens with the app, a click off the frame closes. Drawn on the desktop's TOP
+  surface (`desktop_top.rs`, Overlay, whole output; no top surface = no Quick Look) — the
+  keyboard stays with the file window (`peek_key` first in `filer_key`). One frame for every
+  kind: head (badge, name, "KIND · size · w × h", "Open with <app>" from `xdg-mime`, ×) and a
+  body: a PICTURE (image crate, SVG via resvg, RAW by its embedded JPEG) decoded at the size it
+  is shown and CUT IN TILES of the icon array (`cut`: 254 texels + 1 repeated round each, at most
+  `TILES`), drawn clipped to the frame's corner by `icon.wgsl`'s clipped-picture mode (ring in
+  (-1.65,-1.55), clip rect in `tint`, corner in `plate.x`); TEXT (its first lines, mono, wheel /
+  PgUp/PgDn); else INFO (the window's picture + kind, size, modified, where). FAST: the window's
+  own thumbnail blown up at once (SOFT layer), the sharp body fades in; what the keys are on and
+  its neighbours are PREPARED in the background as they move (`filer_peek_near` from
+  `filer_draw` → `peek_want`: one nice-10 thread, newest first, stale dropped) within `BUDGET`.
+  Measured on the dev box: 12 MP JPEG 75 ms, 24 MP 290 ms (DCT-scaled JPEG decode is the next
+  lever). Rig verbs: `files key space|escape|left|right|pgdown`. Next phases: PDF, audio, fonts,
+  archives, video, Office; then the pencil (editor) — see the lab.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the

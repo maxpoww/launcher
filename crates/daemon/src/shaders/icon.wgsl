@@ -38,6 +38,7 @@ struct VsOut {
     @location(2) @interpolate(flat) tint: vec4<f32>,
     @location(3) @interpolate(flat) ring: f32,
     @location(4) @interpolate(flat) plate: vec4<f32>,
+    @location(5) spot: vec2<f32>,      // where on the surface, logical pixels
 };
 
 @vertex
@@ -57,6 +58,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.tint = inst.tint;
     out.ring = inst.ring;
     out.plate = inst.plate;
+    out.spot = px;
     return out;
 }
 
@@ -115,6 +117,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let e = pow(abs(p.x), n) + pow(abs(p.y), n);
         let w = max(fwidth(e), 1e-5);
         mask = 1.0 - smoothstep(1.0 - w, 1.0 + w, e);
+    }
+    // CLIPPED PICTURE (ring in (-1.65, -1.55)): a piece of a big picture
+    // (Quick Look's tiles, `quicklook.rs`), kept inside a rounded rect —
+    // `tint` = its (x0, y0, x1, y1) in surface px, `plate.x` its corner (a
+    // NEGATIVE one is the windows' superellipse, as `rounded_rect.wgsl`
+    // draws it), `plate.y` the opacity. No squircle, no plate, no wash.
+    if (in.ring < -1.55 && in.ring > -1.65) {
+        let center = (in.tint.xy + in.tint.zw) * 0.5;
+        let half = (in.tint.zw - in.tint.xy) * 0.5;
+        let r = min(abs(in.plate.x), min(half.x, half.y));
+        let q = abs(in.spot - center) - half + vec2<f32>(r);
+        var d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+        if (in.plate.x < 0.0 && q.x > 0.0 && q.y > 0.0) {
+            d = pow(pow(q.x, 3.0) + pow(q.y, 3.0), 1.0 / 3.0) - r;
+        }
+        let aa = max(fwidth(in.spot.x), 1e-4) * 0.5;
+        let cov = 1.0 - smoothstep(-aa, aa, d);
+        return texel * cov * in.plate.y * globals.alpha;
     }
     // PLATE WITH HOLES (ring in (-1.5, -1.4)): the apps button holding pins
     // (`apps_icon`): the plate alone, cut where the layer is opaque — its
