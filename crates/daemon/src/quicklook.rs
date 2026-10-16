@@ -62,9 +62,11 @@ pub(crate) const STEP: u32 = TILE - 2;
 pub(crate) const TILES: u32 = 64;
 /// The layers on the top surface: the tiles, the soft first picture, the
 /// head's icon.
-pub(crate) const LAYERS: u32 = TILES + 2;
-const SOFT: u32 = TILES;
-const BADGE: u32 = TILES + 1;
+pub(crate) const LAYERS: u32 = 2 * TILES + 2;
+/// A zoomed photo's sharp part (`peek_zoom`) has tiles of its own.
+const DETAIL: u32 = TILES;
+const SOFT: u32 = 2 * TILES;
+const BADGE: u32 = 2 * TILES + 1;
 /// What is kept prepared, at most.
 const BUDGET: usize = 96 << 20;
 /// Of the screen, at most.
@@ -113,6 +115,11 @@ impl Pic {
         }
     }
 
+    /// A picture already premultiplied, in tiles.
+    pub(crate) fn of_premultiplied(img: &image::RgbaImage) -> Self {
+        Self::of(img)
+    }
+
     fn bytes(&self) -> usize {
         self.tiles.iter().map(Vec::len).sum()
     }
@@ -151,6 +158,8 @@ pub(crate) struct Prepared {
     pub video: Option<(f32, (u32, u32))>,
     /// Text read WHOLE (the pencil may write it back).
     pub whole_text: bool,
+    /// A photo's own size (what zooming in reads it back at).
+    pub own: (u32, u32),
     bytes: usize,
 }
 
@@ -211,6 +220,8 @@ pub(crate) struct Up {
     /// THE PENCIL on text (`peek_text`), on a video or a song (`peek_trim`).
     pub(crate) text_edit: Option<crate::peek_text::TextEdit>,
     pub(crate) trim_edit: Option<crate::peek_trim::TrimEdit>,
+    /// A photo zoomed and moved (`peek_zoom`).
+    pub(crate) zoom: crate::peek_zoom::Zoom,
 }
 
 impl Up {
@@ -284,6 +295,8 @@ pub(crate) struct QuickLook {
     pub(crate) tag: u64,
     /// The editor's threads answer here (`peek_editor::Msg`).
     pub(crate) edits: Option<calloop::channel::Sender<crate::peek_editor::Msg>>,
+    /// A zoomed photo's sharp parts come in here (`peek_zoom`).
+    pub(crate) zooms: Option<calloop::channel::Sender<(u64, Pic, [f32; 4])>>,
     /// The mono font's width of a character at the text's size (measured
     /// once the top surface's renderer is at hand).
     pub(crate) char_w: f32,
@@ -569,6 +582,7 @@ fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32)
         pages,
         video: None,
         whole_text: false,
+        own: (0, 0),
         bytes,
     }
 }
@@ -606,12 +620,15 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
             // (Its own size first: the tiles decide how big it is decoded.)
             let own = image::image_dimensions(path).unwrap_or(max);
             if let Some((img, own)) = decode(path, tile_fit(own, max)) {
-                return picture(
-                    img,
-                    format!("{kind} · {size_text} · {} × {}", own.0, own.1),
-                    app,
-                    0,
-                );
+                return Prepared {
+                    own,
+                    ..picture(
+                        img,
+                        format!("{kind} · {size_text} · {} × {}", own.0, own.1),
+                        app,
+                        0,
+                    )
+                };
             }
         }
         if kinds::is_pdf(&name) {
@@ -670,6 +687,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     pages: 0,
                     video: None,
                     whole_text: false,
+                    own: (0, 0),
                     bytes,
                 };
             }
@@ -697,6 +715,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     pages: 0,
                     video: None,
                     whole_text: false,
+                    own: (0, 0),
                     bytes,
                 };
             }
@@ -719,6 +738,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 pages: 0,
                 video: None,
                 whole_text: whole,
+                own: (0, 0),
                 bytes,
             };
         }
@@ -741,6 +761,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 pages: 0,
                 video: None,
                 whole_text: false,
+                own: (0, 0),
                 bytes,
             };
         }
@@ -785,6 +806,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         pages: 0,
         video: None,
         whole_text: false,
+        own: (0, 0),
         bytes: 1024,
     }
 }
@@ -1017,6 +1039,7 @@ impl App {
             notice: None,
             text_edit: None,
             trim_edit: None,
+            zoom: crate::peek_zoom::Zoom::new(),
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1248,6 +1271,18 @@ impl App {
             Keysym::Return | Keysym::KP_Enter => self.peek_open_app(),
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => return false,
             Keysym::p | Keysym::P => self.peek_play(),
+            // Zoom a photo in, out, back to fitted.
+            Keysym::plus | Keysym::equal | Keysym::KP_Add | Keysym::minus | Keysym::KP_Subtract => {
+                if let Some((body, _, _)) = self.peek_zoom_frame() {
+                    let factor = if matches!(key, Keysym::minus | Keysym::KP_Subtract) {
+                        0.8
+                    } else {
+                        1.25
+                    };
+                    self.peek_zoom_at(factor, (body.x + body.w / 2.0, body.y + body.h / 2.0));
+                }
+            }
+            Keysym::_0 | Keysym::KP_0 => self.peek_zoom_reset(),
             Keysym::Page_Up | Keysym::Page_Down => {
                 let by = if key == Keysym::Page_Up { -1 } else { 1 };
                 if !self.peek_turn(by) {
@@ -1362,6 +1397,8 @@ impl App {
                 if let Some(up) = self.peek.up.as_mut() {
                     up.ptr = Some((*surface_x as f32, *surface_y as f32));
                 }
+                // (A zoomed photo being dragged.)
+                self.peek_zoom_motion((*surface_x as f32, *surface_y as f32));
                 self.request_desktop_top_draw();
             }
             Event::Leave { .. } => {
@@ -1370,11 +1407,39 @@ impl App {
                 }
                 self.request_desktop_top_draw();
             }
+            // A photo: Ctrl with the wheel zooms about the pointer; zoomed,
+            // the wheel moves it.
+            Event::Axis {
+                axis: WEnum::Value(axis),
+                value,
+                ..
+            } if self.peek_zoom_frame().is_some() => {
+                let v = *value as f32;
+                let at = self
+                    .peek
+                    .up
+                    .as_ref()
+                    .and_then(|u| u.ptr)
+                    .unwrap_or_default();
+                let zoomed = self.peek.up.as_ref().is_some_and(|u| u.zoom.zoomed());
+                match axis {
+                    Axis::VerticalScroll if self.modifiers.ctrl => {
+                        self.peek_zoom_at((-v * 0.01).exp(), at)
+                    }
+                    Axis::VerticalScroll if zoomed => self.peek_pan((0.0, -v)),
+                    Axis::HorizontalScroll if zoomed => self.peek_pan((-v, 0.0)),
+                    _ => {}
+                }
+            }
             Event::Axis {
                 axis: WEnum::Value(Axis::VerticalScroll),
                 value,
                 ..
             } => self.peek_wheel(*value as f32),
+            Event::Button {
+                state: WEnum::Value(ButtonState::Released),
+                ..
+            } => self.peek_zoom_release(),
             Event::Button {
                 state: WEnum::Value(ButtonState::Pressed),
                 ..
@@ -1383,6 +1448,13 @@ impl App {
                     return;
                 };
                 let at = up.ptr.unwrap_or((-1.0, -1.0));
+                // A photo: a double click zooms; zoomed, a drag moves it.
+                if self.peek_zoom_press(at) {
+                    return;
+                }
+                let Some(up) = self.peek.up.as_ref() else {
+                    return;
+                };
                 let parts = parts(up.rect);
                 let song = self
                     .peek_shown()
@@ -1467,6 +1539,8 @@ impl App {
 
     /// Move Quick Look on by `dt`; whether it still moves.
     pub(crate) fn peek_ease(&mut self, dt: f32) -> bool {
+        // (A zoomed photo that stood still: its sharp part asked for.)
+        let zoom_waiting = self.peek_zoom_tick();
         let Some(target) = self.peek.up.as_ref().map(|u| {
             if u.closing {
                 u.from
@@ -1497,7 +1571,7 @@ impl App {
             .notice
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
-        up.t < 1.0 || (ready && up.sharp < 1.0) || up.play.is_some() || noticing
+        up.t < 1.0 || (ready && up.sharp < 1.0) || up.play.is_some() || noticing || zoom_waiting
     }
 
     /// Put what is shown in the top surface's layers.
@@ -1591,6 +1665,20 @@ impl App {
                 }
             }
             return;
+        }
+        // A zoomed photo's sharp part.
+        if let Some(up) = self.peek.up.as_ref() {
+            if let Some((part, _)) = up
+                .zoom
+                .detail
+                .as_ref()
+                .filter(|_| up.zoom.detail_rev != self.desktop_top.peek_detail_rev)
+            {
+                for (i, tile) in part.tiles.iter().enumerate() {
+                    renderer.update_icon_layer(DETAIL + i as u32, tile);
+                }
+                self.desktop_top.peek_detail_rev = up.zoom.detail_rev;
+            }
         }
         let Some(key) = self.peek.up.as_ref().map(Up::key) else {
             return;
@@ -1693,7 +1781,7 @@ impl App {
         let mut dim = ink;
         dim[3] *= 0.6;
         // A picture in its tiles, filling `into`.
-        let tiles_in = |g: &mut GridContent, pic: &Pic, into: Rect, a: f32| {
+        let tiles_in = |g: &mut GridContent, pic: &Pic, into: Rect, a: f32, base: u32| {
             let kx = into.w / pic.w as f32;
             let ky = into.h / pic.h as f32;
             for row in 0..pic.rows {
@@ -1702,7 +1790,7 @@ impl App {
                     let y = into.y + (row * STEP) as f32 * ky - ky;
                     g.icons.push(clipped(
                         Rect::new(x, y, TILE as f32 * kx, TILE as f32 * ky),
-                        row * pic.cols + col,
+                        base + row * pic.cols + col,
                         a,
                     ));
                 }
@@ -1710,6 +1798,7 @@ impl App {
         };
         // THE BODY.
         let mut over_page = None;
+        let mut zoom_grid = None;
         let soft = 1.0 - up.sharp;
         let soft_square = |g: &mut GridContent, a: f32| {
             if up.thumb.is_some() && a > 0.01 {
@@ -1732,7 +1821,34 @@ impl App {
                 // (Opaque: tiles overlap by a texel, and a see-through
                 // picture would show that as a grid.)
                 let into = crate::peek_editor::pic_rect(body, pic.w, pic.h);
-                tiles_in(&mut g, pic, into, if up.closing { open } else { up.sharp });
+                let a = if up.closing { open } else { up.sharp };
+                if self.peek_zoom_frame().is_some() && up.zoom.zoomed() {
+                    // ZOOMED: the whole where it stands, its sharp part over
+                    // it, in a grid cut to the body.
+                    let mut zg = GridContent {
+                        clip: body,
+                        ..Default::default()
+                    };
+                    let r = crate::peek_zoom::view_rect(body, into, &up.zoom);
+                    tiles_in(&mut zg, pic, r, a, 0);
+                    if let Some((part, region)) = up
+                        .zoom
+                        .detail
+                        .as_ref()
+                        .filter(|_| self.desktop_top.peek_detail_rev == up.zoom.detail_rev)
+                    {
+                        let pr = Rect::new(
+                            r.x + region[0] * r.w,
+                            r.y + region[1] * r.h,
+                            region[2] * r.w,
+                            region[3] * r.h,
+                        );
+                        tiles_in(&mut zg, part, pr, a, DETAIL);
+                    }
+                    zoom_grid = Some(zg);
+                } else {
+                    tiles_in(&mut g, pic, into, a, 0);
+                }
                 let pages = prepared.map_or(0, |p| p.pages);
                 if pages > 1 {
                     // (Its own grid: a grid's fills go under its pictures.)
@@ -1860,7 +1976,7 @@ impl App {
                             w,
                             h,
                         );
-                        tiles_in(&mut g, pic, into, open);
+                        tiles_in(&mut g, pic, into, open, 0);
                     }
                     _ if up.thumb.is_some() => g.icons.push(clipped(parts.cover, SOFT, open)),
                     _ => {}
@@ -2138,6 +2254,7 @@ impl App {
             }
         }
         scene.grids.push(g);
+        scene.grids.extend(zoom_grid);
         scene.grids.extend(over_page);
         scene.grids.extend(notice_grid);
     }

@@ -50,6 +50,8 @@ pub(crate) struct Top {
     pub(crate) peek_soft: bool,
     /// Which drawing of the pencil's picture is in the layers.
     pub(crate) peek_edit_rev: u64,
+    /// Which sharp part of a zoomed photo is in the layers.
+    pub(crate) peek_detail_rev: u64,
 }
 
 impl App {

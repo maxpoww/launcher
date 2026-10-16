@@ -788,7 +788,13 @@ The big daemon files are cohesive but long — go straight to the function:
   `thumb_more::draw_text_in`); an ARCHIVE = its list (`bsdtar -tvf`); anything with a freedesktop
   thumbnailer (Office through libgsf, epub…) = its picture asked big (`by_thumbnailer_at`). Golem's
   home.nix brings mutool (mupdf-headless) and bsdtar (libarchive). `xdg-mime` is asked once a kind
-  (it is a slow shell script). Rig verbs: `files key space|escape|left|right|pgdown`. PHASE 3: a VIDEO
+  (it is a slow shell script). A PHOTO ZOOMS (`peek_zoom.rs`, as Finder's): Ctrl+wheel about
+  the pointer, + / −, a double click (fitted ↔ its own pixels), 0 fits; zoomed, drag or wheel to
+  move; drawn in a grid scissored to the body. Once it stands still 160 ms the part on screen is
+  read again at the screen's size off the loop (a JPEG decoded straight at that size) into its
+  OWN layers (`DETAIL` = TILES.., so the array is 2×TILES+2) and laid over; its rev is the
+  request's unique TAG (a counter per photo let one photo show another's part). Rig verbs:
+  `files key space|escape|left|right|pgdown|plus|minus|zero`, `debug-desktop "peek pan dx dy|dbl x y"`. PHASE 3: a VIDEO
   PLAYS as it is shown (Finder's way): `peek_kinds::stream` — `ffmpeg -re` hands RGBA frames at
   most 1280×720 / 30 a second through a reader thread (tagged, an empty frame = the end), the
   sound is `mpv`'s; the frames go into the renderer's VIDEO TEXTURE (`Renderer::set_video_frame`,

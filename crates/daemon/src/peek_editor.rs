@@ -1562,6 +1562,28 @@ impl App {
         let mut words = what.split_whitespace();
         let verb = words.next().unwrap_or("");
         let rest: Vec<&str> = words.collect();
+        // A zoomed photo: `pan <dx> <dy>` (screen pixels), `dbl <x> <y>`
+        // (shares of the body: a double click there).
+        if verb == "pan" {
+            let d: Vec<f32> = rest.iter().filter_map(|w| w.parse().ok()).collect();
+            if let [dx, dy] = d.as_slice() {
+                self.peek_pan((*dx, *dy));
+            }
+            let z = self.peek.up.as_ref().map(|u| (u.zoom.k, u.zoom.center));
+            return format!("zoom {z:?}");
+        }
+        if verb == "dbl" {
+            let d: Vec<f32> = rest.iter().filter_map(|w| w.parse().ok()).collect();
+            if let (Some((body, _, _)), [x, y]) = (self.peek_zoom_frame(), d.as_slice()) {
+                let at = (body.x + x * body.w, body.y + y * body.h);
+                self.peek_zoom_press(at);
+                self.peek_zoom_release();
+                self.peek_zoom_press(at);
+                self.peek_zoom_release();
+            }
+            let z = self.peek.up.as_ref().map(|u| (u.zoom.k, u.zoom.center));
+            return format!("zoom {z:?}");
+        }
         // A cut: `cut <from s> <to s>`, `mute`, `save`, `copy`, `cancel`.
         if self.peek.up.as_ref().is_some_and(|u| u.trim_edit.is_some()) {
             match verb {
