@@ -262,10 +262,19 @@ impl App {
             || crate::peek_edit::writable(&name)
             || name.ends_with(".gif")
             || name.ends_with(".avif");
-        picture && up.edit.is_none() && !up.closing
+        let shown_picture = self.peek_shown().is_some_and(|(_, p)| {
+            matches!(p.body, crate::quicklook::Body::Picture(_))
+                && p.pages == 0
+                && p.video.is_none()
+        });
+        let text = self.peek_shown().is_some_and(|(_, p)| p.whole_text);
+        ((picture && shown_picture) || text)
+            && up.edit.is_none()
+            && up.text_edit.is_none()
+            && !up.closing
     }
 
-    fn edit_channel(&mut self) -> Option<calloop::channel::Sender<Msg>> {
+    pub(crate) fn peek_edit_channel(&mut self) -> Option<calloop::channel::Sender<Msg>> {
         if self.peek.edits.is_none() {
             let (sender, receiver) = calloop::channel::channel();
             let inserted = self
@@ -289,7 +298,11 @@ impl App {
         if !self.peek_editable() {
             return;
         }
-        let Some(tx) = self.edit_channel() else {
+        // Text is written straight in the frame (`peek_text`).
+        if self.peek_shown().is_some_and(|(_, p)| p.whole_text) {
+            return self.text_begin();
+        }
+        let Some(tx) = self.peek_edit_channel() else {
             return;
         };
         self.peek.tag += 1;
@@ -356,6 +369,17 @@ impl App {
                 self.edit_redraw();
             }
             Msg::Saved(tag, result) => {
+                // (The text's own save comes back the same way.)
+                if self
+                    .peek
+                    .up
+                    .as_ref()
+                    .and_then(|u| u.text_edit.as_ref())
+                    .is_some()
+                {
+                    self.text_saved(tag, result);
+                    return;
+                }
                 let ours = self
                     .peek
                     .up
@@ -383,6 +407,8 @@ impl App {
                         };
                         self.edit_end();
                         self.peek_forget(&to);
+                        // (Its picture in the file windows and on the desktop, made anew.)
+                        self.thumb_stale(&to.to_string_lossy());
                         if let Some(up) = self.peek.up.as_mut() {
                             if !same {
                                 up.name = to
@@ -748,7 +774,7 @@ impl App {
     /// Save over it (its original kept) or beside it, off the loop.
     fn edit_save(&mut self, how: SaveAs) {
         self.edit_keep_words();
-        let Some(tx) = self.edit_channel() else {
+        let Some(tx) = self.peek_edit_channel() else {
             return;
         };
         let Some(up) = self.peek.up.as_mut() else {
@@ -1196,6 +1222,36 @@ impl App {
         let mut words = what.split_whitespace();
         let verb = words.next().unwrap_or("");
         let rest: Vec<&str> = words.collect();
+        // Text being written: `type <words>`, `key enter|back|up|down|
+        // left|right|home|end|escape`, `save`, `copy`, `cancel`.
+        if self.peek.up.as_ref().is_some_and(|u| u.text_edit.is_some()) {
+            match verb {
+                "type" => {
+                    for c in rest.join(" ").chars() {
+                        self.text_key(Keysym::NoSymbol, Some(&c.to_string()));
+                    }
+                }
+                "key" => {
+                    let k = match rest.first().copied() {
+                        Some("enter") => Keysym::Return,
+                        Some("back") => Keysym::BackSpace,
+                        Some("up") => Keysym::Up,
+                        Some("down") => Keysym::Down,
+                        Some("left") => Keysym::Left,
+                        Some("right") => Keysym::Right,
+                        Some("home") => Keysym::Home,
+                        Some("end") => Keysym::End,
+                        _ => Keysym::Escape,
+                    };
+                    self.text_key(k, None);
+                }
+                "save" => self.text_key_save(false),
+                "copy" => self.text_key_save(true),
+                "cancel" => self.text_key(Keysym::Escape, None),
+                _ => {}
+            }
+            return "writing text".to_owned();
+        }
         match verb {
             "edit" => self.edit_begin(),
             "tool" => {
@@ -1215,7 +1271,10 @@ impl App {
             "copy" => self.edit_save(SaveAs::Copy),
             "cancel" => self.edit_cancel(),
             "slide" => {
-                let (i, k) = (rest.first().and_then(|v| v.parse().ok()).unwrap_or(0), rest.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.5));
+                let (i, k) = (
+                    rest.first().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    rest.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.5),
+                );
                 self.edit_slide(i, k);
                 if let Some(edit) = self.peek.up.as_mut().and_then(|u| u.edit.as_mut()) {
                     edit.tint_at = None;
@@ -1235,12 +1294,30 @@ impl App {
                     [x, y] => ((*x, *y), (*x, *y)),
                     _ => return "drag x0 y0 x1 y1 | click x y".to_owned(),
                 };
-                let Some(up) = self.peek.up.as_ref() else { return "nothing up".to_owned() };
-                let Some(pic) = up.edit.as_ref().and_then(|e| e.pic.as_ref()) else { return "not editing yet".to_owned() };
-                let pr = pic_rect(Rect::new(up.rect.x, up.rect.y + HEAD, up.rect.w, up.rect.h - HEAD), pic.w, pic.h);
-                let at = |s: (f32, f32)| (f64::from(pr.x + s.0 * pr.w), f64::from(pr.y + s.1 * pr.h));
-                let motion = |p: (f64, f64)| Event::Motion { time: 0, surface_x: p.0, surface_y: p.1 };
-                let button = |state| Event::Button { serial: 0, time: 0, button: 0x110, state: WEnum::Value(state) };
+                let Some(up) = self.peek.up.as_ref() else {
+                    return "nothing up".to_owned();
+                };
+                let Some(pic) = up.edit.as_ref().and_then(|e| e.pic.as_ref()) else {
+                    return "not editing yet".to_owned();
+                };
+                let pr = pic_rect(
+                    Rect::new(up.rect.x, up.rect.y + HEAD, up.rect.w, up.rect.h - HEAD),
+                    pic.w,
+                    pic.h,
+                );
+                let at =
+                    |s: (f32, f32)| (f64::from(pr.x + s.0 * pr.w), f64::from(pr.y + s.1 * pr.h));
+                let motion = |p: (f64, f64)| Event::Motion {
+                    time: 0,
+                    surface_x: p.0,
+                    surface_y: p.1,
+                };
+                let button = |state| Event::Button {
+                    serial: 0,
+                    time: 0,
+                    button: 0x110,
+                    state: WEnum::Value(state),
+                };
                 self.edit_pointer(&motion(at(a)));
                 self.edit_pointer(&button(ButtonState::Pressed));
                 for n in 1..=12 {
@@ -1252,7 +1329,9 @@ impl App {
             "state" => {}
             _ => return format!("no peek verb {verb}"),
         }
-        let Some(edit) = self.peek.up.as_ref().and_then(|u| u.edit.as_ref()) else { return "not editing".to_owned() };
+        let Some(edit) = self.peek.up.as_ref().and_then(|u| u.edit.as_ref()) else {
+            return "not editing".to_owned();
+        };
         format!(
             "editing: {} ops, tool {:?}, picture {:?}, crop {:?}, tint {:?}, saving {}",
             edit.ops.len(),

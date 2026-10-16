@@ -50,6 +50,7 @@ mod quicklook;
 mod peek_kinds;
 mod peek_edit;
 mod peek_editor;
+mod peek_text;
 mod apps_icon;
 mod thumb_more;
 mod bin_motion;

@@ -149,6 +149,8 @@ pub(crate) struct Prepared {
     pub pages: u32,
     /// A video's length (s) and own size: it plays.
     pub video: Option<(f32, (u32, u32))>,
+    /// Text read WHOLE (the pencil may write it back).
+    pub whole_text: bool,
     bytes: usize,
 }
 
@@ -206,6 +208,8 @@ pub(crate) struct Up {
     pub(crate) edit: Option<crate::peek_editor::Edit>,
     /// A word for a moment ("Saved"), since when.
     pub(crate) notice: Option<(String, Instant)>,
+    /// THE PENCIL on text (`peek_text`).
+    pub(crate) text_edit: Option<crate::peek_text::TextEdit>,
 }
 
 impl Up {
@@ -274,6 +278,9 @@ pub(crate) struct QuickLook {
     pub(crate) tag: u64,
     /// The editor's threads answer here (`peek_editor::Msg`).
     pub(crate) edits: Option<calloop::channel::Sender<crate::peek_editor::Msg>>,
+    /// The mono font's width of a character at the text's size (measured
+    /// once the top surface's renderer is at hand).
+    pub(crate) char_w: f32,
 }
 
 impl QuickLook {
@@ -552,6 +559,7 @@ fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32)
         app,
         pages,
         video: None,
+        whole_text: false,
         bytes,
     }
 }
@@ -652,6 +660,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     app,
                     pages: 0,
                     video: None,
+                    whole_text: false,
                     bytes,
                 };
             }
@@ -678,6 +687,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     app,
                     pages: 0,
                     video: None,
+                    whole_text: false,
                     bytes,
                 };
             }
@@ -685,6 +695,10 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         if let Some(lines) = text_of(path) {
             let bytes = lines.iter().map(String::len).sum();
             let n = lines.len();
+            // (Read whole: small enough, no line cut short.)
+            let whole = size <= TEXT_BYTES as u64
+                && n < TEXT_LINES
+                && lines.iter().all(|l| l.chars().count() < 400);
             let meta = format!(
                 "{kind} · {size_text} · {}",
                 fill(tr("{n} lines"), &[("n", &n)])
@@ -695,6 +709,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 app,
                 pages: 0,
                 video: None,
+                whole_text: whole,
                 bytes,
             };
         }
@@ -716,6 +731,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 app,
                 pages: 0,
                 video: None,
+                whole_text: false,
                 bytes,
             };
         }
@@ -759,6 +775,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         app,
         pages: 0,
         video: None,
+        whole_text: false,
         bytes: 1024,
     }
 }
@@ -989,6 +1006,7 @@ impl App {
             frame_size: (0, 0),
             edit: None,
             notice: None,
+            text_edit: None,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1032,7 +1050,7 @@ impl App {
 
     /// The prepared thing on screen: the page asked for, else (while it is
     /// made) the one whose tiles are up.
-    fn peek_shown(&self) -> Option<(Key, &Arc<Prepared>)> {
+    pub(crate) fn peek_shown(&self) -> Option<(Key, &Arc<Prepared>)> {
         let up = self.peek.up.as_ref()?;
         let key = up.key();
         if let Some(p) = self.peek.cache.get(&key) {
@@ -1205,6 +1223,10 @@ impl App {
             return false;
         }
         // The pencil taken: every key is the editor's.
+        if self.peek.up.as_ref().is_some_and(|u| u.text_edit.is_some()) {
+            self.text_key(key, utf8);
+            return true;
+        }
         if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) {
             self.edit_key(key, utf8);
             return true;
@@ -1270,6 +1292,43 @@ impl App {
         // The pencil taken: the pointer is the editor's.
         if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) && self.edit_pointer(event) {
             return;
+        }
+        if self.peek.up.as_ref().is_some_and(|u| u.text_edit.is_some()) {
+            match event {
+                Event::Button {
+                    state: WEnum::Value(ButtonState::Pressed),
+                    ..
+                } => {
+                    let Some(up) = self.peek.up.as_ref() else {
+                        return;
+                    };
+                    let at = up.ptr.unwrap_or((-1.0, -1.0));
+                    let parts = crate::peek_editor::edit_parts(up.rect, false);
+                    let char_w = self.peek_char_w();
+                    if parts.save.contains(at) {
+                        self.text_key_save(false);
+                    } else if parts.copy.contains(at) {
+                        self.text_key_save(true);
+                    } else if parts.cancel.contains(at) {
+                        self.text_key(smithay_client_toolkit::seat::keyboard::Keysym::Escape, None);
+                    } else {
+                        self.text_click(at, char_w);
+                    }
+                    return;
+                }
+                Event::Axis {
+                    axis: WEnum::Value(Axis::VerticalScroll),
+                    value,
+                    ..
+                } => {
+                    if let Some(t) = self.peek.up.as_mut().and_then(|u| u.text_edit.as_mut()) {
+                        t.scroll = (t.scroll + *value as f32).max(0.0);
+                    }
+                    self.request_desktop_top_draw();
+                    return;
+                }
+                _ => {}
+            }
         }
         match event {
             Event::Enter {
@@ -1424,7 +1483,44 @@ impl App {
     }
 
     /// Put what is shown in the top surface's layers.
+    /// The mono font's width of a character (a guess until measured).
+    pub(crate) fn peek_char_w(&self) -> f32 {
+        if self.peek.char_w > 0.0 {
+            self.peek.char_w
+        } else {
+            crate::peek_text::PX * 0.6
+        }
+    }
+
     pub(crate) fn peek_upload(&mut self) {
+        // The caret of text being written: measured in the font it is drawn in.
+        if let (Some(t), Some(renderer)) = (
+            self.peek.up.as_mut().and_then(|u| u.text_edit.as_mut()),
+            self.desktop_top.renderer.as_mut(),
+        ) {
+            let (line, col) = t.at();
+            if t.caret_x.is_none_or(|(l, c, _)| (l, c) != (line, col)) {
+                let prefix = crate::peek_text::before(t.line_text(line), col);
+                let x = renderer.measure_text(
+                    &prefix,
+                    crate::peek_text::PX,
+                    Some(crate::options::NERD),
+                );
+                t.caret_x = Some((line, col, x));
+            }
+        }
+        if self.peek.char_w <= 0.0 {
+            if let Some(renderer) = self.desktop_top.renderer.as_mut() {
+                let w = renderer.measure_text(
+                    "MMMMMMMMMM",
+                    crate::peek_text::PX,
+                    Some(crate::options::NERD),
+                ) / 10.0;
+                if w > 0.0 {
+                    self.peek.char_w = w;
+                }
+            }
+        }
         // A video's newest frame.
         if let Some(up) = self.peek.up.as_mut() {
             if let (Some(frame), Some(renderer)) =
@@ -1538,6 +1634,14 @@ impl App {
             glass: 0.0,
             border: 1.0e4,
         });
+        // THE PENCIL on text: the text being written.
+        if up.text_edit.is_some() {
+            let mut ink = pal.ink;
+            ink[3] *= open;
+            self.text_push(&mut g, r, open, ink, ground, self.peek_char_w());
+            scene.grids.push(g);
+            return;
+        }
         // THE PENCIL taken: the editor draws the rest.
         if let Some(edit) = up.edit.as_ref() {
             let tiles_up = edit.pic.is_some() && self.desktop_top.peek_edit_rev == edit.rev;

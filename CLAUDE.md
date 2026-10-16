@@ -804,8 +804,13 @@ The big daemon files are cohesive but long — go straight to the function:
   Save copy writes "name (edited).ext" beside it (a RAW is only ever copied, as JPEG); Cancel
   with changes asks once ("Discard changes?"); Ctrl+S / Ctrl+Shift+S / Ctrl+Z / Escape. Rig:
   `debug-desktop "peek edit|tool <t>|drag x0 y0 x1 y1|click x y|type <w>|slide i k|turn|undo|
-  apply|save|copy|cancel|state"` (the drag goes through the real pointer code). Not built:
-  editing video/audio (trim), text, PDF (sign) — the lab has them.
+  apply|save|copy|cancel|state"` (the drag goes through the real pointer code). TEXT read WHOLE
+  (`Prepared::whole_text`: small, no line cut) gets the pencil too (`peek_text.rs`): written
+  straight in the frame — caret (measured in the font as drawn, `TextEdit::caret_x`), arrows,
+  Home/End, PgUp/PgDn, Enter keeps the indent, Tab, Backspace/Delete; Ctrl+S over (original kept
+  in versions), Ctrl+Shift+S beside; tabs, `\r\n` and the last newline come back as they were
+  read. A saved file's pictures in the file windows and on the desktop are let go and made anew
+  (`App::thumb_stale`). Not built: trimming video/audio, signing a PDF — the lab has them.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the

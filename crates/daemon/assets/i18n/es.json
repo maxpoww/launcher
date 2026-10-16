@@ -958,5 +958,6 @@
  "Copy saved: {name}": "Copia guardada: {name}",
  "Could not save: {why}": "No se pudo guardar: {why}",
  "edited": "editado",
- "Brightness": "Brillo"
+ "Brightness": "Brillo",
+ "Editing · line {n}": "Editando · línea {n}"
 }

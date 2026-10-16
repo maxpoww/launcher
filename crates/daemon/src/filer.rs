@@ -3953,6 +3953,31 @@ impl App {
         }
     }
 
+    /// The file at `path` was written (Quick Look's pencil saved over it):
+    /// every picture of it held is let go, so it is made again.
+    pub(crate) fn thumb_stale(&mut self, path: &str) {
+        let key = crate::desktop::thumb_key(path);
+        self.thumb_map.remove(path);
+        self.thumb_pending.remove(path);
+        let mut redraw = Vec::new();
+        for win in self.filer.wins.iter_mut() {
+            if win.chains.remove(&key).is_some() {
+                for held in win.uploaded.iter_mut() {
+                    if held.as_deref() == Some(key.as_str()) {
+                        *held = None;
+                    }
+                }
+                redraw.push(win.id);
+            }
+        }
+        for id in redraw {
+            self.filer_request_draw(id);
+        }
+        if self.desktop.chains.remove(&key).is_some() {
+            self.request_desktop_draw();
+        }
+    }
+
     /// Draw one frame of window `id`.
     fn filer_draw(&mut self, id: u32) {
         // (What the keys are on, and its neighbours, prepared for Quick Look.)

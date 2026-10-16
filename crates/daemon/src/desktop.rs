@@ -480,7 +480,7 @@ pub(crate) struct Desktop {
     pub dnd: Option<DndIn>,
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
     /// be refilled without asking again.
-    chains: HashMap<String, Vec<u8>>,
+    pub(crate) chains: HashMap<String, Vec<u8>>,
     /// Keys asked of the resolver and not answered yet.
     pending: HashSet<String>,
     /// Keys the theme had no icon for: asked once, not again until the
