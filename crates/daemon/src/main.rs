@@ -45,6 +45,7 @@ mod filer;
 mod files;
 mod files_icon;
 mod gears_icon;
+mod compass_icon;
 mod apps_icon;
 mod thumb_more;
 mod bin_motion;
@@ -898,6 +899,7 @@ fn main() -> anyhow::Result<()> {
         trash_hover: 0.0,
         files_hover: files_icon::Hover::default(),
         gears_spin: gears_icon::Spin::default(),
+        compass: compass_icon::Wobble::default(),
         apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
         reorder_slot: None,
@@ -2153,6 +2155,8 @@ pub struct App {
     files_hover: files_icon::Hover,
     /// The control panel's gears under the pointer (`gears_icon`).
     gears_spin: gears_icon::Spin,
+    /// Seam's compass: its needle swings under the pointer (`compass_icon`).
+    compass: compass_icon::Wobble,
     /// The apps button: its pages under the pointer, its squares down while
     /// the grid is open (`apps_icon`).
     apps_motion: apps_icon::AppsMotion,
