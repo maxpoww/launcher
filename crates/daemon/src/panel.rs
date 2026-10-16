@@ -1301,6 +1301,8 @@ impl Panel {
         if !std::mem::take(&mut self.control_ask) {
             return None;
         }
+        // A setting opened afresh starts on its own page (Colours: not its apps list).
+        crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
         self.open_control_label()
     }
 
@@ -3194,7 +3196,22 @@ impl App {
             updates: crate::i18n::tr(if stale { tr("Restart to finish updating") } else { tr("Up to date") }).to_owned(),
             has_bt: self.stats_page_for(PageKind::Bt).is_some(),
             has_battery: self.stats_page_for(PageKind::Battery).is_some(),
+            apps: self.colours_apps(),
         }
+    }
+
+    /// The grid's apps for the Colours list, most used first (a webapp only
+    /// once it is installed).
+    fn colours_apps(&self) -> Vec<(String, String)> {
+        let mut apps: Vec<(u32, String, String)> = self
+            .entries
+            .iter()
+            .filter(|e| !e.id.starts_with("webapp-") || self.managed_webapps.contains(&e.id["webapp-".len()..]))
+            .map(|e| (self.usage.count(&e.id), e.id.clone(), e.name.clone()))
+            .collect();
+        apps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
+        apps.dedup_by(|a, b| a.1 == b.1);
+        apps.into_iter().map(|(_, id, name)| (id, name)).collect()
     }
 
     fn on_control_event(&mut self, ev: ControlEvent) {
@@ -3271,7 +3288,14 @@ impl App {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
                 }
             }
-            "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
+            // The "+" beside Apps, and the list's Back.
+            "colors-apps-look" if value == "list" => {
+                crate::controls::APPS_LIST.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            "colors-apps-list" => {
+                crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {

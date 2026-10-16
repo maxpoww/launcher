@@ -89,9 +89,13 @@ fn spoil_in_place(name: &str) -> bool {
 /// of the session's (an app started now follows a choice made a moment ago;
 /// the rest of the session follows at the next login).
 /// Built in the parent — nothing may allocate between `fork` and `exec`.
-fn launch_env() -> Vec<CString> {
+fn launch_env(exec: &str) -> Vec<CString> {
     let mut chosen = crate::controls::session_vars(&crate::display::GolemSettings::load());
     chosen.extend(crate::palette::launch_vars());
+    for (k, v) in crate::palette::skip_vars(exec) {
+        chosen.retain(|(c, _)| *c != k);
+        chosen.push((k, v));
+    }
     env_with(std::env::vars_os(), &chosen)
 }
 
@@ -125,7 +129,7 @@ pub fn launch(exec: &str, needs_terminal: bool, terminal: &str) -> anyhow::Resul
     let sh = CString::new("/bin/sh").context("sh path")?;
     let dash_c = CString::new("-c").context("-c arg")?;
     let cmd = CString::new(line).context("exec line contains a NUL byte")?;
-    let env = launch_env();
+    let env = launch_env(exec);
     let mut envp: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).collect();
     envp.push(std::ptr::null());
 
@@ -306,14 +310,14 @@ mod tests {
         std::env::set_var(WORKSPACE_TICKET, "d0c5-stale");
         let has = |env: &[CString]| env.iter().any(|e| e.to_bytes().starts_with(b"HL_INITIAL_WORKSPACE_TOKEN="));
         // Even with one in our own environment, the launch's has none…
-        assert!(!has(&launch_env()));
+        assert!(!has(&launch_env("")));
         // …and the rest of the environment is passed on.
-        assert!(launch_env().iter().any(|e| e.to_bytes().starts_with(b"PATH=")));
+        assert!(launch_env("").iter().any(|e| e.to_bytes().starts_with(b"PATH=")));
         // The daemon drops its own at start, and says whether it had one.
         assert!(drop_workspace_ticket());
         assert!(std::env::var_os(WORKSPACE_TICKET).is_none());
         assert!(!drop_workspace_ticket());
-        assert!(!has(&launch_env()));
+        assert!(!has(&launch_env("")));
     }
 
     #[test]

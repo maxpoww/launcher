@@ -96,7 +96,15 @@ pub(crate) struct UiFacts {
     /// The gear box has these pages on this machine.
     pub has_bt: bool,
     pub has_battery: bool,
+    /// The apps in the grid, most used first: (desktop id, name).
+    pub apps: Vec<(String, String)>,
 }
+
+/// The Colours page shows its APPS LIST (the "+" beside Apps) instead.
+pub(crate) static APPS_LIST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How many apps the list shows (the most used): the panel does not scroll.
+const APPS_SHOWN: usize = 36;
 
 #[derive(Debug)]
 pub(crate) enum ControlCommand {
@@ -193,7 +201,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
-        "open" | "night" | "dnd" | "restart" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+        "open" | "night" | "dnd" | "restart" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look"
     )
 }
@@ -1412,6 +1420,18 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // ONE PAGE for how everything looks (Max, 2026-10-15): the look, where
         // the colours go, then the palettes — the Dynamic one (made from the
         // wallpaper; the shell keeps reading the screen place by place) first.
+        "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
+            let picked = crate::palette::choice();
+            view.subtitle = tr("Lit: the app wears your colours. Off: its own. Most used first.").to_owned();
+            view.groups.push(group(None, "colors-apps-list", 120.0, vec![choice(tr("‹  Back"), false, "back")]));
+            let apps = ui
+                .apps
+                .iter()
+                .take(APPS_SHOWN)
+                .map(|(id, name)| choice(name.clone(), !picked.skip.contains(id), id.clone()))
+                .collect();
+            view.groups.push(group(None, "colors-skip", 150.0, apps));
+        }
         "Colours" => {
             let dark = dark_now();
             let picked = crate::palette::choice();
@@ -1430,7 +1450,12 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             ] {
                 let caption = format!("{} · {}", tr(name), level_text(level));
                 view.groups.push(Group { caption: Some(caption), ..slider(key, level) });
-                view.groups.push(Group { beside: true, ..look_pair(None, look_key, own.unwrap_or(dark), "dark", "light") });
+                let mut pair = look_pair(None, look_key, own.unwrap_or(dark), "dark", "light");
+                if key == "colors-apps" {
+                    // The small round "+": the apps, one switch each.
+                    pair.choices.push(choice("+", false, "list"));
+                }
+                view.groups.push(Group { beside: true, ..pair });
             }
             let now = picked.palette_id().to_owned();
             let ground = |p: &crate::palette::Palette| if dark { p.dark[0] } else { p.light[0] };

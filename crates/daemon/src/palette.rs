@@ -102,6 +102,10 @@ pub(crate) struct ColorChoice {
     pub web_dark: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons_dark: Option<bool>,
+    /// The apps that keep their OWN colours (desktop ids; Max, 2026-10-16:
+    /// the "+" beside Apps, one switch each).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<String>,
     /// Before 2026-10-16 the apps and the web were switches; read once.
     #[serde(default, skip_serializing)]
     pub apps: Option<bool>,
@@ -119,7 +123,7 @@ fn web_off() -> Option<u8> {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, apps_dark: None, web_dark: None, icons_dark: None, apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), apps: None, web: None, dynamic: None }
     }
 }
 
@@ -936,6 +940,40 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
     }
 }
 
+/// The programs (the first word of their command) that keep their own
+/// colours: an app the dock starts gets the makers' themes in its
+/// environment ([`skip_vars`]).
+static SKIPPED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn program_of(exec: &str) -> String {
+    let first = exec.split_whitespace().find(|w| !w.contains('=') && *w != "env").unwrap_or("");
+    first.rsplit('/').next().unwrap_or("").to_owned()
+}
+
+pub(crate) fn set_skipped_programs(entries: &[waverunner_core::index::AppEntry], skip: &[String]) {
+    let progs: Vec<String> = entries
+        .iter()
+        .filter(|e| skip.contains(&e.id) && !e.id.starts_with("webapp-"))
+        .map(|e| program_of(&e.exec))
+        .filter(|p| !p.is_empty())
+        .collect();
+    if let Ok(mut g) = SKIPPED.lock() {
+        *g = progs;
+    }
+}
+
+/// What a program kept in its own colours is started with: GTK's own
+/// Adwaita (in the apps' look) over our theme, Qt without qt5ct/qt6ct.
+pub(crate) fn skip_vars(exec: &str) -> Vec<(&'static str, String)> {
+    let p = program_of(exec);
+    let hit = SKIPPED.lock().map(|g| g.contains(&p)).unwrap_or(false);
+    if !hit {
+        return Vec::new();
+    }
+    let dark = current().apps_dark;
+    vec![("GTK_THEME", if dark { "Adwaita:dark" } else { "Adwaita" }.to_owned()), ("QT_QPA_PLATFORMTHEME", String::new())]
+}
+
 /// THE ICON FILTER (Max, 2026-10-16: "more aggressive"), for the icon
 /// shader: row 0 = (strength 0..1, dark icons 0/1, how many targets, _),
 /// rows 1..=6 = the palette's strongest colours as OKLCH (L, C, hue in
@@ -1045,7 +1083,11 @@ fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
     m.insert("dark_websites".into(), (t.web && shell.web_dark).into());
     m.insert("icons_tint".into(), shell.icons_tint.into());
     m.insert("icons_dark".into(), shell.icons_dark.into());
-    m.insert("webapp_hosts".into(), webapp_hosts.to_vec().into());
+    // A webapp kept in its own colours: out of the webapps, and named so
+    // Seam leaves its site alone even with the web on.
+    let skipped = crate::webapps::hosts_of(&choice().skip);
+    m.insert("webapp_hosts".into(), webapp_hosts.iter().filter(|h| !skipped.contains(h)).cloned().collect::<Vec<_>>().into());
+    m.insert("web_skip".into(), skipped.into());
     for (i, c) in t.c.iter().enumerate() {
         m.insert(slot_name(i), format!("#{}", hex(*c)).into());
     }
@@ -1760,6 +1802,7 @@ impl crate::App {
             });
         }
         set_icon_filter(&theme);
+        set_skipped_programs(&self.entries, &choice().skip);
         let changed = set(theme);
         if changed || look_changed {
             publish(current(), look_changed);
@@ -1797,6 +1840,15 @@ impl crate::App {
                         "colors-web" => c.web_tint = level,
                         _ => c.icons_tint = level.unwrap_or(50),
                     }
+                }
+                // An app in its own colours or the palette's: its id turns it.
+                "colors-skip" => {
+                    if let Some(i) = c.skip.iter().position(|s| s == value) {
+                        c.skip.remove(i);
+                    } else {
+                        c.skip.push(value.to_owned());
+                    }
+                    set_skipped_programs(&self.entries, &c.skip);
                 }
                 // A slider's own look: "dark" / "light" (from then on it is the owner's).
                 "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
@@ -1847,6 +1899,13 @@ mod tests {
             icons_dark: dark,
             pair: None,
         }
+    }
+
+    #[test]
+    fn a_program_is_known_by_its_first_word() {
+        assert_eq!(program_of("env FOO=1 /usr/bin/gnome-text-editor --new-window"), "gnome-text-editor");
+        assert_eq!(program_of("vlc --started-from-file"), "vlc");
+        assert_eq!(program_of(""), "");
     }
 
     #[test]
