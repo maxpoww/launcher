@@ -4,6 +4,8 @@
 //! made of light alone ("Solo luz": eight points, each a lit face and a
 //! shaded one, the long four out to the plate's edge), and a needle on
 //! Safari's slant, its north half red, its south half blue.
+//! The plate is 80 across in the figure's 100: the size every theme icon
+//! (Chrome's too) is fitted to on the dock (Max, 2026-10-16: "same as chrome").
 //!
 //! A HOVER nudges it: the needle swings side to side and settles back on its
 //! slant, and the plate turns the other way, by `PLATE` of the needle's
@@ -145,7 +147,7 @@ fn figure(needle: f32, plate: f32, part: Part) -> String {
 <mask id="cut" {bx}><rect x="-20" y="-20" width="140" height="140" fill="#fff"/><g {turn}>{cut}</g></mask>
 <mask id="pl" {bx}><circle cx="50" cy="50" r="40" fill="#fff"/><g {turn}>{cut}</g></mask>
 <mask id="op" {bx}><g {turn}>{open}</g></mask></defs>
-<g opacity="{opacity}"><g transform="translate(-3.75 -5) scale(1.075)">
+<g opacity="{opacity}"><g transform="translate(0 -1.5)">
 {body}
 </g></g></svg>"##,
         s0 = stops[0],
