@@ -741,6 +741,9 @@ pub(crate) struct Panel {
     /// The room a wall of pictures may take top to foot, where the box is
     /// made to hug it (the quick box): 0 = the field's own height.
     tile_room_h: f32,
+    /// How wide a wallpaper's preview is in the wallpaper box: a palette's
+    /// tile is made that size (Max, 2026-10-16). 0 = not known yet.
+    pub(crate) wall_tile: f32,
     /// How many pictures the page as last laid out holds — its whole grid,
     /// every row full (`flow_tiles`).
     tile_cap: std::cell::Cell<usize>,
@@ -1542,21 +1545,11 @@ impl Panel {
                 best = Some((cols, rows, w));
             }
         }
-        // PALETTES AS BIG AS THE WALLPAPERS (Max, 2026-10-16): the size a
-        // page of pictures gets with the WHOLE box to itself, as many across
-        // as that size fits, as many rows as the room under the sliders
-        // holds — the rest on further pages.
-        let best = if swatches {
-            let full_h = (whole - WALL_TOP * s - 40.0 * s - dots_h).max(TILE_ASPECT * 80.0 * s);
-            let mut size: Option<f32> = None;
-            for cols in 2..=12usize {
-                let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
-                let rows = (((full_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1);
-                if cols * rows >= want && size.is_none_or(|bw| w > bw) {
-                    size = Some(w);
-                }
-            }
-            size.map(|w| {
+        // PALETTES AS BIG AS THE WALLPAPERS' PREVIEWS (Max, 2026-10-16: "the
+        // palette rectangles, not the whole box"): the wallpaper box's tile
+        // width, in whatever box this is — as many across as that fits.
+        let best = if swatches && self.wall_tile > 0.0 {
+            Some(self.wall_tile.min(room_w)).map(|w| {
                 let cols = (((room_w + gap) / (w + gap)).floor() as usize).max(1);
                 (cols, (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1), w)
             })
@@ -3227,6 +3220,7 @@ impl App {
             self.controls_send(ControlCommand::Read(label, ui));
         }
         self.colours_preview_guard();
+        self.panel.wall_tile = self.wallpaper_tile_w();
         self.panel.keep_left = self.display_keep_left();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
@@ -3609,9 +3603,7 @@ impl App {
         // 2026-10-13: "casi tan grande como la pantalla completa").
         // (With no picture to show it is a box like any other: one line of
         // words in a box the screen's size read as something broken.)
-        // (Colours too, while its palettes are up — Max, 2026-10-16: "make the
-        // palettes rectangles as big as the wallpapers".)
-        let whole = (self.quick.open_is("Wallpaper") || self.quick.open_is("Colours")) && self.quick.open_has_tiles();
+        let whole = self.quick.open_is("Wallpaper") && self.quick.open_has_tiles();
         if whole {
             // From under the bar to clear of the dock, nearly the screen's
             // width (Max, 2026-10-14: "make the box a little wider and move
@@ -3642,6 +3634,26 @@ impl App {
 
     /// Where a wall of pictures may stand: from under the bar to clear of
     /// the dock — its top, and how tall that is.
+    /// How wide a wallpaper's preview is in the wallpaper box (as
+    /// `flow_tiles` makes it there: the biggest a page of them fits).
+    pub(crate) fn wallpaper_tile_w(&self) -> f32 {
+        let s = self.options_scale() * self.fast_zoom();
+        let sw = self.buffer_size.0 as f32;
+        let room_w = ((sw * QUICK_WHOLE).max(200.0) - 2.0 * MARGIN * s).max(100.0);
+        let (_, room) = self.quick_wall_room();
+        let gap = TILE_GAP * s;
+        let room_h = (room - WALL_TOP * s - 40.0 * s - TILE_DOTS_H * s).max(TILE_ASPECT * 80.0 * s);
+        let mut best = 0.0f32;
+        for cols in 2..=12usize {
+            let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
+            let rows = (((room_h + gap) / (w * TILE_ASPECT + gap)).floor() as usize).max(1);
+            if cols * rows >= TILES_PER_PAGE && w > best {
+                best = w;
+            }
+        }
+        best
+    }
+
     fn quick_wall_room(&self) -> (f32, f32) {
         let s = self.options_scale() * self.fast_zoom();
         let sh = self.buffer_size.1 as f32;
@@ -3654,8 +3666,9 @@ impl App {
     fn quick_ensure(&mut self, rect: Rect) {
         // (The wall is laid out for the room it MAY take; the box then hugs
         // what it took.)
-        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") || self.quick.open_is("Colours") { self.quick_wall_room().1 } else { 0.0 };
-        if let Some(h) = self.quick.open_height().filter(|_| (self.quick.open_is("Wallpaper") || self.quick.open_is("Colours")) && self.quick.open_has_tiles()) {
+        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") { self.quick_wall_room().1 } else { 0.0 };
+        self.quick.wall_tile = self.wallpaper_tile_w();
+        if let Some(h) = self.quick.open_height().filter(|_| self.quick.open_is("Wallpaper") && self.quick.open_has_tiles()) {
             self.quick.wall_h = Some(h);
         }
         let scale = self.options_scale() * self.fast_zoom();
