@@ -4,9 +4,8 @@
 //! each top edge, the shadow thrown past each bottom one; the squares are
 //! openings with a depth of their own).
 //!
-//! - HOVER: the pages turn, once a hover — two pages to the left, one back
-//!   to the right — and it ends there (every page is alike: it ends looking
-//!   as it began);
+//! - HOVER: the pages turn, once a hover — two pages to the left — and it
+//!   stays there, still, the pointer gone or not (every page is alike);
 //! - the GRID OPEN (a click, Super+Space): the squares slide down out of the
 //!   disc and it stays bare while the grid is up; as it closes they come back
 //!   up from below. The disc BEATS once at each.
@@ -25,7 +24,6 @@ const SIZE: f32 = 10.5;
 const GAP: f32 = 6.5;
 const ROUND: f32 = 0.55;
 const LEFT_MS: f32 = 360.0;
-const RIGHT_MS: f32 = 560.0;
 const REST_MS: f32 = 160.0;
 const DOWN_MS: f32 = 380.0;
 const UP_MS: f32 = 420.0;
@@ -267,9 +265,11 @@ impl AppsMotion {
         let mut moved = false;
         if let Some(t) = &mut self.round {
             *t += ms;
-            // Two pages left, one back, a rest after each.
-            let (l, r, p) = (LEFT_MS, RIGHT_MS, REST_MS);
-            let steps = [(l, 0.0, 1.0), (p, 1.0, 1.0), (l, 1.0, 2.0), (p, 2.0, 2.0), (r, 2.0, 1.0), (p, 1.0, 1.0)];
+            // Two pages left, a rest after each, and it stays there (Max,
+            // 2026-10-16: "pass once and stay; when I leave, keep still" —
+            // the page back to the right read as the animation undoing itself).
+            let (l, p) = (LEFT_MS, REST_MS);
+            let steps = [(l, 0.0, 1.0), (p, 1.0, 1.0), (l, 1.0, 2.0), (p, 2.0, 2.0)];
             let mut at = *t;
             let mut done = true;
             for (len, from, to) in steps {
@@ -281,7 +281,7 @@ impl AppsMotion {
                 at -= len;
             }
             if done {
-                self.pages = 0.0; // (one page on is where it began)
+                self.pages = 0.0; // (two pages on looks as it began)
                 self.round = None;
             }
             moved = true;
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hover_turns_two_pages_and_one_back_then_rests() {
+    fn a_hover_turns_two_pages_then_rests() {
         let mut m = AppsMotion::default();
         let mut most: f32 = 0.0;
         m.step(true, false, true, 0.016);
