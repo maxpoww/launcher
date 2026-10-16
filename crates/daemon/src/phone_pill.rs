@@ -909,6 +909,8 @@ impl App {
         if self.desktop.config.as_ref().is_some_and(|c| c.hosted) {
             self.desktop_config_edit(false);
             self.desktop.config = None;
+            // (The desktop may hold the keys still, kept for the box.)
+            self.desktop_pointer_went();
         }
     }
 

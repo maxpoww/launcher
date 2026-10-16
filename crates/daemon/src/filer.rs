@@ -2408,9 +2408,9 @@ impl App {
         if self.filer.keys == Some(id) {
             self.filer.keys = None;
         }
+        self.peek.forget_window(id);
         if self.peek.up.as_ref().is_some_and(|u| u.win == id) {
-            self.peek.up = None;
-            self.request_desktop_top_draw();
+            self.peek_gone();
         }
         info!("files: window {id} closed");
         self.filer_note_session();
@@ -3974,6 +3974,7 @@ impl App {
             self.filer_request_draw(id);
         }
         if self.desktop.chains.remove(&key).is_some() {
+            self.desktop.forget_uploaded(&key);
             self.request_desktop_draw();
         }
     }

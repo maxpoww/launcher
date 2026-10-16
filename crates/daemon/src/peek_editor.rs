@@ -58,8 +58,8 @@ pub(crate) struct Edit {
     /// `base` with everything done to it, and its tiles.
     shown: Option<RgbaImage>,
     pub(crate) pic: Option<Pic>,
-    /// Tiles to write again (`None`: all of them); a count of the pictures
-    /// made, for the upload to know.
+    /// Tiles to write again (`None`: all of them, `Some(empty)`: none); the
+    /// drawing's number, for the upload to know.
     pub(crate) dirty: Option<HashSet<u32>>,
     pub(crate) rev: u64,
     ops: Vec<Op>,
@@ -263,6 +263,14 @@ pub(crate) fn pad_parts(r: Rect) -> PadParts {
     }
 }
 
+/// A drawing of the edited picture never numbered before (a counter per
+/// edit started at 0 again, and its first drawing was taken for the last
+/// edit's, already in the layers).
+fn next_rev() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Where a picture of `w`×`h` stands in `body`: as big as fits, centred.
 pub(crate) fn pic_rect(body: Rect, w: u32, h: u32) -> Rect {
     let k = (body.w / w.max(1) as f32).min(body.h / h.max(1) as f32);
@@ -389,6 +397,11 @@ impl App {
         if !self.peek_editable() {
             return;
         }
+        // (Fitted first: a zoomed photo's sharp part would be laid over the
+        // edit, and after it over what was saved.)
+        if let Some(up) = self.peek.up.as_mut() {
+            up.zoom = crate::peek_zoom::Zoom::new();
+        }
         // Text is written straight in the frame (`peek_text`).
         if self.peek_shown().is_some_and(|(_, p)| p.whole_text) {
             return self.text_begin();
@@ -486,6 +499,12 @@ impl App {
                 self.edit_redraw();
             }
             Msg::Saved(tag, result) => {
+                // (Whoever's it is now, the file written is not what was
+                // prepared of it or pictured any more.)
+                if let Ok(to) = &result {
+                    self.peek_forget(to);
+                    self.thumb_stale(&to.to_string_lossy());
+                }
                 // (The text's own save comes back the same way.)
                 if self
                     .peek
@@ -504,7 +523,7 @@ impl App {
                     .and_then(|u| u.trim_edit.as_ref())
                     .is_some()
                 {
-                    self.trim_saved(result);
+                    self.trim_saved(tag, result);
                     return;
                 }
                 let ours = self
@@ -597,7 +616,7 @@ impl App {
         edit.pic = Some(pic_of(&shown));
         edit.shown = Some(shown);
         edit.dirty = None;
-        edit.rev += 1;
+        edit.rev = next_rev();
         if reshaped {
             up.start = up.rect;
             up.t = 0.0;
@@ -748,7 +767,8 @@ impl App {
                                 (last.1.max(s.1) * sh + pad).min(sh - 1.0),
                             );
                             if let Some(pic) = edit.pic.as_mut() {
-                                let mut dirty = edit.dirty.take().unwrap_or_default();
+                                // (All of it waiting to go up stays all of it.)
+                                let mut dirty = edit.dirty.take();
                                 for r in (y0 as u32 / STEP).saturating_sub(1)
                                     ..=((y1 as u32 / STEP) + 1).min(pic.rows - 1)
                                 {
@@ -757,11 +777,13 @@ impl App {
                                     {
                                         let i = r * pic.cols + c;
                                         pic.tiles[i as usize] = tile(shown, c, r);
-                                        dirty.insert(i);
+                                        if let Some(d) = dirty.as_mut() {
+                                            d.insert(i);
+                                        }
                                     }
                                 }
-                                edit.dirty = Some(dirty);
-                                edit.rev += 1;
+                                edit.dirty = dirty;
+                                edit.rev = next_rev();
                             }
                         }
                     } else if let Some((from, _)) = edit.pull {

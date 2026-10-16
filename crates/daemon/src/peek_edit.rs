@@ -309,6 +309,31 @@ pub(crate) enum SaveAs {
     Copy,
 }
 
+/// A word of this moment for a temporary file's name (two saves at once
+/// never share one).
+pub(crate) fn nonce() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("{n}{t:x}")
+}
+
+/// A program that ends with the dock (it would else finish writing a
+/// temporary file nobody renames or takes away).
+pub(crate) fn dies_with_us(mut cmd: std::process::Command) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: only an async-signal-safe call between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    cmd
+}
+
 /// The versions folder: the original of everything saved over is kept here.
 pub(crate) fn versions_dir() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
@@ -383,16 +408,36 @@ pub(crate) fn save(
         }
         _ => copy_path(path, word),
     };
-    let lower = to.to_string_lossy().to_ascii_lowercase();
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+    // Whole or not at all: written beside it, then renamed over it (a dock
+    // that dies mid-write leaves the picture as it was).
+    let to_name = to
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = to_name
+        .rsplit_once('.')
+        .map_or("png", |(_, e)| e)
+        .to_owned();
+    let tmp = to.with_file_name(format!(".{to_name}.{}.golem-tmp.{ext}", nonce()));
+    let lower = to_name.to_ascii_lowercase();
+    let written = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         // (No alpha in a JPEG; a good quality.)
         let rgb = image::DynamicImage::ImageRgba8(done).to_rgb8();
-        let file = std::fs::File::create(&to)?;
-        let mut enc =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92);
-        enc.encode_image(&rgb)?;
+        std::fs::File::create(&tmp)
+            .map_err(anyhow::Error::from)
+            .and_then(|file| {
+                let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                    std::io::BufWriter::new(file),
+                    92,
+                );
+                enc.encode_image(&rgb).map_err(anyhow::Error::from)
+            })
     } else {
-        done.save(&to).context("writing the picture")?;
+        done.save(&tmp).map_err(anyhow::Error::from)
+    };
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &to).map_err(anyhow::Error::from)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.context("writing the picture"));
     }
     Ok(to)
 }

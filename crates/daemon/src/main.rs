@@ -5695,6 +5695,9 @@ impl App {
         // overview own the whole screen, and hide it regardless.
         if self.zone_free && !self.dock_suppressed() {
             debug!("dismiss: zone free → dock parks visible");
+            // (The box went with no animation: the input region it had
+            // would stay, a tall strip over the windows taking clicks.)
+            self.sync_input_region();
             return;
         }
         self.handle_command(Command::Hide);
@@ -6822,6 +6825,9 @@ impl LayerShellHandler for App {
             .is_some_and(|d| d.wl_surface() == layer.wl_surface())
         {
             warn!("desktop menu surface closed by the compositor");
+            // (Quick Look was drawn there: it goes with it — its song, its
+            // video, its keys.)
+            self.peek.up = None;
             self.desktop_top = desktop_top::Top::default();
             return;
         }

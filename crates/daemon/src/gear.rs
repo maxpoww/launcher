@@ -380,7 +380,7 @@ pub(crate) struct GearState {
     pair: Option<(String, bool)>,
     field: Option<Field>,
     field_t: f32,
-    keyboard_held: bool,
+    pub(crate) keyboard_held: bool,
     hit: Hit,
     scroll: f32,
     scroll_target: f32,
@@ -2892,15 +2892,23 @@ impl App {
         if want == self.gear.keyboard_held {
             return;
         }
+        // (The bar's surface is shared: the clipboard box may hold it too.)
+        let others = self.clip.keyboard_held
+            || self
+                .desktop
+                .config
+                .as_ref()
+                .is_some_and(|c| c.hosted && c.editing);
         if want {
             self.cancel_keyboard_handback(crate::KbSurface::Options);
-        } else if !self.keyboard_handback_armed(crate::KbSurface::Options) {
+        } else if !others && !self.keyboard_handback_armed(crate::KbSurface::Options) {
             self.begin_keyboard_handback(crate::KbSurface::Options, None);
         }
         self.gear.keyboard_held = want;
         debug!("gear: keyboard grab {}", if want { "on" } else { "off" });
+        let any = self.options_keys_wanted();
         if let Some(layer) = &self.options_layer {
-            crate::surface::set_interactive(layer, want);
+            crate::surface::set_interactive(layer, any);
         }
     }
 
@@ -3134,6 +3142,8 @@ impl App {
     pub(crate) fn gear_arm(&mut self, text: &str, then: Hit) {
         self.gear.field = None;
         self.gear.arm = Some((text.to_owned(), then));
+        // (The field is gone: the keys it held go back.)
+        self.sync_gear_keyboard();
         self.schedule_stats_frame();
     }
 
@@ -3192,6 +3202,7 @@ impl App {
         self.gear.scroll_target = 0.0;
         self.gear.field = None;
         self.gear.field_t = 0.0;
+        self.sync_gear_keyboard();
         self.schedule_stats_frame();
     }
 

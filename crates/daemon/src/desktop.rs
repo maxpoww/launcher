@@ -492,6 +492,17 @@ pub(crate) struct Desktop {
     capacity: u32,
 }
 
+impl Desktop {
+    /// The picture of `key` is not in its layer any more (made anew).
+    pub(crate) fn forget_uploaded(&mut self, key: &str) {
+        for held in self.uploaded.iter_mut() {
+            if held.as_deref() == Some(key) {
+                *held = None;
+            }
+        }
+    }
+}
+
 /// The desktop folder: `$WAVERUNNER_DESKTOP_DIR`, else the XDG user dir
 /// (`~/.config/user-dirs.dirs`), else `~/Desktop`. Created if missing — a
 /// desktop that cannot receive a file is not one.
@@ -3587,7 +3598,8 @@ impl App {
                 || app.desktop.rename.is_some()
                 || app.desktop.menu.is_some()
                 || app.desktop.props.is_some()
-                || app.desktop.config.is_some();
+                // (The phone pill's Configure box is the bar's, not ours.)
+                || app.desktop_config_up();
             if !busy && app.desktop.keys {
                 info!("desktop: the pointer is on a window");
                 app.desktop_drop_keys();

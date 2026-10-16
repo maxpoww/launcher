@@ -83,8 +83,11 @@ fn save(
     };
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     // (The muxer is chosen by the ending: the temporary file keeps it.)
-    let tmp = dir.join(format!(".{stem}.golem-tmp{ext}"));
-    let mut cmd = std::process::Command::new(ffmpeg);
+    let tmp = dir.join(format!(
+        ".{stem}.{}.golem-tmp{ext}",
+        crate::peek_edit::nonce()
+    ));
+    let mut cmd = crate::peek_edit::dies_with_us(std::process::Command::new(ffmpeg));
     cmd.args([
         "-v",
         "error",
@@ -231,7 +234,17 @@ impl App {
     }
 
     /// A save of the cut came back.
-    pub(crate) fn trim_saved(&mut self, result: Result<PathBuf, String>) {
+    pub(crate) fn trim_saved(&mut self, tag: u64, result: Result<PathBuf, String>) {
+        // (Only this cut's: one of an older one is not this one's.)
+        if self
+            .peek
+            .up
+            .as_ref()
+            .and_then(|u| u.trim_edit.as_ref())
+            .is_none_or(|t| t.tag != tag)
+        {
+            return;
+        }
         match result {
             Ok(to) => {
                 let same = self.peek.up.as_ref().is_some_and(|u| u.path == to);
@@ -499,7 +512,13 @@ impl App {
         over.labels.push(text_label(
             note,
             (s.x + 270.0, s.y + s.h + 12.0),
-            (parts.mute.x - s.x - 290.0).max(60.0),
+            // (A song has no sound button: the note has the line's width.)
+            (if t.video {
+                parts.mute.x - s.x - 290.0
+            } else {
+                s.w - 270.0
+            })
+            .max(60.0),
             11.5,
             None,
             dim,

@@ -1122,7 +1122,7 @@ pub(crate) struct ClipState {
     search_sel: Option<u64>,
     /// Whether the OPTIONS surface currently holds the keyboard for us, so the
     /// grab is committed only on a real change (see `sync_clip_keyboard`).
-    keyboard_held: bool,
+    pub(crate) keyboard_held: bool,
     /// Hash of a clip we served WITHOUT meaning to record it (the emoji picker's
     /// "type this"), so our own capture of it can be dropped instead of filed.
     suppress_hash: Option<u64>,
@@ -2860,22 +2860,42 @@ impl App {
         self.set_clip_keyboard(want);
     }
 
+    /// Whether anything on the bar holds the keyboard: the clipboard box,
+    /// the gear's page, the phone pill's Configure box. ONE surface has
+    /// them all, so none of them lets go for the others.
+    pub(crate) fn options_keys_wanted(&self) -> bool {
+        self.clip.keyboard_held
+            || self.gear.keyboard_held
+            || self
+                .desktop
+                .config
+                .as_ref()
+                .is_some_and(|c| c.hosted && c.editing)
+    }
+
     /// Take or release the grab (committed only on a real change).
     fn set_clip_keyboard(&mut self, want: bool) {
         if want == self.clip.keyboard_held {
             return;
         }
+        let others = self.gear.keyboard_held
+            || self
+                .desktop
+                .config
+                .as_ref()
+                .is_some_and(|c| c.hosted && c.editing);
         if want {
             self.cancel_keyboard_handback(crate::KbSurface::Options);
-        } else if !self.keyboard_handback_armed(crate::KbSurface::Options) {
+        } else if !others && !self.keyboard_handback_armed(crate::KbSurface::Options) {
             // Every release hands the keyboard back — to the window the user is
             // on now, unless the caller already chose one (a paste).
             self.begin_keyboard_handback(crate::KbSurface::Options, None);
         }
         self.clip.keyboard_held = want;
         debug!("clip: keyboard grab {}", if want { "on" } else { "off" });
+        let any = self.options_keys_wanted();
         if let Some(layer) = &self.options_layer {
-            crate::surface::set_interactive(layer, want);
+            crate::surface::set_interactive(layer, any);
         }
     }
 

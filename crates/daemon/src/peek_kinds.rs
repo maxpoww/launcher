@@ -761,6 +761,10 @@ pub(crate) fn stream(
                         continue;
                     };
                     let out = child.stdout.take();
+                    // (The way before, which gave nothing: waited for.)
+                    if let Some(mut old) = r.0.take() {
+                        let _ = old.wait();
+                    }
                     r.0 = Some(child);
                     out
                 };

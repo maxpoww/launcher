@@ -106,10 +106,13 @@ pub(crate) fn save(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let js_file = std::env::temp_dir().join(format!("golem-peek-{}.js", std::process::id()));
+    // (Names of this save's own: two saves at once must not share them.)
+    let nonce = crate::peek_edit::nonce();
+    let js_file =
+        std::env::temp_dir().join(format!("golem-peek-{}-{nonce}.js", std::process::id()));
     std::fs::write(&js_file, script(page, ops)).context("writing the script")?;
-    let tmp = dir.join(format!(".{name}.golem-tmp.pdf"));
-    let out = std::process::Command::new("mutool")
+    let tmp = dir.join(format!(".{name}.{nonce}.golem-tmp.pdf"));
+    let out = crate::peek_edit::dies_with_us(std::process::Command::new("mutool"))
         .arg("run")
         .arg(&js_file)
         .arg(path)

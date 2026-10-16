@@ -732,13 +732,14 @@ impl App {
         // In the bar's phone pill: the bar's surface takes the keyboard for
         // as long as the name is typed, as it does for its other boxes.
         if config.hosted {
+            let any = self.options_keys_wanted();
             if on {
                 self.cancel_keyboard_handback(crate::KbSurface::Options);
-            } else {
+            } else if !any {
                 self.begin_keyboard_handback(crate::KbSurface::Options, None);
             }
             if let Some(layer) = self.options_layer.as_ref() {
-                crate::surface::set_interactive(layer, on);
+                crate::surface::set_interactive(layer, any);
                 let _ = self.conn.flush();
             }
             self.draw_options();

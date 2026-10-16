@@ -84,6 +84,9 @@ const TEXT_LINE: f32 = 19.0;
 const TEXT_PAD: f32 = 18.0;
 /// A song's frame, and its loudness in so many steps.
 const SONG: (f32, f32) = (720.0, 280.0);
+/// How much taller a song's frame grows while it is cut: the cutting line
+/// goes UNDER the song, not over its cover.
+const TRIM_ROOM: f32 = 108.0;
 const WAVE: usize = 120;
 /// How far the wheel goes for a page of a PDF.
 const WHEEL_PAGE: f32 = 60.0;
@@ -163,6 +166,9 @@ pub(crate) struct Prepared {
     /// A moving picture's frames (an animated GIF or WebP): played round,
     /// over its first frame.
     pub anim: Option<Arc<kinds::Anim>>,
+    /// The file as it was read (when it last changed, its size): a file
+    /// changed since — by another program — is read again.
+    stamp: Option<(std::time::SystemTime, u64)>,
     bytes: usize,
 }
 
@@ -309,6 +315,11 @@ pub(crate) struct QuickLook {
 }
 
 impl QuickLook {
+    /// A file window is gone: what it was on is forgotten.
+    pub(crate) fn forget_window(&mut self, win: u32) {
+        self.seen.remove(&win);
+    }
+
     pub(crate) fn is_up(&self) -> bool {
         self.up.is_some()
     }
@@ -590,14 +601,25 @@ fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32)
         whole_text: false,
         own: (0, 0),
         anim: None,
+        stamp: None,
         bytes,
     }
 }
 
 /// Make page `page` of `path` ready to be shown.
+/// When `path` last changed, and its size.
+fn stamp_of(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 fn prepare(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepared {
     let started = Instant::now();
-    let made = prepare_kind(path, page, max, ink);
+    let stamp = stamp_of(path);
+    let made = Prepared {
+        stamp,
+        ..prepare_kind(path, page, max, ink)
+    };
     debug!(
         "quick look: {} (page {page}) in {:?}",
         path.display(),
@@ -718,6 +740,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     whole_text: false,
                     own: (0, 0),
                     anim: None,
+                    stamp: None,
                     bytes,
                 };
             }
@@ -747,6 +770,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     whole_text: false,
                     own: (0, 0),
                     anim: None,
+                    stamp: None,
                     bytes,
                 };
             }
@@ -771,6 +795,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 whole_text: whole,
                 own: (0, 0),
                 anim: None,
+                stamp: None,
                 bytes,
             };
         }
@@ -795,6 +820,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 whole_text: false,
                 own: (0, 0),
                 anim: None,
+                stamp: None,
                 bytes,
             };
         }
@@ -841,6 +867,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         whole_text: false,
         own: (0, 0),
         anim: None,
+        stamp: None,
         bytes: 1024,
     }
 }
@@ -968,6 +995,19 @@ impl App {
         queue.ready.notify_one();
     }
 
+    /// Quick Look is gone (gone back into its icon, its window closed, its
+    /// surface closed): what it held let go — the playing stopped (`Up`'s
+    /// drop), the video's texture, the pointer given back to the windows.
+    pub(crate) fn peek_gone(&mut self) {
+        self.peek.up = None;
+        if let Some(renderer) = self.desktop_top.renderer.as_mut() {
+            renderer.drop_video();
+        }
+        if self.desktop_top_ready() {
+            self.request_desktop_top_draw();
+        }
+    }
+
     /// What was prepared of `path` is stale (it was written).
     pub(crate) fn peek_forget(&mut self, path: &Path) {
         let gone: Vec<Key> = self
@@ -983,6 +1023,8 @@ impl App {
             }
             self.peek.order.retain(|o| o != &k);
         }
+        // (A reading of it already on its way is of the old file: asked again.)
+        self.peek.asked.retain(|k| k.0 != path);
         self.desktop_top.peek_tiles = None;
     }
 
@@ -1029,6 +1071,20 @@ impl App {
     }
 
     /// Show `thing` of file window `win` (or, if something is up, walk to it).
+    /// What was prepared of `path`, if the file changed since: let go.
+    fn peek_fresh(&mut self, path: &Path) {
+        let stale = self
+            .peek
+            .cache
+            .iter()
+            .any(|(k, p)| k.0 == path && p.stamp.is_some() && p.stamp != stamp_of(path));
+        if stale {
+            self.peek_forget(path);
+            // (Its little picture in the windows is of the old file too.)
+            self.thumb_stale(&path.to_string_lossy());
+        }
+    }
+
     pub(crate) fn peek_show(&mut self, win: u32, thing: Thing) {
         if !self.desktop_top_ready() {
             info!("quick look: no top surface");
@@ -1043,6 +1099,8 @@ impl App {
             return;
         }
         let key = (thing.path.clone(), 0);
+        // (Changed on disk by another program since it was read: read again.)
+        self.peek_fresh(&thing.path);
         // (Shown: the newest of what is kept.)
         let ready = self.peek.get(&key).is_some();
         let was = self.peek.up.as_ref().filter(|u| !u.closing).map(|u| u.rect);
@@ -1515,7 +1573,7 @@ impl App {
                     self.peek_close();
                 } else if parts.open.contains(at) {
                     self.peek_open_app();
-                } else if song && song_parts(up.rect).play.contains(at) {
+                } else if song && song_parts(self.song_area(up.rect)).play.contains(at) {
                     self.peek_play();
                 } else if !up.rect.contains(at) {
                     self.peek_close();
@@ -1526,6 +1584,23 @@ impl App {
     }
 
     /// Where the frame is going: the shape its body wants, centred.
+    /// The room a song's frame keeps under it for the cutting line.
+    fn song_room(&self) -> f32 {
+        if self.peek.up.as_ref().is_some_and(|u| u.trim_edit.is_some()) {
+            TRIM_ROOM
+        } else {
+            0.0
+        }
+    }
+
+    /// The part of a song's frame `r` the song itself is laid out in.
+    fn song_area(&self, r: Rect) -> Rect {
+        Rect {
+            h: r.h - self.song_room(),
+            ..r
+        }
+    }
+
     fn peek_target(&self) -> Rect {
         let (sw, sh) = (
             self.desktop_top.size.0 as f32,
@@ -1560,7 +1635,7 @@ impl App {
                 let k = (mw / pw).min(mh / ph).min(1.0);
                 ((pw * k).max(380.0), ph * k)
             }
-            Some(Body::Song { .. }) => (SONG.0.min(mw), SONG.1),
+            Some(Body::Song { .. }) => (SONG.0.min(mw), SONG.1 + self.song_room()),
             // (As tall as its lines, a page at least.)
             Some(Body::Text { lines }) => (
                 (sw * 0.56).clamp(480.0, 1000.0).min(mw),
@@ -1592,6 +1667,7 @@ impl App {
             return false;
         };
         let ready = self.peek_shown().is_some();
+        let secs = self.peek_secs().unwrap_or(0.0);
         // A moving picture goes round on its own clock.
         let anim = self.peek_shown().and_then(|(_, p)| p.anim.clone());
         let Some(up) = self.peek.up.as_mut() else {
@@ -1599,14 +1675,24 @@ impl App {
         };
         up.t = (up.t + dt / GROW_SECS).min(1.0);
         up.rect = lerp(up.start, target, ease_out(up.t));
+        // A song that came to its end by itself: stopped (else the line
+        // moved on for ever and its mpv was never waited for).
+        let ended = match up.play.as_mut() {
+            Some(Play {
+                what: Playing::Song(child),
+                ..
+            }) => matches!(child.try_wait(), Ok(Some(_))),
+            _ => false,
+        };
+        if ended {
+            up.stop();
+            up.at = secs;
+        }
         if ready && up.sharp < 1.0 {
             up.sharp = (up.sharp + dt / SHARP_SECS).min(1.0);
         }
         if up.closing && up.t >= 1.0 {
-            self.peek.up = None;
-            if let Some(renderer) = self.desktop_top.renderer.as_mut() {
-                renderer.drop_video();
-            }
+            self.peek_gone();
             return true;
         }
         // (A song playing moves its line on.)
@@ -1702,7 +1788,9 @@ impl App {
                 if let (Some(pic), Some(renderer)) =
                     (edit.pic.as_ref(), self.desktop_top.renderer.as_mut())
                 {
-                    match edit.dirty.take() {
+                    // (Up now: nothing waits — `Some(empty)`, not `None`,
+                    // which would mean all of it.)
+                    match edit.dirty.replace(HashSet::new()) {
                         Some(dirty) => {
                             for i in dirty {
                                 if let Some(tile) = pic.tiles.get(i as usize) {
@@ -2026,7 +2114,7 @@ impl App {
                 secs,
                 wave,
             }) => {
-                let parts = song_parts(r);
+                let parts = song_parts(self.song_area(r));
                 match cover {
                     Some(pic) if tiles_up => {
                         let k = (parts.cover.w / pic.w as f32).min(parts.cover.h / pic.h as f32);

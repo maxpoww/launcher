@@ -337,7 +337,9 @@ fn kept_path(path: &str, always: bool) -> Option<PathBuf> {
     if !always && meta.len() < KEEP_FROM_BYTES {
         return None;
     }
-    let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // (To the nanosecond: a picture rewritten within the same second, the
+    // same size, is another picture.)
+    let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as u64;
     // FNV-1a over the three: a name for a cache file, not a secret.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     // ("o1": made turned as the camera says — the ones made before were not.)

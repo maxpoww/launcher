@@ -127,7 +127,8 @@ fn save(path: &Path, text: &str, how: SaveAs, word: &str) -> anyhow::Result<Path
     };
     // (Whole or not at all: a temporary file renamed over it.)
     let tmp = to.with_file_name(format!(
-        ".{}.golem-tmp",
+        ".{}.{}.golem-tmp",
+        crate::peek_edit::nonce(),
         to.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
