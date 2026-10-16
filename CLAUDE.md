@@ -792,8 +792,20 @@ The big daemon files are cohesive but long — go straight to the function:
   grid, under the bar's grid), the poster under it. Its bar: play/pause, the line (a click seeks),
   the time; P too. The damage repaints the video's rect at EVERY frame (its texture is written
   behind the damage's back: a paused one showed an old swapchain buffer). No `-hwaccel auto`: it
-  cost 2 s to the first frame under the dock's environment (100 ms without). Next: Office as
-  pages, folders as a grid, hardware decoding for big videos; then the pencil — see the lab.
+  cost 2 s to the first frame under the dock's environment (100 ms without). A FOLDER lists what
+  is in it; Quick Look works from the DESKTOP's icons too (`quicklook::DESKTOP` as its window
+  id; `debug-desktop "key space|…"`). THE PENCIL (`peek_edit.rs` = what is done, `peek_editor.rs` =
+  the frame's side): on a picture the head gets a pencil; taken, the head is Cancel · Save copy ·
+  Save and a toolbar comes up (Crop · Draw · Text · Blur · Tint · Turn, six inks, Undo; the tint's
+  panel has Brightness/Contrast/Warmth sliders + Black and white). An edit is a list of `Op`s in
+  SHARES of the picture: the same list draws the screen-size copy (read again whole, off the
+  loop) and, on save, the whole picture off the loop. A line drawn live re-cuts only the tiles it
+  crosses. Save writes over (the original kept in `~/.local/share/golem/versions/<secs>-name`),
+  Save copy writes "name (edited).ext" beside it (a RAW is only ever copied, as JPEG); Cancel
+  with changes asks once ("Discard changes?"); Ctrl+S / Ctrl+Shift+S / Ctrl+Z / Escape. Rig:
+  `debug-desktop "peek edit|tool <t>|drag x0 y0 x1 y1|click x y|type <w>|slide i k|turn|undo|
+  apply|save|copy|cancel|state"` (the drag goes through the real pointer code). Not built:
+  editing video/audio (trim), text, PDF (sign) — the lab has them.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the

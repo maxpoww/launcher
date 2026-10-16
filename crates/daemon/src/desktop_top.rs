@@ -48,6 +48,8 @@ pub(crate) struct Top {
     pub(crate) peek_layers: bool,
     pub(crate) peek_tiles: Option<(std::path::PathBuf, u32)>,
     pub(crate) peek_soft: bool,
+    /// Which drawing of the pencil's picture is in the layers.
+    pub(crate) peek_edit_rev: u64,
 }
 
 impl App {

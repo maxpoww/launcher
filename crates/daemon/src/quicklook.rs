@@ -56,8 +56,8 @@ pub(crate) const DESKTOP: u32 = u32::MAX;
 
 /// A tile is one layer of the icon array; it carries `STEP` texels of the
 /// picture and the one beyond each edge again, so neighbours overlap.
-const TILE: u32 = ICON_SIZE;
-const STEP: u32 = TILE - 2;
+pub(crate) const TILE: u32 = ICON_SIZE;
+pub(crate) const STEP: u32 = TILE - 2;
 /// The most tiles a picture is cut into: a bigger one is made smaller.
 pub(crate) const TILES: u32 = 64;
 /// The layers on the top surface: the tiles, the soft first picture, the
@@ -69,7 +69,7 @@ const BADGE: u32 = TILES + 1;
 const BUDGET: usize = 96 << 20;
 /// Of the screen, at most.
 const MAX: f32 = 0.82;
-const HEAD: f32 = 46.0;
+pub(crate) const HEAD: f32 = 46.0;
 /// How long the frame takes to grow out of the icon (and to go back).
 const GROW_SECS: f32 = 0.22;
 /// The sharp picture fading in over the soft one.
@@ -85,6 +85,8 @@ const SONG: (f32, f32) = (720.0, 280.0);
 const WAVE: usize = 120;
 /// How far the wheel goes for a page of a PDF.
 const WHEEL_PAGE: f32 = 60.0;
+/// How long a word like "Saved" stays.
+const NOTICE_SECS: f32 = 3.5;
 
 /// What is prepared: a thing, and which page of it (0 for all but a PDF).
 type Key = (PathBuf, u32);
@@ -92,11 +94,11 @@ type Key = (PathBuf, u32);
 /// A picture of `w`×`h` texels, cut in `cols`×`rows` tiles (their mip
 /// chains, row by row).
 pub(crate) struct Pic {
-    w: u32,
-    h: u32,
-    cols: u32,
-    rows: u32,
-    tiles: Vec<Vec<u8>>,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) cols: u32,
+    pub(crate) rows: u32,
+    pub(crate) tiles: Vec<Vec<u8>>,
 }
 
 impl Pic {
@@ -172,24 +174,24 @@ pub(crate) struct Up {
     pub path: PathBuf,
     /// The page shown (a PDF's).
     page: u32,
-    name: String,
+    pub(crate) name: String,
     /// The thing's picture in its window (the soft first frame, the badge).
     thumb: Option<Vec<u8>>,
     /// Its icon on the screen: where it grows from and goes back to.
     from: Rect,
     /// Where this motion starts, and how far along it is (0..1).
-    start: Rect,
-    t: f32,
-    closing: bool,
+    pub(crate) start: Rect,
+    pub(crate) t: f32,
+    pub(crate) closing: bool,
     /// The frame as last drawn.
-    rect: Rect,
+    pub(crate) rect: Rect,
     /// The sharp body over the soft one (0..1).
     sharp: f32,
     /// Text scrolled by; the wheel gathered toward a page.
     scroll: f32,
     wheel: f32,
     /// The pointer on the surface, for the buttons' wash.
-    ptr: Option<(f32, f32)>,
+    pub(crate) ptr: Option<(f32, f32)>,
     play: Option<Play>,
     /// Where a stopped song or video is.
     at: f32,
@@ -200,6 +202,10 @@ pub(crate) struct Up {
     /// Frames come in since it last started (re)playing.
     frames_of_play: u32,
     frame_size: (u32, u32),
+    /// THE PENCIL taken (`peek_editor`).
+    pub(crate) edit: Option<crate::peek_editor::Edit>,
+    /// A word for a moment ("Saved"), since when.
+    pub(crate) notice: Option<(String, Instant)>,
 }
 
 impl Up {
@@ -207,7 +213,7 @@ impl Up {
         (self.path.clone(), self.page)
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if let Some(p) = self.play.take() {
             self.at = p.from + p.since.elapsed().as_secs_f32();
             match p.what {
@@ -265,7 +271,9 @@ pub(crate) struct QuickLook {
     /// Where a video's frames come in (`peek_frame`), and the tag of the
     /// newest started (frames of an older one are dropped).
     frames: Option<calloop::channel::Sender<(u64, Vec<u8>)>>,
-    tag: u64,
+    pub(crate) tag: u64,
+    /// The editor's threads answer here (`peek_editor::Msg`).
+    pub(crate) edits: Option<calloop::channel::Sender<crate::peek_editor::Msg>>,
 }
 
 impl QuickLook {
@@ -416,7 +424,7 @@ fn decode(path: &Path, max: (u32, u32)) -> Option<(image::RgbaImage, (u32, u32))
 }
 
 /// The most texels that cut into `TILES` tiles at `max`'s shape.
-fn tile_fit(own: (u32, u32), max: (u32, u32)) -> (u32, u32) {
+pub(crate) fn tile_fit(own: (u32, u32), max: (u32, u32)) -> (u32, u32) {
     let (mut w, mut h) = (own.0.min(max.0) as f32, own.1.min(max.1) as f32);
     let k = (w / own.0 as f32).min(h / own.1 as f32);
     w = own.0 as f32 * k;
@@ -826,7 +834,7 @@ fn pic_of(body: &Body) -> Option<&Pic> {
 impl App {
     /// The most texels a picture is made at: the frame's biggest, in real
     /// pixels.
-    fn peek_max(&self) -> (u32, u32) {
+    pub(crate) fn peek_max(&self) -> (u32, u32) {
         let (w, h) = self.desktop_top.size;
         let scale = self.surface_scale(crate::fractional::SurfaceKind::DesktopTop);
         (
@@ -878,8 +886,26 @@ impl App {
         queue.ready.notify_one();
     }
 
+    /// What was prepared of `path` is stale (it was written).
+    pub(crate) fn peek_forget(&mut self, path: &Path) {
+        let gone: Vec<Key> = self
+            .peek
+            .cache
+            .keys()
+            .filter(|k| k.0 == path)
+            .cloned()
+            .collect();
+        for k in gone {
+            if let Some(p) = self.peek.cache.remove(&k) {
+                self.peek.bytes -= p.bytes;
+            }
+            self.peek.order.retain(|o| o != &k);
+        }
+        self.desktop_top.peek_tiles = None;
+    }
+
     /// Wish for `key` too, ahead of what was wished for.
-    fn peek_want_now(&mut self, key: Key) {
+    pub(crate) fn peek_want_now(&mut self, key: Key) {
         if self.peek.cache.contains_key(&key) || self.peek.asked.contains(&key) {
             return;
         }
@@ -961,6 +987,8 @@ impl App {
             frames: 0,
             frames_of_play: 0,
             frame_size: (0, 0),
+            edit: None,
+            notice: None,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1165,6 +1193,7 @@ impl App {
         &mut self,
         win: u32,
         key: smithay_client_toolkit::seat::keyboard::Keysym,
+        utf8: Option<&str>,
     ) -> bool {
         use smithay_client_toolkit::seat::keyboard::Keysym;
         if !self
@@ -1174,6 +1203,11 @@ impl App {
             .is_some_and(|u| u.win == win && !u.closing)
         {
             return false;
+        }
+        // The pencil taken: every key is the editor's.
+        if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) {
+            self.edit_key(key, utf8);
+            return true;
         }
         match key {
             Keysym::space | Keysym::Escape => self.peek_close(),
@@ -1233,6 +1267,10 @@ impl App {
             Axis, ButtonState, Event,
         };
         use smithay_client_toolkit::reexports::client::WEnum;
+        // The pencil taken: the pointer is the editor's.
+        if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) && self.edit_pointer(event) {
+            return;
+        }
         match event {
             Event::Enter {
                 surface_x,
@@ -1281,6 +1319,8 @@ impl App {
                     // (A click on the line: from there.)
                     let k = ((at.0 - bar.track.x) / bar.track.w).clamp(0.0, 1.0);
                     self.peek_play_from(k * secs);
+                } else if parts.pencil.contains(at) && self.peek_editable() {
+                    self.edit_begin();
                 } else if parts.close.contains(at) {
                     self.peek_close();
                 } else if parts.open.contains(at) {
@@ -1303,6 +1343,26 @@ impl App {
         );
         let scale = self.surface_scale(crate::fractional::SurfaceKind::DesktopTop);
         let (mw, mh) = (sw * MAX, sh * MAX - HEAD);
+        // The pencil taken: the edited picture's shape (room for the
+        // toolbar under a small one).
+        let editing = self
+            .peek
+            .up
+            .as_ref()
+            .and_then(|u| u.edit.as_ref())
+            .and_then(|e| e.pic.as_ref())
+            .map(|p| (p.w, p.h));
+        if let Some((ew, eh)) = editing {
+            let (pw, ph) = (ew as f32 / scale, eh as f32 / scale);
+            let k = (mw / pw).min(mh / ph).min(1.0);
+            let (w, h) = ((pw * k).max(600.0).min(sw * 0.94), (ph * k).max(320.0));
+            return Rect::new(
+                ((sw - w) / 2.0).round(),
+                ((sh - h - HEAD) / 2.0).round(),
+                w.round(),
+                (h + HEAD).round(),
+            );
+        }
         let (w, h) = match self.peek_shown().map(|(_, p)| &p.body) {
             Some(Body::Picture(p)) => {
                 // (Never bigger than the picture itself.)
@@ -1356,7 +1416,11 @@ impl App {
             return true;
         }
         // (A song playing moves its line on.)
-        up.t < 1.0 || (ready && up.sharp < 1.0) || up.play.is_some()
+        let noticing = up
+            .notice
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
+        up.t < 1.0 || (ready && up.sharp < 1.0) || up.play.is_some() || noticing
     }
 
     /// Put what is shown in the top surface's layers.
@@ -1387,7 +1451,36 @@ impl App {
             }
             self.desktop_top.peek_soft = true;
         }
-        let key = up.key();
+        // The pencil taken: its picture's tiles (what changed of them).
+        if let Some(edit) = self.peek.up.as_mut().and_then(|u| u.edit.as_mut()) {
+            if edit.rev != self.desktop_top.peek_edit_rev {
+                if let (Some(pic), Some(renderer)) =
+                    (edit.pic.as_ref(), self.desktop_top.renderer.as_mut())
+                {
+                    match edit.dirty.take() {
+                        Some(dirty) => {
+                            for i in dirty {
+                                if let Some(tile) = pic.tiles.get(i as usize) {
+                                    renderer.update_icon_layer(i, tile);
+                                }
+                            }
+                        }
+                        None => {
+                            for (i, tile) in pic.tiles.iter().enumerate() {
+                                renderer.update_icon_layer(i as u32, tile);
+                            }
+                        }
+                    }
+                    self.desktop_top.peek_edit_rev = edit.rev;
+                    // (The view's own tiles are not in the layers any more.)
+                    self.desktop_top.peek_tiles = None;
+                }
+            }
+            return;
+        }
+        let Some(key) = self.peek.up.as_ref().map(Up::key) else {
+            return;
+        };
         if self.desktop_top.peek_tiles.as_ref() != Some(&key) {
             if let Some(p) = self.peek.cache.get(&key) {
                 if let Some(pic) = pic_of(&p.body) {
@@ -1445,6 +1538,20 @@ impl App {
             glass: 0.0,
             border: 1.0e4,
         });
+        // THE PENCIL taken: the editor draws the rest.
+        if let Some(edit) = up.edit.as_ref() {
+            let tiles_up = edit.pic.is_some() && self.desktop_top.peek_edit_rev == edit.rev;
+            let mut over = GridContent {
+                clip: g.clip,
+                ..Default::default()
+            };
+            let mut ink = pal.ink;
+            ink[3] *= open;
+            self.edit_push(&mut g, &mut over, r, open, ink, ground, tiles_up);
+            scene.grids.push(g);
+            scene.grids.push(over);
+            return;
+        }
         let clip = [r.x, r.y, r.x + r.w, r.y + r.h];
         let clipped = |rect: Rect, layer: u32, a: f32| IconInst {
             rect,
@@ -1502,7 +1609,8 @@ impl App {
                 soft_square(&mut g, soft);
                 // (Opaque: tiles overlap by a texel, and a see-through
                 // picture would show that as a grid.)
-                tiles_in(&mut g, pic, body, if up.closing { open } else { up.sharp });
+                let into = crate::peek_editor::pic_rect(body, pic.w, pic.h);
+                tiles_in(&mut g, pic, into, if up.closing { open } else { up.sharp });
                 let pages = prepared.map_or(0, |p| p.pages);
                 if pages > 1 {
                     // (Its own grid: a grid's fills go under its pictures.)
@@ -1836,6 +1944,21 @@ impl App {
                 ink,
             )
         });
+        if self.peek_editable() {
+            g.rects.push(pill(parts.pencil, wash(parts.pencil)));
+            g.labels.push(Label {
+                centered: true,
+                family: Some(crate::options::NERD),
+                ..text_label(
+                    "\u{f040}",
+                    (parts.pencil.x + parts.pencil.w / 2.0, parts.pencil.y + 5.0),
+                    parts.pencil.w,
+                    13.0,
+                    None,
+                    ink,
+                )
+            });
+        }
         g.rects.push(pill(parts.close, wash(parts.close)));
         g.labels.push(Label {
             centered: true,
@@ -1848,8 +1971,42 @@ impl App {
                 ink,
             )
         });
+        // A word for a moment ("Saved"), over the picture.
+        let mut notice_grid = None;
+        if let Some((word, at)) = up.notice.as_ref() {
+            let age = at.elapsed().as_secs_f32();
+            if age < NOTICE_SECS {
+                let fade = open * (1.0 - ((age - NOTICE_SECS + 0.6) / 0.6).clamp(0.0, 1.0));
+                let w = self.peek_word_w(word) + 30.0;
+                let pill = Rect::new(r.x + (r.w - w) / 2.0, r.y + HEAD + 14.0, w, 28.0);
+                let mut ng = GridContent {
+                    clip: g.clip,
+                    ..Default::default()
+                };
+                ng.rects.push(RectInst {
+                    rect: pill,
+                    radius: 14.0,
+                    color: [0.06, 0.07, 0.09, 0.85 * fade],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                ng.labels.push(Label {
+                    centered: true,
+                    ..text_label(
+                        word,
+                        (pill.x + pill.w / 2.0, pill.y + 6.0),
+                        w,
+                        12.5,
+                        Some(FONT_BOLD),
+                        [1.0, 1.0, 1.0, fade],
+                    )
+                });
+                notice_grid = Some(ng);
+            }
+        }
         scene.grids.push(g);
         scene.grids.extend(over_page);
+        scene.grids.extend(notice_grid);
     }
 
     fn peek_word_w(&self, word: &str) -> f32 {
@@ -1858,17 +2015,20 @@ impl App {
     }
 }
 
-/// The head's buttons, for a frame at `r`.
+/// The head's buttons, for a frame at `r`: ×, the pencil, Open.
 struct Parts {
     open: Rect,
+    pencil: Rect,
     close: Rect,
 }
 
 fn parts(r: Rect) -> Parts {
     let close = Rect::new(r.x + r.w - 12.0 - 26.0, r.y + 10.0, 26.0, 26.0);
+    let pencil = Rect::new(close.x - 8.0 - 32.0, r.y + 10.0, 32.0, 26.0);
     let open_w = (r.w * 0.4).min(240.0);
     Parts {
-        open: Rect::new(close.x - 8.0 - open_w, r.y + 10.0, open_w, 26.0),
+        open: Rect::new(pencil.x - 8.0 - open_w, r.y + 10.0, open_w, 26.0),
+        pencil,
         close,
     }
 }
@@ -1912,7 +2072,7 @@ fn song_parts(r: Rect) -> SongParts {
     SongParts { cover, wave, play }
 }
 
-fn text_label(
+pub(crate) fn text_label(
     text: &str,
     pos: (f32, f32),
     max_w: f32,

@@ -3643,7 +3643,7 @@ impl App {
         let keysym = if self.modifiers.ctrl { keysym } else { crate::panel::left_hand(keysym) };
         // QUICK LOOK up from here: its keys first (the arrows walk on, and
         // it follows them).
-        if self.peek_key(crate::quicklook::DESKTOP, keysym) {
+        if self.peek_key(crate::quicklook::DESKTOP, keysym, None) {
             return;
         }
         let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
@@ -5233,6 +5233,10 @@ impl App {
     pub(crate) fn desktop_debug(&mut self, what: &str) -> String {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
+        }
+        // `peek …`: Quick Look's pencil without a pointer (`edit_debug`).
+        if let Some(rest) = what.strip_prefix("peek ") {
+            return self.edit_debug(rest);
         }
         // `key space|escape|left|right|up|down`: as if pressed with the
         // desktop holding the keys (Quick Look's rig).

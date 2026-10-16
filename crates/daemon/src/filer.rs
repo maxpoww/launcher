@@ -5845,7 +5845,7 @@ impl App {
     pub(crate) fn filer_key(&mut self, id: u32, keysym: Keysym, utf8: Option<&str>) {
         // QUICK LOOK up for this window: its keys first (the arrows walk on
         // here, and it follows them).
-        if self.peek_key(id, keysym) {
+        if self.peek_key(id, keysym, utf8) {
             return;
         }
         let icon_scale = self.icon_scale();
