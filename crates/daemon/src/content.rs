@@ -443,8 +443,31 @@ pub(crate) const DOCK_MAG_SNAP: f32 = 0.002;
 /// only its amplitude changes.
 pub(crate) const DOCK_SPREAD_FOLLOW: f32 = 0.25;
 /// Running-indicator dot radius (px) and its gap below the icon baseline.
-const DOCK_DOT_R: f32 = 2.0;
-const DOCK_DOT_GAP: f32 = 3.0;
+// The dock's dots (running apps, the apps button's held pins): a little
+// lower, a little bigger, WHITE so they read (Max, 2026-10-16).
+const DOCK_DOT_R: f32 = 2.4;
+const DOCK_DOT_GAP: f32 = 1.0;
+const DOCK_DOT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
+
+/// A row of `n` dots centred on `cx` (each `DOCK_DOT_R`, three radii apart,
+/// drawn closer when that would pass `max_w`) with their bottoms on `y`.
+fn dock_dots(rects: &mut Vec<RectInst>, cx: f32, y: f32, n: usize, max_w: f32) {
+    if n == 0 {
+        return;
+    }
+    let step = (DOCK_DOT_R * 3.0).min(max_w / n as f32);
+    let first = cx - step * (n as f32 - 1.0) / 2.0;
+    for k in 0..n {
+        let x = first + step * k as f32;
+        rects.push(RectInst {
+            rect: Rect::new(x - DOCK_DOT_R, y - 2.0 * DOCK_DOT_R, DOCK_DOT_R * 2.0, DOCK_DOT_R * 2.0),
+            radius: DOCK_DOT_R,
+            color: DOCK_DOT_COLOR,
+            glass: 0.0,
+            border: 0.0,
+        });
+    }
+}
 /// Width (px) of the divider between the pinned and running-unpinned zones.
 const DOCK_DIVIDER_W: f32 = 1.5;
 /// Extra air before the minimized-window tiles, setting them off from the
@@ -1548,7 +1571,7 @@ pub struct FrameInput<'a> {
     /// Per-slot running flag, aligned with `dock_order`: `true` draws the
     /// macOS-style running indicator dot under that icon. Short/empty
     /// slice ⇒ no dots.
-    pub dock_running: &'a [bool],
+    pub dock_running: &'a [usize],
     /// Dock slot at which the running-but-unpinned zone begins: a thin
     /// divider is drawn just left of it. `None` (or 0) draws no divider.
     pub dock_divider: Option<usize>,
@@ -2175,23 +2198,12 @@ pub fn scene(
         let slot_rect = &layout.dock_slots[slot];
         let vcx = dock_vcx[slot] + dock_slide.get(slot).copied().unwrap_or(0.0) * dock_slot;
         let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
-        // Running indicator (macOS dot): a small dot beneath the icon.
-        // Drawn before the icon so a magnified icon never hides it.
-        if dock_running.get(slot).copied().unwrap_or(false) {
-            let fg = dock_ink;
-            scene.rects.push(RectInst {
-                rect: Rect::new(
-                    vcx - DOCK_DOT_R,
-                    baseline - DOCK_DOT_GAP - DOCK_DOT_R,
-                    DOCK_DOT_R * 2.0,
-                    DOCK_DOT_R * 2.0,
-                ),
-                radius: DOCK_DOT_R,
-                color: [fg[0], fg[1], fg[2], 0.55],
-                glass: 0.0,
-                border: 0.0,
-            });
-        }
+        // Running indicator (macOS dots): one dot beneath the icon for each
+        // of its windows (Max, 2026-10-16: "the running instances in dot
+        // quantities"). Drawn before the icon so a magnified icon never
+        // hides them.
+        let windows = dock_running.get(slot).copied().unwrap_or(0);
+        dock_dots(&mut scene.rects, vcx, baseline + DOCK_DOT_R - DOCK_DOT_GAP, windows, dock_icon * 0.8);
         let scale = dock_scales[slot];
         let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM) * shown;
         // AGUA: the icon elongates/compresses vertically about its
@@ -2495,24 +2507,9 @@ pub fn scene(
         // A dot under the button for each pin it holds, as the running
         // apps have theirs (Max, 2026-10-16): they go out one by one as it
         // spits; many draw closer so the row stays under the button.
-        let held = ov.hidden_right;
-        if held > 0 {
-            if let Some(slot_rect) = layout.dock_slots.get(ov.apps_slot) {
-                let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
-                let step = (DOCK_DOT_R * 3.0).min(apps.w * 0.8 / held as f32);
-                let first = apps_cx - step * (held as f32 - 1.0) / 2.0;
-                let fg = dock_ink;
-                for k in 0..held {
-                    let x = first + step * k as f32;
-                    scene.rects.push(RectInst {
-                        rect: Rect::new(x - DOCK_DOT_R, baseline - DOCK_DOT_GAP - DOCK_DOT_R, DOCK_DOT_R * 2.0, DOCK_DOT_R * 2.0),
-                        radius: DOCK_DOT_R,
-                        color: [fg[0], fg[1], fg[2], 0.55],
-                        glass: 0.0,
-                        border: 0.0,
-                    });
-                }
-            }
+        if let Some(slot_rect) = layout.dock_slots.get(ov.apps_slot) {
+            let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
+            dock_dots(&mut scene.rects, apps_cx, baseline + DOCK_DOT_R - DOCK_DOT_GAP, ov.hidden_right, apps.w * 0.8);
         }
         scene.grids.push(edge);
         scene.grids.push(GridContent {

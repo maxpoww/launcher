@@ -1285,10 +1285,11 @@ impl App {
             (0, 1)
         };
         // Per-slot running flags for the macOS indicator dot.
-        let dock_running: Vec<bool> = self
+        // (How many windows each has: a dot each.)
+        let dock_running: Vec<usize> = self
             .dock_order
             .iter()
-            .map(|e| self.running.contains_key(e))
+            .map(|e| self.running.get(e).map_or(0, Vec::len))
             .collect();
         // Corner app-icon badge per minimized tile (dock-tail order); already
         // resolved to a texture layer in `recompute_dock_order`.
