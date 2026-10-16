@@ -220,6 +220,9 @@ pub(crate) struct FastLaunch {
     /// the card is away meanwhile and the keys are the box's).
     pub controls: bool,
     pub boxed: Option<&'static str>,
+    /// A press in the quick box that began on a SLIDER: the knob follows the
+    /// pointer until it is let go (and the release never closes the box).
+    pub slide_from: Option<(f32, f32)>,
     /// The quick controls' card and pills as last drawn (surface
     /// coordinates): what a click is tested against, and what the box
     /// grows out of.

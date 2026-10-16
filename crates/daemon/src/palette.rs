@@ -937,7 +937,7 @@ fn same_for_apps(a: &Theme, b: &Theme) -> bool {
 /// Only the file every reader shares (`colors.json`: Seam's web switches).
 fn write_shared(dir: &Path, shell: &Theme) {
     let t = &for_apps(shell);
-    crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &crate::webapps::app_hosts()));
+    crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &choice(), &crate::webapps::app_hosts()));
 }
 
 /// What the programs wear: the palette walked to the Apps slider in the apps'
@@ -1035,7 +1035,10 @@ fn set_icon_filter(t: &Theme) {
         let all: Vec<(f32, f32, f32)> = soul.iter().map(|&c| tint::lch(c)).collect();
         let cmax = all.iter().map(|t| t.1).fold(0.0f32, f32::max);
         let targets: Vec<_> = all.into_iter().filter(|t| t.1 > 0.03 && t.1 >= cmax * 0.55).take(6).collect();
-        f[0] = [f32::from(t.icons_tint) / 100.0, if t.icons_dark { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
+        // Dark icons dim at Off too when their Dark was clicked (Off = no
+        // colour, not no dark).
+        let dim = if t.icons_tint > 0 { t.icons_dark } else { choice().icons_dark == Some(true) };
+        f[0] = [f32::from(t.icons_tint) / 100.0, if dim { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
         for (k, (l, c, h)) in targets.into_iter().enumerate() {
             f[k + 1] = [l, c, h.to_radians(), 0.0];
         }
@@ -1073,7 +1076,7 @@ fn palette_of(id: &str) -> Option<Palette> {
 pub(crate) fn write_all(dir: &Path, shell: &Theme) {
     let t = &for_apps(shell);
     let put = |name: &str, text: String| crate::persist::write_text("theme", &dir.join(name), &text);
-    put("colors.json", colors_json(t, shell, &crate::webapps::app_hosts()));
+    put("colors.json", colors_json(t, shell, &choice(), &crate::webapps::app_hosts()));
     put("foot.ini", foot_ini(t));
     put("hyprlock.conf", hyprlock_conf(shell));
     put("gtk4.css", gtk4_css(t));
@@ -1106,20 +1109,28 @@ pub(crate) fn write_all(dir: &Path, shell: &Theme) {
 /// websites, the palette's own ground and ink (`shell`: `web_bg`,
 /// `web_ink`), whether they wear it (`web`), and the webapps' hosts, which
 /// follow `apps` instead.
-fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
+fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[String]) -> String {
     let mut m = serde_json::Map::new();
     m.insert("name".into(), t.name.clone().into());
     m.insert("palette".into(), t.id.clone().into());
     m.insert("dark".into(), t.dark.into());
     m.insert("dynamic".into(), t.dynamic.into());
-    m.insert("apps".into(), t.apps.into());
-    m.insert("web".into(), t.web.into());
+    // OFF IS NOT LIGHT (Max, 2026-10-16: "the mode off on the sliders
+    // should off the colours but not the dark mode … i want dark mode on my
+    // apps but not colour"): a slider at Off whose Dark was CLICKED still
+    // darkens — neutral greys (the palette walked to 0), no colour. Left to
+    // follow the system, Off leaves sites as they are made.
+    let apps_dark_off = !t.apps && picked.apps_dark == Some(true);
+    let web_dark_off = !t.web && picked.web_dark == Some(true);
+    m.insert("apps".into(), (t.apps || apps_dark_off).into());
+    m.insert("web".into(), (t.web || web_dark_off).into());
     // THE WEB: its own look and its own slider — the palette's variant in the
     // web look, walked to the Web slider; Seam gives Dark Reader its ground,
     // its ink and the look (`web_dark`).
     let pal = palette_of(&shell.id).unwrap_or_else(golem);
     let wv = if shell.web_dark { pal.dark } else { pal.light };
-    let wv = tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint);
+    // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
+    let wv = if web_dark_off { tint::at(&wv, pal.dark[pal.accent], 0.0, true) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
     m.insert("web_dark".into(), shell.web_dark.into());
     m.insert("web_bg".into(), format!("#{}", hex(wv[1])).into());
     m.insert("web_ink".into(), format!("#{}", hex(wv[5])).into());
@@ -1129,7 +1140,7 @@ fn colors_json(t: &Theme, shell: &Theme, webapp_hosts: &[String]) -> String {
     m.insert("icons_dark".into(), shell.icons_dark.into());
     // A webapp kept in its own colours: out of the webapps, and named so
     // Seam leaves its site alone even with the web on.
-    let skipped = crate::webapps::hosts_of(&choice().skip);
+    let skipped = crate::webapps::hosts_of(&picked.skip);
     m.insert("webapp_hosts".into(), webapp_hosts.iter().filter(|h| !skipped.contains(h)).cloned().collect::<Vec<_>>().into());
     m.insert("web_skip".into(), skipped.into());
     for (i, c) in t.c.iter().enumerate() {
@@ -2020,6 +2031,24 @@ mod tests {
     }
 
     #[test]
+    fn off_takes_the_colour_not_the_dark() {
+        let off = |web_dark| {
+            let c = ColorChoice { palette: Some(GOLEM.to_owned()), web_tint: Some(0), web_dark, ..Default::default() };
+            let t = resolve(&c, true);
+            let json: serde_json::Value = serde_json::from_str(&colors_json(&for_apps(&t), &t, &c, &[])).unwrap();
+            json
+        };
+        // Its Dark clicked: the web stays dark, in greys with no colour.
+        let dark = off(Some(true));
+        assert_eq!(dark["web"], true);
+        assert_eq!(dark["web_dark"], true);
+        let bg = parse_hex(dark["web_bg"].as_str().unwrap()).unwrap();
+        assert!(tint::lch(bg).1 < 0.01, "neutral, not the palette's colour");
+        // Left to follow the system, Off leaves the sites as they are made.
+        assert_eq!(off(None)["web"], false);
+    }
+
+    #[test]
     fn a_program_is_known_by_its_first_word() {
         assert_eq!(program_of("env FOO=1 /usr/bin/gnome-text-editor --new-window"), "gnome-text-editor");
         assert_eq!(program_of("vlc --started-from-file"), "vlc");
@@ -2211,7 +2240,7 @@ mod tests {
         assert_eq!(adwaita_accent([0x8a, 0xb4, 0xf0]), "blue");
         // Text on the peach accent is the dark end.
         assert_eq!(t.accent_ink(), t.c[0]);
-        let json: serde_json::Value = serde_json::from_str(&colors_json(&t, &t, &["open.spotify.com".to_owned()])).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&colors_json(&t, &t, &ColorChoice::default(), &["open.spotify.com".to_owned()])).unwrap();
         assert_eq!(json["accent"], "#ffbe98");
         assert_eq!(json["web"], false, "websites stay as made unless asked");
         assert_eq!(json["apps"], true);
