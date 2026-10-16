@@ -295,6 +295,13 @@ pub struct Renderer {
     /// The icon texture array itself, kept for per-layer updates of the
     /// dynamic package icons; layer count includes the reserved tail.
     icon_texture: Option<wgpu::Texture>,
+    /// A MOVING PICTURE (`Scene::video`): one texture written whole at each
+    /// frame (no mips: shown at its size), its bind group, its size, and a
+    /// count of the frames written (what the damage sees change).
+    video_texture: Option<wgpu::Texture>,
+    video_bind: Option<wgpu::BindGroup>,
+    video_size: (u32, u32),
+    video_gen: u64,
     icon_layer_count: u32,
     /// The most layers the array may grow to (its content + the reserved
     /// tail).
@@ -1433,6 +1440,10 @@ impl Renderer {
             icon_sampler,
             icon_bind: None,
             icon_texture: None,
+            video_texture: None,
+            video_bind: None,
+            video_size: (0, 0),
+            video_gen: 0,
             icon_layer_count: 0,
             icon_layer_cap: 0,
             font_system,
@@ -1586,6 +1597,60 @@ impl Renderer {
         }));
         self.icon_layer_count = layers;
         self.icon_texture = Some(texture);
+    }
+
+    /// The moving picture's next frame: `w`×`h` premultiplied RGBA.
+    pub fn set_video_frame(&mut self, w: u32, h: u32, rgba: &[u8]) {
+        if rgba.len() < (w * h * 4) as usize || w == 0 || h == 0 {
+            return;
+        }
+        if self.video_size != (w, h) || self.video_texture.is_none() {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("waverunner.video"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            self.video_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("waverunner.video"),
+                layout: &self.icon_bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.icon_sampler) },
+                ],
+            }));
+            self.video_texture = Some(texture);
+            self.video_size = (w, h);
+        }
+        if let Some(texture) = &self.video_texture {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba[..(w * h * 4) as usize],
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            self.video_gen += 1;
+        }
+    }
+
+    /// Let the moving picture go.
+    pub fn drop_video(&mut self) {
+        self.video_texture = None;
+        self.video_bind = None;
+        self.video_size = (0, 0);
     }
 
     /// Make the icon array hold at least `need` layers (within its cap),
@@ -1860,6 +1925,11 @@ impl Renderer {
         let o0 = icons.len() as u32;
         icons.extend(scene.overlay.iter().map(icon_instance));
         let overlay_range = o0..icons.len() as u32;
+        // The moving picture rides the same buffer, drawn after its grid.
+        let video_at: Option<(usize, u32)> = scene.video.as_ref().filter(|_| self.video_bind.is_some()).map(|(after, v)| {
+            icons.push(icon_instance(v));
+            (*after, icons.len() as u32 - 1)
+        });
 
         // Shape the visible labels and hand them to glyphon.
         let alpha = scene.alpha.clamp(0.0, 1.0);
@@ -2183,6 +2253,14 @@ impl Renderer {
             for i in &icons[overlay_range.start as usize..overlay_range.end as usize] {
                 mark_icon(&mut tiles, i, None, scale, &deps, gens);
             }
+            // The moving picture is drawn whole at every frame: its texture
+            // is written behind the damage's back (a paused one kept only
+            // the swapchain's older buffer where it was not redrawn).
+            if let Some((_, at)) = video_at {
+                let i = &icons[at as usize];
+                let b = [i.rect_min[0] * scale, i.rect_min[1] * scale, i.rect_max[0] * scale, i.rect_max[1] * scale];
+                tiles.mark(b, mix(hash_bytes(KIND_ICON, bytemuck::bytes_of(i)), mix(self.video_gen, frame_no)));
+            }
             damage = match &self.damage_prev {
                 Some(prev) if prev.same_size(&tiles) => Some(tiles.changed(prev)),
                 _ => None,
@@ -2390,14 +2468,17 @@ impl Renderer {
         }
         let target = check_target.map_or(&view, |t| &t.view);
 
-        // Scissored grid draws: rects, then icons, per grid.
+        // Scissored grid draws: rects, then icons, per grid (`first` is the
+        // index of the first of `grids` in the scene: the moving picture
+        // goes after its own).
         let draw_grids = |pass: &mut wgpu::RenderPass<'_>,
+                          first: usize,
                           grids: &[(
             crate::content::Rect,
             std::ops::Range<u32>,
             std::ops::Range<u32>,
         )]| {
-            for (clip, rect_range, icon_range) in grids {
+            for (n, (clip, rect_range, icon_range)) in grids.iter().enumerate() {
                 let Some([sx, sy, sw, sh]) = scissor_of(clip, scale, w, h) else {
                     continue;
                 };
@@ -2413,6 +2494,14 @@ impl Renderer {
                         pass.set_bind_group(1, icon_bind, &[]);
                         pass.set_vertex_buffer(0, icon_buf.slice(..));
                         pass.draw(0..4, icon_range.clone());
+                    }
+                }
+                if let (Some((after, at)), Some(video_bind)) = (video_at, &self.video_bind) {
+                    if after == first + n {
+                        pass.set_pipeline(&self.icon_pipeline);
+                        pass.set_bind_group(1, video_bind, &[]);
+                        pass.set_vertex_buffer(0, icon_buf.slice(..));
+                        pass.draw(0..4, at..at + 1);
                     }
                 }
             }
@@ -2454,13 +2543,13 @@ impl Renderer {
 
             // Base section grids (everything before the box overlay), each
             // under its own scissor rect.
-            draw_grids(pass, &grid_ranges[..split]);
+            draw_grids(pass, 0, &grid_ranges[..split]);
         };
         // What goes over it: the box's panel and members (the grids from
         // `split` on), all text, the drag ghost.
         let draw_overlay = |pass: &mut wgpu::RenderPass<'_>| -> anyhow::Result<()> {
             pass.set_bind_group(0, &self.globals_bind, &[]);
-            draw_grids(pass, &grid_ranges[split..]);
+            draw_grids(pass, split, &grid_ranges[split..]);
 
             // Text renders unscissored: every TextArea carries its own clip
             // bounds, so labels outside the grid still show.

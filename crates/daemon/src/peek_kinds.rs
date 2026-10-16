@@ -337,6 +337,106 @@ pub(crate) fn play(path: &Path, from: f32) -> Option<std::process::Child> {
         .ok()
 }
 
+/// A VIDEO PLAYING: `ffmpeg` hands its frames over, `w`×`h` RGBA each, at
+/// the video's own pace (at most 30 a second), from `from` seconds; the
+/// sound is `mpv`'s, started with it. A thread reads the frames and sends
+/// them on with `tag`; an empty frame says the video ended.
+pub(crate) struct Stream {
+    ffmpeg: std::process::Child,
+    sound: Option<std::process::Child>,
+}
+
+impl Stream {
+    pub(crate) fn stop(&mut self) {
+        for child in [Some(&mut self.ffmpeg), self.sound.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+pub(crate) fn stream(
+    path: &Path,
+    from: f32,
+    (w, h): (u32, u32),
+    tag: u64,
+    frames: smithay_client_toolkit::reexports::calloop::channel::Sender<(u64, Vec<u8>)>,
+) -> Option<Stream> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    let ffmpeg = crate::thumbs::ffmpeg_tool()?;
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-ss", &format!("{from:.2}"), "-re", "-i"])
+        .arg(path)
+        .args([
+            "-an",
+            "-vf",
+            &format!("fps=30,scale={w}:{h},format=rgba"),
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // SAFETY: only an async-signal-safe call between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| tracing::warn!("quick look: ffmpeg: {e}"))
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let size = (w * h * 4) as usize;
+    let read = std::thread::Builder::new()
+        .name("quick-look-video".into())
+        .spawn(move || loop {
+            let mut frame = vec![0u8; size];
+            if out.read_exact(&mut frame).is_err() {
+                let _ = frames.send((tag, Vec::new()));
+                return;
+            }
+            if frames.send((tag, frame)).is_err() {
+                return;
+            }
+        });
+    if read.is_err() {
+        let _ = child.kill();
+        return None;
+    }
+    Some(Stream {
+        ffmpeg: child,
+        sound: play(path, from),
+    })
+}
+
+/// A video's frame size for playing: its shape within `max`, at most 1280
+/// wide (what a weak machine moves 30 times a second), even.
+pub(crate) fn stream_size(own: (u32, u32), max: (u32, u32)) -> (u32, u32) {
+    let aspect = own.0.max(1) as f32 / own.1.max(1) as f32;
+    let (w, h) = fit(
+        aspect,
+        (
+            max.0.min(1280).min(own.0.max(2)),
+            max.1.min(720).min(own.1.max(2)),
+        ),
+    );
+    (w & !1, h & !1)
+}
+
 // ── fonts ───────────────────────────────────────────────────────────────
 
 /// A font's sheet, `max` at most, its letters in `ink`; and its family.

@@ -141,13 +141,22 @@ pub(crate) struct Prepared {
     pub app: Option<String>,
     /// A PDF's pages (0: not paged).
     pub pages: u32,
+    /// A video's length (s) and own size: it plays.
+    pub video: Option<(f32, (u32, u32))>,
     bytes: usize,
 }
 
-/// A song playing.
+/// What plays: a song (`mpv`), or a video (`peek_kinds::Stream`, its
+/// frames tagged with `tag`).
+enum Playing {
+    Song(std::process::Child),
+    Video { stream: kinds::Stream, tag: u64 },
+}
+
+/// A song or a video playing.
 struct Play {
-    child: std::process::Child,
-    /// When it started, and from where in the song.
+    what: Playing,
+    /// When it started, and from where in it.
     since: Instant,
     from: f32,
 }
@@ -178,8 +187,15 @@ pub(crate) struct Up {
     /// The pointer on the surface, for the buttons' wash.
     ptr: Option<(f32, f32)>,
     play: Option<Play>,
-    /// Where a stopped song is.
+    /// Where a stopped song or video is.
     at: f32,
+    /// A video's newest frame not yet on the screen, how many it has shown,
+    /// and their size.
+    frame: Option<Vec<u8>>,
+    frames: u32,
+    /// Frames come in since it last started (re)playing.
+    frames_of_play: u32,
+    frame_size: (u32, u32),
 }
 
 impl Up {
@@ -188,10 +204,15 @@ impl Up {
     }
 
     fn stop(&mut self) {
-        if let Some(mut p) = self.play.take() {
+        if let Some(p) = self.play.take() {
             self.at = p.from + p.since.elapsed().as_secs_f32();
-            let _ = p.child.kill();
-            let _ = p.child.wait();
+            match p.what {
+                Playing::Song(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                Playing::Video { mut stream, .. } => stream.stop(),
+            }
         }
     }
 
@@ -237,6 +258,10 @@ pub(crate) struct QuickLook {
     /// For each file window, the thing its keys were on when its
     /// neighbours were last wished for.
     seen: HashMap<u32, String>,
+    /// Where a video's frames come in (`peek_frame`), and the tag of the
+    /// newest started (frames of an older one are dropped).
+    frames: Option<calloop::channel::Sender<(u64, Vec<u8>)>>,
+    tag: u64,
 }
 
 impl QuickLook {
@@ -474,6 +499,7 @@ fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32)
         meta,
         app,
         pages,
+        video: None,
         bytes,
     }
 }
@@ -539,7 +565,11 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                         .size
                         .map_or(String::new(), |(w, h)| format!(" · {w} × {h}"));
                     let meta = format!("{kind} · {size_text}{dims} · {}", kinds::clock(probe.secs));
-                    return picture(img, meta, app, 0);
+                    let own = probe.size.unwrap_or((img.width(), img.height()));
+                    return Prepared {
+                        video: Some((probe.secs, own)),
+                        ..picture(img, meta, app, 0)
+                    };
                 }
             }
         }
@@ -569,6 +599,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     meta: format!("{kind} · {size_text} · {}", kinds::clock(probe.secs)),
                     app,
                     pages: 0,
+                    video: None,
                     bytes,
                 };
             }
@@ -594,6 +625,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     meta,
                     app,
                     pages: 0,
+                    video: None,
                     bytes,
                 };
             }
@@ -610,6 +642,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 meta,
                 app,
                 pages: 0,
+                video: None,
                 bytes,
             };
         }
@@ -655,6 +688,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         },
         app,
         pages: 0,
+        video: None,
         bytes: 1024,
     }
 }
@@ -807,6 +841,7 @@ impl App {
                 }
             }
             self.request_desktop_top_draw();
+            self.peek_autoplay();
             // (The next page, before it is asked for.)
             if key.1 + 1 < pages {
                 self.peek_want_now((key.0, key.1 + 1));
@@ -860,10 +895,18 @@ impl App {
             ptr: None,
             play: None,
             at: 0.0,
+            frame: None,
+            frames: 0,
+            frames_of_play: 0,
+            frame_size: (0, 0),
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
         self.peek_want_now(key);
+        // (A video plays as it is shown, as Finder's does.)
+        if ready {
+            self.peek_autoplay();
+        }
         self.request_desktop_top_draw();
     }
 
@@ -937,26 +980,118 @@ impl App {
         true
     }
 
-    /// Play or stop the song that is up.
-    fn peek_play(&mut self) {
-        let Some(secs) = self.peek_shown().and_then(|(_, p)| match &p.body {
+    /// How long the song or video that is up lasts, if it plays.
+    fn peek_secs(&self) -> Option<f32> {
+        let (_, p) = self.peek_shown()?;
+        match &p.body {
             Body::Song { secs, .. } => Some(*secs),
-            _ => None,
-        }) else {
-            return;
-        };
+            _ => p.video.map(|(secs, _)| secs),
+        }
+    }
+
+    /// A video starts as soon as it is shown.
+    fn peek_autoplay(&mut self) {
+        let video = self.peek_shown().is_some_and(|(_, p)| p.video.is_some());
+        if video
+            && self
+                .peek
+                .up
+                .as_ref()
+                .is_some_and(|u| u.play.is_none() && u.frames == 0 && !u.closing)
+        {
+            self.peek_play_from(0.0);
+        }
+    }
+
+    /// Play or stop the song or the video that is up.
+    fn peek_play(&mut self) {
+        let Some(secs) = self.peek_secs() else { return };
         let Some(up) = self.peek.up.as_mut() else {
             return;
         };
         if up.play.is_some() {
             up.stop();
+            self.request_desktop_top_draw();
         } else {
             let from = if up.at >= secs - 0.5 { 0.0 } else { up.at };
-            up.play = kinds::play(&up.path, from).map(|child| Play {
-                child,
-                since: Instant::now(),
-                from,
-            });
+            self.peek_play_from(from);
+        }
+    }
+
+    /// (Re)start what is up playing from `from` seconds.
+    fn peek_play_from(&mut self, from: f32) {
+        let video = self.peek_shown().and_then(|(_, p)| p.video);
+        let max = self.peek_max();
+        if video.is_some() && self.peek.frames.is_none() {
+            let (sender, receiver) = calloop::channel::channel();
+            let inserted = self
+                .loop_handle
+                .insert_source(receiver, |event, _, app: &mut App| {
+                    if let calloop::channel::Event::Msg((tag, frame)) = event {
+                        app.peek_frame(tag, frame);
+                    }
+                });
+            if let Err(e) = inserted {
+                warn!("quick look: {e}");
+                return;
+            }
+            self.peek.frames = Some(sender);
+        }
+        self.peek.tag += 1;
+        let tag = self.peek.tag;
+        let frames = self.peek.frames.clone();
+        let Some(up) = self.peek.up.as_mut() else {
+            return;
+        };
+        up.stop();
+        up.at = from;
+        up.frames_of_play = 0;
+        let what = match (video, frames) {
+            (Some((_, own)), Some(frames)) => {
+                let size = kinds::stream_size(own, max);
+                up.frame_size = size;
+                kinds::stream(&up.path, from, size, tag, frames)
+                    .map(|stream| Playing::Video { stream, tag })
+            }
+            (Some(_), None) => None,
+            (None, _) => kinds::play(&up.path, from).map(Playing::Song),
+        };
+        up.play = what.map(|what| Play {
+            what,
+            since: Instant::now(),
+            from,
+        });
+        self.request_desktop_top_draw();
+    }
+
+    /// A video's frame (an empty one: it ended).
+    fn peek_frame(&mut self, tag: u64, frame: Vec<u8>) {
+        let secs = self.peek_secs().unwrap_or(0.0);
+        let Some(up) = self.peek.up.as_mut() else {
+            return;
+        };
+        let ours =
+            matches!(&up.play, Some(Play { what: Playing::Video { tag: t, .. }, .. }) if *t == tag);
+        if !ours {
+            return;
+        }
+        if frame.is_empty() {
+            up.stop();
+            up.at = secs;
+        } else {
+            // (Its clock starts with its first frame: the decoder takes a
+            // moment to start.)
+            if up.frame.is_none() && up.frames_of_play == 0 {
+                if let Some(play) = up.play.as_mut() {
+                    debug!(
+                        "quick look: first frame {:?} after the start",
+                        play.since.elapsed()
+                    );
+                    play.since = Instant::now();
+                }
+            }
+            up.frames_of_play += 1;
+            up.frame = Some(frame);
         }
         self.request_desktop_top_draw();
     }
@@ -1075,7 +1210,16 @@ impl App {
                 let song = self
                     .peek_shown()
                     .is_some_and(|(_, p)| matches!(p.body, Body::Song { .. }));
-                if parts.close.contains(at) {
+                let video = self.peek_shown().is_some_and(|(_, p)| p.video.is_some());
+                let bar = video_bar(up.rect);
+                let secs = self.peek_secs().unwrap_or(0.0);
+                if video && bar.play.contains(at) {
+                    self.peek_play();
+                } else if video && bar.track.contains(at) {
+                    // (A click on the line: from there.)
+                    let k = ((at.0 - bar.track.x) / bar.track.w).clamp(0.0, 1.0);
+                    self.peek_play_from(k * secs);
+                } else if parts.close.contains(at) {
                     self.peek_close();
                 } else if parts.open.contains(at) {
                     self.peek_open_app();
@@ -1144,6 +1288,9 @@ impl App {
         }
         if up.closing && up.t >= 1.0 {
             self.peek.up = None;
+            if let Some(renderer) = self.desktop_top.renderer.as_mut() {
+                renderer.drop_video();
+            }
             return true;
         }
         // (A song playing moves its line on.)
@@ -1152,6 +1299,15 @@ impl App {
 
     /// Put what is shown in the top surface's layers.
     pub(crate) fn peek_upload(&mut self) {
+        // A video's newest frame.
+        if let Some(up) = self.peek.up.as_mut() {
+            if let (Some(frame), Some(renderer)) =
+                (up.frame.take(), self.desktop_top.renderer.as_mut())
+            {
+                renderer.set_video_frame(up.frame_size.0, up.frame_size.1, &frame);
+                up.frames += 1;
+            }
+        }
         let Some(up) = self.peek.up.as_ref() else {
             return;
         };
@@ -1315,6 +1471,82 @@ impl App {
                             [1.0, 1.0, 1.0, open],
                         )
                     });
+                    over_page = Some(over);
+                }
+                // A VIDEO: its frames over the poster, its bar over them.
+                if let Some((secs, _)) = prepared.and_then(|p| p.video) {
+                    if up.frames > 0 && !up.closing {
+                        scene.video = Some((scene.grids.len(), clipped(body, 0, 1.0)));
+                    }
+                    let mut over = GridContent {
+                        clip: g.clip,
+                        ..Default::default()
+                    };
+                    let bar = video_bar(r);
+                    let hot = up.ptr.is_some_and(|p| bar.pill.contains(p));
+                    over.rects.push(RectInst {
+                        rect: bar.pill,
+                        radius: bar.pill.h / 2.0,
+                        color: [0.06, 0.07, 0.09, (if hot { 0.78 } else { 0.62 }) * open],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    let white = [1.0, 1.0, 1.0, open];
+                    let glyph = if up.play.is_some() {
+                        "\u{f04c}"
+                    } else {
+                        "\u{f04b}"
+                    };
+                    over.labels.push(Label {
+                        centered: true,
+                        family: Some(crate::options::NERD),
+                        ..text_label(
+                            glyph,
+                            (bar.play.x + bar.play.w / 2.0, bar.play.y + 6.0),
+                            bar.play.w,
+                            14.0,
+                            None,
+                            white,
+                        )
+                    });
+                    let at = up.song_at().min(secs);
+                    let done = if secs > 0.0 {
+                        (at / secs).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let line = Rect::new(
+                        bar.track.x,
+                        bar.track.y + bar.track.h / 2.0 - 2.0,
+                        bar.track.w,
+                        4.0,
+                    );
+                    over.rects.push(RectInst {
+                        rect: line,
+                        radius: 2.0,
+                        color: [1.0, 1.0, 1.0, 0.25 * open],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    over.rects.push(RectInst {
+                        rect: Rect {
+                            w: line.w * done,
+                            ..line
+                        },
+                        radius: 2.0,
+                        color: white,
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    let time = format!("{} / {}", kinds::clock(at), kinds::clock(secs));
+                    over.labels.push(text_label(
+                        &time,
+                        (bar.track.x + bar.track.w + 12.0, bar.play.y + 8.0),
+                        110.0,
+                        12.0,
+                        None,
+                        white,
+                    ));
                     over_page = Some(over);
                 }
             }
@@ -1577,6 +1809,27 @@ fn parts(r: Rect) -> Parts {
         open: Rect::new(close.x - 8.0 - open_w, r.y + 10.0, open_w, 26.0),
         close,
     }
+}
+
+/// A video's bar, for a frame at `r`: a pill at the foot of the picture
+/// with play/pause, the line of where it is, and the time.
+struct VideoBar {
+    pill: Rect,
+    play: Rect,
+    track: Rect,
+}
+
+fn video_bar(r: Rect) -> VideoBar {
+    let w = (r.w - 48.0).clamp(160.0, 560.0);
+    let pill = Rect::new(r.x + (r.w - w) / 2.0, r.y + r.h - 16.0 - 36.0, w, 36.0);
+    let play = Rect::new(pill.x + 6.0, pill.y + 4.0, 28.0, 28.0);
+    let track = Rect::new(
+        play.x + play.w + 12.0,
+        pill.y + 6.0,
+        (pill.x + pill.w - 124.0 - (play.x + play.w + 12.0)).max(20.0),
+        24.0,
+    );
+    VideoBar { pill, play, track }
 }
 
 /// A song's body, for a frame at `r`: its cover, its loudness, its button.

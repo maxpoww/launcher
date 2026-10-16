@@ -199,6 +199,11 @@ pub struct Scene {
     /// Banner blister: `(bar_edge_y, k, _, _)` for the sunset module's swell.
     /// `None` = no blister this frame.
     pub neck: Option<[f32; 4]>,
+    /// A MOVING PICTURE (Quick Look's video): one quad over the renderer's
+    /// video texture (`Renderer::set_video_frame`; its `layer` is ignored),
+    /// drawn right after grid `.0`'s pictures — over that grid's frame,
+    /// under the grids that follow (its controls).
+    pub video: Option<(usize, IconInst)>,
 }
 
 /// What the pointer is over.

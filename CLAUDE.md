@@ -784,8 +784,16 @@ The big daemon files are cohesive but long — go straight to the function:
   `thumb_more::draw_text_in`); an ARCHIVE = its list (`bsdtar -tvf`); anything with a freedesktop
   thumbnailer (Office through libgsf, epub…) = its picture asked big (`by_thumbnailer_at`). Golem's
   home.nix brings mutool (mupdf-headless) and bsdtar (libarchive). `xdg-mime` is asked once a kind
-  (it is a slow shell script). Rig verbs: `files key space|escape|left|right|pgdown`. Next: video
-  playing, Office as pages, folders as a grid; then the pencil (editor) — see the lab.
+  (it is a slow shell script). Rig verbs: `files key space|escape|left|right|pgdown`. PHASE 3: a VIDEO
+  PLAYS as it is shown (Finder's way): `peek_kinds::stream` — `ffmpeg -re` hands RGBA frames at
+  most 1280×720 / 30 a second through a reader thread (tagged, an empty frame = the end), the
+  sound is `mpv`'s; the frames go into the renderer's VIDEO TEXTURE (`Renderer::set_video_frame`,
+  one layer, no mips, the icon pipeline with its own bind group; `Scene::video` = drawn after its
+  grid, under the bar's grid), the poster under it. Its bar: play/pause, the line (a click seeks),
+  the time; P too. The damage repaints the video's rect at EVERY frame (its texture is written
+  behind the damage's back: a paused one showed an old swapchain buffer). No `-hwaccel auto`: it
+  cost 2 s to the first frame under the dock's environment (100 ms without). Next: Office as
+  pages, folders as a grid, hardware decoding for big videos; then the pencil — see the lab.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the
