@@ -2492,6 +2492,28 @@ pub fn scene(
                 plate: plate_of(entry_idx),
             });
         }
+        // A dot under the button for each pin it holds, as the running
+        // apps have theirs (Max, 2026-10-16): they go out one by one as it
+        // spits; many draw closer so the row stays under the button.
+        let held = ov.hidden_right;
+        if held > 0 {
+            if let Some(slot_rect) = layout.dock_slots.get(ov.apps_slot) {
+                let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
+                let step = (DOCK_DOT_R * 3.0).min(apps.w * 0.8 / held as f32);
+                let first = apps_cx - step * (held as f32 - 1.0) / 2.0;
+                let fg = dock_ink;
+                for k in 0..held {
+                    let x = first + step * k as f32;
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(x - DOCK_DOT_R, baseline - DOCK_DOT_GAP - DOCK_DOT_R, DOCK_DOT_R * 2.0, DOCK_DOT_R * 2.0),
+                        radius: DOCK_DOT_R,
+                        color: [fg[0], fg[1], fg[2], 0.55],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+            }
+        }
         scene.grids.push(edge);
         scene.grids.push(GridContent {
             clip: Rect::new(0.0, 0.0, surface.0, surface.1),
