@@ -1403,7 +1403,8 @@ impl Panel {
         let room = fw - 4.0 * MARGIN * s;
         let gap = 3.0 * s;
         let w = ((room - (cols - 1) as f32 * gap) / cols as f32).min(40.0 * s);
-        let h = if cells.len() <= cols { w * 0.7 } else { w };
+        // Squat cells: the editor must fit a 900 px screen.
+        let h = if cells.len() <= cols { (w * 0.6).min(18.0 * s) } else { w.min(24.0 * s) };
         let x0 = (fw - cols as f32 * w - (cols - 1) as f32 * gap) / 2.0;
         for (i, c) in cells.iter().enumerate() {
             let (row, col) = (i / cols, i % cols);
@@ -3475,6 +3476,12 @@ impl App {
             "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" => {
                 if let Ok(mut t) = crate::controls::TYPING.lock() {
                     *t = crate::controls::field_start(key);
+                }
+            }
+            // The editor's two fields on one row: the value names the field.
+            "colors-edit-text" => {
+                if let Ok(mut t) = crate::controls::TYPING.lock() {
+                    *t = crate::controls::field_start(&value);
                 }
             }
             // The "+" tile after the palettes opens the editor.

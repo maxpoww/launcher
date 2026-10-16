@@ -102,10 +102,8 @@ fn field(key: &'static str, shown: &str, hint: &str, width: f32) -> Group {
 /// The keys a field can be, and the text it starts with when clicked.
 pub(crate) fn field_start(key: &str) -> Option<(&'static str, String)> {
     match key {
-        "colors-edit-hex" => {
-            let e = EDITOR.lock().ok()?.clone()?;
-            Some(("colors-edit-hex", crate::palette::hex(e.soul[e.cur])))
-        }
+        // (Empty: a colour is typed whole, not added to the one there.)
+        "colors-edit-hex" => EDITOR.lock().ok()?.as_ref().map(|_| ("colors-edit-hex", String::new())),
         "colors-edit-name" => Some(("colors-edit-name", EDITOR.lock().ok()?.as_ref()?.name.clone())),
         "colors-apps-find" => Some(("colors-apps-find", APPS_FIND.lock().ok()?.clone())),
         _ => None,
@@ -145,7 +143,7 @@ pub(crate) static EDITOR: std::sync::Mutex<Option<Editor>> = std::sync::Mutex::n
 
 /// The editor's field: chroma across, lightness down.
 const FIELD_COLS: usize = 18;
-const FIELD_ROWS: usize = 7;
+const FIELD_ROWS: usize = 6;
 const HUES: usize = 24;
 
 fn field_colour(col: usize, row: usize, hue: f32) -> [u8; 3] {
@@ -359,7 +357,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
-        "open" | "night" | "dnd" | "restart" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+        "open" | "night" | "dnd" | "restart" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look"
     )
 }
@@ -1607,8 +1605,14 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 .collect();
             view.groups.push(Group { cells: HUES, ..group(None, "colors-edit-hue", 0.0, hues) });
             // The place's colour typed as #rrggbb, and the palette's name.
-            view.groups.push(field("colors-edit-hex", &format!("#{}", crate::palette::hex(e.soul[e.cur])), "", 150.0));
-            view.groups.push(field("colors-edit-name", &e.name, tr("Name it (click to type)"), 320.0));
+            // (One row: the box must fit a 900 px screen.)
+            let hex = field("colors-edit-hex", &format!("#{}", crate::palette::hex(e.soul[e.cur])), "", 240.0);
+            let name = field("colors-edit-name", &e.name, tr("Name it (click to type)"), 240.0);
+            let both = vec![
+                Choice { value: "colors-edit-hex".to_owned(), ..hex.choices[0].clone() },
+                Choice { value: "colors-edit-name".to_owned(), ..name.choices[0].clone() },
+            ];
+            view.groups.push(Group { field: true, ..group(None, "colors-edit-text", 240.0, both) });
             view.groups.push(group(None, "colors-edit", 120.0, vec![choice(tr("Save"), false, "save"), choice(tr("Cancel"), false, "cancel")]));
         }
         "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
