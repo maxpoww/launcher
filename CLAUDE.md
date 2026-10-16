@@ -788,7 +788,11 @@ The big daemon files are cohesive but long — go straight to the function:
   `thumb_more::draw_text_in`); an ARCHIVE = its list (`bsdtar -tvf`); anything with a freedesktop
   thumbnailer (Office through libgsf, epub…) = its picture asked big (`by_thumbnailer_at`). Golem's
   home.nix brings mutool (mupdf-headless) and bsdtar (libarchive). `xdg-mime` is asked once a kind
-  (it is a slow shell script). A PHOTO ZOOMS (`peek_zoom.rs`, as Finder's): Ctrl+wheel about
+  (it is a slow shell script). A MOVING PICTURE (animated GIF or WebP — `ffmpeg` cannot read
+  an animated WebP) is read whole in-process (`peek_kinds::animation`: `image`'s
+  AnimationDecoder, frames brought to the screen's size and, all together, within 48 MB) and
+  played round on the loop's clock through the renderer's video texture over its first frame
+  (`Up::anim_ms`), as Finder plays them: no bar; no pencil (saved, it would stand still). A PHOTO ZOOMS (`peek_zoom.rs`, as Finder's): Ctrl+wheel about
   the pointer, + / −, a double click (fitted ↔ its own pixels), 0 fits; zoomed, drag or wheel to
   move; drawn in a grid scissored to the body. Once it stands still 160 ms the part on screen is
   read again at the screen's size off the loop (a JPEG decoded straight at that size) into its

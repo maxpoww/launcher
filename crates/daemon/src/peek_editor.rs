@@ -338,9 +338,11 @@ impl App {
             || name.ends_with(".gif")
             || name.ends_with(".avif");
         let shown_picture = self.peek_shown().is_some_and(|(_, p)| {
+            // (Not a moving picture: saved, it would stand still.)
             matches!(p.body, crate::quicklook::Body::Picture(_))
                 && p.pages == 0
                 && p.video.is_none()
+                && p.anim.is_none()
         });
         let text = self.peek_shown().is_some_and(|(_, p)| p.whole_text);
         let cut = self.trim_able().is_some();
