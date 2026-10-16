@@ -633,6 +633,7 @@ impl App {
         }
         self.sync_input_region();
         self.schedule_frame();
+        self.colours_preview_check(true);
     }
 
     /// Re-rank for the current query: apps only, the real ones (no catalog

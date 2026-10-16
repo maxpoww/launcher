@@ -3189,6 +3189,7 @@ impl App {
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Read(label, ui));
         }
+        self.colours_preview_guard();
         self.panel.keep_left = self.display_keep_left();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
@@ -3291,6 +3292,30 @@ impl App {
         }
         if let Some(h) = &self.controls {
             h.send(cmd);
+        }
+    }
+
+    /// The editor's preview lasts only while the editor is up: a panel
+    /// closed (or another setting opened) mid-edit puts the palette in use
+    /// back.
+    pub(crate) fn colours_preview_guard(&mut self) {
+        self.colours_preview_check(false);
+    }
+
+    /// `closing`: the card is going away, whatever it shows.
+    pub(crate) fn colours_preview_check(&mut self, closing: bool) {
+        if !crate::palette::previewing() {
+            return;
+        }
+        let editing = crate::controls::EDITOR.lock().is_ok_and(|g| g.is_some());
+        let shown = self.ui.target() == Target::Open || self.fast.boxed.is_some();
+        let on = |p: &Panel| p.open_control_label() == Some("Colours");
+        if closing || !(editing && shown && (on(&self.panel) || on(&self.quick))) {
+            crate::palette::set_preview(None);
+            if let Ok(mut e) = crate::controls::EDITOR.lock() {
+                *e = None;
+            }
+            self.colors_apply(false);
         }
     }
 
@@ -3402,12 +3427,20 @@ impl App {
                 }
             }
             // The "+" tile after the palettes opens the editor.
-            "colors-palette" if value == "new" => crate::controls::editor_open(),
+            "colors-palette" if value == "new" => {
+                crate::controls::editor_open();
+                crate::palette::set_preview(crate::controls::editor_draft());
+                self.colors_apply(false);
+            }
             "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" => {
                 let mut saved = None;
                 crate::controls::editor_pick(key, &value, &mut saved);
+                // Worn while it is made; Save or Cancel takes the preview off.
+                crate::palette::set_preview(crate::controls::editor_draft());
                 if let Some(id) = saved {
                     self.colors_pick("colors-palette", &id);
+                } else {
+                    self.colors_apply(false);
                 }
             }
             // The "+" beside Apps, and the list's Back.

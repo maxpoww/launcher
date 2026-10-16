@@ -5671,6 +5671,7 @@ impl App {
     /// finishes the job); from the dock, hide outright — unless nothing
     /// overlaps the zone, where intellihide keeps the dock parked.
     fn dismiss(&mut self) {
+        self.colours_preview_check(true);
         // A dock stack (group or directory) closes with the launcher.
         self.dock_stack = None;
         self.dir_stack = None;

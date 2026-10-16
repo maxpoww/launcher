@@ -106,6 +106,12 @@ pub(crate) fn editor_open() {
     }
 }
 
+/// The palette the editor holds now (for its live preview).
+pub(crate) fn editor_draft() -> Option<crate::palette::Palette> {
+    let e = EDITOR.lock().ok()?.clone()?;
+    Some(crate::palette_gen::direct(crate::palette::DRAFT_ID, tr("New palette"), e.soul))
+}
+
 /// A pick in the editor (`key`, `value`); true when it was the editor's.
 /// Save makes the palette and hands its id back through `saved`.
 pub(crate) fn editor_pick(key: &str, value: &str, saved: &mut Option<String>) -> bool {

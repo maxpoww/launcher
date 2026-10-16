@@ -412,9 +412,30 @@ pub(crate) fn choice() -> ColorChoice {
 }
 
 /// The theme a choice gives in a look.
+/// The palette being MADE in the editor, worn while it is made (Max: "the
+/// desktop shows it as you go"); never saved as the choice.
+static PREVIEW: std::sync::Mutex<Option<Palette>> = std::sync::Mutex::new(None);
+pub(crate) const DRAFT_ID: &str = "golem-draft";
+
+pub(crate) fn set_preview(p: Option<Palette>) {
+    if let Ok(mut g) = PREVIEW.lock() {
+        *g = p;
+    }
+}
+
+pub(crate) fn previewing() -> bool {
+    PREVIEW.lock().is_ok_and(|g| g.is_some())
+}
+
+fn preview() -> Option<Palette> {
+    PREVIEW.lock().ok().and_then(|g| g.clone())
+}
+
 pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
     let want = choice.palette_id();
-    let p = if want == DYNAMIC_ID {
+    let p = if want == DRAFT_ID {
+        preview()
+    } else if want == DYNAMIC_ID {
         dynamic_palette()
     } else {
         all().into_iter().find(|p| p.id == want)
@@ -1042,6 +1063,7 @@ fn palette_of(id: &str) -> Option<Palette> {
         DYNAMIC_ID => dynamic_palette(),
         "stock" => parse("stock", STOCK),
         GOLEM => Some(golem()),
+        DRAFT_ID => preview(),
         _ => all().into_iter().find(|p| p.id == id),
     }
 }
@@ -1874,7 +1896,11 @@ impl crate::App {
         for (k, v) in launch_vars() {
             crate::hypr::eval(&format!("hl.env('{k}', '{v}')"));
         }
-        let theme = resolve(&choice(), crate::look::dark());
+        let mut picked = choice();
+        if previewing() {
+            picked.palette = Some(DRAFT_ID.to_owned());
+        }
+        let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's
         // stands in, and this comes back when it is ready.
         if theme.dynamic && dynamic_pending() {
