@@ -1333,6 +1333,25 @@ impl Panel {
         Some((label, g.key, value))
     }
 
+    /// A press at `from` that began on a SLIDER, now at `pos`: the stop
+    /// under the pointer's x (the slider's own, wherever the pointer went
+    /// up or down), when it is not the lit one.
+    pub(crate) fn slide(&self, from: (f32, f32), pos: (f32, f32)) -> Option<(u8, u8)> {
+        let label = self.open_control_label()?;
+        let content = self.open_content(label)?;
+        let f = self.field;
+        let inside = |c: &Chip| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(from);
+        let sl = content.sliders.iter().find(|sl| content.chips[sl.stops.clone()].iter().any(inside))?;
+        let stops = &content.chips[sl.stops.clone()];
+        let n = stops.len().max(2) - 1;
+        let k = (((pos.0 - f.x - sl.track.x) / sl.track.w).clamp(0.0, 1.0) * n as f32).round() as usize;
+        let chip = stops.get(k)?;
+        match chip.action {
+            PanelAction::Pick { group, index } if !chip.on => Some((group, index)),
+            _ => None,
+        }
+    }
+
     /// What the last click asked for, once.
     fn take_action(&mut self) -> Option<PanelAction> {
         self.action.take()
@@ -3117,6 +3136,16 @@ impl App {
         self.panel_search();
         self.panel.open_named(label);
         self.schedule_frame();
+    }
+
+    /// The pointer moved with the button held: a press that began on a
+    /// slider drags its knob.
+    pub(crate) fn panel_drag(&mut self, pos: (f32, f32)) {
+        let Some(from) = self.gesture.press_pos else { return };
+        if let Some((group, index)) = self.panel.slide(from, pos) {
+            self.control_pick(group, index, false);
+            self.schedule_frame();
+        }
     }
 
     pub(crate) fn panel_click(&mut self, pos: (f32, f32)) {

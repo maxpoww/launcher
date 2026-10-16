@@ -7399,6 +7399,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if app.fast.open {
                     app.fast_touch();
                 }
+                if app.control_panel && app.gesture.press_pos.is_some() {
+                    app.panel_drag(pos);
+                }
                 // Edge-crossing jelly poke: fire whenever the pointer crosses
                 // the card boundary (inside ↔ outside), regardless of click.
                 {
