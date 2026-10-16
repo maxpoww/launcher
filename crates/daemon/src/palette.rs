@@ -1733,24 +1733,28 @@ fn poke(t: &Theme, look_changed: bool) {
 }
 
 /// GtkSourceView (GNOME Text Editor's writing area, Builder…): a colour
-/// scheme of the palette. The area does not take the GTK theme's colours,
-/// it has a scheme of its own; and a scheme is read once, so — as for
-/// GTK 3 — it is written under the name NOT in use and the editor is
-/// switched to it (`org.gnome.TextEditor style-scheme`, live). An owner who
+/// scheme of the palette — the area does not take the GTK theme's colours.
+/// ONE name, rewritten: an app reads its schemes once, at its start (the
+/// ASUS, 2026-10-16: switching between two names to make it re-read showed
+/// a PREVIOUS palette's copy — Jade's green under Braun), so a change
+/// reaches an editor at its next start, as GTK 4's colours do. An owner who
 /// picked another scheme in the editor keeps it.
 fn sourceview_live(t: &Theme) {
-    const NAMES: [&str; 2] = ["golem-a", "golem-b"];
+    const NAME: &str = "golem";
     let key = "/org/gnome/TextEditor/style-scheme";
     let now = out("dconf", &["read", key]).map(|o| o.trim().trim_matches('\'').to_owned()).unwrap_or_default();
-    if !now.is_empty() && !NAMES.contains(&now.as_str()) {
-        return;
-    }
-    let next = if now == NAMES[0] { NAMES[1] } else { NAMES[0] };
+    let ours = now.is_empty() || now == NAME || now == "golem-a" || now == "golem-b";
     let home = std::env::var("HOME").unwrap_or_default();
     let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let dir = PathBuf::from(data_home).join("gtksourceview-5").join("styles");
-    crate::persist::write_text("theme", &dir.join(format!("{next}.xml")), &sourceview_scheme(t, next));
-    run("dconf", &["write", key, &format!("'{next}'")]);
+    crate::persist::write_text("theme", &dir.join(format!("{NAME}.xml")), &sourceview_scheme(t, NAME));
+    // (The two names of the first cut go.)
+    for old in ["golem-a", "golem-b"] {
+        let _ = std::fs::remove_file(dir.join(format!("{old}.xml")));
+    }
+    if ours && now != NAME {
+        run("dconf", &["write", key, &format!("'{NAME}'")]);
+    }
 }
 
 fn sourceview_scheme(t: &Theme, id: &str) -> String {
