@@ -46,6 +46,8 @@ struct Globals {
     // the light. The glass and the icon plates light themselves from above
     // with it (rounded_rect.wgsl, icon.wgsl); the rest is free.
     light: [f32; 4],
+    // THE ICON FILTER (icon.wgsl): see `palette::icon_filter`.
+    filt: [[f32; 4]; 7],
 }
 
 /// Physical px of room a label's layout width gets beyond its box (see the
@@ -2116,7 +2118,10 @@ impl Renderer {
                     .filter(|n| n[0] > -9000.0)
                     .map(|n| hash_bytes(fade, bytemuck::bytes_of(&n))),
                 icons: mix(
-                    hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32])),
+                    mix(
+                        hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32])),
+                        hash_bytes(fade, bytemuck::bytes_of(&crate::palette::icon_filter())),
+                    ),
                     self.icon_epoch,
                 ),
             };
@@ -2248,6 +2253,7 @@ impl Renderer {
                 thumb_base: thumb_base as f32,
                 neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
                 light: [if crate::look::dark() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                filt: crate::palette::icon_filter(),
             }),
         );
 

@@ -655,7 +655,7 @@ pub(crate) mod tint {
     fn hex_of(c: [f32; 3]) -> Rgb {
         c.map(|v| (gam(v.clamp(0.0, 1.0)) * 255.0).round() as u8)
     }
-    fn lch(c: Rgb) -> (f32, f32, f32) {
+    pub(crate) fn lch(c: Rgb) -> (f32, f32, f32) {
         let [l, a, b] = lab(c);
         (l, a.hypot(b), b.atan2(a).to_degrees().rem_euclid(360.0))
     }
@@ -933,6 +933,34 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
         dark: t.apps_dark,
         pair: Some(pair),
         ..t.clone()
+    }
+}
+
+/// THE ICON FILTER (Max, 2026-10-16: "more aggressive"), for the icon
+/// shader: row 0 = (strength 0..1, dark icons 0/1, how many targets, _),
+/// rows 1..=6 = the palette's strongest colours as OKLCH (L, C, hue in
+/// radians). Each icon colour goes to the nearest of them by hue, at their
+/// full chroma; a grey takes a whisper of the strongest.
+static ICON_FILTER: std::sync::Mutex<[[f32; 4]; 7]> = std::sync::Mutex::new([[0.0; 4]; 7]);
+
+pub(crate) fn icon_filter() -> [[f32; 4]; 7] {
+    ICON_FILTER.lock().map(|f| *f).unwrap_or([[0.0; 4]; 7])
+}
+
+fn set_icon_filter(t: &Theme) {
+    let mut f = [[0.0f32; 4]; 7];
+    if let Some(p) = palette_of(&t.id) {
+        let soul: Vec<Rgb> = if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() };
+        let all: Vec<(f32, f32, f32)> = soul.iter().map(|&c| tint::lch(c)).collect();
+        let cmax = all.iter().map(|t| t.1).fold(0.0f32, f32::max);
+        let targets: Vec<_> = all.into_iter().filter(|t| t.1 > 0.03 && t.1 >= cmax * 0.55).take(6).collect();
+        f[0] = [f32::from(t.icons_tint) / 100.0, if t.icons_dark { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
+        for (k, (l, c, h)) in targets.into_iter().enumerate() {
+            f[k + 1] = [l, c, h.to_radians(), 0.0];
+        }
+    }
+    if let Ok(mut g) = ICON_FILTER.lock() {
+        *g = f;
     }
 }
 
@@ -1731,6 +1759,7 @@ impl crate::App {
                 calloop::timer::TimeoutAction::Drop
             });
         }
+        set_icon_filter(&theme);
         let changed = set(theme);
         if changed || look_changed {
             publish(current(), look_changed);
