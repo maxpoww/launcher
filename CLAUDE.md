@@ -797,7 +797,10 @@ The big daemon files are cohesive but long — go straight to the function:
   move; drawn in a grid scissored to the body. Once it stands still 160 ms the part on screen is
   read again at the screen's size off the loop (a JPEG decoded straight at that size) into its
   OWN layers (`DETAIL` = TILES.., so the array is 2×TILES+2) and laid over; its rev is the
-  request's unique TAG (a counter per photo let one photo show another's part). Rig verbs:
+  request's unique TAG (a counter per photo let one photo show another's part). A PDF's PAGE zooms
+  too (as close as 8×; a double click 2.5×): its sharp part is drawn by `pdftoppm`'s crop (`-r dpi
+  -x -y -W -H`: only what is on screen), and turning the page fits it again. The wheel is the
+  zoom's only with Ctrl or once zoomed (else it turns a PDF's pages, as before). Rig verbs:
   `files key space|escape|left|right|pgdown|plus|minus|zero`, `debug-desktop "peek pan dx dy|dbl x y"`. PHASE 3: a VIDEO
   PLAYS as it is shown (Finder's way): `peek_kinds::stream` — `ffmpeg -re` hands RGBA frames at
   most 1280×720 / 30 a second through a reader thread (tagged, an empty frame = the end), the

@@ -1145,6 +1145,8 @@ impl App {
         let page = (up.page as i32 + by).clamp(0, pages as i32 - 1) as u32;
         if page != up.page {
             up.page = page;
+            // (Another page: fitted again.)
+            up.zoom = crate::peek_zoom::Zoom::new();
             let key = up.key();
             // (The page after first, the page asked for last: the newest
             // wish is the first made.)
@@ -1449,7 +1451,10 @@ impl App {
                 axis: WEnum::Value(axis),
                 value,
                 ..
-            } if self.peek_zoom_frame().is_some() => {
+            } if self.peek_zoom_frame().is_some()
+                && (self.modifiers.ctrl
+                    || self.peek.up.as_ref().is_some_and(|u| u.zoom.zoomed())) =>
+            {
                 let v = *value as f32;
                 let at = self
                     .peek

@@ -316,6 +316,65 @@ pub(crate) fn pdf_facts(path: &Path) -> Option<(u32, f32)> {
     Some((pages, aspect))
 }
 
+/// Page `page`'s size in points (its first page's when not told apart).
+pub(crate) fn pdf_points(path: &Path, page: u32) -> Option<(f32, f32)> {
+    let p = path.to_str()?;
+    let n = (page + 1).to_string();
+    let info = output("pdfinfo", &["-f", &n, "-l", &n, p])?;
+    let line = info
+        .lines()
+        .find(|l| l.contains("size:") && l.contains("pts"))?;
+    let v = line.split(':').nth(1)?;
+    let mut it = v.split_whitespace();
+    let w: f32 = it.next()?.parse().ok()?;
+    it.next();
+    let h: f32 = it.next()?.parse().ok()?;
+    (w > 0.0 && h > 0.0).then_some((w, h))
+}
+
+/// A part (x, y, w, h pixels) of page `page` drawn at `dpi`, on white.
+pub(crate) fn pdf_crop(
+    path: &Path,
+    page: u32,
+    dpi: f32,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> Option<RgbaImage> {
+    let p = path.to_str()?;
+    let out = Scratch::new("peek-pdf-part")?;
+    let prefix = out.path().trim_end_matches(".png").to_owned();
+    let n = (page + 1).to_string();
+    let words = [
+        "pdftoppm",
+        "-f",
+        &n,
+        "-l",
+        &n,
+        "-png",
+        "-singlefile",
+        "-r",
+        &format!("{dpi:.2}"),
+        "-x",
+        &x.to_string(),
+        "-y",
+        &y.to_string(),
+        "-W",
+        &w.to_string(),
+        "-H",
+        &h.to_string(),
+        p,
+        &prefix,
+    ]
+    .map(str::to_owned);
+    if !run(&words) {
+        return None;
+    }
+    let img = read_png(out.path())?;
+    let mut paper =
+        RgbaImage::from_pixel(img.width(), img.height(), image::Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut paper, &img, 0, 0);
+    Some(paper)
+}
+
 /// Page `page` (from 0), no bigger than `max`.
 pub(crate) fn pdf_page(path: &Path, page: u32, aspect: f32, max: (u32, u32)) -> Option<RgbaImage> {
     let p = path.to_str()?;

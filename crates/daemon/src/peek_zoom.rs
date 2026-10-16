@@ -95,15 +95,18 @@ impl App {
         let crate::quicklook::Body::Picture(pic) = &p.body else {
             return None;
         };
-        if p.pages > 0 || p.video.is_some() || p.own == (0, 0) {
+        // (A PDF's page has no pixels of its own: it is drawn sharp at any size
+        // — as close as eight times.)
+        let own = if p.pages > 0 {
+            (pic.w * 8, pic.h * 8)
+        } else {
+            p.own
+        };
+        if p.video.is_some() || p.anim.is_some() || own == (0, 0) {
             return None;
         }
         let body = Rect::new(up.rect.x, up.rect.y + HEAD, up.rect.w, up.rect.h - HEAD);
-        Some((
-            body,
-            crate::peek_editor::pic_rect(body, pic.w, pic.h),
-            p.own,
-        ))
+        Some((body, crate::peek_editor::pic_rect(body, pic.w, pic.h), own))
     }
 
     /// Bring it closer (`factor` > 1) or farther, the point under `at`
@@ -185,7 +188,12 @@ impl App {
                 self.peek_zoom_reset();
             } else {
                 // (Its own pixels: one of them to one of the screen's.)
-                let actual = (own.0 as f32 / scale / fit.w).max(2.0);
+                let pdf = self.peek_shown().is_some_and(|(_, p)| p.pages > 0);
+                let actual = if pdf {
+                    2.5
+                } else {
+                    (own.0 as f32 / scale / fit.w).max(2.0)
+                };
                 self.peek_zoom_at(actual, at);
             }
             return true;
@@ -257,13 +265,20 @@ impl App {
         let tag = self.peek.tag;
         up.zoom.tag = tag;
         let path = up.path.clone();
+        let page = up.page_shown();
+        let pdf = self.peek_shown().is_some_and(|(_, p)| p.pages > 0);
         let Some(tx) = self.peek_zoom_channel() else {
             return false;
         };
         let spawned = std::thread::Builder::new()
             .name("quick-look-zoom".into())
             .spawn(move || {
-                if let Some(pic) = read_part(&path, whole, region) {
+                let part = if pdf {
+                    pdf_part(&path, page, whole, region)
+                } else {
+                    read_part(&path, whole, region)
+                };
+                if let Some(pic) = part {
                     let _ = tx.send((tag, pic, region));
                 }
             });
@@ -306,6 +321,29 @@ impl App {
 
 /// `region` (shares) of the picture at `path`, the whole read at `whole`
 /// texels (a JPEG decoded straight at that size), premultiplied, in tiles.
+/// `region` (shares) of page `page` of a PDF drawn as if the whole page
+/// were `whole` texels — only that part drawn (`pdftoppm`'s crop), on white.
+fn pdf_part(path: &std::path::Path, page: u32, whole: (u32, u32), region: [f32; 4]) -> Option<Pic> {
+    let (pw, _) = crate::peek_kinds::pdf_points(path, page)?;
+    let dpi = whole.0 as f32 / pw * 72.0;
+    let (x, y) = (
+        (region[0] * whole.0 as f32) as u32,
+        (region[1] * whole.1 as f32) as u32,
+    );
+    let (w, h) = (
+        (region[2] * whole.0 as f32) as u32,
+        (region[3] * whole.1 as f32) as u32,
+    );
+    let img = crate::peek_kinds::pdf_crop(path, page, dpi, (x, y, w.max(1), h.max(1)))?;
+    let (fw, fh) = crate::quicklook::tile_fit(img.dimensions(), img.dimensions());
+    let img = if (fw, fh) != img.dimensions() {
+        image::imageops::thumbnail(&img, fw, fh)
+    } else {
+        img
+    };
+    Some(Pic::of_premultiplied(&img))
+}
+
 fn read_part(path: &std::path::Path, whole: (u32, u32), region: [f32; 4]) -> Option<Pic> {
     let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
     let img = if name.ends_with(".jpg") || name.ends_with(".jpeg") {
