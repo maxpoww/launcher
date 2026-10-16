@@ -46,7 +46,7 @@ pub(crate) struct Top {
     /// allocated, the picture whose tiles are in it, the soft picture and
     /// badge are written.
     pub(crate) peek_layers: bool,
-    pub(crate) peek_tiles: Option<std::path::PathBuf>,
+    pub(crate) peek_tiles: Option<(std::path::PathBuf, u32)>,
     pub(crate) peek_soft: bool,
 }
 

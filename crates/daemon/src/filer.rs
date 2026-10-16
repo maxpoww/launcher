@@ -6181,6 +6181,7 @@ impl App {
                     "escape" => Keysym::Escape,
                     "space" => Keysym::space,
                     "pgdown" => Keysym::Page_Down,
+                    "p" => Keysym::p,
                     "home" => Keysym::Home,
                     "end" => Keysym::End,
                     "f2" => Keysym::F2,

@@ -934,5 +934,8 @@
  "Original": "Original",
  "Install": "Instalar",
  "Open with {app}": "Abrir con {app}",
- "{n} lines": "{n} líneas"
+ "{n} lines": "{n} líneas",
+ "{n} pages": "{n} páginas",
+ "{n} files": "{n} archivos",
+ "{size} unpacked": "{size} descomprimido"
 }

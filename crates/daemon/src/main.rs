@@ -47,6 +47,7 @@ mod files_icon;
 mod gears_icon;
 mod compass_icon;
 mod quicklook;
+mod peek_kinds;
 mod apps_icon;
 mod thumb_more;
 mod bin_motion;

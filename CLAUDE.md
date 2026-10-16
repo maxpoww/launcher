@@ -775,8 +775,17 @@ The big daemon files are cohesive but long — go straight to the function:
   its neighbours are PREPARED in the background as they move (`filer_peek_near` from
   `filer_draw` → `peek_want`: one nice-10 thread, newest first, stale dropped) within `BUDGET`.
   Measured on the dev box: 12 MP JPEG 75 ms, 24 MP 290 ms (DCT-scaled JPEG decode is the next
-  lever). Rig verbs: `files key space|escape|left|right|pgdown`. Next phases: PDF, audio, fonts,
-  archives, video, Office; then the pencil (editor) — see the lab.
+  lever). PHASE 2 (`peek_kinds.rs`, what reads each kind, all on the worker): a PDF a PAGE at a time
+  (`mutool draw`, else `pdftoppm`; PgUp/PgDn or the wheel turn it, the next page prepared ahead,
+  "2 / 3" pill in a grid of its own over the page — a grid's fills draw under its pictures; the
+  cache is keyed by (path, page)); a VIDEO = a frame a tenth in + length/size (`ffprobe`/`ffmpeg`);
+  a SONG = cover (tiles), title, artist · album, loudness bars, play/pause (`mpv`, P or the button;
+  stopped when it closes or moves on — `Up`'s drop); a FONT = a sheet in itself (glyphon,
+  `thumb_more::draw_text_in`); an ARCHIVE = its list (`bsdtar -tvf`); anything with a freedesktop
+  thumbnailer (Office through libgsf, epub…) = its picture asked big (`by_thumbnailer_at`). Golem's
+  home.nix brings mutool (mupdf-headless) and bsdtar (libarchive). `xdg-mime` is asked once a kind
+  (it is a slow shell script). Rig verbs: `files key space|escape|left|right|pgdown`. Next: video
+  playing, Office as pages, folders as a grid; then the pencil (editor) — see the lab.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the

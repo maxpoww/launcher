@@ -147,7 +147,7 @@ fn fill(exec: &str, path: &str, out: &str, size: u32) -> Vec<String> {
 }
 
 /// Run a program to its end, or `PATIENCE`; whether it went well.
-fn run(words: &[String]) -> bool {
+pub(crate) fn run(words: &[String]) -> bool {
     let Some((prog, args)) = words.split_first() else { return false };
     let child = Command::new(prog).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     let mut child = match child {
@@ -172,16 +172,18 @@ fn run(words: &[String]) -> bool {
     }
 }
 
-/// A scratch picture for one outside program, gone when dropped.
-struct Scratch(PathBuf);
+/// A scratch picture for one outside program, gone when dropped — one a
+/// thread (the thumbnailer's and Quick Look's both use them).
+pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(tag: &str) -> Option<Self> {
+    pub(crate) fn new(tag: &str) -> Option<Self> {
         let dir = std::env::temp_dir().join(format!("waverunner-thumbs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok()?;
-        Some(Self(dir.join(format!("{tag}.png"))))
+        let thread = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect::<String>();
+        Some(Self(dir.join(format!("{tag}-{thread}.png"))))
     }
-    fn path(&self) -> &str {
+    pub(crate) fn path(&self) -> &str {
         self.0.to_str().unwrap_or_default()
     }
 }
@@ -194,6 +196,12 @@ impl Drop for Scratch {
 
 /// Through the system's thumbnailer for this file's type, if there is one.
 pub(crate) fn by_thumbnailer(path: &str, decode: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+    by_thumbnailer_at(path, ICON_SIZE, decode)
+}
+
+/// The same, asked for a picture `size` texels at most (Quick Look's; a
+/// thumbnailer may give less).
+pub(crate) fn by_thumbnailer_at(path: &str, size: u32, decode: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
     let mime = mime_of(path)?;
     let t = thumbnailers().get(mime)?;
     if let Some(needs) = &t.try_exec {
@@ -202,7 +210,7 @@ pub(crate) fn by_thumbnailer(path: &str, decode: impl Fn(&str) -> Option<Vec<u8>
         }
     }
     let out = Scratch::new("thumbnailer")?;
-    let words = fill(&t.exec, path, out.path(), ICON_SIZE);
+    let words = fill(&t.exec, path, out.path(), size);
     debug!("thumb: {mime} → {}", words.first().map_or("", String::as_str));
     (run(&words) && out.0.is_file()).then(|| decode(out.path())).flatten()
 }
@@ -306,11 +314,28 @@ fn page() -> (Vec<u8>, (f32, f32, f32, f32)) {
     (px, (x0 + m, y0 + m, w - 2.0 * m, h - 2.0 * m))
 }
 
-/// Draw `text` into `px` (premultiplied, over), clipped to `clip`.
+/// Draw `text` into `px` (premultiplied, over, `ICON_SIZE` texels a row),
+/// clipped to `clip`.
 // (One knob per thing drawn: a struct for them would be read once.)
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     px: &mut [u8],
+    text: &str,
+    attrs: glyphon::Attrs,
+    font_px: f32,
+    at: (f32, f32),
+    clip: (f32, f32, f32, f32),
+    ink: [u8; 3],
+    fonts: &mut glyphon::FontSystem,
+) {
+    draw_text_in(px, ICON_SIZE, text, attrs, font_px, at, clip, ink, fonts);
+}
+
+/// The same into a picture `stride` texels wide (Quick Look's font sheet).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_text_in(
+    px: &mut [u8],
+    stride: u32,
     text: &str,
     attrs: glyphon::Attrs,
     font_px: f32,
@@ -336,7 +361,7 @@ fn draw_text(
                     if gx < cx0 || gy < cy0 || gx >= cx1 || gy >= cy1 {
                         continue;
                     }
-                    let i = ((gy as u32 * ICON_SIZE + gx as u32) * 4) as usize;
+                    let i = ((gy as u32 * stride + gx as u32) * 4) as usize;
                     let a = u32::from(c.a());
                     for k in 0..3 {
                         let src = u32::from([c.r(), c.g(), c.b()][k]) * a / 255;
@@ -357,7 +382,7 @@ thread_local! {
 /// With this thread's fonts; `None` with none at all (cosmic-text gives up
 /// with a panic when it has no font) or when drawing failed — a page that
 /// cannot be drawn must never take the thumbnailer's thread with it.
-fn with_fonts<R>(f: impl FnOnce(&mut glyphon::FontSystem) -> Option<R>) -> Option<R> {
+pub(crate) fn with_fonts<R>(f: impl FnOnce(&mut glyphon::FontSystem) -> Option<R>) -> Option<R> {
     FONTS.with(|cell| {
         let mut cell = cell.borrow_mut();
         let fonts = cell.get_or_insert_with(|| {

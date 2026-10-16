@@ -79,7 +79,7 @@ impl Thumbs {
 /// The program that reads the frames of what moves: the one named by
 /// `WAVERUNNER_FFMPEG` (the dev launcher builds one and names it, as it
 /// does the wallpaper player), else the one on the PATH.
-fn ffmpeg_tool() -> Option<String> {
+pub(crate) fn ffmpeg_tool() -> Option<String> {
     if let Some(named) = std::env::var("WAVERUNNER_FFMPEG").ok().filter(|p| std::path::Path::new(p).is_file()) {
         return Some(named);
     }

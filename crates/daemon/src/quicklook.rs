@@ -7,21 +7,27 @@
 //!
 //! One frame for every kind: a head (the thing's icon, its name, "kind ·
 //! size · dimensions", "Open with <app>", a ×) and a body. What fills the
-//! body is drawn by us; what reads a kind only hands over pixels or text:
+//! body is drawn by us; what reads a kind (`peek_kinds.rs`) only hands over
+//! pixels, text or facts:
 //!
 //! - a PICTURE (what `image` reads, SVG, a camera's RAW by the JPEG it
-//!   carries) is decoded at the size it will be shown and cut in TILES of the
-//!   icon array (`TILE` square, a texel of overlap round each so they meet
-//!   without a seam), drawn clipped to the frame's corner (`icon.wgsl`'s
-//!   clipped-picture mode) — no pipeline of its own;
-//! - TEXT (what reads as text) is its first lines, in the bar's mono font;
+//!   carries; and a PDF's page, a video's frame, a font's sheet, what a
+//!   thumbnailer draws) is made at the size it will be shown and cut in TILES
+//!   of the icon array (`TILE` square, a texel of overlap round each so they
+//!   meet without a seam), drawn clipped to the frame's corner (`icon.wgsl`'s
+//!   clipped-picture mode) — no pipeline of its own. A PDF is turned a page
+//!   at a time (PgUp/PgDn, the wheel), each page prepared on its own;
+//! - a SONG is its cover, its names, its loudness along the way and a play
+//!   button (`mpv`, stopped when Quick Look goes or moves on);
+//! - TEXT (what reads as text, an archive's list) is its lines, in the bar's
+//!   mono font, scrolled by the wheel and PgUp/PgDn;
 //! - anything else is its picture from the file window and what it is.
 //!
 //! FAST: the frame shows at once with the window's own thumbnail blown up,
 //! and the sharp one fades in when it is ready. It is usually ready already:
 //! what the keys are on in a file window, and its neighbours, are PREPARED
-//! in the background (`want`) — one low-priority thread, the newest wish
-//! first, the stale ones dropped — and kept within a budget (`BUDGET`).
+//! in the background (`peek_want`) — one low-priority thread, the newest
+//! wish first, the stale ones dropped — and kept within a budget (`BUDGET`).
 //!
 //! It is drawn on the desktop's top surface (`desktop_top.rs`: the Overlay
 //! layer, the whole output), which takes the pointer while it is up: a
@@ -41,13 +47,14 @@ use crate::content::{
     GridContent, IconInst, Label, Rect, RectInst, Scene, ShadowInst, FONT_BOLD, WINDOW_CORNER,
 };
 use crate::i18n::{fill, tr};
+use crate::peek_kinds as kinds;
 use crate::App;
 
 /// A tile is one layer of the icon array; it carries `STEP` texels of the
 /// picture and the one beyond each edge again, so neighbours overlap.
 const TILE: u32 = ICON_SIZE;
 const STEP: u32 = TILE - 2;
-/// The most tiles a picture is cut into: a bigger one is decoded smaller.
+/// The most tiles a picture is cut into: a bigger one is made smaller.
 pub(crate) const TILES: u32 = 64;
 /// The layers on the top surface: the tiles, the soft first picture, the
 /// head's icon.
@@ -69,22 +76,61 @@ const TEXT_LINES: usize = 3000;
 const TEXT_PX: f32 = 13.0;
 const TEXT_LINE: f32 = 19.0;
 const TEXT_PAD: f32 = 18.0;
+/// A song's frame, and its loudness in so many steps.
+const SONG: (f32, f32) = (720.0, 280.0);
+const WAVE: usize = 120;
+/// How far the wheel goes for a page of a PDF.
+const WHEEL_PAGE: f32 = 60.0;
+
+/// What is prepared: a thing, and which page of it (0 for all but a PDF).
+type Key = (PathBuf, u32);
+
+/// A picture of `w`×`h` texels, cut in `cols`×`rows` tiles (their mip
+/// chains, row by row).
+pub(crate) struct Pic {
+    w: u32,
+    h: u32,
+    cols: u32,
+    rows: u32,
+    tiles: Vec<Vec<u8>>,
+}
+
+impl Pic {
+    fn of(img: &image::RgbaImage) -> Self {
+        let (cols, rows, tiles) = cut(img);
+        Self {
+            w: img.width(),
+            h: img.height(),
+            cols,
+            rows,
+            tiles,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.tiles.iter().map(Vec::len).sum()
+    }
+}
 
 /// What a thing is shown as, once prepared.
 pub(crate) enum Body {
-    /// A picture of `w`×`h` texels, cut in `cols`×`rows` tiles (their mip
-    /// chains, row by row).
-    Picture {
-        w: u32,
-        h: u32,
-        cols: u32,
-        rows: u32,
-        tiles: Vec<Vec<u8>>,
+    Picture(Pic),
+    /// A song: its cover, its title, artist · album, length, loudness.
+    Song {
+        cover: Option<Pic>,
+        title: String,
+        sub: String,
+        secs: f32,
+        wave: Vec<f32>,
     },
-    /// Its first lines.
-    Text { lines: Vec<String> },
+    /// Lines of text.
+    Text {
+        lines: Vec<String>,
+    },
     /// What it is: name → value.
-    Info { lines: Vec<(&'static str, String)> },
+    Info {
+        lines: Vec<(&'static str, String)>,
+    },
 }
 
 pub(crate) struct Prepared {
@@ -93,7 +139,17 @@ pub(crate) struct Prepared {
     pub meta: String,
     /// The app that opens it (a `.desktop` id), as the system says.
     pub app: Option<String>,
+    /// A PDF's pages (0: not paged).
+    pub pages: u32,
     bytes: usize,
+}
+
+/// A song playing.
+struct Play {
+    child: std::process::Child,
+    /// When it started, and from where in the song.
+    since: Instant,
+    from: f32,
 }
 
 /// What is up.
@@ -101,6 +157,8 @@ pub(crate) struct Up {
     /// The file window it came from (its keys come here).
     pub win: u32,
     pub path: PathBuf,
+    /// The page shown (a PDF's).
+    page: u32,
     name: String,
     /// The thing's picture in its window (the soft first frame, the badge).
     thumb: Option<Vec<u8>>,
@@ -114,16 +172,49 @@ pub(crate) struct Up {
     rect: Rect,
     /// The sharp body over the soft one (0..1).
     sharp: f32,
-    /// Text scrolled by.
+    /// Text scrolled by; the wheel gathered toward a page.
     scroll: f32,
+    wheel: f32,
     /// The pointer on the surface, for the buttons' wash.
     ptr: Option<(f32, f32)>,
+    play: Option<Play>,
+    /// Where a stopped song is.
+    at: f32,
+}
+
+impl Up {
+    fn key(&self) -> Key {
+        (self.path.clone(), self.page)
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut p) = self.play.take() {
+            self.at = p.from + p.since.elapsed().as_secs_f32();
+            let _ = p.child.kill();
+            let _ = p.child.wait();
+        }
+    }
+
+    /// Where the song is, in seconds.
+    fn song_at(&self) -> f32 {
+        self.play
+            .as_ref()
+            .map_or(self.at, |p| p.from + p.since.elapsed().as_secs_f32())
+    }
+}
+
+impl Drop for Up {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 struct Job {
-    path: PathBuf,
-    /// The most texels a picture is decoded to.
+    key: Key,
+    /// The most texels a picture is made at.
     max: (u32, u32),
+    /// The ink of what is drawn here (a font's sheet), sRGB.
+    ink: [u8; 3],
 }
 
 /// The worker's queue: the newest wish is taken first.
@@ -136,13 +227,13 @@ struct Queue {
 #[derive(Default)]
 pub(crate) struct QuickLook {
     pub(crate) up: Option<Up>,
-    cache: HashMap<PathBuf, Arc<Prepared>>,
+    cache: HashMap<Key, Arc<Prepared>>,
     /// Oldest first, for the budget.
-    order: Vec<PathBuf>,
+    order: Vec<Key>,
     bytes: usize,
     queue: Option<Arc<Queue>>,
     /// Asked of the worker and not back yet.
-    asked: HashSet<PathBuf>,
+    asked: HashSet<Key>,
     /// For each file window, the thing its keys were on when its
     /// neighbours were last wished for.
     seen: HashMap<u32, String>,
@@ -153,26 +244,26 @@ impl QuickLook {
         self.up.is_some()
     }
 
-    fn get(&mut self, path: &Path) -> Option<Arc<Prepared>> {
-        let p = self.cache.get(path)?.clone();
-        if let Some(i) = self.order.iter().position(|o| o == path) {
+    fn get(&mut self, key: &Key) -> Option<Arc<Prepared>> {
+        let p = self.cache.get(key)?.clone();
+        if let Some(i) = self.order.iter().position(|o| o == key) {
             let o = self.order.remove(i);
             self.order.push(o);
         }
         Some(p)
     }
 
-    fn keep(&mut self, path: PathBuf, p: Prepared) {
+    fn keep(&mut self, key: Key, p: Prepared) {
         self.bytes += p.bytes;
-        if let Some(old) = self.cache.insert(path.clone(), Arc::new(p)) {
+        if let Some(old) = self.cache.insert(key.clone(), Arc::new(p)) {
             self.bytes -= old.bytes;
-            self.order.retain(|o| o != &path);
+            self.order.retain(|o| o != &key);
         }
-        self.order.push(path);
+        self.order.push(key);
         // (Never what is up.)
         let up = self.up.as_ref().map(|u| u.path.clone());
         while self.bytes > BUDGET && self.order.len() > 1 {
-            let Some(i) = self.order.iter().position(|o| Some(o) != up.as_ref()) else {
+            let Some(i) = self.order.iter().position(|o| Some(&o.0) != up.as_ref()) else {
                 break;
             };
             let o = self.order.remove(i);
@@ -206,7 +297,21 @@ fn kind_word(name: &str) -> String {
     }
 }
 
+/// The app that opens a kind — asked once a kind (`xdg-mime` is a shell
+/// script: a tenth of a second and more each time).
 fn default_app(mime: &str) -> Option<String> {
+    thread_local! {
+        static KNOWN: std::cell::RefCell<HashMap<String, Option<String>>> = std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(known) = KNOWN.with(|k| k.borrow().get(mime).cloned()) {
+        return known;
+    }
+    let asked = ask_default_app(mime);
+    KNOWN.with(|k| k.borrow_mut().insert(mime.to_owned(), asked.clone()));
+    asked
+}
+
+fn ask_default_app(mime: &str) -> Option<String> {
     let out = std::process::Command::new("xdg-mime")
         .args(["query", "default", mime])
         .stdin(std::process::Stdio::null())
@@ -215,6 +320,18 @@ fn default_app(mime: &str) -> Option<String> {
         .ok()?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (!id.is_empty()).then(|| id.trim_end_matches(".desktop").to_owned())
+}
+
+/// Premultiply in place.
+fn premultiply(img: &mut image::RgbaImage) {
+    for px in img.pixels_mut() {
+        let a = u32::from(px[3]);
+        if a < 255 {
+            for c in 0..3 {
+                px[c] = (u32::from(px[c]) * a / 255) as u8;
+            }
+        }
+    }
 }
 
 /// Decode a picture no bigger than `max` texels, premultiplied RGBA, and
@@ -265,14 +382,7 @@ fn decode(path: &Path, max: (u32, u32)) -> Option<(image::RgbaImage, (u32, u32))
         img
     };
     let mut rgba = img.to_rgba8();
-    for px in rgba.pixels_mut() {
-        let a = px[3] as u32;
-        if a < 255 {
-            for c in 0..3 {
-                px[c] = (px[c] as u32 * a / 255) as u8;
-            }
-        }
-    }
+    premultiply(&mut rgba);
     Some((rgba, own))
 }
 
@@ -287,6 +397,16 @@ fn tile_fit(own: (u32, u32), max: (u32, u32)) -> (u32, u32) {
         h *= 0.94;
     }
     (w.max(1.0) as u32, h.max(1.0) as u32)
+}
+
+/// A picture made elsewhere brought within the tiles.
+fn within_tiles(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = tile_fit(img.dimensions(), img.dimensions());
+    if (w, h) == img.dimensions() {
+        img
+    } else {
+        image::imageops::thumbnail(&img, w, h)
+    }
 }
 
 /// Cut a picture in tiles: tile (c, r) holds texels from `c·STEP − 1` and
@@ -346,8 +466,31 @@ fn text_of(path: &Path) -> Option<Vec<String>> {
     )
 }
 
-/// Make `path` ready to be shown.
-fn prepare(path: &Path, max: (u32, u32)) -> Prepared {
+fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32) -> Prepared {
+    let pic = Pic::of(&within_tiles(img));
+    let bytes = pic.bytes();
+    Prepared {
+        body: Body::Picture(pic),
+        meta,
+        app,
+        pages,
+        bytes,
+    }
+}
+
+/// Make page `page` of `path` ready to be shown.
+fn prepare(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepared {
+    let started = Instant::now();
+    let made = prepare_kind(path, page, max, ink);
+    debug!(
+        "quick look: {} (page {page}) in {:?}",
+        path.display(),
+        started.elapsed()
+    );
+    made
+}
+
+fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepared {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -361,55 +504,117 @@ fn prepare(path: &Path, max: (u32, u32)) -> Prepared {
         crate::thumb_more::mime_of(&name)
     };
     let app = mime.and_then(default_app);
-    if !dir && is_picture(&name) {
-        let started = Instant::now();
-        // (Its own size first: the tiles' budget decides how big it is decoded.)
-        let own = image::image_dimensions(path).unwrap_or(max);
-        if let Some((img, own)) = decode(path, tile_fit(own, max)) {
-            let (cols, rows, tiles) = cut(&img);
-            debug!(
-                "quick look: {} at {}×{} in {:?}",
-                path.display(),
-                img.width(),
-                img.height(),
-                started.elapsed()
-            );
-            let bytes = tiles.iter().map(Vec::len).sum();
-            return Prepared {
-                body: Body::Picture {
-                    w: img.width(),
-                    h: img.height(),
-                    cols,
-                    rows,
-                    tiles,
-                },
-                meta: format!(
-                    "{} · {} · {} × {}",
-                    kind_word(&name),
-                    crate::desktop_props::size_text(size),
-                    own.0,
-                    own.1
-                ),
-                app,
-                bytes,
-            };
-        }
-    }
+    let kind = kind_word(&name);
+    let size_text = crate::desktop_props::size_text(size);
     if !dir {
+        if is_picture(&name) {
+            // (Its own size first: the tiles decide how big it is decoded.)
+            let own = image::image_dimensions(path).unwrap_or(max);
+            if let Some((img, own)) = decode(path, tile_fit(own, max)) {
+                return picture(
+                    img,
+                    format!("{kind} · {size_text} · {} × {}", own.0, own.1),
+                    app,
+                    0,
+                );
+            }
+        }
+        if kinds::is_pdf(&name) {
+            if let Some((pages, aspect)) = kinds::pdf_facts(path) {
+                if let Some(img) =
+                    kinds::pdf_page(path, page.min(pages.saturating_sub(1)), aspect, max)
+                {
+                    let meta = format!(
+                        "PDF · {size_text} · {}",
+                        fill(tr("{n} pages"), &[("n", &pages)])
+                    );
+                    return picture(img, meta, app, pages);
+                }
+            }
+        }
+        if kinds::is_video(&name) {
+            if let Some(probe) = kinds::probe(path) {
+                if let Some(img) = kinds::frame(path, probe.secs * 0.1, max) {
+                    let dims = probe
+                        .size
+                        .map_or(String::new(), |(w, h)| format!(" · {w} × {h}"));
+                    let meta = format!("{kind} · {size_text}{dims} · {}", kinds::clock(probe.secs));
+                    return picture(img, meta, app, 0);
+                }
+            }
+        }
+        if kinds::is_audio(&name) {
+            if let Some(probe) = kinds::probe(path) {
+                let cover =
+                    kinds::frame(path, 0.0, (600, 600)).map(|img| Pic::of(&within_tiles(img)));
+                let wave = kinds::wave(path, WAVE).unwrap_or_default();
+                let title = probe.title.clone().unwrap_or_else(|| {
+                    name.rsplit_once('.')
+                        .map_or(name.clone(), |(s, _)| s.to_owned())
+                });
+                let sub = [probe.artist.clone(), probe.album.clone()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let bytes = cover.as_ref().map_or(0, Pic::bytes) + wave.len() * 4;
+                return Prepared {
+                    body: Body::Song {
+                        cover,
+                        title,
+                        sub,
+                        secs: probe.secs,
+                        wave,
+                    },
+                    meta: format!("{kind} · {size_text} · {}", kinds::clock(probe.secs)),
+                    app,
+                    pages: 0,
+                    bytes,
+                };
+            }
+        }
+        if crate::thumb_more::is_font(&name) {
+            if let Some((img, family)) = kinds::font_sheet(path, max, ink) {
+                return picture(img, format!("{kind} · {size_text} · {family}"), app, 0);
+            }
+        }
+        if kinds::is_archive(&name) {
+            if let Some((lines, files, total)) = kinds::archive_list(path) {
+                let bytes = lines.iter().map(String::len).sum();
+                let meta = format!(
+                    "{kind} · {size_text} · {} · {}",
+                    fill(tr("{n} files"), &[("n", &files)]),
+                    fill(
+                        tr("{size} unpacked"),
+                        &[("size", &crate::desktop_props::size_text(total))]
+                    )
+                );
+                return Prepared {
+                    body: Body::Text { lines },
+                    meta,
+                    app,
+                    pages: 0,
+                    bytes,
+                };
+            }
+        }
         if let Some(lines) = text_of(path) {
             let bytes = lines.iter().map(String::len).sum();
             let n = lines.len();
+            let meta = format!(
+                "{kind} · {size_text} · {}",
+                fill(tr("{n} lines"), &[("n", &n)])
+            );
             return Prepared {
                 body: Body::Text { lines },
-                meta: format!(
-                    "{} · {} · {}",
-                    kind_word(&name),
-                    crate::desktop_props::size_text(size),
-                    fill(tr("{n} lines"), &[("n", &n)])
-                ),
+                meta,
                 app,
+                pages: 0,
                 bytes,
             };
+        }
+        if let Some(img) = kinds::thumbnailed(path, max) {
+            return picture(img, format!("{kind} · {size_text}"), app, 0);
         }
     }
     let mut lines = Vec::new();
@@ -418,7 +623,7 @@ fn prepare(path: &Path, max: (u32, u32)) -> Prepared {
         if dir {
             tr("Folder").to_owned()
         } else {
-            mime.map_or_else(|| kind_word(&name), str::to_owned)
+            mime.map_or_else(|| kind.clone(), str::to_owned)
         },
     ));
     if dir {
@@ -429,7 +634,7 @@ fn prepare(path: &Path, max: (u32, u32)) -> Prepared {
         });
         lines.push((tr("Contains"), fill(tr("{n} things"), &[("n", &n)])));
     } else {
-        lines.push((tr("Size"), crate::desktop_props::size_text(size)));
+        lines.push((tr("Size"), size_text.clone()));
     }
     if let Some(m) = crate::desktop_props::date_text(meta.as_ref().and_then(|m| m.modified().ok()))
     {
@@ -446,18 +651,15 @@ fn prepare(path: &Path, max: (u32, u32)) -> Prepared {
         meta: if dir {
             tr("Folder").to_owned()
         } else {
-            format!(
-                "{} · {}",
-                kind_word(&name),
-                crate::desktop_props::size_text(size)
-            )
+            format!("{kind} · {size_text}")
         },
         app,
+        pages: 0,
         bytes: 1024,
     }
 }
 
-fn spawn(sender: calloop::channel::Sender<(PathBuf, Prepared)>) -> Option<Arc<Queue>> {
+fn spawn(sender: calloop::channel::Sender<(Key, Prepared)>) -> Option<Arc<Queue>> {
     let queue = Arc::new(Queue::default());
     let q = queue.clone();
     let spawned = std::thread::Builder::new()
@@ -477,8 +679,8 @@ fn spawn(sender: calloop::channel::Sender<(PathBuf, Prepared)>) -> Option<Arc<Qu
                     jobs.pop()
                 };
                 let Some(job) = job else { continue };
-                let made = prepare(&job.path, job.max);
-                if sender.send((job.path, made)).is_err() {
+                let made = prepare(&job.key.0, job.key.1, job.max, job.ink);
+                if sender.send((job.key, made)).is_err() {
                     return;
                 }
             }
@@ -516,8 +718,17 @@ pub(crate) struct Thing {
     pub icon: Rect,
 }
 
+/// The picture a body shows in its tiles.
+fn pic_of(body: &Body) -> Option<&Pic> {
+    match body {
+        Body::Picture(p) => Some(p),
+        Body::Song { cover, .. } => cover.as_ref(),
+        _ => None,
+    }
+}
+
 impl App {
-    /// The most texels a picture is decoded to: the frame's biggest, in real
+    /// The most texels a picture is made at: the frame's biggest, in real
     /// pixels.
     fn peek_max(&self) -> (u32, u32) {
         let (w, h) = self.desktop_top.size;
@@ -528,9 +739,9 @@ impl App {
         )
     }
 
-    /// Ask for `paths` to be prepared, the last first; what was asked
-    /// before and is not among them is dropped.
-    pub(crate) fn peek_want(&mut self, paths: Vec<PathBuf>) {
+    /// Ask for `keys` to be prepared, the last first; what was asked before
+    /// and is not among them is dropped.
+    pub(crate) fn peek_want(&mut self, keys: Vec<Key>) {
         if !self.desktop_top_ready() {
             return;
         }
@@ -539,8 +750,8 @@ impl App {
             let inserted = self
                 .loop_handle
                 .insert_source(receiver, |event, _, app: &mut App| {
-                    if let calloop::channel::Event::Msg((path, made)) = event {
-                        app.peek_ready(path, made);
+                    if let calloop::channel::Event::Msg((key, made)) = event {
+                        app.peek_ready(key, made);
                     }
                 });
             if let Err(e) = inserted {
@@ -550,9 +761,11 @@ impl App {
             self.peek.queue = spawn(sender);
         }
         let max = self.peek_max();
-        let todo: Vec<PathBuf> = paths
+        let ink = self.filer_palette().ink;
+        let ink = [0, 1, 2].map(|i| (ink[i].clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0) as u8);
+        let todo: Vec<Key> = keys
             .into_iter()
-            .filter(|p| !self.peek.cache.contains_key(p))
+            .filter(|k| !self.peek.cache.contains_key(k))
             .collect();
         let Some(queue) = self.peek.queue.clone() else {
             return;
@@ -561,27 +774,43 @@ impl App {
             return;
         };
         jobs.clear();
-        self.peek.asked.retain(|p| todo.contains(p));
-        for path in todo {
-            self.peek.asked.insert(path.clone());
-            jobs.push(Job { path, max });
+        self.peek.asked.retain(|k| todo.contains(k));
+        for key in todo {
+            self.peek.asked.insert(key.clone());
+            jobs.push(Job { key, max, ink });
         }
         queue.ready.notify_one();
     }
 
-    fn peek_ready(&mut self, path: PathBuf, made: Prepared) {
-        self.peek.asked.remove(&path);
-        let shown = self.peek.up.as_ref().is_some_and(|u| u.path == path);
-        self.peek.keep(path, made);
+    /// Wish for `key` too, ahead of what was wished for.
+    fn peek_want_now(&mut self, key: Key) {
+        if self.peek.cache.contains_key(&key) || self.peek.asked.contains(&key) {
+            return;
+        }
+        let mut all: Vec<Key> = self.peek.asked.iter().cloned().collect();
+        all.push(key);
+        self.peek_want(all);
+    }
+
+    fn peek_ready(&mut self, key: Key, made: Prepared) {
+        self.peek.asked.remove(&key);
+        let shown = self.peek.up.as_ref().is_some_and(|u| u.key() == key);
+        let pages = made.pages;
+        self.peek.keep(key.clone(), made);
         if shown {
             // Its real shape: the frame goes there from where it is.
             if let Some(up) = self.peek.up.as_mut() {
                 up.start = up.rect;
                 up.t = 0.0;
-                up.sharp = 0.0;
+                if up.page == 0 {
+                    up.sharp = 0.0;
+                }
             }
-            self.desktop_top.peek_tiles = None;
             self.request_desktop_top_draw();
+            // (The next page, before it is asked for.)
+            if key.1 + 1 < pages {
+                self.peek_want_now((key.0, key.1 + 1));
+            }
         }
     }
 
@@ -591,7 +820,7 @@ impl App {
             return;
         }
         self.peek.seen.insert(win, at.to_owned());
-        self.peek_want(near);
+        self.peek_want(near.into_iter().map(|p| (p, 0)).collect());
     }
 
     /// Show `thing` of file window `win` (or, if something is up, walk to it).
@@ -608,13 +837,16 @@ impl App {
         {
             return;
         }
+        let key = (thing.path.clone(), 0);
         // (Shown: the newest of what is kept.)
-        let ready = self.peek.get(&thing.path).is_some();
+        let ready = self.peek.get(&key).is_some();
         let was = self.peek.up.as_ref().filter(|u| !u.closing).map(|u| u.rect);
         let start = was.unwrap_or(thing.icon);
+        // (A song playing stops as its frame goes: `Up`'s drop.)
         self.peek.up = Some(Up {
             win,
-            path: thing.path.clone(),
+            path: thing.path,
+            page: 0,
             name: thing.name,
             thumb: thing.thumb,
             from: thing.icon,
@@ -624,15 +856,14 @@ impl App {
             rect: start,
             sharp: if ready { 1.0 } else { 0.0 },
             scroll: 0.0,
+            wheel: 0.0,
             ptr: None,
+            play: None,
+            at: 0.0,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
-        if !self.peek.cache.contains_key(&thing.path) && !self.peek.asked.contains(&thing.path) {
-            let mut all: Vec<PathBuf> = self.peek.asked.iter().cloned().collect();
-            all.push(thing.path);
-            self.peek_want(all);
-        }
+        self.peek_want_now(key);
         self.request_desktop_top_draw();
     }
 
@@ -644,6 +875,7 @@ impl App {
         if up.closing {
             return;
         }
+        up.stop();
         up.closing = true;
         up.start = up.rect;
         up.t = 0.0;
@@ -663,6 +895,70 @@ impl App {
             warn!("quick look: opening {} failed: {e:#}", up.path.display());
         }
         self.peek_close();
+    }
+
+    /// The prepared thing on screen: the page asked for, else (while it is
+    /// made) the one whose tiles are up.
+    fn peek_shown(&self) -> Option<(Key, &Arc<Prepared>)> {
+        let up = self.peek.up.as_ref()?;
+        let key = up.key();
+        if let Some(p) = self.peek.cache.get(&key) {
+            return Some((key, p));
+        }
+        let tiles = self
+            .desktop_top
+            .peek_tiles
+            .as_ref()
+            .filter(|k| k.0 == up.path)?;
+        Some((tiles.clone(), self.peek.cache.get(tiles)?))
+    }
+
+    /// Turn a PDF's page by `by`.
+    fn peek_turn(&mut self, by: i32) -> bool {
+        let pages = self.peek_shown().map_or(0, |(_, p)| p.pages);
+        let Some(up) = self.peek.up.as_mut() else {
+            return false;
+        };
+        if pages < 2 {
+            return false;
+        }
+        let page = (up.page as i32 + by).clamp(0, pages as i32 - 1) as u32;
+        if page != up.page {
+            up.page = page;
+            let key = up.key();
+            // (The page after first, the page asked for last: the newest
+            // wish is the first made.)
+            if page + 1 < pages {
+                self.peek_want_now((key.0.clone(), page + 1));
+            }
+            self.peek_want_now(key);
+            self.request_desktop_top_draw();
+        }
+        true
+    }
+
+    /// Play or stop the song that is up.
+    fn peek_play(&mut self) {
+        let Some(secs) = self.peek_shown().and_then(|(_, p)| match &p.body {
+            Body::Song { secs, .. } => Some(*secs),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some(up) = self.peek.up.as_mut() else {
+            return;
+        };
+        if up.play.is_some() {
+            up.stop();
+        } else {
+            let from = if up.at >= secs - 0.5 { 0.0 } else { up.at };
+            up.play = kinds::play(&up.path, from).map(|child| Play {
+                child,
+                since: Instant::now(),
+                from,
+            });
+        }
+        self.request_desktop_top_draw();
     }
 
     /// A key of file window `win` while Quick Look is up for it: whether it
@@ -686,10 +982,13 @@ impl App {
             Keysym::space | Keysym::Escape => self.peek_close(),
             Keysym::Return | Keysym::KP_Enter => self.peek_open_app(),
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => return false,
+            Keysym::p | Keysym::P => self.peek_play(),
             Keysym::Page_Up | Keysym::Page_Down => {
-                let by = if key == Keysym::Page_Up { -1.0 } else { 1.0 };
-                let page = self.peek.up.as_ref().map_or(0.0, |u| u.rect.h - HEAD) * 0.9;
-                self.peek_scroll(by * page);
+                let by = if key == Keysym::Page_Up { -1 } else { 1 };
+                if !self.peek_turn(by) {
+                    let page = self.peek.up.as_ref().map_or(0.0, |u| u.rect.h - HEAD) * 0.9;
+                    self.peek_scroll(by as f32 * page);
+                }
             }
             _ => {}
         }
@@ -698,20 +997,34 @@ impl App {
 
     fn peek_scroll(&mut self, by: f32) {
         let body_h = self.peek.up.as_ref().map_or(0.0, |u| u.rect.h - HEAD);
-        let Some(path) = self.peek.up.as_ref().map(|u| u.path.clone()) else {
+        let Some(n) = self.peek_shown().and_then(|(_, p)| match &p.body {
+            Body::Text { lines } => Some(lines.len()),
+            _ => None,
+        }) else {
             return;
         };
-        let Some(p) = self.peek.cache.get(&path).cloned() else {
-            return;
-        };
-        let Body::Text { lines } = &p.body else {
-            return;
-        };
-        let most = (lines.len() as f32 * TEXT_LINE + 2.0 * TEXT_PAD - body_h).max(0.0);
+        let most = (n as f32 * TEXT_LINE + 2.0 * TEXT_PAD - body_h).max(0.0);
         if let Some(up) = self.peek.up.as_mut() {
             up.scroll = (up.scroll + by).clamp(0.0, most);
         }
         self.request_desktop_top_draw();
+    }
+
+    /// The wheel: text scrolls, a PDF turns its pages.
+    fn peek_wheel(&mut self, by: f32) {
+        let paged = self.peek_shown().is_some_and(|(_, p)| p.pages > 1);
+        if !paged {
+            return self.peek_scroll(by);
+        }
+        let Some(up) = self.peek.up.as_mut() else {
+            return;
+        };
+        up.wheel += by;
+        if up.wheel.abs() >= WHEEL_PAGE {
+            let step = up.wheel.signum() as i32;
+            up.wheel = 0.0;
+            self.peek_turn(step);
+        }
     }
 
     /// The pointer on the top surface while Quick Look is up.
@@ -749,7 +1062,7 @@ impl App {
                 axis: WEnum::Value(Axis::VerticalScroll),
                 value,
                 ..
-            } => self.peek_scroll(*value as f32),
+            } => self.peek_wheel(*value as f32),
             Event::Button {
                 state: WEnum::Value(ButtonState::Pressed),
                 ..
@@ -759,10 +1072,15 @@ impl App {
                 };
                 let at = up.ptr.unwrap_or((-1.0, -1.0));
                 let parts = parts(up.rect);
+                let song = self
+                    .peek_shown()
+                    .is_some_and(|(_, p)| matches!(p.body, Body::Song { .. }));
                 if parts.close.contains(at) {
                     self.peek_close();
                 } else if parts.open.contains(at) {
                     self.peek_open_app();
+                } else if song && song_parts(up.rect).play.contains(at) {
+                    self.peek_play();
                 } else if !up.rect.contains(at) {
                     self.peek_close();
                 }
@@ -772,20 +1090,21 @@ impl App {
     }
 
     /// Where the frame is going: the shape its body wants, centred.
-    fn peek_target(&self, up: &Up) -> Rect {
+    fn peek_target(&self) -> Rect {
         let (sw, sh) = (
             self.desktop_top.size.0 as f32,
             self.desktop_top.size.1 as f32,
         );
         let scale = self.surface_scale(crate::fractional::SurfaceKind::DesktopTop);
         let (mw, mh) = (sw * MAX, sh * MAX - HEAD);
-        let (w, h) = match self.peek.cache.get(&up.path).map(|p| &p.body) {
-            Some(Body::Picture { w, h, .. }) => {
+        let (w, h) = match self.peek_shown().map(|(_, p)| &p.body) {
+            Some(Body::Picture(p)) => {
                 // (Never bigger than the picture itself.)
-                let (pw, ph) = (*w as f32 / scale, *h as f32 / scale);
+                let (pw, ph) = (p.w as f32 / scale, p.h as f32 / scale);
                 let k = (mw / pw).min(mh / ph).min(1.0);
                 ((pw * k).max(380.0), ph * k)
             }
+            Some(Body::Song { .. }) => (SONG.0.min(mw), SONG.1),
             // (As tall as its lines, a page at least.)
             Some(Body::Text { lines }) => (
                 (sw * 0.56).clamp(480.0, 1000.0).min(mw),
@@ -809,16 +1128,12 @@ impl App {
             if u.closing {
                 u.from
             } else {
-                self.peek_target(u)
+                self.peek_target()
             }
         }) else {
             return false;
         };
-        let ready = self
-            .peek
-            .up
-            .as_ref()
-            .is_some_and(|u| self.peek.cache.contains_key(&u.path));
+        let ready = self.peek_shown().is_some();
         let Some(up) = self.peek.up.as_mut() else {
             return false;
         };
@@ -831,7 +1146,8 @@ impl App {
             self.peek.up = None;
             return true;
         }
-        up.t < 1.0 || (ready && up.sharp < 1.0)
+        // (A song playing moves its line on.)
+        up.t < 1.0 || (ready && up.sharp < 1.0) || up.play.is_some()
     }
 
     /// Put what is shown in the top surface's layers.
@@ -853,16 +1169,15 @@ impl App {
             }
             self.desktop_top.peek_soft = true;
         }
-        if self.desktop_top.peek_tiles.as_ref() != Some(&up.path) {
-            if let Some(Body::Picture { tiles, .. }) =
-                self.peek.cache.get(&up.path).map(|p| &p.body)
-            {
-                for (i, tile) in tiles.iter().enumerate() {
-                    renderer.update_icon_layer(i as u32, tile);
+        let key = up.key();
+        if self.desktop_top.peek_tiles.as_ref() != Some(&key) {
+            if let Some(p) = self.peek.cache.get(&key) {
+                if let Some(pic) = pic_of(&p.body) {
+                    for (i, tile) in pic.tiles.iter().enumerate() {
+                        renderer.update_icon_layer(i as u32, tile);
+                    }
                 }
-            }
-            if self.peek.cache.contains_key(&up.path) {
-                self.desktop_top.peek_tiles = Some(up.path.clone());
+                self.desktop_top.peek_tiles = Some(key);
             }
         }
     }
@@ -921,12 +1236,33 @@ impl App {
             plate: [WINDOW_CORNER, a, 0.0, 0.0],
         };
         let body = Rect::new(r.x, r.y + HEAD, r.w, (r.h - HEAD).max(0.0));
-        let prepared = self.peek.cache.get(&up.path);
+        let shown = self.peek_shown();
+        let tiles_up = shown
+            .as_ref()
+            .is_some_and(|(key, _)| self.desktop_top.peek_tiles.as_ref() == Some(key));
+        let prepared = shown.map(|(_, p)| p);
         let mut ink = pal.ink;
         ink[3] *= open;
         let mut dim = ink;
         dim[3] *= 0.6;
+        // A picture in its tiles, filling `into`.
+        let tiles_in = |g: &mut GridContent, pic: &Pic, into: Rect, a: f32| {
+            let kx = into.w / pic.w as f32;
+            let ky = into.h / pic.h as f32;
+            for row in 0..pic.rows {
+                for col in 0..pic.cols {
+                    let x = into.x + (col * STEP) as f32 * kx - kx;
+                    let y = into.y + (row * STEP) as f32 * ky - ky;
+                    g.icons.push(clipped(
+                        Rect::new(x, y, TILE as f32 * kx, TILE as f32 * ky),
+                        row * pic.cols + col,
+                        a,
+                    ));
+                }
+            }
+        };
         // THE BODY.
+        let mut over_page = None;
         let soft = 1.0 - up.sharp;
         let soft_square = |g: &mut GridContent, a: f32| {
             if up.thumb.is_some() && a > 0.01 {
@@ -944,25 +1280,153 @@ impl App {
             }
         };
         match prepared.map(|p| &p.body) {
-            Some(Body::Picture {
-                w, h, cols, rows, ..
-            }) if self.desktop_top.peek_tiles.as_ref() == Some(&up.path) => {
-                let kx = body.w / *w as f32;
-                let ky = body.h / *h as f32;
+            Some(Body::Picture(pic)) if tiles_up => {
                 soft_square(&mut g, soft);
-                for row in 0..*rows {
-                    for col in 0..*cols {
-                        let x = body.x + (col * STEP) as f32 * kx - kx;
-                        let y = body.y + (row * STEP) as f32 * ky - ky;
-                        g.icons.push(clipped(
-                            Rect::new(x, y, TILE as f32 * kx, TILE as f32 * ky),
-                            row * cols + col,
-                            // (Opaque: tiles overlap by a texel, and a
-                            // see-through picture would show that as a grid.)
-                            if up.closing { open } else { up.sharp },
-                        ));
-                    }
+                // (Opaque: tiles overlap by a texel, and a see-through
+                // picture would show that as a grid.)
+                tiles_in(&mut g, pic, body, if up.closing { open } else { up.sharp });
+                let pages = prepared.map_or(0, |p| p.pages);
+                if pages > 1 {
+                    // (Its own grid: a grid's fills go under its pictures.)
+                    let mut over = GridContent {
+                        clip: g.clip,
+                        ..Default::default()
+                    };
+                    let g = &mut over;
+                    let word = format!("{} / {pages}", up.page + 1);
+                    let w = self.peek_word_w(&word) + 22.0;
+                    let pill =
+                        Rect::new(body.x + (body.w - w) / 2.0, body.y + body.h - 38.0, w, 24.0);
+                    g.rects.push(RectInst {
+                        rect: pill,
+                        radius: 12.0,
+                        color: [0.0, 0.0, 0.0, 0.55 * open],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    g.labels.push(Label {
+                        centered: true,
+                        ..text_label(
+                            &word,
+                            (pill.x + pill.w / 2.0, pill.y + 4.0),
+                            w,
+                            12.0,
+                            Some(FONT_BOLD),
+                            [1.0, 1.0, 1.0, open],
+                        )
+                    });
+                    over_page = Some(over);
                 }
+            }
+            Some(Body::Song {
+                cover,
+                title,
+                sub,
+                secs,
+                wave,
+            }) => {
+                let parts = song_parts(r);
+                match cover {
+                    Some(pic) if tiles_up => {
+                        let k = (parts.cover.w / pic.w as f32).min(parts.cover.h / pic.h as f32);
+                        let (w, h) = (pic.w as f32 * k, pic.h as f32 * k);
+                        let into = Rect::new(
+                            parts.cover.x + (parts.cover.w - w) / 2.0,
+                            parts.cover.y + (parts.cover.h - h) / 2.0,
+                            w,
+                            h,
+                        );
+                        tiles_in(&mut g, pic, into, open);
+                    }
+                    _ if up.thumb.is_some() => g.icons.push(clipped(parts.cover, SOFT, open)),
+                    _ => {}
+                }
+                let x = parts.wave.x;
+                g.labels.push(text_label(
+                    title,
+                    (x, parts.cover.y + 4.0),
+                    parts.wave.w,
+                    20.0,
+                    Some(FONT_BOLD),
+                    ink,
+                ));
+                g.labels.push(text_label(
+                    sub,
+                    (x, parts.cover.y + 34.0),
+                    parts.wave.w,
+                    13.5,
+                    None,
+                    dim,
+                ));
+                // The loudness along the way, what is played lit.
+                let at = up.song_at();
+                let done = if *secs > 0.0 {
+                    (at / secs).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let n = wave.len().max(1);
+                let step = parts.wave.w / n as f32;
+                for (i, v) in wave.iter().enumerate() {
+                    let bh = (parts.wave.h * v.max(0.06)).round();
+                    let lit = (i as f32 + 0.5) / n as f32 <= done;
+                    let mut c = ink;
+                    c[3] *= if lit { 1.0 } else { 0.32 };
+                    g.rects.push(RectInst {
+                        rect: Rect::new(
+                            x + i as f32 * step,
+                            parts.wave.y + (parts.wave.h - bh) / 2.0,
+                            (step - 1.5).max(1.0),
+                            bh,
+                        ),
+                        radius: 1.0,
+                        color: c,
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+                // Play / pause, and where it is.
+                let hot = up.ptr.is_some_and(|p| parts.play.contains(p));
+                g.rects.push(RectInst {
+                    rect: parts.play,
+                    radius: parts.play.h / 2.0,
+                    color: [
+                        ink[0],
+                        ink[1],
+                        ink[2],
+                        (if hot { 1.0 } else { 0.88 }) * open,
+                    ],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                let mut on_ink = ground;
+                on_ink[3] = open;
+                let glyph = if up.play.is_some() {
+                    "\u{f04c}"
+                } else {
+                    "\u{f04b}"
+                };
+                g.labels.push(Label {
+                    centered: true,
+                    family: Some(crate::options::NERD),
+                    ..text_label(
+                        glyph,
+                        (parts.play.x + parts.play.w / 2.0 + 1.0, parts.play.y + 9.0),
+                        parts.play.w,
+                        16.0,
+                        None,
+                        on_ink,
+                    )
+                });
+                let time = format!("{} / {}", kinds::clock(at), kinds::clock(*secs));
+                g.labels.push(text_label(
+                    &time,
+                    (parts.play.x + parts.play.w + 14.0, parts.play.y + 11.0),
+                    160.0,
+                    12.5,
+                    None,
+                    dim,
+                ));
             }
             Some(Body::Text { lines }) => {
                 let first = (up.scroll / TEXT_LINE).floor().max(0.0) as usize;
@@ -1091,6 +1555,7 @@ impl App {
             )
         });
         scene.grids.push(g);
+        scene.grids.extend(over_page);
     }
 
     fn peek_word_w(&self, word: &str) -> f32 {
@@ -1114,6 +1579,24 @@ fn parts(r: Rect) -> Parts {
     }
 }
 
+/// A song's body, for a frame at `r`: its cover, its loudness, its button.
+struct SongParts {
+    cover: Rect,
+    wave: Rect,
+    play: Rect,
+}
+
+fn song_parts(r: Rect) -> SongParts {
+    let pad = 24.0;
+    let side = (r.h - HEAD - 2.0 * pad).max(40.0);
+    let cover = Rect::new(r.x + pad, r.y + HEAD + pad, side, side);
+    let x = cover.x + side + 26.0;
+    let w = (r.x + r.w - pad - x).max(40.0);
+    let wave = Rect::new(x, cover.y + 66.0, w, (side - 66.0 - 58.0).max(20.0));
+    let play = Rect::new(x, cover.y + side - 40.0, 40.0, 40.0);
+    SongParts { cover, wave, play }
+}
+
 fn text_label(
     text: &str,
     pos: (f32, f32),
@@ -1130,6 +1613,8 @@ fn text_label(
         line_px: px * 1.3,
         centered: false,
         dim: false,
+        // (The frame grows: its widths change, and a cached shape keeps the
+        // width it was first made at.)
         cache: false,
         clip: None,
         family,
@@ -1175,24 +1660,42 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("notes.md");
         std::fs::write(&t, "# hi\n\tthere\n").unwrap();
-        let p = prepare(&t, (800, 600));
+        let p = prepare(&t, 0, (800, 600), [255; 3]);
         assert!(matches!(&p.body, Body::Text { lines } if lines[1] == "    there"));
         let img = dir.join("a.png");
         image::RgbaImage::from_pixel(40, 20, image::Rgba([10, 20, 30, 128]))
             .save(&img)
             .unwrap();
-        let p = prepare(&img, (800, 600));
+        let p = prepare(&img, 0, (800, 600), [255; 3]);
         assert!(matches!(
             &p.body,
-            Body::Picture {
+            Body::Picture(Pic {
                 w: 40,
                 h: 20,
                 cols: 1,
                 rows: 1,
                 ..
-            }
+            })
         ));
         assert!(p.meta.contains("40 × 20"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_song_lays_out_inside_its_frame() {
+        let r = Rect::new(100.0, 100.0, SONG.0, SONG.1 + HEAD);
+        let s = song_parts(r);
+        for part in [s.cover, s.wave, s.play] {
+            assert!(
+                part.x >= r.x
+                    && part.y >= r.y + HEAD
+                    && part.x + part.w <= r.x + r.w + 0.1
+                    && part.y + part.h <= r.y + r.h + 0.1
+            );
+        }
+        assert!(
+            s.wave.y + s.wave.h <= s.play.y,
+            "the button under the loudness"
+        );
     }
 }
