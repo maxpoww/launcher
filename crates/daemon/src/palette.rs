@@ -328,6 +328,25 @@ fn parse(id: &str, text: &str) -> Option<Palette> {
     Some(Palette { id: id.to_owned(), name: file.name, dark, light, accent, accent_light, soul, family: file.family.unwrap_or_default() })
 }
 
+/// Keep one of the owner's palettes in their directory (`<id>.json`).
+pub(crate) fn save_own(p: &Palette) -> std::io::Result<()> {
+    let map = |c: &[Rgb; 16]| (0..16).map(|i| (slot_name(i), format!("#{}", hex(c[i])))).collect::<std::collections::BTreeMap<_, _>>();
+    let file = serde_json::json!({
+        "name": p.name,
+        "family": p.family,
+        "accent": slot_name(p.accent),
+        "accent_light": slot_name(p.accent_light),
+        "soul": p.soul.iter().map(|c| format!("#{}", hex(*c))).collect::<Vec<_>>(),
+        "dark": map(&p.dark),
+        "light": map(&p.light),
+    });
+    let dir = own_dir();
+    std::fs::create_dir_all(&dir)?;
+    let text = serde_json::to_string_pretty(&file).unwrap_or_default() + "\n";
+    crate::persist::write_text("palette", &dir.join(format!("{}.json", p.id)), &text);
+    Ok(())
+}
+
 /// The owner's own palettes' directory.
 fn own_dir() -> PathBuf {
     config_home().join("golem").join("palettes")
@@ -656,6 +675,9 @@ pub(crate) mod tint {
             -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
         ]
     }
+    pub(crate) fn from_lab(l: f32, a: f32, b: f32) -> Rgb {
+        hex_of(raw(l, a, b))
+    }
     fn hex_of(c: [f32; 3]) -> Rgb {
         c.map(|v| (gam(v.clamp(0.0, 1.0)) * 255.0).round() as u8)
     }
@@ -669,7 +691,7 @@ pub(crate) mod tint {
     }
 
     /// OKLCH → sRGB, chroma reduced until it fits.
-    fn from_lch(l: f32, mut c: f32, h: f32) -> Rgb {
+    pub(crate) fn from_lch(l: f32, mut c: f32, h: f32) -> Rgb {
         let (sin, cos) = h.to_radians().sin_cos();
         for _ in 0..40 {
             let rgb = raw(l, c * cos, c * sin);

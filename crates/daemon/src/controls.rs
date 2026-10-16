@@ -58,6 +58,92 @@ pub(crate) struct Group {
     /// Laid on the same row as the group before it (a slider's own
     /// [Dark][Light] pair), at its right end.
     pub beside: bool,
+    /// The choices are COLOUR CELLS (their `swatch`), this many to a row:
+    /// the palette editor's field and hue strip. 0 = not cells.
+    pub cells: usize,
+}
+
+/// THE PALETTE EDITOR (Max, 2026-10-16; the mockup's "+" tile): six places
+/// — Accent, Ground, Panels, Web, Text, Detail — each given a colour from a
+/// field of the hue chosen on the strip under it. Saved as the owner's own.
+#[derive(Debug, Clone)]
+pub(crate) struct Editor {
+    pub soul: [[u8; 3]; 6],
+    /// The place being given its colour.
+    pub cur: usize,
+    /// The hue of the field, in degrees.
+    pub hue: f32,
+}
+
+pub(crate) static EDITOR: std::sync::Mutex<Option<Editor>> = std::sync::Mutex::new(None);
+
+/// The editor's field: chroma across, lightness down.
+const FIELD_COLS: usize = 18;
+const FIELD_ROWS: usize = 7;
+const HUES: usize = 24;
+
+fn field_colour(col: usize, row: usize, hue: f32) -> [u8; 3] {
+    let c = 0.22 * col as f32 / (FIELD_COLS - 1) as f32;
+    let l = 0.96 - 0.84 * row as f32 / (FIELD_ROWS - 1) as f32;
+    crate::palette::tint::from_lch(l, c, hue)
+}
+
+/// Open the editor on the palette in use (its six as the start).
+pub(crate) fn editor_open() {
+    let pick = crate::palette::choice();
+    let id = pick.palette_id().to_owned();
+    let soul = crate::palette::all()
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| {
+            // Its six in the editor's places: accent, ground, panels, web, text, detail.
+            [p.dark[p.accent], p.dark[1], p.dark[2], p.dark[1], p.dark[5], p.dark[3]]
+        })
+        .unwrap_or([[0xff, 0xbe, 0x98], [0x1d, 0x20, 0x26], [0x2a, 0x2e, 0x36], [0x1d, 0x20, 0x26], [0xe6, 0xe6, 0xe0], [0x44, 0x48, 0x50]]);
+    let hue = crate::palette::tint::lch(soul[0]).2;
+    if let Ok(mut g) = EDITOR.lock() {
+        *g = Some(Editor { soul, cur: 0, hue });
+    }
+}
+
+/// A pick in the editor (`key`, `value`); true when it was the editor's.
+/// Save makes the palette and hands its id back through `saved`.
+pub(crate) fn editor_pick(key: &str, value: &str, saved: &mut Option<String>) -> bool {
+    let Ok(mut g) = EDITOR.lock() else { return false };
+    match key {
+        "colors-edit-role" => {
+            if let (Some(e), Ok(i)) = (g.as_mut(), value.parse::<usize>()) {
+                e.cur = i.min(5);
+                e.hue = crate::palette::tint::lch(e.soul[e.cur]).2;
+            }
+        }
+        "colors-edit-hue" => {
+            if let (Some(e), Ok(h)) = (g.as_mut(), value.parse::<f32>()) {
+                e.hue = h;
+            }
+        }
+        "colors-edit-colour" => {
+            if let (Some(e), Some(c)) = (g.as_mut(), crate::palette::parse_hex(value)) {
+                e.soul[e.cur] = c;
+            }
+        }
+        "colors-edit" => match value {
+            "save" => {
+                if let Some(e) = g.take() {
+                    let n = (1..100).find(|n| !crate::palette::all().iter().any(|p| p.id == format!("mine-{n}"))).unwrap_or(1);
+                    let id = format!("mine-{n}");
+                    let name = crate::i18n::fill(tr("My palette {n}"), &[("n", &n.to_string())]);
+                    let p = crate::palette_gen::direct(&id, &name, e.soul);
+                    if crate::palette::save_own(&p).is_ok() {
+                        *saved = Some(id);
+                    }
+                }
+            }
+            _ => *g = None,
+        },
+        _ => return false,
+    }
+    true
 }
 
 /// What an open setting shows.
@@ -201,7 +287,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
-        "open" | "night" | "dnd" | "restart" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+        "open" | "night" | "dnd" | "restart" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look"
     )
 }
@@ -287,7 +373,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0 }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -298,7 +384,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0 }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -1420,6 +1506,36 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // ONE PAGE for how everything looks (Max, 2026-10-15): the look, where
         // the colours go, then the palettes — the Dynamic one (made from the
         // wallpaper; the shell keeps reading the screen place by place) first.
+        "Colours" if EDITOR.lock().is_ok_and(|g| g.is_some()) => {
+            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0 });
+            view.subtitle = tr("Pick a place, then its colour. Each goes exactly there.").to_owned();
+            let roles = crate::palette_gen::ROLES
+                .iter()
+                .enumerate()
+                .map(|(i, r)| Choice { swatch: vec![e.soul[i]], ..choice(tr(r), i == e.cur, i.to_string()) })
+                .collect();
+            view.groups.push(group(None, "colors-edit-role", 104.0, roles));
+            let mut field = Vec::new();
+            for row in 0..FIELD_ROWS {
+                for col in 0..FIELD_COLS {
+                    let c = field_colour(col, row, e.hue);
+                    let v = format!("#{}", crate::palette::hex(c));
+                    field.push(Choice { swatch: vec![c], ..choice(String::new(), c == e.soul[e.cur], v) });
+                }
+            }
+            view.groups.push(Group { cells: FIELD_COLS, ..group(None, "colors-edit-colour", 0.0, field) });
+            let hues = (0..HUES)
+                .map(|k| {
+                    let h = 360.0 * k as f32 / HUES as f32;
+                    let c = crate::palette::tint::hue(k as f32 / HUES as f32);
+                    let d = (h - e.hue).abs();
+                    let near = d.min(360.0 - d) <= 180.0 / HUES as f32;
+                    Choice { swatch: vec![c], ..choice(String::new(), near, format!("{h:.0}")) }
+                })
+                .collect();
+            view.groups.push(Group { cells: HUES, ..group(None, "colors-edit-hue", 0.0, hues) });
+            view.groups.push(group(None, "colors-edit", 120.0, vec![choice(tr("Save"), false, "save"), choice(tr("Cancel"), false, "cancel")]));
+        }
         "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
             let picked = crate::palette::choice();
             view.subtitle = tr("Lit: the app wears your colours. Off: its own. Most used first.").to_owned();
@@ -1465,6 +1581,8 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 swatch.extend(if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() });
                 Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
             }));
+            // The "+" tile at the end: make one's own.
+            choices.push(choice("+", false, "new"));
             view.groups.push(Group { tiles: true, ..group(None, "colors-palette", 110.0, choices) });
         }
         "Brightness" => match brightness() {

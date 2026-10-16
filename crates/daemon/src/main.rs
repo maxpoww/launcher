@@ -88,6 +88,7 @@ mod perf;
 mod pager;
 mod pages;
 mod palette;
+mod palette_gen;
 mod persist;
 mod phones;
 mod pins;

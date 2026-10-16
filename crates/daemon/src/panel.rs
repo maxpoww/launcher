@@ -548,6 +548,8 @@ struct Chip {
     seg: bool,
     /// A palette's swatch (Dynamic's has no colours: it is drawn as a wheel).
     palette: bool,
+    /// A colour cell of the palette editor (its colour = `swatch[0]`).
+    cell: bool,
 }
 
 /// A slider as drawn: its track, the lit stop's place on it (0..=1), and
@@ -1303,6 +1305,9 @@ impl Panel {
         }
         // A setting opened afresh starts on its own page (Colours: not its apps list).
         crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut e) = crate::controls::EDITOR.lock() {
+            *e = None;
+        }
         self.open_control_label()
     }
 
@@ -1381,9 +1386,37 @@ impl Panel {
             let in_row = (total - row * per_row).min(per_row);
             let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
             let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
-            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None, swatch: Vec::new(), seg: false, palette: false });
+            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None, swatch: Vec::new(), seg: false, palette: false, cell: false });
         }
         y + rows as f32 * h + (rows - 1) as f32 * row_gap + GROUP_GAP * s
+    }
+
+    /// Lay COLOUR CELLS out from `y` down, `cols` to a row, square, across
+    /// the field: the palette editor's field and its hue strip.
+    fn flow_cells(&self, out: &mut OpenContent, y: f32, group: u8, cols: usize, cells: &[crate::controls::Choice]) -> f32 {
+        let s = self.scale;
+        let fw = self.key.0;
+        let room = fw - 4.0 * MARGIN * s;
+        let gap = 3.0 * s;
+        let w = ((room - (cols - 1) as f32 * gap) / cols as f32).min(40.0 * s);
+        let h = if cells.len() <= cols { w * 0.7 } else { w };
+        let x0 = (fw - cols as f32 * w - (cols - 1) as f32 * gap) / 2.0;
+        for (i, c) in cells.iter().enumerate() {
+            let (row, col) = (i / cols, i % cols);
+            out.chips.push(Chip {
+                rect: Rect::new(x0 + col as f32 * (w + gap), y + row as f32 * (h + gap), w, h),
+                text: String::new(),
+                on: c.on,
+                action: PanelAction::Pick { group, index: i as u8 },
+                image: None,
+                swatch: c.swatch.clone(),
+                seg: false,
+                palette: false,
+                cell: true,
+            });
+        }
+        let rows = cells.len().div_ceil(cols);
+        y + rows as f32 * h + (rows.saturating_sub(1)) as f32 * gap + GROUP_GAP * s * 0.7
     }
 
     /// Lay a SLIDER out from `y` down, across the field, with its own pair
@@ -1416,6 +1449,7 @@ impl Panel {
                     swatch: Vec::new(),
                     seg: false,
                     palette: false,
+                    cell: false,
                 });
             }
             right = x0 - 22.0 * s;
@@ -1435,6 +1469,7 @@ impl Panel {
                 swatch: Vec::new(),
                 seg: true,
                 palette: false,
+                cell: false,
             });
         }
         out.sliders.push(Slider { track, value: lit as f32 / (n - 1) as f32, stops: first..out.chips.len() });
@@ -1521,6 +1556,7 @@ impl Panel {
                         swatch: c.swatch.clone(),
                         seg: false,
                         palette: swatches,
+                        cell: false,
                     }
                 })
                 .collect()
@@ -1614,6 +1650,10 @@ impl Panel {
                 if let Some(c) = &g.caption {
                     y = self.caption(&mut out, y, c.clone());
                 }
+                if g.cells > 0 {
+                    y = self.flow_cells(&mut out, y, gi as u8, g.cells, &g.choices);
+                    continue;
+                }
                 if g.slider {
                     let pair = view.groups.get(gi + 1).filter(|n| n.beside).map(|n| (gi as u8 + 1, n));
                     y = self.flow_slider(&mut out, y, gi as u8, &g.choices, pair);
@@ -1629,7 +1669,11 @@ impl Panel {
                     .enumerate()
                     .map(|(ci, c)| (c.text.clone(), c.on, PanelAction::Pick { group: gi as u8, index: ci as u8 }))
                     .collect();
+                let first = out.chips.len();
                 y = self.flow(&mut out, y, g.width, chips);
+                for (chip, c) in out.chips[first..].iter_mut().zip(&g.choices) {
+                    chip.swatch = c.swatch.clone();
+                }
             }
             out.foot_y = if wall { y - (GROUP_GAP - WALL_HINT_GAP) * s } else { (y - (GROUP_GAP - 12.0) * s).max(top) };
             return Some(out);
@@ -2491,8 +2535,71 @@ impl Panel {
                 if chip.seg {
                     continue;
                 }
+                let lin = |c: [u8; 3], a: f32| {
+                    let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0);
+                    [f(c[0]), f(c[1]), f(c[2]), a * ca]
+                };
+                // A COLOUR CELL: its colour, ringed when it is the one chosen
+                // or the keys are on it.
+                if chip.cell {
+                    let c = chip.swatch.first().copied().unwrap_or([0, 0, 0]);
+                    rect(out, r.x, r.y, r.w, r.h, 3.0 * s, lin(c, 1.0));
+                    if chip.on || keyed {
+                        let g = 2.5 * s;
+                        let (mx, my) = map(r.x - g, r.y - g);
+                        out.rects.push(RectInst {
+                            rect: Rect::new(mx, my, (r.w + 2.0 * g) * cs, (r.h + 2.0 * g) * cs),
+                            radius: (3.0 * s + g) * cs,
+                            color: [paint.ink[0], paint.ink[1], paint.ink[2], if keyed { 0.95 } else { 0.8 } * ca],
+                            glass: 0.0,
+                            border: (2.0 * s * cs).max(1.5),
+                        });
+                    }
+                    continue;
+                }
+                // The "+" tile after the palettes: make one's own.
+                if chip.palette && chip.text == "+" {
+                    rect(out, r.x, r.y, r.w, r.h, TILE_RADIUS * s, crate::options::wash(!paint.bright, if keyed { hover_a } else { layer_wash[1] }));
+                    text(out, "+".to_owned(), r.x + r.w / 2.0, r.y + (r.h - 30.0 * s) / 2.0, 26.0, 30.0, 0.9);
+                    continue;
+                }
                 if chip.palette {
                     swatch_at(out, r, content.slide, &chip.swatch, chip.on, keyed && content.slide.abs() < 0.5);
+                    continue;
+                }
+                // A PILL IN A COLOUR (the editor's places): filled with it,
+                // its words in whichever ink reads on it.
+                if let Some(&c) = chip.swatch.first() {
+                    let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
+                    let (x0, y0) = (r.x + 1.1 * s * a.cos(), r.y + 1.1 * s * a.sin());
+                    rect(out, x0, y0, r.w, r.h, r.h / 2.0, lin(c, 1.0));
+                    if chip.on || keyed {
+                        let g = if chip.on { 3.0 } else { 2.5 } * s;
+                        let (mx, my) = map(x0 - g, y0 - g);
+                        out.rects.push(RectInst {
+                            rect: Rect::new(mx, my, (r.w + 2.0 * g) * cs, (r.h + 2.0 * g) * cs),
+                            radius: (r.h / 2.0 + g) * cs,
+                            color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.95 * ca],
+                            glass: 0.0,
+                            border: (2.2 * s * cs).max(1.5),
+                        });
+                    }
+                    let light = crate::palette::rel_lum(c) > 0.25;
+                    let ink_c = if light { [0.02, 0.02, 0.02, ca] } else { [1.0, 1.0, 1.0, ca] };
+                    let (mx, my) = map(x0 + r.w / 2.0, y0 + (r.h - line) / 2.0);
+                    out.labels.push(Label {
+                        text: chip.text,
+                        pos: (mx, my),
+                        max_w: r.w * cs,
+                        font_px: 16.0 * s * cs,
+                        line_px: 20.0 * s * cs,
+                        centered: true,
+                        dim: false,
+                        cache: resting,
+                        family: TEXT_FONT,
+                        color: Some(ink_c),
+                        clip: None,
+                    });
                     continue;
                 }
                 let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
@@ -3292,6 +3399,15 @@ impl App {
             "night" => {
                 if let Ok(k) = value.parse::<u32>() {
                     self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
+                }
+            }
+            // The "+" tile after the palettes opens the editor.
+            "colors-palette" if value == "new" => crate::controls::editor_open(),
+            "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" => {
+                let mut saved = None;
+                crate::controls::editor_pick(key, &value, &mut saved);
+                if let Some(id) = saved {
+                    self.colors_pick("colors-palette", &id);
                 }
             }
             // The "+" beside Apps, and the list's Back.
