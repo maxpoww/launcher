@@ -52,6 +52,7 @@ mod peek_edit;
 mod peek_editor;
 mod peek_text;
 mod peek_trim;
+mod peek_pdf;
 mod apps_icon;
 mod thumb_more;
 mod bin_motion;

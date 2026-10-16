@@ -814,7 +814,11 @@ The big daemon files are cohesive but long — go straight to the function:
   CUT (`peek_trim.rs`): two handles on a line as long as it lasts, "Take the sound away" for a
   video; saved with `ffmpeg -ss a -to b -c copy` (no re-encoding: quick anywhere, the cut on the
   keyframe before), over (original kept) or beside. Rig: `peek cut <a> <b>|mute|save|copy|cancel`.
-  Not built: signing a PDF — the lab has it.
+  A PDF's page is MARKED (`peek_pdf.rs`): Highlight · Draw · Text · Sign on the page drawn at
+  the screen's size; saved as the PDF's own ANNOTATIONS (Highlight, Ink, FreeText) by `mutool run`
+  with a generated script — the page itself is never changed. The signature is drawn once in a
+  box (3 : 1) and kept (`~/.local/share/golem/signature.json`); "New signature" draws another.
+  Rig: `peek tool mark|sign`, `padline x0 y0 x1 y1`, `paduse`, `click x y`.
 - `filer.rs` — FILES, Golem's file manager (Max, 2026-10-13: a REAL WINDOW, icons as on the
   desktop, Nautilus stays the system's until this one covers the daily things). Each window is an
   `xdg_toplevel` OF THE DAEMON (class `golem-files`, `WindowHandler` + `delegate_xdg_*` at the

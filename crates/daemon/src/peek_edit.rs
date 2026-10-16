@@ -45,7 +45,19 @@ pub(crate) enum Op {
         size: f32,
         ink: Ink,
     },
+    /// A PDF's page: this part marked as with a highlighter (x, y, w, h).
+    Mark([f32; 4]),
+    /// A signature in this part (x, y, w, h): its lines in shares of it.
+    Sign {
+        rect: [f32; 4],
+        strokes: Vec<Vec<(f32, f32)>>,
+    },
 }
+
+/// A signature's ink: a pen's dark blue.
+pub(crate) const SIGN_INK: Ink = [20, 40, 107];
+/// A highlighter's yellow.
+pub(crate) const MARK_INK: Ink = [255, 214, 10];
 
 /// The picture's colour, set as a whole.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,6 +138,31 @@ pub(crate) fn apply(img: &mut RgbaImage, op: &Op) {
             size,
             ink,
         } => words(img, (at.0 * w, at.1 * h), text, size * h, *ink),
+        Op::Mark([x, y, mw, mh]) => {
+            // (A highlighter darkens what is under it to its colour.)
+            let (x0, y0) = ((x * w) as u32, (y * h) as u32);
+            let (x1, y1) = (
+                (((x + mw) * w) as u32).min(img.width()),
+                (((y + mh) * h) as u32).min(img.height()),
+            );
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    let p = img.get_pixel_mut(xx, yy);
+                    for c in 0..3 {
+                        p[c] = (u32::from(p[c]) * u32::from(MARK_INK[c]) / 255) as u8;
+                    }
+                }
+            }
+        }
+        Op::Sign { rect, strokes } => {
+            for line in strokes {
+                let points: Vec<(f32, f32)> = line
+                    .iter()
+                    .map(|&(sx, sy)| (rect[0] + sx * rect[2], rect[1] + sy * rect[3]))
+                    .collect();
+                stroke(img, &points, (rect[2] * w * 0.012).max(1.5), SIGN_INK);
+            }
+        }
     }
 }
 

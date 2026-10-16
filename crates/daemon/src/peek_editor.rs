@@ -39,6 +39,9 @@ pub(crate) enum Tool {
     Text,
     Blur,
     Tint,
+    /// A PDF's: the highlighter, and the signature.
+    Mark,
+    Sign,
 }
 
 /// What comes back from the editor's threads.
@@ -76,6 +79,13 @@ pub(crate) struct Edit {
     saving: bool,
     /// The last tint drawn (they come fast while a slider moves).
     tint_at: Option<Instant>,
+    /// A PDF's page being marked (its marks become the PDF's annotations).
+    pdf_page: Option<u32>,
+    /// The signature: being drawn in its box (its lines; whether a line is
+    /// in hand), and the one to place.
+    pad: Option<Vec<Vec<(f32, f32)>>>,
+    pad_live: bool,
+    sig: Option<Vec<Vec<(f32, f32)>>>,
 }
 
 impl Edit {
@@ -105,6 +115,8 @@ pub(crate) enum Btn {
     Ink(usize),
     Apply,
     Undo,
+    /// Draw the signature again.
+    NewSign,
 }
 
 fn btn_word(b: Btn) -> &'static str {
@@ -117,6 +129,9 @@ fn btn_word(b: Btn) -> &'static str {
         Btn::Turn => tr("Turn"),
         Btn::Apply => tr("Apply crop"),
         Btn::Undo => tr("Undo"),
+        Btn::NewSign => tr("New signature"),
+        Btn::Tool(Tool::Mark) => tr("Highlight"),
+        Btn::Tool(Tool::Sign) => tr("Sign"),
         Btn::Ink(_) => "",
     }
 }
@@ -126,6 +141,12 @@ fn word_w(word: &str, px: f32) -> f32 {
 }
 
 pub(crate) fn edit_parts(r: Rect, crop_waiting: bool) -> EditParts {
+    edit_parts_for(r, crop_waiting, None)
+}
+
+/// The same for a PDF's page (`pdf`: whether a signature is kept, to offer
+/// drawing a new one): its own tools.
+pub(crate) fn edit_parts_for(r: Rect, crop_waiting: bool, pdf: Option<bool>) -> EditParts {
     let save_w = word_w(tr("Save"), 12.0) + 28.0;
     let copy_w = word_w(tr("Save copy"), 12.0) + 28.0;
     let cancel_w = word_w(tr("Discard changes?"), 12.0).max(word_w(tr("Cancel"), 12.0)) + 28.0;
@@ -133,11 +154,21 @@ pub(crate) fn edit_parts(r: Rect, crop_waiting: bool) -> EditParts {
     let copy = Rect::new(save.x - 8.0 - copy_w, r.y + 10.0, copy_w, 26.0);
     let cancel = Rect::new(copy.x - 8.0 - cancel_w, r.y + 10.0, cancel_w, 26.0);
     // The toolbar: words and dots in a row, centred at the foot.
-    let mut items: Vec<(Btn, f32)> = [Tool::Crop, Tool::Draw, Tool::Text, Tool::Blur, Tool::Tint]
-        .into_iter()
-        .map(|t| (Btn::Tool(t), word_w(btn_word(Btn::Tool(t)), 12.0) + 22.0))
+    let tools: &[Tool] = if pdf.is_some() {
+        &[Tool::Mark, Tool::Draw, Tool::Text, Tool::Sign]
+    } else {
+        &[Tool::Crop, Tool::Draw, Tool::Text, Tool::Blur, Tool::Tint]
+    };
+    let mut items: Vec<(Btn, f32)> = tools
+        .iter()
+        .map(|&t| (Btn::Tool(t), word_w(btn_word(Btn::Tool(t)), 12.0) + 22.0))
         .collect();
-    items.push((Btn::Turn, word_w(btn_word(Btn::Turn), 12.0) + 22.0));
+    if pdf.is_none() {
+        items.push((Btn::Turn, word_w(btn_word(Btn::Turn), 12.0) + 22.0));
+    }
+    if pdf == Some(true) {
+        items.push((Btn::NewSign, word_w(btn_word(Btn::NewSign), 12.0) + 22.0));
+    }
     for i in 0..INKS.len() {
         items.push((Btn::Ink(i), 22.0));
     }
@@ -185,6 +216,50 @@ pub(crate) fn edit_parts(r: Rect, crop_waiting: bool) -> EditParts {
         tint,
         sliders,
         grey,
+    }
+}
+
+/// The editor's parts for `edit` in a frame `r`.
+fn parts_of(r: Rect, edit: &Edit) -> EditParts {
+    let pdf = edit
+        .pdf_page
+        .map(|_| edit.sig.is_some() && edit.tool == Tool::Sign);
+    edit_parts_for(r, edit.crop.is_some(), pdf)
+}
+
+/// The signature's box in a frame `r`: where it is drawn (3 : 1), Clear,
+/// Use, Cancel.
+pub(crate) struct PadParts {
+    pub panel: Rect,
+    pub draw: Rect,
+    pub clear: Rect,
+    pub done: Rect,
+    pub cancel: Rect,
+}
+
+pub(crate) fn pad_parts(r: Rect) -> PadParts {
+    let w = (r.w - 80.0).clamp(240.0, 480.0);
+    let draw_h = w / 3.0;
+    let panel = Rect::new(
+        r.x + (r.w - w - 28.0) / 2.0,
+        r.y + HEAD + ((r.h - HEAD) - draw_h - 92.0) / 2.0,
+        w + 28.0,
+        draw_h + 92.0,
+    );
+    let draw = Rect::new(panel.x + 14.0, panel.y + 38.0, w, draw_h);
+    let by = draw.y + draw_h + 10.0;
+    let done_w = word_w(tr("Use"), 12.0) + 28.0;
+    let clear_w = word_w(tr("Clear"), 12.0) + 28.0;
+    let cancel_w = word_w(tr("Cancel"), 12.0) + 28.0;
+    let done = Rect::new(draw.x + draw.w - done_w, by, done_w, 26.0);
+    let clear = Rect::new(done.x - 8.0 - clear_w, by, clear_w, 26.0);
+    let cancel = Rect::new(clear.x - 8.0 - cancel_w, by, cancel_w, 26.0);
+    PadParts {
+        panel,
+        draw,
+        clear,
+        done,
+        cancel,
     }
 }
 
@@ -269,11 +344,23 @@ impl App {
         });
         let text = self.peek_shown().is_some_and(|(_, p)| p.whole_text);
         let cut = self.trim_able().is_some();
-        ((picture && shown_picture) || text || cut)
+        let pdf = self.peek_pdf_page().is_some();
+        ((picture && shown_picture) || text || cut || pdf)
             && up.edit.is_none()
             && up.text_edit.is_none()
             && up.trim_edit.is_none()
             && !up.closing
+    }
+
+    /// The page of a PDF on screen, when the pencil can mark it (MuPDF is here).
+    pub(crate) fn peek_pdf_page(&self) -> Option<u32> {
+        let up = self.peek.up.as_ref()?;
+        let (key, p) = self.peek_shown()?;
+        let pdf = up
+            .path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+        (pdf && p.pages > 0 && crate::launch::on_path("mutool")).then_some(key.1)
     }
 
     pub(crate) fn peek_edit_channel(&mut self) -> Option<calloop::channel::Sender<Msg>> {
@@ -314,10 +401,17 @@ impl App {
         self.peek.tag += 1;
         let tag = self.peek.tag;
         let max = self.peek_max();
+        // A PDF's page: marked, its marks written as annotations.
+        let pdf_page = self.peek_pdf_page();
         let Some(up) = self.peek.up.as_mut() else {
             return;
         };
         up.stop();
+        let first_tool = if pdf_page.is_some() {
+            Tool::Mark
+        } else {
+            Tool::Draw
+        };
         up.edit = Some(Edit {
             tag,
             base: None,
@@ -327,8 +421,12 @@ impl App {
             rev: 0,
             ops: Vec::new(),
             tint: Tint::default(),
-            tool: Tool::Draw,
-            ink: INKS[0],
+            tool: first_tool,
+            ink: if pdf_page.is_some() {
+                crate::peek_edit::SIGN_INK
+            } else {
+                INKS[0]
+            },
             live: None,
             pull: None,
             crop: None,
@@ -337,12 +435,23 @@ impl App {
             armed: false,
             saving: false,
             tint_at: None,
+            pdf_page,
+            pad: None,
+            pad_live: false,
+            sig: crate::peek_pdf::kept_signature(),
         });
         let path = up.path.clone();
         let spawned = std::thread::Builder::new()
             .name("quick-look-edit".into())
             .spawn(move || {
-                let Some(whole) = crate::peek_edit::whole_picture(&path) else {
+                // (A PDF's page drawn at the screen's size; a picture read whole.)
+                let whole = match pdf_page {
+                    Some(page) => crate::peek_kinds::pdf_facts(&path).and_then(|(_, aspect)| {
+                        crate::peek_kinds::pdf_page(&path, page, aspect, max)
+                    }),
+                    None => crate::peek_edit::whole_picture(&path),
+                };
+                let Some(whole) = whole else {
                     return;
                 };
                 let (w, h) = crate::quicklook::tile_fit(whole.dimensions(), max);
@@ -435,7 +544,8 @@ impl App {
                             }
                             up.notice = Some((word, Instant::now()));
                         }
-                        self.peek_want_now((to, 0));
+                        let page = self.peek.up.as_ref().map_or(0, |u| u.page_shown());
+                        self.peek_want_now((to, page));
                     }
                     Err(e) => {
                         warn!("quick look: saving failed: {e}");
@@ -528,8 +638,72 @@ impl App {
             return false;
         };
         let at = up.ptr.unwrap_or((-1.0, -1.0));
-        let parts = edit_parts(up.rect, edit.crop.is_some());
+        let parts = parts_of(up.rect, edit);
         let tool = edit.tool;
+        // The signature's box is up: the pointer is its.
+        if edit.pad.is_some() {
+            let pad = pad_parts(up.rect);
+            let share = |p: (f32, f32)| {
+                (
+                    ((p.0 - pad.draw.x) / pad.draw.w).clamp(0.0, 1.0),
+                    ((p.1 - pad.draw.y) / pad.draw.h).clamp(0.0, 1.0),
+                )
+            };
+            match event {
+                Event::Motion {
+                    surface_x,
+                    surface_y,
+                    ..
+                } => {
+                    let p = (*surface_x as f32, *surface_y as f32);
+                    if let Some(up) = self.peek.up.as_mut() {
+                        up.ptr = Some(p);
+                        if let Some(edit) = up.edit.as_mut().filter(|e| e.pad_live) {
+                            if let Some(line) = edit.pad.as_mut().and_then(|l| l.last_mut()) {
+                                line.push(share(p));
+                            }
+                        }
+                    }
+                }
+                Event::Button {
+                    state: WEnum::Value(ButtonState::Pressed),
+                    ..
+                } => {
+                    let Some(edit) = self.peek.up.as_mut().and_then(|u| u.edit.as_mut()) else {
+                        return true;
+                    };
+                    if pad.done.contains(at) {
+                        if let Some(lines) =
+                            edit.pad.take().filter(|l| l.iter().any(|s| s.len() > 1))
+                        {
+                            crate::peek_pdf::keep_signature(&lines);
+                            edit.sig = Some(lines);
+                            edit.tool = Tool::Sign;
+                        }
+                    } else if pad.clear.contains(at) {
+                        edit.pad = Some(Vec::new());
+                    } else if pad.cancel.contains(at) {
+                        edit.pad = None;
+                    } else if pad.draw.contains(at) {
+                        if let Some(lines) = edit.pad.as_mut() {
+                            lines.push(vec![share(at)]);
+                        }
+                        edit.pad_live = true;
+                    }
+                }
+                Event::Button {
+                    state: WEnum::Value(ButtonState::Released),
+                    ..
+                } => {
+                    if let Some(edit) = self.peek.up.as_mut().and_then(|u| u.edit.as_mut()) {
+                        edit.pad_live = false;
+                    }
+                }
+                _ => return false,
+            }
+            self.request_desktop_top_draw();
+            return true;
+        }
         match event {
             Event::Motion {
                 surface_x,
@@ -649,7 +823,28 @@ impl App {
                 };
                 match tool {
                     Tool::Draw => edit.live = Some(vec![s]),
-                    Tool::Crop | Tool::Blur => {
+                    Tool::Sign => {
+                        match edit.sig.clone() {
+                            // (A signature a third of the page wide, centred where clicked.)
+                            Some(strokes) => {
+                                let (pw, ph) = edit
+                                    .pic
+                                    .as_ref()
+                                    .map_or((3.0, 4.0), |p| (p.w as f32, p.h as f32));
+                                let w = 0.3;
+                                let h = w * pw / ph / 3.0;
+                                let rect = [
+                                    (s.0 - w / 2.0).clamp(0.0, 1.0 - w),
+                                    (s.1 - h / 2.0).clamp(0.0, 1.0 - h),
+                                    w,
+                                    h,
+                                ];
+                                self.edit_do(Op::Sign { rect, strokes });
+                            }
+                            None => edit.pad = Some(Vec::new()),
+                        }
+                    }
+                    Tool::Crop | Tool::Blur | Tool::Mark => {
                         edit.pull = Some((s, s));
                         edit.crop = None;
                     }
@@ -699,6 +894,7 @@ impl App {
                         match tool {
                             Tool::Crop => edit.crop = Some(rect),
                             Tool::Blur => self.edit_do(Op::Blur(rect)),
+                            Tool::Mark => self.edit_do(Op::Mark(rect)),
                             _ => {}
                         }
                     }
@@ -739,8 +935,13 @@ impl App {
                 edit.tool = t;
                 edit.crop = None;
                 edit.pull = None;
+                // (No signature yet: its box, to draw one.)
+                if t == Tool::Sign && edit.sig.is_none() {
+                    edit.pad = Some(Vec::new());
+                }
                 self.edit_keep_words();
             }
+            Btn::NewSign => edit.pad = Some(Vec::new()),
             Btn::Ink(i) => edit.ink = INKS[i],
             Btn::Turn => self.edit_do(Op::Turn),
             Btn::Apply => {
@@ -809,7 +1010,8 @@ impl App {
             return;
         }
         // (A RAW is never written over: it becomes a JPEG beside it.)
-        let how = if crate::peek_edit::writable(&name) {
+        let pdf_page = edit.pdf_page;
+        let how = if crate::peek_edit::writable(&name) || pdf_page.is_some() {
             how
         } else {
             SaveAs::Copy
@@ -820,8 +1022,12 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("quick-look-save".into())
             .spawn(move || {
-                let result = crate::peek_edit::save(&path, &ops, tint, how, &word)
-                    .map_err(|e| format!("{e:#}"));
+                // (A PDF's marks become its own annotations.)
+                let result = match pdf_page {
+                    Some(page) => crate::peek_pdf::save(&path, page, &ops, how, &word),
+                    None => crate::peek_edit::save(&path, &ops, tint, how, &word),
+                }
+                .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(Msg::Saved(tag, result));
             });
         if let Err(e) = spawned {
@@ -922,7 +1128,7 @@ impl App {
                 )
             });
         }
-        let parts = edit_parts(r, edit.crop.is_some());
+        let parts = parts_of(r, edit);
         // A marquee being pulled or waiting (crop, blur).
         let marquee = edit
             .pull
@@ -1013,7 +1219,7 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let can_save = crate::peek_edit::writable(&name);
+        let can_save = crate::peek_edit::writable(&name) || edit.pdf_page.is_some();
         let hot = |rect: Rect| up.ptr.is_some_and(|p| rect.contains(p));
         let pill =
             |g: &mut GridContent, rect: Rect, color: [f32; 4], word: &str, word_ink: [f32; 4]| {
@@ -1157,6 +1363,124 @@ impl App {
                 }
             }
         }
+        // A signature: where to put it said; or its box to draw it in.
+        if edit.tool == Tool::Sign && edit.sig.is_some() && edit.pad.is_none() {
+            let word = tr("Click where the signature goes");
+            let w = word_w(word, 12.0) + 28.0;
+            let hint = Rect::new(r.x + (r.w - w) / 2.0, parts.bar.y - 36.0, w, 26.0);
+            over.rects.push(RectInst {
+                rect: hint,
+                radius: 13.0,
+                color: [0.06, 0.07, 0.09, 0.84 * open],
+                glass: 0.0,
+                border: 0.0,
+            });
+            over.labels.push(Label {
+                centered: true,
+                ..text_label(
+                    word,
+                    (hint.x + hint.w / 2.0, hint.y + 5.0),
+                    w,
+                    12.0,
+                    None,
+                    white,
+                )
+            });
+        }
+        if let Some(lines) = edit.pad.as_ref() {
+            let pad = pad_parts(r);
+            over.rects.push(RectInst {
+                rect: Rect::new(r.x, r.y + HEAD, r.w, r.h - HEAD),
+                radius: 0.0,
+                color: [0.0, 0.0, 0.0, 0.45 * open],
+                glass: 0.0,
+                border: 0.0,
+            });
+            over.rects.push(RectInst {
+                rect: pad.panel,
+                radius: 14.0,
+                color: [ground[0], ground[1], ground[2], open],
+                glass: 0.0,
+                border: 0.0,
+            });
+            over.labels.push(text_label(
+                tr("Your signature"),
+                (pad.draw.x, pad.panel.y + 12.0),
+                pad.draw.w,
+                13.0,
+                Some(FONT_BOLD),
+                ink,
+            ));
+            over.rects.push(RectInst {
+                rect: pad.draw,
+                radius: 8.0,
+                color: [0.98, 0.98, 0.97, open],
+                glass: 0.0,
+                border: 0.0,
+            });
+            // Its lines, as dots close together.
+            let mut pen = [0.0f32; 4];
+            for (k, v) in crate::peek_edit::SIGN_INK.iter().enumerate() {
+                pen[k] = (f32::from(*v) / 255.0).powf(2.2);
+            }
+            pen[3] = open;
+            let dot = 3.0;
+            for line in lines {
+                let pts: Vec<(f32, f32)> = line
+                    .iter()
+                    .map(|&(x, y)| (pad.draw.x + x * pad.draw.w, pad.draw.y + y * pad.draw.h))
+                    .collect();
+                for pair in pts.windows(2) {
+                    let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+                    let n = ((x1 - x0).hypot(y1 - y0) / 1.5).ceil().max(1.0) as usize;
+                    for i in 0..=n {
+                        let k = i as f32 / n as f32;
+                        let (x, y) = (x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+                        over.rects.push(RectInst {
+                            rect: Rect::new(x - dot / 2.0, y - dot / 2.0, dot, dot),
+                            radius: dot / 2.0,
+                            color: pen,
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
+                }
+            }
+            for (rect, word, lit) in [
+                (pad.cancel, tr("Cancel"), false),
+                (pad.clear, tr("Clear"), false),
+                (pad.done, tr("Use"), true),
+            ] {
+                let fill = if lit {
+                    [1.0, 0.75, 0.6, open]
+                } else {
+                    [ink[0], ink[1], ink[2], 0.14 * open]
+                };
+                let word_ink = if lit {
+                    [ground[0], ground[1], ground[2], open]
+                } else {
+                    ink
+                };
+                over.rects.push(RectInst {
+                    rect,
+                    radius: 13.0,
+                    color: fill,
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                over.labels.push(Label {
+                    centered: true,
+                    ..text_label(
+                        word,
+                        (rect.x + rect.w / 2.0, rect.y + 5.0),
+                        rect.w,
+                        12.0,
+                        Some(FONT_BOLD),
+                        word_ink,
+                    )
+                });
+            }
+        }
         // The tint's panel.
         if edit.tool == Tool::Tint {
             over.rects.push(RectInst {
@@ -1292,6 +1616,8 @@ impl App {
                     Some("text") => Tool::Text,
                     Some("blur") => Tool::Blur,
                     Some("tint") => Tool::Tint,
+                    Some("mark") => Tool::Mark,
+                    Some("sign") => Tool::Sign,
                     _ => Tool::Draw,
                 };
                 self.edit_button(Btn::Tool(t));
@@ -1357,6 +1683,52 @@ impl App {
                     self.edit_pointer(&motion(at((a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k))));
                 }
                 self.edit_pointer(&button(ButtonState::Released));
+            }
+            // The signature's box: a line drawn in it (shares of it), Use.
+            "padline" | "paduse" => {
+                let Some(up) = self.peek.up.as_ref() else {
+                    return "nothing up".to_owned();
+                };
+                let pad = pad_parts(up.rect);
+                let v: Vec<f32> = rest.iter().filter_map(|w| w.parse().ok()).collect();
+                let at = |s: (f32, f32)| {
+                    (
+                        f64::from(pad.draw.x + s.0 * pad.draw.w),
+                        f64::from(pad.draw.y + s.1 * pad.draw.h),
+                    )
+                };
+                let motion = |p: (f64, f64)| Event::Motion {
+                    time: 0,
+                    surface_x: p.0,
+                    surface_y: p.1,
+                };
+                let button = |state| Event::Button {
+                    serial: 0,
+                    time: 0,
+                    button: 0x110,
+                    state: WEnum::Value(state),
+                };
+                if verb == "paduse" {
+                    let c = pad.done;
+                    self.edit_pointer(&motion((
+                        f64::from(c.x + c.w / 2.0),
+                        f64::from(c.y + c.h / 2.0),
+                    )));
+                    self.edit_pointer(&button(ButtonState::Pressed));
+                    self.edit_pointer(&button(ButtonState::Released));
+                } else if let [x0, y0, x1, y1] = v.as_slice() {
+                    self.edit_pointer(&motion(at((*x0, *y0))));
+                    self.edit_pointer(&button(ButtonState::Pressed));
+                    for n in 1..=16 {
+                        let k = n as f32 / 16.0;
+                        let wave = (k * 12.0).sin() * 0.25;
+                        self.edit_pointer(&motion(at((
+                            x0 + (x1 - x0) * k,
+                            y0 + (y1 - y0) * k + wave,
+                        ))));
+                    }
+                    self.edit_pointer(&button(ButtonState::Released));
+                }
             }
             "state" => {}
             _ => return format!("no peek verb {verb}"),

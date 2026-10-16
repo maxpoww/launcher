@@ -218,6 +218,11 @@ impl Up {
         (self.path.clone(), self.page)
     }
 
+    /// The page shown (a PDF's; 0 otherwise).
+    pub(crate) fn page_shown(&self) -> u32 {
+        self.page
+    }
+
     pub(crate) fn stop(&mut self) {
         if let Some(p) = self.play.take() {
             self.at = p.from + p.since.elapsed().as_secs_f32();

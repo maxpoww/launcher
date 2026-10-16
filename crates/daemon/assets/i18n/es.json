@@ -963,5 +963,12 @@
  "Take the sound away": "Quitar el sonido",
  "{n} s": "{n} s",
  "without sound · cut at the nearest keyframe": "sin sonido · corta en el keyframe más cercano",
- "not re-encoded · cut at the nearest keyframe": "sin recodificar · corta en el keyframe más cercano"
+ "not re-encoded · cut at the nearest keyframe": "sin recodificar · corta en el keyframe más cercano",
+ "New signature": "Firma nueva",
+ "Highlight": "Resaltar",
+ "Sign": "Firmar",
+ "Use": "Usar",
+ "Clear": "Borrar",
+ "Your signature": "Tu firma",
+ "Click where the signature goes": "Hacé clic donde va la firma"
 }
