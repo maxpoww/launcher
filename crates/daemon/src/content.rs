@@ -2202,7 +2202,8 @@ pub fn scene(
         // of its windows (Max, 2026-10-16: "the running instances in dot
         // quantities"). Drawn before the icon so a magnified icon never
         // hides them.
-        let windows = dock_running.get(slot).copied().unwrap_or(0);
+        // (Four at most: four means four or more — Max, 2026-10-16.)
+        let windows = dock_running.get(slot).copied().unwrap_or(0).min(4);
         dock_dots(&mut scene.rects, vcx, baseline + DOCK_DOT_R - DOCK_DOT_GAP, windows, dock_icon * 0.8);
         let scale = dock_scales[slot];
         let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM) * shown;
