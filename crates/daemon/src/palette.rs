@@ -1657,8 +1657,69 @@ fn poke(t: &Theme, look_changed: bool) {
     let _ = look_changed;
     foot_live(t);
     gtk3_live(t);
+    sourceview_live(t);
     // btop reads its config again on SIGUSR2 (and with it, its theme).
     signal_all("btop", libc::SIGUSR2);
+}
+
+/// GtkSourceView (GNOME Text Editor's writing area, Builder…): a colour
+/// scheme of the palette. The area does not take the GTK theme's colours,
+/// it has a scheme of its own; and a scheme is read once, so — as for
+/// GTK 3 — it is written under the name NOT in use and the editor is
+/// switched to it (`org.gnome.TextEditor style-scheme`, live). An owner who
+/// picked another scheme in the editor keeps it.
+fn sourceview_live(t: &Theme) {
+    const NAMES: [&str; 2] = ["golem-a", "golem-b"];
+    let key = "/org/gnome/TextEditor/style-scheme";
+    let now = out("dconf", &["read", key]).map(|o| o.trim().trim_matches('\'').to_owned()).unwrap_or_default();
+    if !now.is_empty() && !NAMES.contains(&now.as_str()) {
+        return;
+    }
+    let next = if now == NAMES[0] { NAMES[1] } else { NAMES[0] };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let dir = PathBuf::from(data_home).join("gtksourceview-5").join("styles");
+    crate::persist::write_text("theme", &dir.join(format!("{next}.xml")), &sourceview_scheme(t, next));
+    run("dconf", &["write", key, &format!("'{next}'")]);
+}
+
+fn sourceview_scheme(t: &Theme, id: &str) -> String {
+    let c = &t.c;
+    let h = |x: Rgb| format!("#{}", hex(x));
+    let styles = [
+        ("text", format!(r#"foreground="{}" background="{}""#, h(c[5]), h(c[0]))),
+        ("selection", format!(r#"foreground="{}" background="{}""#, h(c[6]), h(c[2]))),
+        ("current-line", format!(r#"background="{}""#, h(c[1]))),
+        ("line-numbers", format!(r#"foreground="{}" background="{}""#, h(c[3]), h(c[0]))),
+        ("current-line-number", format!(r#"foreground="{}" background="{}""#, h(c[5]), h(c[1]))),
+        ("cursor", format!(r#"foreground="{}""#, h(t.accent()))),
+        ("bracket-match", format!(r#"foreground="{}" background="{}" bold="true""#, h(t.accent()), h(c[2]))),
+        ("search-match", format!(r#"background="{}""#, h(c[3]))),
+        ("def:comment", format!(r#"foreground="{}" italic="true""#, h(c[4]))),
+        ("def:keyword", format!(r#"foreground="{}" bold="true""#, h(c[0xE]))),
+        ("def:statement", format!(r#"foreground="{}""#, h(c[0xE]))),
+        ("def:type", format!(r#"foreground="{}""#, h(c[0xA]))),
+        ("def:string", format!(r#"foreground="{}""#, h(c[0xB]))),
+        ("def:special-char", format!(r#"foreground="{}""#, h(c[0xC]))),
+        ("def:constant", format!(r#"foreground="{}""#, h(c[0x9]))),
+        ("def:number", format!(r#"foreground="{}""#, h(c[0x9]))),
+        ("def:identifier", format!(r#"foreground="{}""#, h(c[0xD]))),
+        ("def:function", format!(r#"foreground="{}""#, h(c[0xD]))),
+        ("def:preprocessor", format!(r#"foreground="{}""#, h(c[0xC]))),
+        ("def:error", format!(r#"foreground="{}" underline="error""#, h(c[8]))),
+        ("def:note", format!(r#"foreground="{}" bold="true""#, h(t.accent()))),
+        ("def:heading", format!(r#"foreground="{}" bold="true""#, h(t.accent()))),
+        ("def:link-text", format!(r#"foreground="{}" underline="single""#, h(c[0xD]))),
+    ];
+    let mut out = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change. -->\n<style-scheme id=\"{id}\" name=\"Golem\" version=\"1.0\">\n  <author>Golem</author>\n  <description>The palette in use</description>\n",
+        t.name.replace(['<', '>', '&', '"'], "")
+    );
+    for (name, attrs) in styles {
+        out.push_str(&format!("  <style name=\"{name}\" {attrs}/>\n"));
+    }
+    out.push_str("</style-scheme>\n");
+    out
 }
 
 /// Send `sig` to every process of ours named `comm`.
@@ -1921,6 +1982,15 @@ mod tests {
             icons_dark: dark,
             pair: None,
         }
+    }
+
+    #[test]
+    fn the_writing_area_gets_a_scheme_of_the_palette() {
+        let t = for_apps(&resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, true));
+        let x = sourceview_scheme(&t, "golem-a");
+        assert!(x.contains(r#"<style-scheme id="golem-a""#));
+        assert!(x.contains(&format!(r##"<style name="text" foreground="#{}" background="#{}"/>"##, hex(t.c[5]), hex(t.c[0]))));
+        assert_eq!(x.matches("<style ").count(), 23);
     }
 
     #[test]
