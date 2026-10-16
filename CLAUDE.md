@@ -796,7 +796,12 @@ The big daemon files are cohesive but long — go straight to the function:
   grid, under the bar's grid), the poster under it. Its bar: play/pause, the line (a click seeks),
   the time; P too. The damage repaints the video's rect at EVERY frame (its texture is written
   behind the damage's back: a paused one showed an old swapchain buffer). No `-hwaccel auto`: it
-  cost 2 s to the first frame under the dock's environment (100 ms without). A FOLDER lists what
+  cost 2 s to the first frame under the dock's environment (100 ms without). A BIG video (over
+  1920×1080) is decoded, scaled AND turned RGBA on the graphics chip (VA-API: `scale_vaapi=…:
+  format=rgba,hwdownload`) — 4K→720p, 8 s of it: 6.3 s of processor by software, ~1.8 s this way;
+  the render node that can is found ONCE a session (`gpu_node`: one frame tried on each, thrown to
+  `-f null` — a frame left in an unread pipe hung the try), and a chip that gives no first frame
+  falls back to the processor in the same thread (`Stream` holds whichever decoder runs). A FOLDER lists what
   is in it; Quick Look works from the DESKTOP's icons too (`quicklook::DESKTOP` as its window
   id; `debug-desktop "key space|…"`). THE PENCIL (`peek_edit.rs` = what is done, `peek_editor.rs` =
   the frame's side): on a picture the head gets a pencil; taken, the head is Cancel · Save copy ·

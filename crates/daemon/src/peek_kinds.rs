@@ -425,17 +425,29 @@ pub(crate) fn play(path: &Path, from: f32) -> Option<std::process::Child> {
 /// the video's own pace (at most 30 a second), from `from` seconds; the
 /// sound is `mpv`'s, started with it. A thread reads the frames and sends
 /// them on with `tag`; an empty frame says the video ended.
+///
+/// A BIG video (more than 1920×1080) is decoded AND made small on the
+/// graphics chip when it can (VA-API: 4K to 720p cost a seventeenth of the
+/// processor's time on the dev box): the render node that can is found once
+/// (`gpu_node`, a frame tried on each), and if it fails before its first
+/// frame the processor does it after all.
 pub(crate) struct Stream {
-    ffmpeg: std::process::Child,
+    /// The decoder running now (the thread may start the processor's one
+    /// after the chip's failed), and whether it was stopped.
+    ffmpeg: std::sync::Arc<std::sync::Mutex<(Option<std::process::Child>, bool)>>,
     sound: Option<std::process::Child>,
 }
 
 impl Stream {
     pub(crate) fn stop(&mut self) {
-        for child in [Some(&mut self.ffmpeg), self.sound.as_mut()]
-            .into_iter()
-            .flatten()
-        {
+        if let Ok(mut running) = self.ffmpeg.lock() {
+            running.1 = true;
+            if let Some(child) = running.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        if let Some(child) = self.sound.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -448,30 +460,54 @@ impl Drop for Stream {
     }
 }
 
-pub(crate) fn stream(
+/// How a video is decoded: by the processor, or on the chip at this render node.
+#[derive(Clone)]
+enum Decode {
+    Cpu,
+    Gpu(String),
+}
+
+fn decoder(
+    ffmpeg: &str,
     path: &Path,
     from: f32,
     (w, h): (u32, u32),
-    tag: u64,
-    frames: smithay_client_toolkit::reexports::calloop::channel::Sender<(u64, Vec<u8>)>,
-) -> Option<Stream> {
-    use std::io::Read;
+    how: &Decode,
+    frames: Option<u32>,
+) -> Command {
     use std::os::unix::process::CommandExt;
-    let ffmpeg = crate::thumbs::ffmpeg_tool()?;
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-v", "error", "-ss", &format!("{from:.2}"), "-re", "-i"])
-        .arg(path)
-        .args([
-            "-an",
-            "-vf",
-            &format!("fps=30,scale={w}:{h},format=rgba"),
-            "-f",
-            "rawvideo",
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.args(["-v", "error"]);
+    let filter = match how {
+        Decode::Cpu => format!("fps=30,scale={w}:{h},format=rgba"),
+        Decode::Gpu(node) => {
+            cmd.args([
+                "-init_hw_device",
+                &format!("vaapi=va:{node}"),
+                "-hwaccel",
+                "vaapi",
+                "-hwaccel_device",
+                "va",
+                "-hwaccel_output_format",
+                "vaapi",
+            ]);
+            format!("fps=30,scale_vaapi=w={w}:h={h}:format=rgba,hwdownload,format=rgba")
+        }
+    };
+    cmd.args(["-ss", &format!("{from:.2}")]);
+    if frames.is_none() {
+        cmd.arg("-re");
+    }
+    cmd.arg("-i").arg(path).args(["-an", "-vf", &filter]);
+    // (A try: one frame, thrown away — a frame held in a pipe nobody reads
+    // would stop it.)
+    match frames {
+        Some(n) => cmd
+            .args(["-frames:v", &n.to_string(), "-f", "null", "-"])
+            .stdout(Stdio::null()),
+        None => cmd.args(["-f", "rawvideo", "-"]).stdout(Stdio::piped()),
+    };
+    cmd.stdin(Stdio::null()).stderr(Stdio::null());
     // SAFETY: only an async-signal-safe call between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
@@ -479,30 +515,132 @@ pub(crate) fn stream(
             Ok(())
         });
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| tracing::warn!("quick look: ffmpeg: {e}"))
-        .ok()?;
-    let mut out = child.stdout.take()?;
+    cmd
+}
+
+/// The render node whose chip decodes and scales video here, found once
+/// (one frame of `path` tried on each, at most four seconds).
+fn gpu_node(ffmpeg: &str, path: &Path, size: (u32, u32)) -> Option<String> {
+    static FOUND: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+    if let Some(found) = FOUND.lock().ok().and_then(|f| f.clone()) {
+        return found;
+    }
+    let mut nodes: Vec<String> = std::fs::read_dir("/dev/dri")
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .map(|e| e.path().to_string_lossy().into_owned())
+                .filter(|p| p.contains("renderD"))
+                .collect()
+        })
+        .unwrap_or_default();
+    nodes.sort();
+    let found = nodes.into_iter().find(|node| {
+        let Ok(mut child) =
+            decoder(ffmpeg, path, 0.0, size, &Decode::Gpu(node.clone()), Some(1)).spawn()
+        else {
+            return false;
+        };
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if start.elapsed().as_secs() < 4 => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    });
+    tracing::info!(
+        "quick look: video on the graphics chip: {}",
+        found.as_deref().unwrap_or("none here")
+    );
+    if let Ok(mut f) = FOUND.lock() {
+        *f = Some(found.clone());
+    }
+    found
+}
+
+pub(crate) fn stream(
+    path: &Path,
+    from: f32,
+    (w, h): (u32, u32),
+    own: (u32, u32),
+    tag: u64,
+    frames: smithay_client_toolkit::reexports::calloop::channel::Sender<(u64, Vec<u8>)>,
+) -> Option<Stream> {
+    use std::io::Read;
+    let ffmpeg = crate::thumbs::ffmpeg_tool()?;
+    let running = std::sync::Arc::new(std::sync::Mutex::new((None::<std::process::Child>, false)));
+    let shared = running.clone();
+    let path_buf = path.to_path_buf();
+    let big = own.0 > 1920 || own.1 > 1080;
     let size = (w * h * 4) as usize;
     let read = std::thread::Builder::new()
         .name("quick-look-video".into())
-        .spawn(move || loop {
-            let mut frame = vec![0u8; size];
-            if out.read_exact(&mut frame).is_err() {
-                let _ = frames.send((tag, Vec::new()));
-                return;
+        .spawn(move || {
+            // The chip first for a big one (if there is one that can), else, or
+            // when it fails before its first frame, the processor.
+            let mut ways = Vec::new();
+            if big {
+                if let Some(node) = gpu_node(&ffmpeg, &path_buf, (w, h)) {
+                    ways.push(Decode::Gpu(node));
+                }
             }
-            if frames.send((tag, frame)).is_err() {
-                return;
+            ways.push(Decode::Cpu);
+            for way in ways {
+                let out = {
+                    let Ok(mut r) = shared.lock() else { return };
+                    if r.1 {
+                        return;
+                    }
+                    let Ok(mut child) =
+                        decoder(&ffmpeg, &path_buf, from, (w, h), &way, None).spawn()
+                    else {
+                        continue;
+                    };
+                    let out = child.stdout.take();
+                    r.0 = Some(child);
+                    out
+                };
+                let Some(mut out) = out else { continue };
+                let mut sent = 0u64;
+                loop {
+                    let mut frame = vec![0u8; size];
+                    if out.read_exact(&mut frame).is_err() {
+                        break;
+                    }
+                    sent += 1;
+                    if frames.send((tag, frame)).is_err() {
+                        return;
+                    }
+                }
+                // (It played, or it was stopped: done. It never gave a frame:
+                // the next way.)
+                if sent > 0 || shared.lock().map_or(true, |r| r.1) {
+                    let _ = frames.send((tag, Vec::new()));
+                    return;
+                }
+                tracing::info!(
+                    "quick look: video: {} gave no frame, trying the next way",
+                    match way {
+                        Decode::Gpu(_) => "the graphics chip",
+                        Decode::Cpu => "the processor",
+                    }
+                );
             }
+            let _ = frames.send((tag, Vec::new()));
         });
-    if read.is_err() {
-        let _ = child.kill();
+    if let Err(e) = read {
+        tracing::warn!("quick look: no video thread: {e}");
         return None;
     }
     Some(Stream {
-        ffmpeg: child,
+        ffmpeg: running,
         sound: play(path, from),
     })
 }
