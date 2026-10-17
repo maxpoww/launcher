@@ -1663,6 +1663,12 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 swatch.extend(if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() });
                 Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
             }));
+            // Each card as a picture (drawn once, here on the worker).
+            for c in &choices {
+                if !c.swatch.is_empty() {
+                    crate::palette_card::ensure(&c.swatch);
+                }
+            }
             // The "+" tile at the end: make one's own.
             choices.push(choice("+", false, "new"));
             view.groups.push(Group { tiles: true, ..group(None, "colors-palette", 110.0, choices) });

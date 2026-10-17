@@ -1588,7 +1588,12 @@ impl Panel {
                         text: c.text.clone(),
                         on: c.on,
                         action: PanelAction::Pick { group, index: (first + k) as u8 },
-                        image: (!swatches).then(|| c.value.clone()),
+                        // A palette's card is a picture too, once drawn.
+                        image: if swatches {
+                            crate::palette_card::path(&c.swatch).filter(|p| !c.swatch.is_empty() && p.is_file()).map(|p| p.to_string_lossy().into_owned())
+                        } else {
+                            Some(c.value.clone())
+                        },
                         swatch: c.swatch.clone(),
                         seg: false,
                         palette: swatches,
@@ -2637,6 +2642,18 @@ impl Panel {
                 let keyed = resting && self.focus == Some(i);
                 if let Some(file) = chip.image {
                     tile_at(out, r, content.slide, file, keyed && content.slide.abs() < 0.5);
+                    // The palette in use, ringed (a wallpaper has no mark).
+                    if chip.palette && chip.on && !keyed && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
+                        let grow = 3.0 * s;
+                        let (mx, my) = map(r.x + content.slide - grow, r.y - grow);
+                        out.rects.push(RectInst {
+                            rect: Rect::new(mx, my, (r.w + 2.0 * grow) * cs, (r.h + 2.0 * grow) * cs),
+                            radius: (TILE_RADIUS * s + grow) * cs,
+                            color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.6 * ca],
+                            glass: 0.0,
+                            border: (1.6 * s * cs).max(1.2),
+                        });
+                    }
                     continue;
                 }
                 if chip.seg {
