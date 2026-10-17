@@ -157,6 +157,32 @@ fn kde(t: &Theme) {
         keys.extend(general);
     }
     put(&path, &ini_with(&old, &sections));
+    // A KDE app with a colour scheme of ITS OWN picked (its `[UiSettings]
+    // ColorScheme`, KColorSchemeManager's — Easy Effects showed Breeze until
+    // Golem was picked there): Golem. It takes it as it starts; one that
+    // follows the system's (no pick) changes live.
+    if let Ok(list) = std::fs::read_dir(config()) {
+        for e in list.flatten() {
+            let p = e.path();
+            let is_rc = p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("rc") && n != "kdeglobals");
+            let Ok(text) = std::fs::read_to_string(&p).map_err(|_| ()).and_then(|t| if is_rc { Ok(t) } else { Err(()) }) else { continue };
+            let Some(start) = text.find("[UiSettings]") else { continue };
+            let section = &text[start..];
+            let end = section[1..].find("\n[").map_or(section.len(), |i| i + 1);
+            if !section[..end].lines().any(|l| l.starts_with("ColorScheme=")) || section[..end].contains("ColorScheme=Golem\n") {
+                continue;
+            }
+            let fixed: String = text[..start].to_owned()
+                + &section[..end]
+                    .lines()
+                    .map(|l| if l.starts_with("ColorScheme=") { "ColorScheme=Golem".to_owned() } else { l.to_owned() })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                + "\n"
+                + section[end..].trim_start_matches('\n');
+            put(&p, &fixed);
+        }
+    }
     // KDE apps reload their colours on these: KConfig's own notice that
     // kdeglobals changed, naming the groups (what Kirigami's desktop style
     // watches — KDE Connect did not change live without it), and the older
