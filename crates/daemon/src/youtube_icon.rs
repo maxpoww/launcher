@@ -103,7 +103,7 @@ pub(crate) fn frame(p: &Pose) -> Option<Vec<u8>> {
 }
 
 /// A cubic Bézier easing (CSS's `cubic-bezier(x1, y1, x2, y2)`) at `x`.
-fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+pub(crate) fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     let at = |a: f32, b: f32, t: f32| {
         let u = 1.0 - t;

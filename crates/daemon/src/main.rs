@@ -50,6 +50,7 @@ mod gears_icon;
 mod compass_icon;
 mod whatsapp_icon;
 mod youtube_icon;
+mod ytmusic_icon;
 mod quicklook;
 mod peek_kinds;
 mod peek_edit;
@@ -920,6 +921,7 @@ fn main() -> anyhow::Result<()> {
         compass: compass_icon::Motion::default(),
         whatsapp: whatsapp_icon::Motion::default(),
         youtube: youtube_icon::Motion::default(),
+        ytmusic: ytmusic_icon::Motion::default(),
         peek: quicklook::QuickLook::default(),
         apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
@@ -2187,6 +2189,9 @@ pub struct App {
     /// YouTube's mark: a hover runs a seek bar and turns the play, a click
     /// swells a pause away (`youtube_icon`).
     youtube: youtube_icon::Motion,
+    /// YouTube Music's mark: the play swallows its ring on a hover and spits
+    /// it out on a click (`ytmusic_icon`).
+    ytmusic: ytmusic_icon::Motion,
     /// QUICK LOOK: Space on a thing in a file window (`quicklook`).
     peek: quicklook::QuickLook,
     /// The apps button: its pages under the pointer, its squares down while
@@ -5536,6 +5541,10 @@ impl App {
                     }
                     if self.entries.get(entry_idx).is_some_and(|e| e.id == youtube_icon::YOUTUBE_ID) {
                         self.youtube.click();
+                        self.dirty = true;
+                    }
+                    if self.entries.get(entry_idx).is_some_and(|e| e.id == ytmusic_icon::YTMUSIC_ID) {
+                        self.ytmusic.click();
                         self.dirty = true;
                     }
                     // A minimized window's tile: the click asks the PLUGIN to

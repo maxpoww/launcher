@@ -1165,6 +1165,26 @@ impl App {
                 }
             }
         }
+        // YouTube Music: the play swallows the ring under the pointer and
+        // spits it out on a click; each pose drawn as it comes.
+        let on_ytmusic = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::ytmusic_icon::YTMUSIC_ID));
+        if self.ytmusic.step(on_ytmusic, dt) {
+            self.dirty = true;
+            let layers: Vec<u32> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.id == crate::ytmusic_icon::YTMUSIC_ID)
+                .filter_map(|(i, _)| self.icon_layers.get(i).copied())
+                .collect();
+            if let (Some(chain), Some(renderer)) = (apps::ytmusic_at(&self.ytmusic.pose()), self.renderer.as_mut()) {
+                for layer in layers {
+                    renderer.update_icon_layer(layer, &chain);
+                }
+            }
+        }
         // The control panel's gears: they turn under the pointer, the frame
         // for each angle put in its layer.
         let on_gears = self.gesture.dragging.is_none()
