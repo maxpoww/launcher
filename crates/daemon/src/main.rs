@@ -53,6 +53,7 @@ mod peek_editor;
 mod peek_text;
 mod peek_trim;
 mod peek_pdf;
+mod peek_syntax;
 mod peek_zoom;
 mod apps_icon;
 mod thumb_more;
