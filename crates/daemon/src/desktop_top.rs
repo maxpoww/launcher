@@ -140,7 +140,9 @@ impl App {
 
     /// The panel's paint: the OPTIONS boxes' surface, read where it is.
     pub(crate) fn desktop_panel_paint(&self, rect: crate::content::Rect) -> MenuPaint {
-        let (fill, ink) = self.box_surface_at(rect);
+        // The menus are the SHELL's (Max, 2026-10-17): its slider's colours
+        // and its Dark/Light when it wears them, else the screen's.
+        let (fill, ink) = crate::palette::shell().unwrap_or_else(|| self.box_surface_at(rect));
         MenuPaint {
             fill,
             ink,

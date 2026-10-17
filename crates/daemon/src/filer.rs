@@ -3572,9 +3572,15 @@ impl App {
     /// the light, a pale warm grey panel with the window's ink.
     fn filer_panel_paint(&self, rect: Rect, ground: [f32; 4]) -> MenuPaint {
         let mut paint = self.desktop_panel_paint(rect);
-        // (Golem Files keeps its menus as they were.)
+        // (Golem Files keeps its menus' rules.) The menu is the SHELL's:
+        // its colours and Dark/Light (Max, 2026-10-17), laid solid on the
+        // window.
         paint.rules = true;
-        if !crate::look::dark() {
+        if crate::palette::shell().is_some() {
+            paint.fill[3] = 1.0;
+            return paint;
+        }
+        if !crate::palette::shell_dark() {
             paint.fill = [0.807, 0.784, 0.73, 1.0]; // #e8e5de
             paint.ink = self.filer_palette().ink;
             paint.wash = [0.0, 0.0, 0.0, 0.06];
