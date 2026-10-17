@@ -2038,6 +2038,9 @@ impl crate::App {
             self.draw_options();
             self.draw();
             self.filer_redraw_all();
+            // (The desktop's icons wear the same filter: Max, 2026-10-17,
+            // "the icons on the desktop don't change live".)
+            self.request_desktop_draw();
         }
     }
 
