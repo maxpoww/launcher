@@ -1664,6 +1664,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
             }));
             // Each card as a picture (drawn once, here on the worker).
+            crate::palette_card::wheel(dark);
             for c in &choices {
                 if !c.swatch.is_empty() {
                     crate::palette_card::ensure(&c.swatch);

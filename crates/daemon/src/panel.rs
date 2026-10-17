@@ -1590,7 +1590,12 @@ impl Panel {
                         action: PanelAction::Pick { group, index: (first + k) as u8 },
                         // A palette's card is a picture too, once drawn.
                         image: if swatches {
-                            crate::palette_card::path(&c.swatch).filter(|p| !c.swatch.is_empty() && p.is_file()).map(|p| p.to_string_lossy().into_owned())
+                            let card = if c.value == crate::palette::DYNAMIC_ID {
+                                crate::palette_card::wheel(crate::look::dark())
+                            } else {
+                                crate::palette_card::path(&c.swatch).filter(|p| !c.swatch.is_empty() && p.is_file())
+                            };
+                            card.map(|p| p.to_string_lossy().into_owned())
                         } else {
                             Some(c.value.clone())
                         },

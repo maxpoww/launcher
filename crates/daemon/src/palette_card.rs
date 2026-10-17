@@ -48,6 +48,73 @@ pub(crate) fn ensure(colours: &[Rgb]) -> Option<PathBuf> {
     Some(p)
 }
 
+/// DYNAMIC's card: the mockup's colour wheel (`.wheel i`, Max: "un círculo
+/// cromático lindo") on the ground of the look — a conic sweep of eleven
+/// stops (here 180 wedges), lit from above, darkened toward its rim, a drop
+/// shadow under it.
+pub(crate) fn wheel(dark: bool) -> Option<PathBuf> {
+    let ground: Rgb = if dark { [0x1d, 0x20, 0x26] } else { [0xec, 0xec, 0xe8] };
+    // (Its own name in the cache: a wheel is not a palette's colours.)
+    let p = path(&[ground, [0xd1, 0x7e, 0xe1]])?;
+    if p.is_file() {
+        return Some(p);
+    }
+    let stops: [Rgb; 11] = [
+        [0xe8, 0x52, 0x4f], [0xf0, 0x8a, 0x3e], [0xf2, 0xc9, 0x4c], [0xa8, 0xcf, 0x5a], [0x4f, 0xbf, 0x8f], [0x3f, 0xb6, 0xc6],
+        [0x4b, 0x8f, 0xe0], [0x7a, 0x6f, 0xe0], [0xb2, 0x68, 0xd6], [0xe0, 0x5a, 0x9a], [0xe8, 0x52, 0x4f],
+    ];
+    let (cx, cy, r) = (80.0f32, 50.0f32, 34.0f32);
+    let mut wedges = String::new();
+    const N: usize = 180;
+    for i in 0..N {
+        let t = i as f32 / N as f32;
+        // from 200deg (CSS: 0 = up, clockwise)
+        let a0 = (200.0 + 360.0 * t).to_radians();
+        let a1 = (200.0 + 360.0 * (t + 1.0 / N as f32) + 0.4).to_radians();
+        let seg = t * 10.0;
+        let (k, f) = (seg.floor() as usize, seg.fract());
+        let c = |j: usize| f32::from(stops[k][j]) * (1.0 - f) + f32::from(stops[(k + 1).min(10)][j]) * f;
+        let col = format!("#{:02x}{:02x}{:02x}", c(0).round() as u8, c(1).round() as u8, c(2).round() as u8);
+        let pt = |a: f32| (cx + r * a.sin(), cy - r * a.cos());
+        let ((x0, y0), (x1, y1)) = (pt(a0), pt(a1));
+        wedges.push_str(&format!("<path d=\"M{cx} {cy}L{x0:.3} {y0:.3}A{r} {r} 0 0 1 {x1:.3} {y1:.3}Z\" fill=\"{col}\"/>"));
+    }
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="100" viewBox="0 0 160 100">
+<defs>
+  <radialGradient id="lift" gradientUnits="userSpaceOnUse" cx="80" cy="0" r="144" gradientTransform="translate(80 0) scale(1 0.4861) translate(-80 0)">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="{lift}"/><stop offset="0.7" stop-color="#ffffff" stop-opacity="0"/>
+  </radialGradient>
+  <radialGradient id="shine" cx="0.5" cy="0.38" r="0.5"><stop offset="0" stop-color="#ffffff" stop-opacity="0.25"/><stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+  <radialGradient id="rim" cx="0.5" cy="0.5" r="0.5"><stop offset="0.54" stop-color="#000000" stop-opacity="0"/><stop offset="1" stop-color="#000000" stop-opacity="0.165"/></radialGradient>
+  <filter id="drop" x="-0.5" y="-0.5" width="2" height="2"><feGaussianBlur stdDeviation="4.2"/></filter>
+</defs>
+<rect width="160" height="100" fill="#{g}"/>
+<rect width="160" height="100" fill="url(#lift)"/>
+<circle cx="{cx}" cy="{sy}" r="{sr}" fill="#000000" fill-opacity="0.5" filter="url(#drop)"/>
+<g>{wedges}</g>
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#rim)"/>
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#shine)"/>
+<circle cx="{cx}" cy="{cy}" r="{ri}" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="0.8"/>
+</svg>
+"##,
+        lift = if dark { 0.07 } else { 0.5 },
+        g = hex(ground),
+        sy = cy + 8.4,
+        sr = r - 5.6,
+        ri = r - 0.4,
+    );
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(W, H)?;
+    let k = W as f32 / tree.size().width();
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k), &mut pixmap.as_mut());
+    std::fs::create_dir_all(p.parent()?).ok()?;
+    let tmp = p.with_extension("tmp");
+    pixmap.save_png(&tmp).ok()?;
+    std::fs::rename(&tmp, &p).ok()?;
+    Some(p)
+}
+
 /// The Paper card (the mockup's `.tile` + `.pill` + `.pills::after`), on a
 /// 160 × 100 board.
 pub(crate) fn svg(colours: &[Rgb]) -> String {
@@ -129,6 +196,10 @@ mod tests {
         // The corner wears the ground.
         let g = img.get_pixel(4, H - 4);
         assert!(g[0] < 50, "{g:?}");
+        // Dynamic's wheel: red at its top-left, its middle not the ground.
+        let w = image::open(wheel(true).expect("a wheel")).expect("a png").to_rgba8();
+        let mid = w.get_pixel(W / 2, H / 2);
+        assert!(mid[0] > 60 || mid[1] > 60 || mid[2] > 60, "{mid:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
