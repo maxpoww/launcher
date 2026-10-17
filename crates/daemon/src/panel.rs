@@ -133,9 +133,11 @@ const TILE_DOT: f32 = 6.0;
 const TILE_RADIUS: f32 = 8.0;
 const TILE_MAX_W: f32 = 420.0;
 /// The palettes stand in two lines (the rest turn as pages).
-const PALETTE_ROWS: usize = 2;
+const PALETTE_ROWS: usize = 3;
+/// …four across (Max's pick on the hairline mockup: four by three).
+const PALETTE_COLS: usize = 4;
 /// The quick Colours box: wide and short, a share of the screen's width.
-const QUICK_COLOURS_W: f32 = 0.72;
+const QUICK_COLOURS_W: f32 = 680.0;
 
 /// The quick box (Super+H): its width, the room under its content for the
 /// closing hint, and its least height — design pixels.
@@ -1676,10 +1678,10 @@ impl Panel {
         // Two lines of them (Max, 2026-10-16: "i want two lines … a horizontal
         // rectangle"), the rest on pages.
         let best = if swatches && self.wall_tile > 0.0 {
-            Some(self.wall_tile.min(room_w)).map(|w| {
-                let cols = (((room_w + gap) / (w + gap)).floor() as usize).max(1);
-                (cols, PALETTE_ROWS, w)
-            })
+            // (Four across, whatever the box: the hairline box is not a wall.)
+            // (As wide as the rows above: the same side margins.)
+            let w = (fw - 4.0 * MARGIN * s - (PALETTE_COLS - 1) as f32 * gap) / PALETTE_COLS as f32;
+            Some((PALETTE_COLS, PALETTE_ROWS, w))
         } else {
             best
         };
@@ -2623,7 +2625,7 @@ impl Panel {
             // quiet line under it; the rows below.
             let left = 2.0 * MARGIN * s;
             text_l(out, crate::i18n::tr(p.label).to_owned(), left, y, 20.0, 1.0);
-            y += if wall { 30.0 } else { 34.0 } * s;
+            y += if wall { 34.0 } else { 38.0 } * s;
             text_l(out, content.subtitle, left, y, 12.5, 0.5);
             for (caption, top) in content.captions {
                 text(out, caption, cx, top, 12.5, 16.0, 0.5);
@@ -3942,7 +3944,7 @@ impl App {
         let wide = self.quick.open_is("Colours") && self.quick.open_has_tiles();
         let (w, h) = {
             (
-                if wide { (sw * QUICK_COLOURS_W).max(QUICK_W * s).min(sw - 40.0 * s) } else { (QUICK_W * s).min(sw - 40.0 * s).max(200.0) },
+                if wide { (QUICK_COLOURS_W * s).min(sw - 40.0 * s) } else { (QUICK_W * s).min(sw - 40.0 * s).max(200.0) },
                 (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(sh - 20.0 * s),
             )
         };
