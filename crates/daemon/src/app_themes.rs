@@ -242,17 +242,20 @@ fn inkscape(t: &Theme) {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
         .filter(|s| s.starts_with("Golem-"));
     if let Some(gtk) = gtk {
-        let themes = data().join("themes");
-        let tmp = themes.join(".golem-link");
-        let _ = std::fs::remove_file(&tmp);
-        if std::os::unix::fs::symlink(&gtk, &tmp).and_then(|()| std::fs::rename(&tmp, themes.join("Golem"))).is_err() {
-            warn!("apps: could not point the fixed GTK theme at {gtk}");
+        // A REAL folder (Inkscape lists the themes folders and passes over a
+        // link — it fell back to Adwaita): its sheet imports the one in use.
+        let dir = data().join("themes/Golem");
+        if dir.is_symlink() {
+            let _ = std::fs::remove_file(&dir);
         }
+        let now = data().join("themes").join(&gtk).join("gtk-3.0/gtk.css");
+        put(&dir.join("gtk-3.0/gtk.css"), &format!("@import url(\"file://{}\");\n", now.display()));
+        put(&dir.join("index.theme"), "[Desktop Entry]\nType=X-GNOME-Metatheme\nName=Golem\n\n[X-GNOME-Metatheme]\nGtkTheme=Golem\n");
     }
     let dark = t.dark;
     // Inkscape writes its preferences back as it quits: written while it is
     // open, ours would be undone — so it is written once it has quit.
-    when_closed("=inkscape", move || {
+    when_closed("=(\\.inkscape-wrapp|inkscape)", move || {
         let Ok(old) = std::fs::read_to_string(&path) else { return };
         let text = set_attr(&set_attr(&old, "gtkTheme", "Golem"), "darkTheme", if dark { "1" } else { "0" });
         if text != old {
@@ -393,6 +396,7 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">
     <themeProvider id="golem-theme" path="/golem.theme.json"/>
+    <bundledColorScheme path="/golem"/>
   </extensions>
 </idea-plugin>
 "#;
@@ -401,7 +405,7 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
         "dark": t.dark,
         "author": "Golem",
         "parentTheme": if t.dark { "Darcula" } else { "IntelliJ" },
-        "editorScheme": "/golem.icls",
+        "editorScheme": "/golem.xml",
         "ui": {
             "*": {
                 "background": h(c[1]),
@@ -456,7 +460,7 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
     zip_stored(&[
         ("META-INF/plugin.xml", plugin.as_bytes()),
         ("golem.theme.json", serde_json::to_string_pretty(&theme).unwrap_or_default().as_bytes()),
-        ("golem.icls", icls.as_bytes()),
+        ("golem.xml", icls.as_bytes()),
     ])
 }
 
