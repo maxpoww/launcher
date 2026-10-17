@@ -593,7 +593,7 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         PillId::Settings | PillId::SettingsStats => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
         // The task pill stands by the bell and, like it, is led by nothing.
-        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone => PillGroup::Notif,
+        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone | PillId::Drive(_) => PillGroup::Notif,
         PillId::Clock => PillGroup::Clock,
         // A doorway belongs to whatever it stands in for; today only the window
         // controls can go sticky. It never reflows anyway — a sticky pair is a
@@ -895,7 +895,7 @@ fn draw_z(id: PillId) -> u8 {
         PillId::NotifMute => 9,
         // Under the bell's preview, which grows over it.
         PillId::Task => 7,
-        PillId::Phone => 7,
+        PillId::Phone | PillId::Drive(_) => 7,
         // Mirror of the bell on the left edge: the box + copy-link pill draw
         // first (emerging from behind), then the small fixed glyph pill on top.
         PillId::ClipboardBox => 10,
@@ -1060,6 +1060,9 @@ pub(crate) enum PillId {
     /// A phone is plugged in: whose, how it stands, and its eject
     /// (`phone_pill.rs`).
     Phone,
+    /// A stick or a memory card is plugged in: its name, how full, its
+    /// eject (`drive_pill.rs`); the `n`th of them.
+    Drive(u8),
 }
 
 impl PillId {
@@ -1448,7 +1451,7 @@ impl Backdrop {
 /// fired on the growing date, each of the two elements claiming the ground the
 /// other was standing on. Spelled here rather than in every `keep` so the next
 /// element that grows over the bar cannot forget it.
-fn clear_under(pills: &mut Vec<Pill>, rect: Rect, keep: fn(PillId) -> bool) {
+fn clear_under(pills: &mut Vec<Pill>, rect: Rect, keep: impl Fn(PillId) -> bool) {
     pills.retain(|p| {
         p.id == PillId::Clock
             || keep(p.id)
@@ -1465,7 +1468,7 @@ fn presence(id: PillId) -> Presence {
         PillId::Window | PillId::Close | PillId::Clock => BOTH,
         // A notification arriving while you pick a window is still worth
         // seeing, and the bell doesn't act on the focused window.
-        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone => BOTH,
+        PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone | PillId::Drive(_) => BOTH,
         // Window-mode controls act on the FOCUSED window — meaningless while
         // you're above the desktop choosing one.
         PillId::Pseudo | PillId::Float | PillId::Fullscreen => DESKTOP_ONLY,
@@ -2398,6 +2401,11 @@ impl App {
         if let Some(rect) = self.phone_pill_rect(bell_left, y, ph) {
             pills.push(Pill { id: PillId::Phone, rect, text: String::new(), family: None, glyph_color: None });
         }
+        // The DRIVE pills (`drive_pill.rs`): one per stick or card, left of
+        // the phone's (Max, 2026-10-17).
+        for (i, rect) in self.drive_pill_rects(bell_left - self.phone_pill_reserve(), y, ph) {
+            pills.push(Pill { id: PillId::Drive(i), rect, text: String::new(), family: None, glyph_color: None });
+        }
         pills
     }
 
@@ -2517,6 +2525,11 @@ impl App {
         if self.phone_pill_out() {
             if let Some(rect) = pills.iter().find(|p| p.id == PillId::Phone).map(|p| p.rect) {
                 clear_under(&mut pills, rect, |id| id == PillId::Phone);
+            }
+        }
+        if let Some(i) = self.drive_pill_out() {
+            if let Some(rect) = pills.iter().find(|p| p.id == PillId::Drive(i)).map(|p| p.rect) {
+                clear_under(&mut pills, rect, move |id| id == PillId::Drive(i));
             }
         }
         pills
@@ -3366,6 +3379,11 @@ impl App {
         self.options_pills().iter().find(|p| p.id == PillId::Phone).map(|p| p.rect)
     }
 
+    /// Where drive pill `i` is drawn now, if it is there.
+    pub(crate) fn drive_pill_drawn(&self, i: u8) -> Option<Rect> {
+        self.options_pills().iter().find(|p| p.id == PillId::Drive(i)).map(|p| p.rect)
+    }
+
     /// Where the task pill is drawn now (its box included), if it is there.
     pub(crate) fn task_pill_drawn(&self) -> Option<Rect> {
         self.options_pills().iter().find(|p| p.id == PillId::Task).map(|p| p.rect)
@@ -3929,6 +3947,10 @@ impl App {
             }
             if pill.id == PillId::Phone {
                 self.push_phone_pill(scene, pill.rect);
+                continue;
+            }
+            if let PillId::Drive(i) = pill.id {
+                self.push_drive_pill(scene, pill.rect, i);
                 continue;
             }
             // The clipboard box draws itself (slides out from behind the small
@@ -5426,6 +5448,7 @@ impl App {
                     self.play_box_open = false;
                     self.task_box_close(); // and the task pill's
                     self.phone_pill_close(); // and the phone pill's long one
+                    self.drive_pills_close(); // and a drive pill's
                     self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.update_clip_hit(); // drop any clip row hover (ptr gone)
@@ -5745,7 +5768,7 @@ impl App {
         self.update_stats_reveal();
         self.update_cava_reveal();
         // (The task pill's chips light under the pointer: a move on it redraws.)
-        let on_task = self.update_task_hover() | self.update_phone_hover();
+        let on_task = self.update_task_hover() | self.update_phone_hover() | self.update_drive_hover();
         // The hit target (card / control / footer) moves within the same box, so
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
@@ -6864,6 +6887,7 @@ impl App {
             Some(PillId::NotifMute) => self.toggle_notif_mute(),
             Some(PillId::Task) => self.task_pill_click(),
             Some(PillId::Phone) => self.phone_pill_click(),
+            Some(PillId::Drive(i)) => self.drive_pill_click(i),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the
             // small pill at rest (a scrollable history box will split these in a

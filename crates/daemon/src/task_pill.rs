@@ -265,7 +265,7 @@ impl App {
             let centre = (band_right + window_left) / 2.0;
             return Some(Rect::new(centre - w / 2.0, y, w, self.task_box_h(ph)));
         }
-        let right = self.options_clock_rest_left() - OPTION_GAP - ph - OPTION_GAP - self.phone_pill_reserve();
+        let right = self.options_clock_rest_left() - OPTION_GAP - ph - OPTION_GAP - self.phone_pill_reserve() - self.drive_pills_reserve();
         let whole = lerp(self.task_pill_full_w().max(ph), small_w, self.task_pill.small);
         let w = lerp(ph.min(whole), whole, t);
         Some(Rect::new(right - w, y, w, self.task_box_h(ph)))

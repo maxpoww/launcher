@@ -139,6 +139,30 @@ enum PView {
     Video,
 }
 
+/// What the worker polls for the gear's page `page`.
+fn sys_page_of(page: Option<PageKind>) -> Option<SysPage> {
+    match page {
+        Some(PageKind::Gear) => Some(SysPage::Machine),
+        Some(PageKind::Disk) => Some(SysPage::Disk),
+        Some(PageKind::Cpu) => Some(SysPage::Cpu),
+        Some(PageKind::Ram) => Some(SysPage::Ram),
+        Some(PageKind::Gpu) => Some(SysPage::Gpu),
+        Some(PageKind::Battery) => Some(SysPage::Battery),
+        _ => None,
+    }
+}
+
+/// What the desktop's menu asks of a plugged-in drive.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DriveAsk {
+    /// Its Format page in the gear box.
+    Format,
+    /// Checked for errors (and mended), said in a notification.
+    Check,
+    /// A new name (typed on the desktop, as a file's is).
+    Rename(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 enum Erase {
     #[default]
@@ -150,6 +174,12 @@ enum Erase {
 
 #[derive(Default)]
 pub(crate) struct PagesState {
+    /// What the desktop's menu asked of a plugged-in drive (by where it is
+    /// mounted), waiting for the drive list to know it.
+    drive_ask: Option<(String, DriveAsk)>,
+    /// The act under way was asked on the desktop: its end is said in a
+    /// notification, by the drive's name (the gear box may not be up).
+    drive_tell: Option<String>,
     sys: Option<SysHandle>,
     machine: Machine,
     live: Live,
@@ -446,15 +476,7 @@ impl App {
 
     /// Start or stop the worker's polling for the page on screen.
     pub(crate) fn pages_sync(&mut self, page: Option<PageKind>) {
-        let want = match page {
-            Some(PageKind::Gear) => Some(SysPage::Machine),
-            Some(PageKind::Disk) => Some(SysPage::Disk),
-            Some(PageKind::Cpu) => Some(SysPage::Cpu),
-            Some(PageKind::Ram) => Some(SysPage::Ram),
-            Some(PageKind::Gpu) => Some(SysPage::Gpu),
-            Some(PageKind::Battery) => Some(SysPage::Battery),
-            _ => None,
-        };
+        let want = sys_page_of(page);
         self.gear.pages.view = PView::List;
         if want.is_none() && self.gear.pages.sys.is_none() {
             return;
@@ -492,7 +514,10 @@ impl App {
                 // The next reading groups processes by the windows of now.
                 self.sys_send_windows();
             }
-            SysEvent::Disk(d) => self.gear.pages.disk = *d,
+            SysEvent::Disk(d) => {
+                self.gear.pages.disk = *d;
+                self.pages_drive_resolve();
+            }
             SysEvent::Cleaned { freed } => {
                 info!("gear: cleaned, {freed} bytes freed");
                 self.gear.pages.cleaning = false;
@@ -2105,6 +2130,7 @@ impl App {
             ("format-for", _) => SysHit::FormatFor(match arg {
                 "golem" => Target::Golem,
                 "win" => Target::Windows,
+                "camera" => Target::Camera,
                 _ => Target::Any,
             }),
             ("format-lock", _) => SysHit::FormatLock,
@@ -2151,6 +2177,85 @@ impl App {
             .map(|a| format!("{}({} win, {} proc)", a.key, a.windows.len(), a.pids.len()))
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// The desktop's menu on a plugged-in drive (a stick, a memory card)
+    /// asks for one of the gear's own acts on it: the same pages and the
+    /// same worker, so the two ways in never differ. `mount`: where the
+    /// drive is mounted, which is how the desktop knows it.
+    pub(crate) fn pages_drive_ask(&mut self, mount: String, ask: DriveAsk) {
+        let format = ask == DriveAsk::Format;
+        self.gear.pages.drive_ask = Some((mount, ask));
+        if format {
+            // The gear box comes out on the drives' page at once (which
+            // reads them); the Format page follows when the list is in.
+            self.stats_show_page(PageKind::Disk);
+        }
+        if !self.pages_drive_resolve() {
+            // The drives are only read while their page is watched: watched
+            // until the list is in (`pages_drive_resolve` puts it back).
+            self.sys_send(SysCommand::Watch(Some(SysPage::Disk)));
+            self.sys_send(SysCommand::Refresh);
+        }
+    }
+
+    /// Act on the waiting ask, if the drive list has its drive.
+    fn pages_drive_resolve(&mut self) -> bool {
+        let Some((mount, _)) = &self.gear.pages.drive_ask else {
+            return false;
+        };
+        // (By where it is mounted, or where that really is.)
+        let real = std::fs::canonicalize(mount).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(i) = self.gear.pages.disk.drives.iter().position(|d| {
+            d.removable
+                && d.vol
+                    .as_ref()
+                    .and_then(|v| v.mount.as_deref())
+                    .is_some_and(|m| m == mount.as_str() || m == real)
+        }) else {
+            return false;
+        };
+        let Some((_, ask)) = self.gear.pages.drive_ask.take() else {
+            return false;
+        };
+        // (The page on screen is watched again, or none.)
+        let watched = sys_page_of(self.gear_page());
+        if watched != Some(SysPage::Disk) {
+            self.sys_send(SysCommand::Watch(watched));
+        }
+        let Some(v) = self.gear.pages.disk.drives[i].vol.clone() else {
+            return false;
+        };
+        let name = if v.label.is_empty() { self.gear.pages.disk.drives[i].name.clone() } else { v.label.clone() };
+        match ask {
+            DriveAsk::Format => {
+                // Its page in the gear box: the name, what it is for, and
+                // the confirming click are there.
+                if self.stats_show_page(PageKind::Disk) && self.gear_page() == Some(PageKind::Disk) {
+                    self.drive_click(SysHit::ExtFormat(i));
+                    self.gear_changed();
+                }
+            }
+            DriveAsk::Check => {
+                self.gear.pages.drive_tell = Some(name);
+                self.drive_send(
+                    "Checking…",
+                    DriveCommand::Check { volume: v.fs_dev().to_owned(), mounted: v.mount.is_some() },
+                );
+            }
+            DriveAsk::Rename(label) => {
+                self.gear.pages.drive_tell = Some(label.clone());
+                self.drive_send(
+                    "Renaming…",
+                    DriveCommand::Rename {
+                        volume: v.fs_dev().to_owned(),
+                        label: fit_label(&label, &v.fstype),
+                        mounted: v.mount.is_some(),
+                    },
+                );
+            }
+        }
+        true
     }
 
     /// `debug-gear page <what>`: reach a details view without a pointer.
@@ -2351,6 +2456,7 @@ fn target_words(t: Target) -> (&'static str, &'static str) {
         Target::Any => ("Anywhere", "exFAT. Windows, Mac, phones, TVs and this one"),
         Target::Golem => ("Golem", "ext4. Linux only. It can be locked"),
         Target::Windows => ("Windows", "NTFS. For a drive that lives on Windows"),
+        Target::Camera => ("Cameras", "FAT32. Cameras, car radios, old devices"),
     }
 }
 
@@ -2371,6 +2477,14 @@ impl App {
                     // drive the view was opened on.
                     if what == "eject" {
                         p.view = PView::List;
+                    }
+                    // Asked on the desktop: said where it was asked.
+                    if let Some(name) = p.drive_tell.take() {
+                        let said = match &p.drive_note {
+                            Some((note, _)) => format!("{name}: {}", crate::i18n::tr_dyn(note)),
+                            None => format!("{name}: {}", tr(if what == "rename" { "Renamed" } else { "Done" })),
+                        };
+                        crate::desktop_send_notify(&said);
                     }
                     app.sys_send(SysCommand::Refresh);
                     app.update_stats_reveal();
@@ -2542,7 +2656,7 @@ impl App {
             },
             Item::Choice {
                 key: "For".into(),
-                opts: [Target::Any, Target::Golem, Target::Windows]
+                opts: [Target::Any, Target::Golem, Target::Windows, Target::Camera]
                     .into_iter()
                     .map(|t| {
                         (
@@ -2685,8 +2799,18 @@ impl App {
             }
             SysHit::ExtFormat(i) => {
                 let x = drive(self, i);
+                let vol = x.and_then(|x| x.vol);
+                // Offered back the way it is now (a camera's card stays a
+                // camera's card); exFAT for anything else.
+                let target = match vol.as_ref().map(|v| v.fstype.as_str()) {
+                    Some("vfat") => Target::Camera,
+                    Some("ext4") => Target::Golem,
+                    Some("ntfs" | "ntfs3") => Target::Windows,
+                    _ => Target::Any,
+                };
                 self.gear.pages.format = FormatDraft {
-                    name: x.and_then(|x| x.vol).map(|v| v.label).unwrap_or_default(),
+                    name: vol.map(|v| v.label).unwrap_or_default(),
+                    target,
                     ..FormatDraft::default()
                 };
                 self.page_view(PView::Format(i));
@@ -2748,11 +2872,7 @@ impl App {
                                 } else {
                                     f.name.trim()
                                 },
-                                match f.target {
-                                    Target::Any => "exfat",
-                                    Target::Golem => "ext4",
-                                    Target::Windows => "ntfs",
-                                },
+                                f.target.fstype(),
                             ),
                             target: f.target,
                             password: (f.lock && f.target == Target::Golem).then_some(f.password),

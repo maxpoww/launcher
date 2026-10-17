@@ -722,7 +722,7 @@ impl App {
     }
 
     /// The page with content that is on screen, if one is.
-    fn gear_page(&self) -> Option<PageKind> {
+    pub(crate) fn gear_page(&self) -> Option<PageKind> {
         let kind = self.stats_page_kind();
         (self.stats.open && kind != PageKind::Other).then_some(kind)
     }

@@ -2719,6 +2719,7 @@ impl App {
         // (They are places in the file manager's windows too.)
         self.filer_places();
         self.phone_pill_plugged();
+        self.drive_pills_sync();
         self.save_desktop_positions();
         self.reload_desktop();
     }
@@ -3173,6 +3174,18 @@ impl App {
                 self.desktop.selected.clear();
                 self.camera_stop(&path);
             }
+            Action::Format | Action::CheckDrive => {
+                if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
+                    self.desktop.selected.clear();
+                    let ask = if action == Action::Format {
+                        crate::gear_pages::DriveAsk::Format
+                    } else {
+                        crate::gear_pages::DriveAsk::Check
+                    };
+                    info!("desktop: {ask:?} {path}");
+                    self.pages_drive_ask(path, ask);
+                }
+            }
             Action::Eject => {
                 if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
                     self.desktop.selected.clear();
@@ -3424,10 +3437,16 @@ impl App {
         };
         // A launcher is renamed by its file, not its `Name=`: what is typed
         // is the file's new name.
-        let file_name = Path::new(&it.path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| it.name.clone());
+        // A stick or a memory card is renamed by its label (its folder's
+        // name may be cut or numbered).
+        let file_name = if it.kind == Kind::Volume {
+            it.name.clone()
+        } else {
+            Path::new(&it.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| it.name.clone())
+        };
         info!("desktop: renaming {file_name}");
         self.desktop.selected.clear();
         self.desktop.selected.insert(it.path.clone());
@@ -3470,6 +3489,16 @@ impl App {
         // had: the whole name is selected as the field opens, so "notes"
         // typed over "notes.txt" made a file nothing would open any more.
         // (To take the ending off on purpose, end the name with a dot.)
+        // A stick or a memory card: its label, by the disk service (the
+        // gear's own act); the desktop sees it come back under its new name.
+        if let Some(it) = self.desktop.items.get(rename.item).filter(|it| it.kind == Kind::Volume) {
+            let (path, label) = (it.path.clone(), rename.text.trim().to_owned());
+            if commit && !label.is_empty() && label != it.name {
+                self.pages_drive_ask(path, crate::gear_pages::DriveAsk::Rename(label));
+            }
+            self.request_desktop_draw();
+            return;
+        }
         let name = match self.desktop.items.get(rename.item) {
             Some(it) => typed_name(&rename.text, Path::new(&it.path), it.kind == Kind::File),
             None => rename.text.trim().to_owned(),
@@ -5393,6 +5422,10 @@ impl App {
         // `phonepill …`: the bar's phone pill, without a pointer.
         if let Some(rest) = what.strip_prefix("phonepill ") {
             return self.phone_pill_debug(rest.trim());
+        }
+        // `drivepill …`: the bar's drive pills, without a pointer.
+        if let Some(rest) = what.strip_prefix("drivepill ") {
+            return self.drive_pill_debug(rest.trim());
         }
         // `task <seconds> [what]`: a task that takes that long, for the
         // OPTIONS bar's task pill to show (no phone needed).

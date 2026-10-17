@@ -1001,5 +1001,18 @@
   "as a web page": "como página web",
   "formatted": "con formato",
   "as a table": "como tabla",
-  "{n} rows": "{n} filas"
+  "{n} rows": "{n} filas",
+  "exFAT · works everywhere": "exFAT · funciona en todas partes",
+  "FAT32 · files up to 4 GB": "FAT32 · archivos de hasta 4 GB",
+  "ext4 · Linux only": "ext4 · solo Linux",
+  "NTFS · Windows": "NTFS · Windows",
+  "Btrfs · Linux only": "Btrfs · solo Linux",
+  "Disc": "Disco óptico",
+  "Other": "Otro",
+  "Capacity": "Capacidad",
+  "Format": "Formato",
+  "Check for errors": "Buscar errores",
+  "Format…": "Formatear…",
+  "Ejecting…": "Expulsando…",
+  "{0} · {1} free of {2}": "{0} · {1} libres de {2}"
 }

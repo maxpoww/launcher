@@ -167,6 +167,40 @@ fn writable(path: &Path) -> bool {
     unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
 }
 
+/// A mounted file system's size and what is free on it, in bytes.
+pub(crate) fn space(path: &Path) -> Option<(u64, u64)> {
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid C string and `st` a zeroed struct it fills.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    let unit = st.f_frsize as u64;
+    Some((st.f_blocks as u64 * unit, st.f_bavail as u64 * unit))
+}
+
+/// The file system mounted at `path`, from `/proc/mounts`.
+fn fstype_of(mounts: &str, path: &Path) -> Option<String> {
+    mounts.lines().find_map(|line| {
+        let mut f = line.split_whitespace();
+        let (_, at, fs) = (f.next()?, f.next()?, f.next()?);
+        (Path::new(&crate::desktop_send::unescape_mount(at)) == path).then(|| fs.to_owned())
+    })
+}
+
+/// A file system as a person knows it: its name, and where it works.
+fn format_words(fs: &str) -> &'static str {
+    match fs {
+        "exfat" => tr("exFAT · works everywhere"),
+        "vfat" | "msdos" => tr("FAT32 · files up to 4 GB"),
+        "ext4" | "ext3" | "ext2" => tr("ext4 · Linux only"),
+        "ntfs" | "ntfs3" | "fuseblk" => tr("NTFS · Windows"),
+        "btrfs" => tr("Btrfs · Linux only"),
+        "iso9660" | "udf" => tr("Disc"),
+        _ => tr("Other"),
+    }
+}
+
 /// Whose it is: `You`, or the account's name (its number, failing that).
 fn owner_text(uid: u32) -> String {
     // SAFETY: `getuid` has no preconditions; `getpwuid` returns a pointer
@@ -193,6 +227,19 @@ pub(crate) fn rows_for(item: &Item, home: &Path) -> Vec<(&'static str, String)> 
     match item.kind {
         Kind::Folder | Kind::Volume => {
             rows.push((tr("Kind"), if item.kind == Kind::Volume { tr("Drive") } else { tr("Folder") }.to_owned()));
+            // A drive: how big it is, what is left, what it is formatted as
+            // (what a person asks before formatting it, or copying to it).
+            if item.kind == Kind::Volume {
+                if let Some((total, free)) = space(path) {
+                    rows.push((tr("Capacity"), size_text(total)));
+                    rows.push((tr("Free"), size_text(free)));
+                }
+                let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+                let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                if let Some(fs) = fstype_of(&mounts, path).or_else(|| fstype_of(&mounts, &real)) {
+                    rows.push((tr("Format"), format_words(&fs).to_owned()));
+                }
+            }
             let (mut folders, mut files, mut hidden) = (0usize, 0usize, 0usize);
             for e in std::fs::read_dir(path).into_iter().flatten().flatten() {
                 if e.file_name().to_string_lossy().starts_with('.') {
@@ -244,6 +291,9 @@ pub(crate) fn rows_for(item: &Item, home: &Path) -> Vec<(&'static str, String)> 
         (tr("Created"), meta.as_ref().and_then(|m| m.created().ok())),
         (tr("Opened"), meta.as_ref().and_then(|m| m.accessed().ok())),
     ] {
+        // (A memory card's top folder has no times: FAT keeps none for it,
+        // and "1970-01-01" says nothing true.)
+        let time = time.filter(|t| *t > std::time::UNIX_EPOCH);
         if let Some(d) = date_text(time) {
             rows.push((key, d));
         }
@@ -427,6 +477,15 @@ impl Props {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drive_says_what_it_is_formatted_as() {
+        let mounts = "/dev/sda1 /run/media/max/MY\\040STICK exfat rw 0 0\n/dev/mmcblk0p1 /run/media/max/NIKON vfat rw 0 0\n";
+        assert_eq!(fstype_of(mounts, Path::new("/run/media/max/MY STICK")).as_deref(), Some("exfat"));
+        assert_eq!(format_words("vfat"), "FAT32 · files up to 4 GB");
+        assert_eq!(fstype_of(mounts, Path::new("/nowhere")), None);
+        assert!(space(Path::new("/")).is_some_and(|(t, f)| t >= f && t > 0));
+    }
 
     const PAINT: MenuPaint = MenuPaint {
         fill: [0.1, 0.1, 0.12, 0.9],

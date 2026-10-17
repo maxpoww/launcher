@@ -42,6 +42,10 @@ pub(crate) enum Action {
     SendTo(usize),
     /// A plugged-in volume (a stick, a phone): let it go.
     Eject,
+    /// A stick or a memory card: its Format page in the gear box…
+    Format,
+    /// …checked for errors and mended.
+    CheckDrive,
     /// A phone: its screen in a window here (scrcpy).
     Mirror,
     /// A phone as this computer's camera (its lens, its picture and its
@@ -261,6 +265,15 @@ pub(crate) fn volume_rows(v: &Volume) -> Vec<Row> {
         if !no_adb {
             rows.push(item(if v.tether { tr("Stop phone's internet") } else { tr("Use phone's internet") }, Action::Tether));
         }
+    }
+    // A stick or a memory card (Max, 2026-10-17: "functions a user will
+    // look for… format to the sd and stick"): what the gear's page of the
+    // drive does, from here. Rename types on the icon, as a file's name.
+    if !v.phone && !v.closed {
+        rows.push(Row::Sep);
+        rows.push(item(tr("Rename"), Action::Rename));
+        rows.push(item(tr("Check for errors"), Action::CheckDrive));
+        rows.push(Row::Item { label: tr("Format…"), action: Action::Format, danger: true });
     }
     if !v.closed {
         rows.push(Row::Sep);
@@ -560,6 +573,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_stick_offers_rename_check_and_format_and_a_phone_does_not() {
+        let acts = |v: &Volume| -> Vec<Action> {
+            volume_rows(v)
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Item { action, .. } => Some(*action),
+                    _ => None,
+                })
+                .collect()
+        };
+        let stick = acts(&Volume::default());
+        assert_eq!(
+            stick,
+            vec![
+                Action::Open,
+                Action::OpenTerminal,
+                Action::Rename,
+                Action::CheckDrive,
+                Action::Format,
+                Action::Eject,
+                Action::Properties
+            ]
+        );
+        // Format throws everything away: drawn in red.
+        assert!(volume_rows(&Volume::default())
+            .contains(&Row::Item { label: "Format…", action: Action::Format, danger: true }));
+        let phone = acts(&Volume { phone: true, ..Default::default() });
+        assert!(!phone.contains(&Action::Format) && !phone.contains(&Action::Rename));
+    }
+
+    #[test]
     fn an_icon_menu_hangs_right_and_below_the_pointer_and_flips_at_the_edges() {
         let m = Menu::open(Some(3), false, (100.0, 100.0), 1000.0, 800.0);
         assert_eq!((m.rect.x, m.rect.y), (106.0, 106.0));
@@ -706,7 +750,18 @@ mod tests {
         assert!(sharing.rows.contains(&Row::Item { label: "Stop phone's internet", action: Action::Tether, danger: false }));
         let m = open().for_volume(Volume::default(), 800.0);
         let actions: Vec<Action> = (0..m.rows.len()).filter_map(|i| m.action(i)).collect();
-        assert_eq!(actions, vec![Action::Open, Action::OpenTerminal, Action::Eject, Action::Properties]);
+        assert_eq!(
+            actions,
+            vec![
+                Action::Open,
+                Action::OpenTerminal,
+                Action::Rename,
+                Action::CheckDrive,
+                Action::Format,
+                Action::Eject,
+                Action::Properties
+            ]
+        );
         // The wallpaper's menu takes Paste on top when there is something.
         let m = Menu::open(None, false, (10.0, 10.0), 1000.0, 800.0).with_paste(800.0);
         assert_eq!(m.action(0), Some(Action::Paste));
