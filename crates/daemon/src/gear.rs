@@ -2098,7 +2098,7 @@ impl App {
                     sel,
                     hit: row_hit,
                 } => {
-                    if view.zebra && list_pos % 2 == 1 {
+                    if crate::options::BOX_ZEBRA && view.zebra && list_pos % 2 == 1 {
                         pen.rect(scene, r, 0.0, stripe, 0.0);
                     }
                     list_pos += 1;

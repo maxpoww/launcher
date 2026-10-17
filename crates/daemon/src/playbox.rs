@@ -153,7 +153,7 @@ impl App {
                 continue;
             }
             // Zebra on odd rows — first row stays plain, as in both histories.
-            if idx % 2 == 1 {
+            if crate::options::BOX_ZEBRA && idx % 2 == 1 {
                 scene.rects.push(RectInst {
                     rect: Rect::new(rr.x, top, rr.w, bot - top),
                     radius: 0.0,

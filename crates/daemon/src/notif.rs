@@ -1617,7 +1617,7 @@ impl App {
         ];
 
         // Zebra (only when this card is an odd index — the newest, 0, has none).
-        if idx % 2 == 1 && e > 0.01 {
+        if crate::options::BOX_ZEBRA && idx % 2 == 1 && e > 0.01 {
             let top = card_rect.y.max(content.y);
             let bot = (card_rect.y + card_rect.h).min(content.y + content.h);
             if bot > top {
@@ -1871,7 +1871,7 @@ impl App {
         // Zebra: alternate cards get the opaque stripe, clipped to the content
         // region; only the corner meeting the box top rounds (a square overlay
         // trims the rest so interior boundaries stay straight).
-        if idx % 2 == 1 {
+        if crate::options::BOX_ZEBRA && idx % 2 == 1 {
             let top = rect.y.max(content.y);
             let bot = (rect.y + rect.h).min(content.y + content.h);
             if bot > top {
@@ -2057,27 +2057,20 @@ impl App {
     /// Draw the single footer option — the "Clear all" ✕ pill — styled exactly
     /// like a topbar OPTIONS control: a neumorphic circle with the bar's rest/hover
     /// wash and the red fa-times glyph. Fades in with `alpha` (the expand).
-    fn push_notif_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, bright: bool) {
+    fn push_notif_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, _bright: bool) {
         // No divider — the pill floats free on the box fill (like the bar pills).
         let hovered = self.notif.hit == NotifHit::DismissAll;
         // Same unified hover lift as every bar pill.
         let br = self.footer_button_rect(rect);
         let br = if hovered { hover_grow(br) } else { br };
         let radius = br.h / 2.0; // stadium with w == h ⇒ circle
-        push_neumorph(scene, br, radius, bright, alpha);
-        let mut base = if hovered {
-            self.options_hover_wash()
-        } else {
-            self.options_rest_wash()
-        };
-        base[3] *= alpha;
-        scene.rects.push(RectInst {
-            rect: br,
-            radius,
-            color: base,
-            glass: 0.0,
-            border: 0.0,
-        });
+        // (Quiet, 2026-10-16: the icon alone at rest; the wash under the
+        // pointer.)
+        if hovered {
+            let mut base = self.options_hover_wash();
+            base[3] *= alpha;
+            scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
+        }
         // The trash-can glyph, scaled to the enlarged pill. Sized off the resting
         // diameter (not the hover-grown one) so it stays steady, and clipped a
         // touch wider than the pill so it isn't shaved.

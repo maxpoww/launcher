@@ -950,6 +950,12 @@ pub(crate) enum PointerSurface {
     Files(u32),
 }
 
+/// THE QUIET LANGUAGE (Max, 2026-10-16): no zebra in the bar's boxes —
+/// space parts their rows, a wash marks the one under the pointer. (The
+/// zebra stays in Golem Files' list view only.) The striping code is kept
+/// behind this, whole, should a box ever want it back.
+pub(crate) const BOX_ZEBRA: bool = false;
+
 /// The pill modules currently on the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PillId {
@@ -1265,26 +1271,28 @@ fn luminance(c: [f32; 4]) -> f32 {
 /// one, and the outer-plus-inner trick would need an opaque inner fill that
 /// would punch a hole in the box's frosted blur.
 pub(crate) fn push_hover_frame(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha: f32) {
-    /// Line thickness and corner radius, logical px.
-    const W: f32 = 1.0;
+    /// Corner radius, logical px.
     const RADIUS: f32 = 7.0;
-    // No inset: the frame sits ON the card's own edge (the stroke occupies
-    // the outermost pixel), so it traces the card rather than floating
-    // inside it.
-    if r.w <= 2.0 * W || r.h <= 2.0 * W {
+    // THE QUIET LANGUAGE (Max, 2026-10-16): the row under the pointer is
+    // WASHED — a breath of the box's own ink behind it — not framed. (It was
+    // a hairline frame on the card's edge.)
+    if r.w <= 2.0 || r.h <= 2.0 {
         return;
     }
     scene.rects.push(RectInst {
         rect: r,
         radius: RADIUS,
-        color: [ink[0], ink[1], ink[2], alpha],
+        color: [ink[0], ink[1], ink[2], alpha * HOVER_WASH],
         glass: 0.0,
-        border: W,
+        border: 0.0,
     });
 }
 
-/// How present the hovered row's frame is. Restrained, but it has to read at
-/// a glance: a hairline only marks the row if you can actually see it.
+/// How much of the ink the hover wash is, at full presence.
+const HOVER_WASH: f32 = 0.11;
+
+/// How present the hovered row's mark is. Restrained, but it has to read at
+/// a glance.
 pub(crate) const HOVER_FRAME_ALPHA: f32 = 0.55;
 
 /// The hovered line's ink: the SAME colour at full strength — the hover

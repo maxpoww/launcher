@@ -2196,7 +2196,7 @@ impl App {
         }
         // Zebra on odd LIST positions (topmost stays plain) — striping follows
         // what is on screen, so a filtered list still alternates.
-        if pos % 2 == 1 {
+        if crate::options::BOX_ZEBRA && pos % 2 == 1 {
             scene.rects.push(RectInst {
                 rect: Rect::new(rr.x, top, rr.w, bot - top),
                 radius: 0.0,
@@ -2396,20 +2396,13 @@ impl App {
             let hovered = self.clip.hit == hit;
             let br = if hovered { hover_grow(br0) } else { br0 };
             let radius = br.h / 2.0;
-            push_neumorph(scene, br, radius, bright, btn_a);
-            let mut base = if hovered {
-                self.options_hover_wash()
-            } else {
-                self.options_rest_wash()
-            };
-            base[3] *= btn_a;
-            scene.rects.push(RectInst {
-                rect: br,
-                radius,
-                color: base,
-                glass: 0.0,
-                border: 0.0,
-            });
+            // (Quiet, 2026-10-16: a footer button is its icon; the wash only
+            // under the pointer.)
+            if hovered {
+                let mut base = self.options_hover_wash();
+                base[3] *= btn_a;
+                scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
+            }
             let glyph = match hit {
                 ClipHit::Emoji => GLYPH_EMOJI,
                 ClipHit::Dictionary => GLYPH_BOOK,
@@ -2447,7 +2440,7 @@ impl App {
     /// out of the middle button's seat, with a leading magnifier, the query (or
     /// its prompt) and a caret. There is no button to press — the field arrives
     /// because you started typing, and Escape sends it back.
-    fn push_clip_search_field(&self, scene: &mut Scene, rect: Rect, a: f32, bright: bool) {
+    fn push_clip_search_field(&self, scene: &mut Scene, rect: Rect, a: f32, _bright: bool) {
         let t = self.clip.search_t.clamp(0.0, 1.0);
         // Grows from the CENTRE of the button row (no button is at the middle of
         // an even row), so the stretch reads as the footer becoming the field.
@@ -2457,7 +2450,7 @@ impl App {
         let full = self.clip_search_field_rect(rect);
         let fr = lerp_rect(seat, full, t);
         let radius = fr.h / 2.0;
-        push_neumorph(scene, fr, radius, bright, a);
+        // (A field: its faint fill, no shadow under it — the quiet hint.)
         let mut wash = self.options_rest_wash();
         wash[3] *= a;
         scene.rects.push(RectInst {
