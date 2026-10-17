@@ -1347,15 +1347,9 @@ impl Backdrop {
     /// so the washes, the boxes and the ink all follow from it by the one
     /// formula below — and the palette's own ink.
     fn palette() -> Option<Backdrop> {
-        if crate::palette::dynamic() {
-            return None;
-        }
-        let t = crate::palette::current();
-        Some(Backdrop {
-            matched: Some(crate::palette::linear(t.surface())),
-            frost: None,
-            ink: Some(crate::palette::linear(t.ink())),
-        })
+        // (The Shell slider and its look: `palette::shell`.)
+        let (surface, ink) = crate::palette::shell()?;
+        Some(Backdrop { matched: Some(surface), frost: None, ink: Some(ink) })
     }
 
     /// What this surface actually sits on right now: the match if there is

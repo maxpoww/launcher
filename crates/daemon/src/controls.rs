@@ -363,7 +363,7 @@ pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
-            | "colors-apps-look" | "colors-web-look" | "colors-icons-look"
+            | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell" | "colors-shell-look"
     )
 }
 
@@ -1650,6 +1650,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 ("Apps", "colors-apps", "colors-apps-look", apps, picked.apps_dark),
                 ("Web", "colors-web", "colors-web-look", web, picked.web_dark),
                 ("Icons", "colors-icons", "colors-icons-look", picked.icons_tint, picked.icons_dark),
+                ("Shell", "colors-shell", "colors-shell-look", picked.shell_tint.unwrap_or(MADE), picked.shell_dark),
             ] {
                 let caption = format!("{} · {}", tr(name), level_text(level));
                 view.groups.push(Group { caption: Some(caption), ..slider(key, level) });
@@ -1661,7 +1662,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 view.groups.push(Group { beside: true, ..pair });
             }
             let now = picked.palette_id().to_owned();
-            let ground = |p: &crate::palette::Palette| if dark { p.dark[0] } else { p.light[0] };
+            // (The cards sit in the shell: they wear its look.)
+            let card_dark = picked.shell_dark.unwrap_or(dark);
+            let ground = |p: &crate::palette::Palette| if card_dark { p.dark[0] } else { p.light[0] };
             let mut choices = vec![Choice { swatch: Vec::new(), ..choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID) }];
             choices.extend(crate::palette::all().into_iter().map(|p| {
                 let mut swatch = vec![ground(&p)];
@@ -1669,7 +1672,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
             }));
             // Each card as a picture (drawn once, here on the worker).
-            crate::palette_card::wheel(dark);
+            crate::palette_card::wheel(card_dark);
             for c in &choices {
                 if !c.swatch.is_empty() {
                     crate::palette_card::ensure(&c.swatch);

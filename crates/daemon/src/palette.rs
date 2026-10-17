@@ -96,6 +96,12 @@ pub(crate) struct ColorChoice {
     pub web_tint: Option<u8>,
     #[serde(default)]
     pub icons_tint: u8,
+    /// THE SHELL (the dock, the boxes; Max, 2026-10-17): None = as made
+    /// (what it was before this slider), 0 = off (it reads the screen again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_tint: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_dark: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps_dark: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +129,7 @@ fn web_off() -> Option<u8> {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), apps: None, web: None, dynamic: None }
     }
 }
 
@@ -1037,6 +1043,39 @@ static ICON_FILTER: std::sync::Mutex<[[f32; 4]; 7]> = std::sync::Mutex::new([[0.
 
 pub(crate) fn icon_filter() -> [[f32; 4]; 7] {
     ICON_FILTER.lock().map(|f| *f).unwrap_or([[0.0; 4]; 7])
+}
+
+/// THE SHELL'S COLOURS (the dock and the boxes): its surface and its ink,
+/// linear — the palette's variant in the shell's own look, walked to the
+/// Shell slider. None: the shell reads the screen (Dynamic, or the slider
+/// at Off).
+static SHELL: std::sync::Mutex<Option<([f32; 4], [f32; 4])>> = std::sync::Mutex::new(None);
+
+/// The shell's own look: its Dark/Light, else the system's.
+pub(crate) fn shell_dark() -> bool {
+    choice().shell_dark.unwrap_or_else(crate::look::dark)
+}
+
+pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
+    SHELL.lock().ok().and_then(|g| *g)
+}
+
+fn set_shell(picked: &ColorChoice, system_dark: bool) {
+    let want = picked.palette_id();
+    let out = if want == DYNAMIC_ID || picked.shell_tint == Some(0) {
+        None
+    } else {
+        let p = if want == DRAFT_ID { preview() } else { all().into_iter().find(|p| p.id == want) }.unwrap_or_else(golem);
+        let dark = picked.shell_dark.unwrap_or(system_dark);
+        let base = if dark { p.dark } else { p.light };
+        let mut c = tint::walk(&base, p.dark[p.accent], dark, picked.shell_tint);
+        readable(&mut c, dark, if dark { p.accent } else { p.accent_light });
+        let t = Theme { c, accent_slot: if dark { p.accent } else { p.accent_light }, dark, ..current().as_ref().clone() };
+        Some((linear(t.surface()), linear(t.ink())))
+    };
+    if let Ok(mut g) = SHELL.lock() {
+        *g = out;
+    }
 }
 
 fn set_icon_filter(t: &Theme) {
@@ -1963,6 +2002,7 @@ impl crate::App {
             });
         }
         set_icon_filter(&theme);
+        set_shell(&picked, crate::look::dark());
         set_skipped_programs(&self.entries, &choice().skip);
         let changed = set(theme);
         if changed || look_changed {
@@ -1986,7 +2026,7 @@ impl crate::App {
                     c.dynamic = None;
                 }
                 // A slider: "0".."100", "made" (the palette as made); the old "on"/"off" too.
-                "colors-apps" | "colors-web" | "colors-icons" => {
+                "colors-apps" | "colors-web" | "colors-icons" | "colors-shell" => {
                     let level = match value {
                         "made" | "on" => None,
                         "off" => Some(0),
@@ -1999,6 +2039,7 @@ impl crate::App {
                     match key {
                         "colors-apps" => c.apps_tint = level,
                         "colors-web" => c.web_tint = level,
+                        "colors-shell" => c.shell_tint = level,
                         _ => c.icons_tint = level.unwrap_or(50),
                     }
                 }
@@ -2012,7 +2053,7 @@ impl crate::App {
                     set_skipped_programs(&self.entries, &c.skip);
                 }
                 // A slider's own look: "dark" / "light" (from then on it is the owner's).
-                "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
+                "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" => {
                     let dark = match value {
                         "dark" => Some(true),
                         "light" => Some(false),
@@ -2021,6 +2062,7 @@ impl crate::App {
                     match key {
                         "colors-apps-look" => c.apps_dark = dark,
                         "colors-web-look" => c.web_dark = dark,
+                        "colors-shell-look" => c.shell_dark = dark,
                         _ => c.icons_dark = dark,
                     }
                 }

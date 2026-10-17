@@ -1716,7 +1716,7 @@ impl Panel {
                         // A palette's card is a picture too, once drawn.
                         image: if swatches {
                             let card = if c.value == crate::palette::DYNAMIC_ID {
-                                crate::palette_card::wheel(crate::look::dark())
+                                crate::palette_card::wheel(crate::palette::shell_dark())
                             } else {
                                 crate::palette_card::path(&c.swatch).filter(|p| !c.swatch.is_empty() && p.is_file())
                             };
@@ -3864,7 +3864,7 @@ impl App {
                     *t = None;
                 }
             }
-            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" => {
+            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-shell" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {
