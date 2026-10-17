@@ -142,7 +142,9 @@ pub(crate) fn save(
                 .context("keeping the original")?;
             path.to_path_buf()
         }
-        SaveAs::Copy => crate::peek_edit::copy_path(path, word),
+        // (A PDF stays a PDF: the picture's copy path made it ".jpg" — found
+        // on the laptops, 2026-10-17.)
+        SaveAs::Copy => crate::peek_text::copy_path(path, word),
     };
     std::fs::rename(&tmp, &to).context("writing")?;
     Ok(to)

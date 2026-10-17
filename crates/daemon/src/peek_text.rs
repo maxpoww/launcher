@@ -163,8 +163,10 @@ fn save(path: &Path, text: &str, how: SaveAs, word: &str) -> anyhow::Result<Path
     Ok(to)
 }
 
-/// "name (edited).ext" beside it, numbered if taken (any ending kept).
-fn copy_path(path: &Path, word: &str) -> PathBuf {
+/// "name (edited).ext" beside it, numbered if taken (any ending kept — a
+/// text's, a PDF's: `peek_edit::copy_path` is a PICTURE's, a JPEG when its
+/// own kind cannot be written).
+pub(crate) fn copy_path(path: &Path, word: &str) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -653,6 +655,12 @@ mod tests {
         assert_eq!(
             copy_path(&d.join("t.txt"), "edited").file_name().unwrap(),
             "t (edited).txt"
+        );
+        assert_eq!(
+            copy_path(&d.join("report.pdf"), "edited")
+                .file_name()
+                .unwrap(),
+            "report (edited).pdf"
         );
         assert_eq!(
             copy_path(&d.join("Makefile"), "edited")

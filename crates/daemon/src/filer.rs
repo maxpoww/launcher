@@ -2087,7 +2087,9 @@ pub(crate) fn by_name(a: &str, b: &str) -> std::cmp::Ordering {
 /// after a space or a mark when one is near its end), the second the rest,
 /// cut with an ellipsis if that is still too long.
 pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
-    if measure(name) <= max_w {
+    // (Clear of the edge: see `desktop::FIT_SLACK`.)
+    let room = max_w - crate::desktop::FIT_SLACK;
+    if measure(name) <= room {
         return (name.to_owned(), String::new());
     }
     let chars: Vec<char> = name.chars().collect();
@@ -2095,7 +2097,7 @@ pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
     let (mut lo, mut hi) = (1usize, chars.len());
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if measure(&chars[..mid].iter().collect::<String>()) <= max_w {
+        if measure(&chars[..mid].iter().collect::<String>()) <= room {
             lo = mid;
         } else {
             hi = mid - 1;
@@ -6658,10 +6660,10 @@ mod tests {
     fn a_long_name_takes_two_lines_and_breaks_at_a_mark() {
         // Ten wide a letter: 100 holds ten letters.
         let mut measure = |t: &str| t.chars().count() as f32 * 10.0;
-        assert_eq!(two_lines("short.txt", 100.0, &mut measure), ("short.txt".to_owned(), String::new()));
-        let (a, b) = two_lines("holiday photos.zip", 100.0, &mut measure);
+        assert_eq!(two_lines("short.txt", 100.0 + crate::desktop::FIT_SLACK, &mut measure), ("short.txt".to_owned(), String::new()));
+        let (a, b) = two_lines("holiday photos.zip", 100.0 + crate::desktop::FIT_SLACK, &mut measure);
         assert_eq!((a.as_str(), b.as_str()), ("holiday", "photos.zip"));
-        let (a, b) = two_lines("abcdefghijklmnopqrstuvwxyz0123456789", 100.0, &mut measure);
+        let (a, b) = two_lines("abcdefghijklmnopqrstuvwxyz0123456789", 100.0 + crate::desktop::FIT_SLACK, &mut measure);
         assert_eq!(a, "abcdefghij");
         assert!(b.ends_with('…') && b.chars().count() <= 10);
     }

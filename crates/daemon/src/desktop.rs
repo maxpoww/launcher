@@ -1816,7 +1816,15 @@ fn label_max_w(cell: &Rect) -> f32 {
 /// cached shaping). Not the grid's per-character estimate: file names are
 /// any length in any script, and the estimate let "Holiday photos" wrap
 /// onto a second line the one-line label never shows.
+/// What a fitted name keeps clear of its width (logical px): a name that
+/// fits by less, measured at its logical size, can be wider drawn at a
+/// fractional scale — and the renderer then breaks it into a line that is
+/// never shown ("h-video-1080p.mp4" fit 102.5 by 0.4 px on the Acer at 0.67
+/// and came out as "h-": 2026-10-17).
+pub(crate) const FIT_SLACK: f32 = 1.5;
+
 pub(crate) fn fit_label(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
+    let max_w = max_w - FIT_SLACK;
     if measure(text) <= max_w {
         return text.to_owned();
     }
@@ -6221,14 +6229,16 @@ mod tests {
     fn fit_label_cuts_by_measured_width_with_an_ellipsis() {
         // A "font" 6 px per char, the ellipsis included.
         let mut measure = |t: &str| t.chars().count() as f32 * 6.0;
-        assert_eq!(fit_label("short", 60.0, &mut measure), "short");
+        // (Widths given with the slack kept clear added back.)
+        let w = |x: f32| x + FIT_SLACK;
+        assert_eq!(fit_label("short", w(60.0), &mut measure), "short");
         // 10 chars fit: 9 of the name plus "…".
-        assert_eq!(fit_label("Holiday photos", 60.0, &mut measure), "Holiday p…");
+        assert_eq!(fit_label("Holiday photos", w(60.0), &mut measure), "Holiday p…");
         // A trailing space before the cut is trimmed, not shown.
-        assert_eq!(fit_label("Holiday photos", 54.0, &mut measure), "Holiday…");
+        assert_eq!(fit_label("Holiday photos", w(54.0), &mut measure), "Holiday…");
         // Nothing fits but the ellipsis itself.
-        assert_eq!(fit_label("abc", 6.0, &mut measure), "…");
+        assert_eq!(fit_label("abc", w(6.0), &mut measure), "…");
         // Multi-byte names are cut on characters, never inside one.
-        assert_eq!(fit_label("héllo wörld", 36.0, &mut measure), "héllo…");
+        assert_eq!(fit_label("héllo wörld", w(36.0), &mut measure), "héllo…");
     }
 }
