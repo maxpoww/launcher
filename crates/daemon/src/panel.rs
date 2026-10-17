@@ -2501,13 +2501,49 @@ impl Panel {
                         rect(out, x + k as f32 * w, y0, w + 0.5, r.h, if k == 0 || k == n - 1 { radius } else { 0.0 }, lin(c, 1.0));
                     }
                 } else {
-                    rect(out, x, y0, r.w, r.h, radius, lin(colours[0], 1.0));
+                    // PAPER (the approved card, ~/Golem/work/palettes): the
+                    // ground, lit from above; the soul as tall capsules
+                    // fanned like a deck — the first on top — each with a
+                    // sheen, a lit top edge and its shadow cast to the left;
+                    // a soft oval shadow under the fan.
+                    let ground = colours[0];
+                    let bright = crate::palette::rel_lum(ground) > 0.35;
+                    rect(out, x, y0, r.w, r.h, radius, lin(ground, 1.0));
+                    let white = |a: f32| [1.0, 1.0, 1.0, a * ca];
+                    let black = |a: f32| [0.0, 0.0, 0.0, a * ca];
+                    // The light from above: rings of a radial lift, widest faintest.
+                    let lift = if bright { 0.16 } else { 0.035 };
+                    for (k, f) in [1.0f32, 0.72, 0.48].iter().enumerate() {
+                        let (lw, lh) = (r.w * 0.9 * f, r.h * 0.7 * f);
+                        rect(out, x + (r.w - lw) / 2.0, y0, lw, lh * 0.55, (lh * 0.55 / 2.0).min(radius * 2.0), white(lift * (1.0 + k as f32 * 0.4)));
+                    }
                     let soul = &colours[1..];
-                    let band = r.h * 0.38;
-                    let pad = r.w * 0.1;
-                    let w = (r.w - 2.0 * pad) / soul.len().max(1) as f32;
-                    for (k, c) in soul.iter().enumerate() {
-                        rect(out, x + pad + k as f32 * w, y0 + r.h - pad * 0.6 - band, w, band, 2.0 * s, lin(*c, 1.0));
+                    let n = soul.len().max(1) as f32;
+                    let (pw, ph) = (r.w * 0.15, r.h * 0.62);
+                    let step = pw * 0.5;
+                    let span = pw + (n - 1.0) * step;
+                    let (px0, py) = (x + (r.w - span) / 2.0, y0 + (r.h - ph) / 2.0);
+                    // The shadow the fan leaves on the paper.
+                    for (sw, a) in [(1.0f32, 0.16f32), (0.8, 0.16), (0.6, 0.18)] {
+                        let w = r.w * 0.52 * sw;
+                        let h = r.h * 0.1 * (0.6 + 0.4 * sw);
+                        rect(out, x + (r.w - w) / 2.0, y0 + r.h * 0.86 - h / 2.0, w, h, h / 2.0, black(a));
+                    }
+                    let cap = pw / 2.0;
+                    // The last first, so the first lies on top.
+                    for (k, c) in soul.iter().enumerate().rev() {
+                        let cx = px0 + k as f32 * step;
+                        // Its shadow, cast to the left (soft: three passes).
+                        for (o, a) in [(4.0f32, 0.10f32), (2.6, 0.12), (1.4, 0.14)] {
+                            rect(out, cx - o * s, py + 0.5 * o * s, pw, ph, cap, black(a));
+                        }
+                        // The lit top edge (a hair of white above the body)…
+                        rect(out, cx, py, pw, ph, cap, white(0.15));
+                        // …the body…
+                        rect(out, cx, py + 1.0 * s, pw, ph - 1.0 * s, cap, lin(*c, 1.0));
+                        // …its sheen, light at the top, a shade at the foot.
+                        rect(out, cx, py + 1.0 * s, pw, ph * 0.35, cap, white(0.12));
+                        rect(out, cx, py + ph * 0.7, pw, ph * 0.3, cap, black(0.10));
                     }
                 }
                 if on || keyed {
