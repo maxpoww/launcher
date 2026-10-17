@@ -1638,7 +1638,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Colours" => {
             let dark = dark_now();
             let picked = crate::palette::choice();
-            view.subtitle = tr("How everything looks. Some apps change the next time they open.").to_owned();
+            view.subtitle = tr("How everything looks. Some apps need a restart to show changes.").to_owned();
             view.groups.push(Group { main: true, ..look_pair(None, "dark", dark, "on", "off") });
             // The three sliders (Max, 2026-10-16): 0 = Off (the makers' own
             // colours), the middle = the palette as made, the end = full
