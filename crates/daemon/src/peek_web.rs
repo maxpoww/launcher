@@ -71,8 +71,9 @@ fn profile() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Where the picture of `path` as it is now is kept.
-fn kept(path: &Path) -> Option<PathBuf> {
+/// Where the picture of `path` as it is now is kept (`salt`: what else it
+/// depends on — the colours a document is drawn in).
+fn kept(path: &Path, salt: &str) -> Option<PathBuf> {
     let meta = std::fs::metadata(path).ok()?;
     let changed = meta
         .modified()
@@ -87,6 +88,7 @@ fn kept(path: &Path) -> Option<PathBuf> {
         .bytes()
         .chain(meta.len().to_le_bytes())
         .chain(changed.to_le_bytes())
+        .chain(salt.bytes())
     {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0100_0000_01b3);
@@ -94,23 +96,91 @@ fn kept(path: &Path) -> Option<PathBuf> {
     Some(crate::apps::cache_base().join(format!("waverunner/web/{h:016x}.png")))
 }
 
-/// The first screen of the page at `path`, as Seam draws it.
-pub(crate) fn page(path: &Path) -> Option<image::RgbaImage> {
-    let out = kept(path)?;
-    if let Ok(img) = image::open(&out) {
+/// What Quick Look shows of `path` drawn as a page, and the words for its
+/// head: a web page as it is; Markdown formatted; a table (CSV, TSV) as a
+/// table. `None`: not one of these, or it could not be drawn.
+pub(crate) fn drawn(path: &Path, name: &str) -> Option<(image::RgbaImage, String)> {
+    use crate::i18n::{fill, tr};
+    let lower = name.to_ascii_lowercase();
+    if is_web(&lower) {
+        let out = kept(path, "")?;
+        return Some((shoot(path, &out, VIEW)?, tr("as a web page").to_owned()));
+    }
+    if is_markdown(&lower) {
+        let style = style();
+        let out = kept(path, &style)?;
+        let img = made(&out, VIEW_DOC, || markdown(path, &style))?;
+        return Some((img, tr("formatted").to_owned()));
+    }
+    if is_table(&lower) {
+        let style = style();
+        let out = kept(path, &style)?;
+        let rows = std::cell::Cell::new(0usize);
+        // (A short table on a short page: as tall as its rows, a screen at most.)
+        let lines = std::fs::read_to_string(path).map_or(0, |t| t.lines().count());
+        let view = (VIEW.0, (96 + 34 * lines as u32).clamp(240, VIEW.1));
+        let img = made(&out, view, || {
+            let (html, n) = table(path, &lower, &style)?;
+            rows.set(n);
+            Some(html)
+        })?;
+        let words = match rows.get() {
+            0 => tr("as a table").to_owned(),
+            n => fill(tr("{n} rows"), &[("n", &n)]),
+        };
+        return Some((img, words));
+    }
+    None
+}
+
+/// Whether a file of this name is Markdown.
+pub(crate) fn is_markdown(lower: &str) -> bool {
+    [".md", ".markdown", ".mkd"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+}
+
+/// Whether a file of this name is a table of values.
+pub(crate) fn is_table(lower: &str) -> bool {
+    [".csv", ".tsv"].iter().any(|e| lower.ends_with(e))
+}
+
+/// A document's page: its screen, in CSS pixels (a page's shape).
+const VIEW_DOC: (u32, u32) = (900, 1100);
+
+/// The page `html` makes, drawn (or read from where it was kept as `out`).
+fn made(
+    out: &Path,
+    view: (u32, u32),
+    html: impl FnOnce() -> Option<String>,
+) -> Option<image::RgbaImage> {
+    if let Ok(img) = image::open(out) {
+        return Some(img.to_rgba8());
+    }
+    let page = out.with_extension(format!("{}.html", crate::peek_edit::nonce()));
+    std::fs::create_dir_all(out.parent()?).ok()?;
+    std::fs::write(&page, html()?).ok()?;
+    let img = shoot(&page, out, view);
+    let _ = std::fs::remove_file(&page);
+    img
+}
+
+/// The page in the file `page`, drawn `view` big, kept as `out`.
+fn shoot(page: &Path, out: &Path, view: (u32, u32)) -> Option<image::RgbaImage> {
+    if let Ok(img) = image::open(out) {
         return Some(img.to_rgba8());
     }
     let engine = engine()?;
     let profile = profile()?;
     std::fs::create_dir_all(out.parent()?).ok()?;
     let tmp = out.with_extension(format!("{}.png", crate::peek_edit::nonce()));
-    let url = format!("file://{}", path.display());
+    let url = format!("file://{}", page.display());
     let mut child = crate::peek_edit::dies_with_us(Command::new(engine))
         .args(["--headless", "--no-remote", "--profile"])
         .arg(&profile)
         .args([
             "--window-size",
-            &format!("{},{}", VIEW.0, VIEW.1),
+            &format!("{},{}", view.0, view.1),
             "--screenshot",
         ])
         .arg(&tmp)
@@ -129,7 +199,7 @@ pub(crate) fn page(path: &Path) -> Option<image::RgbaImage> {
                 std::thread::sleep(Duration::from_millis(25));
             }
             _ => {
-                tracing::warn!("quick look: the page {} took too long", path.display());
+                tracing::warn!("quick look: the page {} took too long", page.display());
                 let _ = child.kill();
                 let _ = child.wait();
                 break false;
@@ -138,11 +208,140 @@ pub(crate) fn page(path: &Path) -> Option<image::RgbaImage> {
     };
     let img = done.then(|| image::open(&tmp).ok()).flatten();
     if img.is_some() {
-        let _ = std::fs::rename(&tmp, &out);
+        let _ = std::fs::rename(&tmp, out);
     } else {
         let _ = std::fs::remove_file(&tmp);
     }
     Some(img?.to_rgba8())
+}
+
+/// The stylesheet documents are drawn with: the palette's own colours, in
+/// the look in use (so a document reads like the rest of Golem).
+fn style() -> String {
+    use crate::palette::hex;
+    let t = crate::palette::current();
+    let c = |i: usize| format!("#{}", hex(t.c[i]));
+    let accent = format!("#{}", hex(t.accent()));
+    let (bg, ink, head, dim, rule, code, zebra) = (c(0), c(5), c(6), c(4), c(2), c(1), c(1));
+    format!(
+        "html{{background:{bg};color:{ink};}}\
+         body{{font:16px/1.6 'DejaVu Sans',sans-serif;margin:0;padding:40px 56px;}}\
+         h1,h2,h3,h4{{color:{head};line-height:1.25;margin:1.2em 0 .5em;}}\
+         h1{{font-size:2em;border-bottom:1px solid {rule};padding-bottom:.3em;margin-top:0}}\
+         h2{{font-size:1.5em;border-bottom:1px solid {rule};padding-bottom:.2em}}\
+         a{{color:{accent};}}\
+         code,pre{{font-family:'JetBrainsMono Nerd Font Mono',monospace;font-size:.88em;background:{code};border-radius:6px;}}\
+         code{{padding:.15em .4em}} pre{{padding:14px 16px;overflow:hidden}} pre code{{padding:0;background:none}}\
+         blockquote{{margin:0;padding:0 1em;border-left:4px solid {rule};color:{dim};}}\
+         img{{max-width:100%}} hr{{border:0;border-top:1px solid {rule}}}\
+         table{{border-collapse:collapse;font-size:14px}} th,td{{border:1px solid {rule};padding:6px 12px;text-align:left}} table.values td,table.values th{{white-space:nowrap}}\
+         th{{background:{code};color:{head}}} tr:nth-child(even) td{{background:{zebra}}}\
+         td.n{{text-align:right;font-variant-numeric:tabular-nums}}",
+    )
+}
+
+/// Markdown as a page (its pictures found beside it).
+fn markdown(path: &Path, style: &str) -> Option<String> {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut text = String::new();
+    use std::io::Read;
+    std::fs::File::open(path)
+        .ok()?
+        .take(2 << 20)
+        .read_to_string(&mut text)
+        .ok()?;
+    let mut body = String::new();
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES;
+    html::push_html(&mut body, Parser::new_ext(&text, options));
+    Some(page_of(path, style, &body))
+}
+
+/// A table of values (comma, semicolon or tab between them) as a table, its
+/// first row the head; its first `ROWS` rows, and how many there are.
+fn table(path: &Path, lower: &str, style: &str) -> Option<(String, usize)> {
+    const ROWS: usize = 300;
+    let text = std::fs::read_to_string(path).ok()?;
+    let first = text.lines().next().unwrap_or("");
+    let sep = if lower.ends_with(".tsv") {
+        '\t'
+    } else {
+        // (The one the first line has most of.)
+        [',', ';', '\t']
+            .into_iter()
+            .max_by_key(|c| first.matches(*c).count())
+            .unwrap_or(',')
+    };
+    let rows = parse_rows(&text, sep);
+    let n = rows.len().saturating_sub(1);
+    let mut body = String::from("<table class=values>");
+    for (i, row) in rows.iter().take(ROWS + 1).enumerate() {
+        body.push_str("<tr>");
+        for cell in row {
+            let tag = if i == 0 { "th" } else { "td" };
+            let num = i > 0 && !cell.is_empty() && cell.trim().parse::<f64>().is_ok();
+            body.push_str(&format!(
+                "<{tag}{}>{}</{tag}>",
+                if num { " class=n" } else { "" },
+                escape(cell)
+            ));
+        }
+        body.push_str("</tr>");
+    }
+    body.push_str("</table>");
+    Some((page_of(path, style, &body), n))
+}
+
+/// Rows of cells: `sep` between them, quotes around a cell that holds one
+/// (a doubled quote is a quote), a line end inside quotes kept.
+fn parse_rows(text: &str, sep: char) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cell.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            c if c == sep && !quoted => row.push(std::mem::take(&mut cell)),
+            '\r' if !quoted => {}
+            '\n' if !quoted => {
+                row.push(std::mem::take(&mut cell));
+                rows.push(std::mem::take(&mut row));
+            }
+            c => cell.push(c),
+        }
+    }
+    if !cell.is_empty() || !row.is_empty() {
+        row.push(cell);
+        rows.push(row);
+    }
+    rows
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The whole page around `body`: its colours, and where its own pictures
+/// and links are looked for (the document's folder).
+fn page_of(path: &Path, style: &str, body: &str) -> String {
+    let base = path
+        .parent()
+        .map(|d| format!("file://{}/", d.display()))
+        .unwrap_or_default();
+    format!(
+        "<!doctype html><html><head><meta charset=utf-8><base href=\"{}\"><style>{style}</style></head><body>{body}</body></html>",
+        escape(&base)
+    )
 }
 
 #[cfg(test)]
@@ -154,5 +353,28 @@ mod tests {
         assert!(is_web("index.HTML"));
         assert!(is_web("a.htm"));
         assert!(!is_web("notes.md"));
+    }
+
+    #[test]
+    fn a_table_reads_quotes_and_line_ends() {
+        let rows = parse_rows(
+            "a,b\n\"x, y\",\"say \"\"hi\"\"\"\r\n1,\"two\nlines\"\n",
+            ',',
+        );
+        assert_eq!(
+            rows,
+            vec![
+                vec!["a".to_owned(), "b".to_owned()],
+                vec!["x, y".to_owned(), "say \"hi\"".to_owned()],
+                vec!["1".to_owned(), "two\nlines".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_and_tables_are_known() {
+        assert!(is_markdown("readme.md"));
+        assert!(is_table("data.csv"));
+        assert!(!is_table("data.json"));
     }
 }

@@ -717,18 +717,14 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         }
         // A WEB PAGE: as Seam shows it (`peek_web`); its source under the
         // pencil. (Not drawn: as text, as before.)
-        if crate::peek_web::is_web(&name) {
-            if let Some(img) = crate::peek_web::page(path) {
+        // So are Markdown (formatted) and a table of values (a table).
+        if let Some((img, words)) = crate::peek_web::drawn(path, &name) {
+            {
                 let own = img.dimensions();
                 return Prepared {
                     own,
                     whole_text: written_whole(path, size),
-                    ..picture(
-                        img,
-                        format!("{kind} · {size_text} · {}", tr("as a web page")),
-                        app,
-                        0,
-                    )
+                    ..picture(img, format!("{kind} · {size_text} · {words}"), app, 0)
                 };
             }
         }

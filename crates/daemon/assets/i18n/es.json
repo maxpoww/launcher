@@ -997,5 +997,8 @@
   "No permission to open it": "Sin permiso para abrirla",
   "No permission to read it": "Sin permiso para leerlo",
   "(missing)": "(no existe)",
-  "as a web page": "como página web"
+  "as a web page": "como página web",
+  "formatted": "con formato",
+  "as a table": "como tabla",
+  "{n} rows": "{n} filas"
 }
