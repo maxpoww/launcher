@@ -369,7 +369,7 @@ fn is_picture(name: &str) -> bool {
     crate::thumb_more::is_raw(&lower)
         || lower.ends_with(".svg")
         // (What `image` reads, also where no MIME database is installed.)
-        || [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico", ".tga", ".qoi", ".pnm", ".ppm"]
+        || [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".jxl", ".ico", ".tga", ".qoi", ".pnm", ".ppm"]
             .iter()
             .any(|e| lower.ends_with(e))
         || crate::thumb_more::mime_of(&lower).is_some_and(|m| m.starts_with("image/"))
@@ -465,6 +465,19 @@ fn decode(path: &Path, max: (u32, u32)) -> Option<(image::RgbaImage, (u32, u32))
     }
     // (Turned as its camera says.)
     let Some(img) = kinds::open_oriented(path) else {
+        // JPEG XL: libjxl's own decoder, whole, then brought to size.
+        if name.ends_with(".jxl") {
+            let img = kinds::jxl_picture(path)?;
+            let own = img.dimensions();
+            let (w, h) = tile_fit(own, max);
+            let mut img = if (w, h) == own {
+                img
+            } else {
+                image::imageops::thumbnail(&img, w, h)
+            };
+            premultiply(&mut img);
+            return Some((img, own));
+        }
         // What `image` cannot read — a phone's HEIC — FFMPEG can: its own
         // size asked first, then decoded straight at the size it is shown.
         let own = kinds::probe(path)?.size?;

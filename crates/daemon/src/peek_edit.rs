@@ -457,6 +457,9 @@ pub(crate) fn whole_picture(path: &std::path::Path) -> Option<RgbaImage> {
     if let Some(img) = crate::peek_kinds::open_oriented(path) {
         return Some(img.to_rgba8());
     }
+    if name.ends_with(".jxl") {
+        return crate::peek_kinds::jxl_picture(path);
+    }
     // A phone's HEIC: through FFMPEG, whole (it is only ever saved as a copy).
     let own = crate::peek_kinds::probe(path)?.size?;
     crate::peek_kinds::ffmpeg_still(path, own)

@@ -348,7 +348,8 @@ impl App {
             || name.ends_with(".gif")
             || name.ends_with(".avif")
             || name.ends_with(".heic")
-            || name.ends_with(".heif");
+            || name.ends_with(".heif")
+            || name.ends_with(".jxl");
         let shown_picture = self.peek_shown().is_some_and(|(_, p)| {
             // (Not a moving picture: saved, it would stand still.)
             matches!(p.body, crate::quicklook::Body::Picture(_))

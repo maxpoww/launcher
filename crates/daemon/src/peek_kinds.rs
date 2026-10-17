@@ -468,6 +468,74 @@ pub(crate) fn ffmpeg_still(path: &Path, size: (u32, u32)) -> Option<image::RgbaI
     image::RgbaImage::from_raw(size.0, size.1, out.stdout)
 }
 
+/// A JPEG XL picture, whole, as `djxl` (libjxl's own, Golem's home brings
+/// it) decodes it: 8-bit PAM through a pipe, turned as the picture says.
+pub(crate) fn jxl_picture(path: &Path) -> Option<image::RgbaImage> {
+    if !crate::launch::on_path("djxl") {
+        return None;
+    }
+    let out = crate::peek_edit::dies_with_us(Command::new("djxl"))
+        .arg(path)
+        .args([
+            "-",
+            "--output_format",
+            "pam",
+            "--bits_per_sample",
+            "8",
+            "--quiet",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    pam_rgba(&out.stdout)
+}
+
+/// An 8-bit PAM (`P7`, depth 1–4) as RGBA.
+pub(crate) fn pam_rgba(data: &[u8]) -> Option<image::RgbaImage> {
+    let end = data.windows(7).position(|w| w == b"ENDHDR\n")?;
+    let head = std::str::from_utf8(&data[..end]).ok()?;
+    let mut lines = head.lines();
+    if lines.next()? != "P7" {
+        return None;
+    }
+    let (mut w, mut h, mut depth, mut max) = (0u32, 0u32, 0usize, 0u32);
+    for line in lines {
+        let mut words = line.split_whitespace();
+        let (Some(k), Some(v)) = (words.next(), words.next()) else {
+            continue;
+        };
+        match k {
+            "WIDTH" => w = v.parse().ok()?,
+            "HEIGHT" => h = v.parse().ok()?,
+            "DEPTH" => depth = v.parse().ok()?,
+            "MAXVAL" => max = v.parse().ok()?,
+            _ => {}
+        }
+    }
+    if max != 255 || !(1..=4).contains(&depth) || w == 0 || h == 0 {
+        return None;
+    }
+    let px = &data[end + 7..];
+    let n = (w as usize).checked_mul(h as usize)?;
+    if px.len() < n * depth {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(n * 4);
+    for p in px[..n * depth].chunks_exact(depth) {
+        match depth {
+            1 => rgba.extend_from_slice(&[p[0], p[0], p[0], 255]),
+            2 => rgba.extend_from_slice(&[p[0], p[0], p[0], p[1]]),
+            3 => rgba.extend_from_slice(&[p[0], p[1], p[2], 255]),
+            _ => rgba.extend_from_slice(p),
+        }
+    }
+    image::RgbaImage::from_raw(w, h, rgba)
+}
+
 pub(crate) fn probe(path: &Path) -> Option<Probe> {
     let p = path.to_str()?;
     let text = output(
@@ -959,6 +1027,17 @@ pub(crate) fn thumbnailed(path: &Path, max: (u32, u32)) -> Option<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pam_reads_as_rgba() {
+        let mut pam =
+            b"P7\nWIDTH 2\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n".to_vec();
+        pam.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+        let img = pam_rgba(&pam).unwrap();
+        assert_eq!(img.dimensions(), (2, 1));
+        assert_eq!(img.as_raw(), &vec![1, 2, 3, 255, 4, 5, 6, 255]);
+        assert!(pam_rgba(b"P6\n2 1\n255\n").is_none());
+    }
 
     #[test]
     fn a_big_jpeg_is_decoded_small_and_its_shape_kept() {
