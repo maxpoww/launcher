@@ -316,11 +316,10 @@ pub(crate) struct QuickLook {
     /// The mono font's width of a character at the text's size (measured
     /// once the top surface's renderer is at hand).
     pub(crate) char_w: f32,
-    /// Code's coloured pieces placed: per line of the file shown, where
+    /// Code's coloured pieces placed: for a line and where it is cut, where
     /// each piece begins and ends (measured in the font: no font is sure to
-    /// be monospaced); `code_of` says which file.
-    code_x: HashMap<usize, Vec<f32>>,
-    code_of: Option<PathBuf>,
+    /// be monospaced). Keyed by the words, so it holds while text is written.
+    code_x: HashMap<(String, Vec<u16>), Vec<f32>>,
 }
 
 impl QuickLook {
@@ -1056,10 +1055,7 @@ impl App {
         }
         // (A reading of it already on its way is of the old file: asked again.)
         self.peek.asked.retain(|k| k.0 != path);
-        // (Code measured of the old file is not the new one's.)
-        if self.peek.code_of.as_deref() == Some(path) {
-            self.peek.code_of = None;
-        }
+
         self.desktop_top.peek_tiles = None;
     }
 
@@ -1758,41 +1754,48 @@ impl App {
     /// Put what is shown in the top surface's layers.
     /// The mono font's width of a character (a guess until measured).
     /// Measure where code's coloured pieces begin and end on the lines in
-    /// view that are not measured yet (once per line of a file).
+    /// view (the shown file's, or the text being written's) not measured yet.
     fn peek_code_measure(&mut self) {
-        let Some(up) = self.peek.up.as_ref() else {
-            return;
-        };
-        if self.peek.code_of.as_ref() != Some(&up.path) {
-            self.peek.code_x.clear();
-            self.peek.code_of = Some(up.path.clone());
+        let mut want: Vec<(String, Vec<u16>)> = Vec::new();
+        if let Some(t) = self.peek.up.as_mut().and_then(|u| u.text_edit.as_mut()) {
+            // Written text: coloured again when it changed.
+            t.recolor();
+            let first = (t.scroll / crate::peek_text::LINE).floor().max(0.0) as usize;
+            for n in first..first + 90 {
+                if let (Some(line), Some(spans)) = (t.lines.get(n), t.syntax.get(n)) {
+                    if !spans.is_empty() {
+                        want.push((crate::peek_text::shown(line), cuts_of(spans)));
+                    }
+                }
+            }
+        } else if let Some((_, p)) = self.peek_shown() {
+            let first = self
+                .peek
+                .up
+                .as_ref()
+                .map_or(0, |u| (u.scroll / TEXT_LINE).floor().max(0.0) as usize);
+            if let Body::Text { lines } = &p.body {
+                // (A screenful and a half: what scrolls in next is ready.)
+                for (line, spans) in lines.iter().zip(&p.syntax).skip(first).take(90) {
+                    if !spans.is_empty() {
+                        want.push((line.clone(), cuts_of(spans)));
+                    }
+                }
+            }
         }
-        let first = (up.scroll / TEXT_LINE).floor().max(0.0) as usize;
-        let Some((_, p)) = self.peek_shown() else {
-            return;
-        };
-        let Body::Text { lines } = &p.body else {
-            return;
-        };
-        if p.syntax.is_empty() {
+        want.retain(|k| !self.peek.code_x.contains_key(k));
+        if want.is_empty() {
             return;
         }
-        // (A screenful and a half: what scrolls in next is ready.)
-        let work: Vec<(usize, Vec<char>, Vec<u16>)> = (first..(first + 90).min(lines.len()))
-            .filter(|n| !self.peek.code_x.contains_key(n))
-            .filter_map(|n| {
-                let spans = p.syntax.get(n).filter(|s| !s.is_empty())?;
-                let cuts = spans
-                    .iter()
-                    .flat_map(|s| [s.from, s.from + s.len])
-                    .collect();
-                Some((n, lines[n].chars().collect(), cuts))
-            })
-            .collect();
         let Some(renderer) = self.desktop_top.renderer.as_mut() else {
             return;
         };
-        for (n, chars, cuts) in work {
+        // (Lines of files long gone are let go now and then.)
+        if self.peek.code_x.len() > 4000 {
+            self.peek.code_x.clear();
+        }
+        for (line, cuts) in want {
+            let chars: Vec<char> = line.chars().collect();
             let xs = cuts
                 .iter()
                 .map(|&c| {
@@ -1800,8 +1803,17 @@ impl App {
                     renderer.measure_text(&prefix, TEXT_PX, Some(crate::options::NERD))
                 })
                 .collect();
-            self.peek.code_x.insert(n, xs);
+            self.peek.code_x.insert((line, cuts), xs);
         }
+    }
+
+    /// Where `line`, cut by `spans`, has its pieces (once measured).
+    pub(crate) fn code_xs(
+        &self,
+        line: &str,
+        spans: &[crate::peek_syntax::Span],
+    ) -> Option<&Vec<f32>> {
+        self.peek.code_x.get(&(line.to_owned(), cuts_of(spans)))
     }
 
     pub(crate) fn peek_char_w(&self) -> f32 {
@@ -2331,70 +2343,28 @@ impl App {
                 let shown = ((body.h / TEXT_LINE).ceil() as usize + 2)
                     .min(lines.len().saturating_sub(first));
                 let clip = Rect::new(body.x, body.y + 4.0, body.w, body.h - 10.0);
-                let theme = crate::palette::current();
-                let hue = |class: crate::peek_syntax::Class| {
-                    use crate::peek_syntax::Class;
-                    let slot = match class {
-                        // (base16's comment grey is too faint on the frame.)
-                        Class::Comment => 0x04,
-                        Class::Str => 0x0B,
-                        Class::Num => 0x09,
-                        Class::Key => 0x0E,
-                        Class::Type => 0x0A,
-                    };
-                    let mut c = crate::palette::linear(theme.c[slot]);
-                    // (A comment a third of the way to the ink: quieter
-                    // than the code, still read.)
-                    if class == Class::Comment {
-                        for i in 0..3 {
-                            c[i] += (ink[i] - c[i]) * 0.35;
-                        }
-                    }
-                    c[3] = ink[3];
-                    c
-                };
                 for (n, line) in lines.iter().enumerate().skip(first).take(shown) {
                     let y = body.y + TEXT_PAD + n as f32 * TEXT_LINE - up.scroll;
                     // CODE: the line in pieces, each in its colour, each
                     // placed where it was measured to begin (not measured
                     // yet: plain this once).
-                    let spans = prepared
+                    if let Some(spans) = prepared
                         .and_then(|p| p.syntax.get(n))
                         .filter(|s| !s.is_empty())
-                        .zip(self.peek.code_x.get(&n));
-                    if let Some((spans, xs)) = spans {
-                        let chars: Vec<char> = line.chars().collect();
-                        let room = body.w - 2.0 * TEXT_PAD;
-                        let mut piece = |a: usize, b: usize, x: f32, color: [f32; 4]| {
-                            let b = b.min(chars.len());
-                            if a >= b || chars[a..b].iter().all(|c| c.is_whitespace()) || x >= room
-                            {
-                                return;
-                            }
-                            g.labels.push(Label {
-                                text: chars[a..b].iter().collect(),
-                                pos: (body.x + TEXT_PAD + x, y),
-                                max_w: room - x,
-                                font_px: TEXT_PX,
-                                line_px: TEXT_LINE,
-                                centered: false,
-                                dim: false,
-                                cache: false,
-                                clip: Some(clip),
-                                family: Some(crate::options::NERD),
-                                color: Some(color),
-                            });
-                        };
-                        let (mut at, mut at_x) = (0, 0.0);
-                        for (k, s) in spans.iter().enumerate() {
-                            let (a, b) = (s.from as usize, (s.from + s.len) as usize);
-                            let (xa, xb) = (xs[2 * k], xs[2 * k + 1]);
-                            piece(at, a, at_x, ink);
-                            piece(a, b, xa, hue(s.class));
-                            (at, at_x) = (b, xb);
+                    {
+                        if let Some(xs) = self.code_xs(line, spans) {
+                            push_code_line(
+                                &mut g,
+                                line,
+                                spans,
+                                xs,
+                                (body.x + TEXT_PAD, y),
+                                body.w - 2.0 * TEXT_PAD,
+                                clip,
+                                ink,
+                            );
+                            continue;
                         }
-                        piece(at, chars.len(), at_x, ink);
-                        continue;
                     }
                     g.labels.push(Label {
                         text: line.clone(),
@@ -2661,6 +2631,84 @@ fn song_parts(r: Rect) -> SongParts {
     let wave = Rect::new(x, cover.y + 66.0, w, (side - 66.0 - 58.0).max(20.0));
     let play = Rect::new(x, cover.y + side - 40.0, 40.0, 40.0);
     SongParts { cover, wave, play }
+}
+
+/// Where a line's coloured pieces begin and end, in characters.
+fn cuts_of(spans: &[crate::peek_syntax::Span]) -> Vec<u16> {
+    spans
+        .iter()
+        .flat_map(|s| [s.from, s.from + s.len])
+        .collect()
+}
+
+/// A kind of code's colour: the palette's hue for it, as the ink is (its
+/// space, its alpha).
+fn code_hue(class: crate::peek_syntax::Class, ink: [f32; 4]) -> [f32; 4] {
+    use crate::peek_syntax::Class;
+    let slot = match class {
+        // (base16's comment grey is too faint on the frame.)
+        Class::Comment => 0x04,
+        Class::Str => 0x0B,
+        Class::Num => 0x09,
+        Class::Key => 0x0E,
+        Class::Type => 0x0A,
+    };
+    let mut c = crate::palette::linear(crate::palette::current().c[slot]);
+    // (A comment a third of the way to the ink: quieter than the code,
+    // still read.)
+    if class == Class::Comment {
+        for i in 0..3 {
+            c[i] += (ink[i] - c[i]) * 0.35;
+        }
+    }
+    c[3] = ink[3];
+    c
+}
+
+/// A line of code at `at` as a label a piece, each in its colour, at the
+/// places measured (`xs`: each span's start and end).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_code_line(
+    g: &mut GridContent,
+    line: &str,
+    spans: &[crate::peek_syntax::Span],
+    xs: &[f32],
+    at: (f32, f32),
+    room: f32,
+    clip: Rect,
+    ink: [f32; 4],
+) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut piece = |a: usize, b: usize, x: f32, color: [f32; 4]| {
+        let b = b.min(chars.len());
+        if a >= b || chars[a..b].iter().all(|c| c.is_whitespace()) || x >= room {
+            return;
+        }
+        g.labels.push(Label {
+            text: chars[a..b].iter().collect(),
+            pos: (at.0 + x, at.1),
+            max_w: room - x,
+            font_px: TEXT_PX,
+            line_px: TEXT_LINE,
+            centered: false,
+            dim: false,
+            cache: false,
+            clip: Some(clip),
+            family: Some(crate::options::NERD),
+            color: Some(color),
+        });
+    };
+    let (mut from, mut from_x) = (0, 0.0);
+    for (k, s) in spans.iter().enumerate() {
+        let (a, b) = (s.from as usize, (s.from + s.len) as usize);
+        let (Some(&xa), Some(&xb)) = (xs.get(2 * k), xs.get(2 * k + 1)) else {
+            break;
+        };
+        piece(from, a, from_x, ink);
+        piece(a, b, xa, code_hue(s.class, ink));
+        (from, from_x) = (b, xb);
+    }
+    piece(from, chars.len(), from_x, ink);
 }
 
 pub(crate) fn text_label(

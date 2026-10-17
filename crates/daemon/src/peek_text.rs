@@ -30,7 +30,7 @@ const TAB: usize = 4;
 
 pub(crate) struct TextEdit {
     tag: u64,
-    lines: Vec<String>,
+    pub(crate) lines: Vec<String>,
     /// Where the caret is: a line, and a place among its characters.
     line: usize,
     col: usize,
@@ -42,6 +42,11 @@ pub(crate) struct TextEdit {
     saving: bool,
     /// The caret's place measured in the font as drawn: (line, col, x).
     pub(crate) caret_x: Option<(usize, usize, f32)>,
+    /// Code's colours (`peek_syntax`), of the lines as they were when
+    /// `coloured` (a hash of them) was taken; the file's language.
+    pub(crate) syntax: Vec<Vec<crate::peek_syntax::Span>>,
+    coloured: u64,
+    lang: Option<&'static crate::peek_syntax::Lang>,
 }
 
 impl TextEdit {
@@ -52,6 +57,23 @@ impl TextEdit {
 
     pub(crate) fn line_text(&self, line: usize) -> &str {
         self.lines.get(line).map_or("", String::as_str)
+    }
+
+    /// Colour the lines again if they changed since (a keystroke's whole
+    /// text, at most `TEXT_BYTES`: a millisecond).
+    pub(crate) fn recolor(&mut self) {
+        let Some(lang) = self.lang else {
+            return;
+        };
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.lines.hash(&mut h);
+        let now = h.finish();
+        if now != self.coloured || self.syntax.is_empty() {
+            let shown: Vec<String> = self.lines.iter().map(|l| shown(l)).collect();
+            self.syntax = crate::peek_syntax::spans(&shown, lang);
+            self.coloured = now;
+        }
     }
 }
 
@@ -187,6 +209,9 @@ impl App {
             armed: false,
             saving: false,
             caret_x: None,
+            syntax: Vec::new(),
+            coloured: 0,
+            lang: crate::peek_syntax::lang_of(&up.path),
         });
         self.request_desktop_top_draw();
     }
@@ -485,6 +510,23 @@ impl App {
         let count = (body.h / LINE).ceil() as usize + 2;
         for (n, line) in t.lines.iter().enumerate().skip(first).take(count) {
             let y = body.y + PAD + n as f32 * LINE - t.scroll;
+            // Code, in its colours (once measured; the line plain meanwhile).
+            if let Some(spans) = t.syntax.get(n).filter(|s| !s.is_empty()) {
+                let line = shown(line);
+                if let Some(xs) = self.code_xs(&line, spans) {
+                    crate::quicklook::push_code_line(
+                        g,
+                        &line,
+                        spans,
+                        xs,
+                        (body.x + PAD, y),
+                        body.w - 2.0 * PAD,
+                        clip,
+                        ink,
+                    );
+                    continue;
+                }
+            }
             g.labels.push(Label {
                 clip: Some(clip),
                 family: Some(crate::options::NERD),
