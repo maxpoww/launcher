@@ -4365,9 +4365,11 @@ impl App {
             let icon = layout.icon_in(&cell, icon_scale);
             let faded = cut.contains(&item.path);
             if let Some(layer) = win.layer_of(&item.icon) {
+                // (A file's own picture: as it is, whatever the palette.)
+                let picture = if item.icon.starts_with("thumb:") { crate::content::PICTURE } else { 0 };
                 grid.icons.push(IconInst {
                     rect: icon,
-                    layer,
+                    layer: layer | picture,
                     // (Washed toward the ground it stands on.)
                     tint: if faded { [ground[0], ground[1], ground[2], 0.6] } else { [0.0; 4] },
                     // (-1.3: the wash alone — at -1.0 a tinted icon also

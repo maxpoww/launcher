@@ -179,7 +179,10 @@ fn plate_px(uv: vec2<f32>, plate: vec4<f32>, px: f32) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let texel = textureSample(icons, icon_sampler, in.uv, i32(in.layer));
+    // (The top bit marks a PICTURE — `content::PICTURE` — the rest is the layer.)
+    let layer = in.layer & 0x7fffffffu;
+    let picture = (in.layer & 0x80000000u) != 0u;
+    let texel = textureSample(icons, icon_sampler, in.uv, i32(layer));
     // One pixel in uv units (the quad is square) for the SDF edges below.
     let px = max(fwidth(in.uv.x), 1e-5);
     // Squircle (superellipse) corner mask: |x|^n + |y|^n = 1 in the tile's
@@ -192,7 +195,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = globals.squircle;
     // Thumbnails (file previews) keep their real square corners — the
     // squircle mask applies only to app/asset icons below `thumb_base`.
-    let is_thumb = f32(in.layer) >= globals.thumb_base;
+    let is_thumb = picture || f32(layer) >= globals.thumb_base;
     if (n > 0.0 && !is_thumb) {
         let p = in.uv * 2.0 - vec2<f32>(1.0);
         let e = pow(abs(p.x), n) + pow(abs(p.y), n);
@@ -312,7 +315,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var a = texel.a;
     // The palette's ICON FILTER, on app icons only (thumbnails keep their colours).
     var painted = texel.rgb;
-    if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5) && f32(in.layer) < globals.thumb_base && a > 0.004) {
+    if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5) && !is_thumb && a > 0.004) {
         painted = icon_filter(texel.rgb / a) * a;
     }
     var rgb = mix(painted, in.tint.rgb * a, in.tint.a);

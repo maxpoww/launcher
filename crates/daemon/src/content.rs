@@ -90,6 +90,12 @@ pub struct IconInst {
     pub plate: [f32; 4],
 }
 
+/// Set on an `IconInst::layer`: the layer holds a PICTURE (a photo's, a
+/// video's thumbnail), not an icon — the palette's icon filter leaves it as
+/// it is, and no squircle cuts it. For the surfaces whose array mixes both
+/// (Files, the desktop: no `thumb_base` block); the shader masks the bit off.
+pub const PICTURE: u32 = 1 << 31;
+
 /// No plate under this icon quad (image thumbnails, ring/shine overlays).
 pub const NO_PLATE: [f32; 4] = [0.0; 4];
 /// The old baked plate's exact look — translucent white frost (84/255).

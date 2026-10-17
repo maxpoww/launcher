@@ -517,7 +517,7 @@ fn mark_icon(
         ],
         clip,
     );
-    let gen = layer_gen.get(i.layer as usize).copied().unwrap_or(0);
+    let gen = layer_gen.get((i.layer & !crate::content::PICTURE) as usize).copied().unwrap_or(0);
     let h = crate::damage::hash_bytes(deps.icons ^ KIND_ICON, bytemuck::bytes_of(i));
     tiles.mark(b, clip_hash(crate::damage::mix(h, u64::from(gen)), clip));
 }

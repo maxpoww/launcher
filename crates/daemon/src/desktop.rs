@@ -1876,9 +1876,11 @@ const FIELD_SEL: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
 fn push_tile(scene: &mut Scene, tile: &Tile) {
     let icon = tile.icon;
     if tile.has_icon {
+        // (A file's own picture: as it is, whatever the palette.)
+        let picture = if tile.item.icon.starts_with("thumb:") { crate::content::PICTURE } else { 0 };
         let inst = IconInst {
             rect: icon,
-            layer: tile.layer,
+            layer: tile.layer | picture,
             tint: [0.0; 4],
             ring: -1.0,
             // Carriers and thumbnails are bare, as in the Files section; a
