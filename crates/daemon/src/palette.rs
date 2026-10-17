@@ -951,7 +951,12 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
             write_all(&theme_dir(), &theme);
             poke(&apps, look_changed);
         }
-        publish_icons();
+        // (The apps' icons once the slider rests: a drag is many changes.)
+        let mine = ICONS_ASKED.fetch_add(1, Ordering::Relaxed) + 1;
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        if ICONS_ASKED.load(Ordering::Relaxed) == mine {
+            publish_icons();
+        }
         info!("palette: {} ({}), accent {}", theme.name, if theme.dark { "dark" } else { "light" }, slot_name(theme.accent_slot));
     });
     if let Err(e) = spawned {
@@ -971,6 +976,8 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
 /// an app reloads its icons only when the theme's NAME changes. At Off the
 /// plain theme is put back and the copies go. (The dock itself keeps the
 /// plain theme and its shader: nothing is tinted twice.)
+static ICONS_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn publish_icons() {
     let f = icon_filter();
     let (k, dim) = (f[0][0], f[0][1] > 0.5);
@@ -1000,12 +1007,79 @@ fn publish_icons() {
     let (next, old) = if now == Some(names[0]) { (names[1], names[0]) } else { (names[0], names[1]) };
     let dest = icons.join(next);
     let _ = std::fs::remove_dir_all(&dest);
-    if let Err(e) = tint_tree(&src, &dest, &f, next) {
+    let started = std::time::Instant::now();
+    if let Err(e) = tint_tree(&src, &dest, &f, next).and_then(|()| {
+        add_small_papirus(&dest, if base == "Golem-Dark" { "Papirus-Dark" } else { "Papirus" }, &f)
+    }) {
         warn!("palette: the apps' icons were not written ({e})");
         return;
     }
+    info!("palette: the apps' icons written in {} ms", started.elapsed().as_millis());
     dconf(next);
     let _ = std::fs::remove_dir_all(icons.join(old));
+}
+
+/// What the apps show SMALL that Golem does not draw — the menus' and the
+/// side panels' icons (Max, 2026-10-17: "a few on the menus of thunar"):
+/// Papirus's places, devices, actions and apps at 16 and 24 px, tinted the
+/// same way, as directories of the tinted theme. A name Golem draws is left
+/// to Golem's; a symbolic icon to GTK (it colours those with the text). Each
+/// drawing is tinted once; its other names are hard links to it.
+fn add_small_papirus(dest: &std::path::Path, variant: &str, f: &[[f32; 4]; 7]) -> std::io::Result<()> {
+    let Some(src) = icon_theme_dir(variant) else { return Ok(()) };
+    // The names Golem's own theme has.
+    let mut golem = std::collections::HashSet::new();
+    let mut stack = vec![dest.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d)?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                golem.insert(n.to_owned());
+            }
+        }
+    }
+    let mut done: std::collections::HashMap<std::path::PathBuf, std::path::PathBuf> = std::collections::HashMap::new();
+    let mut sections = String::new();
+    let mut dirs = Vec::new();
+    for size in [16, 24] {
+        for (ctx, context) in [("places", "Places"), ("devices", "Devices"), ("actions", "Actions"), ("apps", "Applications")] {
+            let from = src.join(format!("{size}x{size}")).join(ctx);
+            let Ok(list) = std::fs::read_dir(&from) else { continue };
+            let rel = format!("small/{size}/{ctx}");
+            let to = dest.join(&rel);
+            std::fs::create_dir_all(&to)?;
+            for e in list.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".svg") || name.contains("-symbolic") || golem.contains(&name) {
+                    continue;
+                }
+                let Ok(real) = std::fs::canonicalize(e.path()) else { continue };
+                let out = to.join(&name);
+                if let Some(first) = done.get(&real) {
+                    if std::fs::hard_link(first, &out).is_ok() {
+                        continue;
+                    }
+                }
+                let Ok(text) = std::fs::read_to_string(&real) else { continue };
+                std::fs::write(&out, tint_svg(&text, f))?;
+                done.insert(real, out);
+            }
+            sections.push_str(&format!("\n[{rel}]\nContext={context}\nSize={size}\nType=Fixed\n"));
+            dirs.push(rel);
+        }
+    }
+    // The theme's index names the new directories.
+    let index = dest.join("index.theme");
+    let text = std::fs::read_to_string(&index)?;
+    let text: String = text
+        .lines()
+        .map(|l| if l.starts_with("Directories=") { format!("{l},{}", dirs.join(",")) } else { l.to_owned() })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&index, text + "\n" + &sections)?;
+    Ok(())
 }
 
 /// Where an installed icon theme lives.
