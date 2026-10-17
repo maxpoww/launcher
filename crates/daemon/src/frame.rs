@@ -1124,6 +1124,27 @@ impl App {
                 }
             }
         }
+        // WhatsApp: the pointer on it shakes the phone and turns the plate
+        // (held), a click turns both round; each pose's frame in its layer.
+        let on_whatsapp = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::whatsapp_icon::WHATSAPP_ID));
+        if self.whatsapp.step(on_whatsapp, dt) {
+            self.dirty = true;
+            let layers: Vec<u32> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.id == crate::whatsapp_icon::WHATSAPP_ID)
+                .filter_map(|(i, _)| self.icon_layers.get(i).copied())
+                .collect();
+            let (plate, phone) = self.whatsapp.pose();
+            if let (Some(chain), Some(renderer)) = (apps::whatsapp_at(plate, phone), self.renderer.as_mut()) {
+                for layer in layers {
+                    renderer.update_icon_layer(layer, &chain);
+                }
+            }
+        }
         // The control panel's gears: they turn under the pointer, the frame
         // for each angle put in its layer.
         let on_gears = self.gesture.dragging.is_none()

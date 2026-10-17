@@ -48,6 +48,7 @@ mod files;
 mod files_icon;
 mod gears_icon;
 mod compass_icon;
+mod whatsapp_icon;
 mod quicklook;
 mod peek_kinds;
 mod peek_edit;
@@ -916,6 +917,7 @@ fn main() -> anyhow::Result<()> {
         files_hover: files_icon::Hover::default(),
         gears_spin: gears_icon::Spin::default(),
         compass: compass_icon::Motion::default(),
+        whatsapp: whatsapp_icon::Motion::default(),
         peek: quicklook::QuickLook::default(),
         apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
@@ -2177,6 +2179,9 @@ pub struct App {
     /// Seam's compass: its needle swings under the pointer, a click turns
     /// it round (`compass_icon`).
     compass: compass_icon::Motion,
+    /// WhatsApp's mark: a hover shakes its phone and turns its plate, a
+    /// click turns both round (`whatsapp_icon`).
+    whatsapp: whatsapp_icon::Motion,
     /// QUICK LOOK: Space on a thing in a file window (`quicklook`).
     peek: quicklook::QuickLook,
     /// The apps button: its pages under the pointer, its squares down while
@@ -5517,6 +5522,11 @@ impl App {
                     // Seam's compass turns once round as it is clicked.
                     if self.entries.get(entry_idx).is_some_and(|e| e.id == compass_icon::SEAM_ID) {
                         self.compass.click();
+                        self.dirty = true;
+                    }
+                    // WhatsApp's plate and phone turn round, each its own way.
+                    if self.entries.get(entry_idx).is_some_and(|e| e.id == whatsapp_icon::WHATSAPP_ID) {
+                        self.whatsapp.click();
                         self.dirty = true;
                     }
                     // A minimized window's tile: the click asks the PLUGIN to
