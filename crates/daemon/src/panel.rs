@@ -554,6 +554,33 @@ struct Chip {
     palette: bool,
     /// A colour cell of the palette editor (its colour = `swatch[0]`).
     cell: bool,
+    /// How it is drawn in the hairline language.
+    style: Style,
+}
+
+/// THE HAIRLINE LANGUAGE (Max, 2026-10-17, https://claude.ai/artifact/FmEgQWQLWxMxHQhpSDJmgb):
+/// what a chip is drawn as.
+#[derive(Clone, Copy, PartialEq)]
+enum Style {
+    /// One of several: a word, bright and underlined when it is the one in use
+    /// (`big`: the box's main choice, bold, on the title's line).
+    Word { big: bool },
+    /// On or off: the whole row is the chip; a slim switch at its right.
+    Switch { on: bool },
+    /// An action: a hairline capsule (`main`: filled, one per box).
+    Button { main: bool },
+    /// A text field: the words over a hairline.
+    Field,
+}
+
+/// A line of text the layout placed (a row's name, a slider's value).
+struct Text {
+    text: String,
+    x: f32,
+    y: f32,
+    px: f32,
+    alpha: f32,
+    centered: bool,
 }
 
 /// A slider as drawn: its track, the lit stop's place on it (0..=1), and
@@ -582,6 +609,7 @@ struct OpenContent {
     ghost_slide: f32,
     dots: Option<(f32, usize, usize)>,
     sliders: Vec<Slider>,
+    texts: Vec<Text>,
 }
 
 /// The pill that became the whole card.
@@ -1409,9 +1437,84 @@ impl Panel {
             let in_row = (total - row * per_row).min(per_row);
             let row_w = in_row as f32 * w + (in_row - 1) as f32 * gap;
             let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
-            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None, swatch: Vec::new(), seg: false, palette: false, cell: false });
+            out.chips.push(Chip { rect: Rect::new(x, y + row as f32 * (h + row_gap), w, h), text, on, action, image: None, swatch: Vec::new(), seg: false, palette: false, cell: false, style: Style::Word { big: false } });
         }
         y + rows as f32 * h + (rows - 1) as f32 * row_gap + GROUP_GAP * s
+    }
+
+    /// Lay WORDS out from `y` down, centred, wrapping: each as wide as its
+    /// letters (`big`: the main choice's size).
+    fn flow_words(&self, out: &mut OpenContent, y: f32, chips: Vec<(String, bool, PanelAction)>, big: bool) -> f32 {
+        if chips.is_empty() {
+            return y;
+        }
+        let s = self.scale;
+        let fw = self.key.0;
+        let (letter, gap, h) = if big { (8.6, 28.0, 30.0) } else { (7.4, 22.0, 26.0) };
+        let (letter, gap, h, row_gap) = (letter * s, gap * s, h * s, 8.0 * s);
+        let room = fw - 4.0 * MARGIN * s;
+        let widths: Vec<f32> = chips.iter().map(|(t, _, _)| t.chars().count().max(1) as f32 * letter + 4.0 * s).collect();
+        // Rows as full as they go.
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut used = 0.0;
+        for (i, w) in widths.iter().enumerate() {
+            let need = if rows.last().is_some_and(|r| r.is_empty()) { *w } else { used + gap + *w };
+            if need > room && !rows.last().is_some_and(|r| r.is_empty()) {
+                rows.push(Vec::new());
+                used = *w;
+            } else {
+                used = need;
+            }
+            if let Some(r) = rows.last_mut() {
+                r.push(i);
+            }
+        }
+        let mut chips: Vec<Option<(String, bool, PanelAction)>> = chips.into_iter().map(Some).collect();
+        for (ri, row) in rows.iter().enumerate() {
+            let row_w: f32 = row.iter().map(|&i| widths[i]).sum::<f32>() + gap * (row.len().saturating_sub(1)) as f32;
+            let mut x = (fw - row_w) / 2.0;
+            for &i in row {
+                if let Some((text, on, action)) = chips[i].take() {
+                    out.chips.push(Chip {
+                        rect: Rect::new(x - gap / 2.0, y + ri as f32 * (h + row_gap), widths[i] + gap, h),
+                        text,
+                        on,
+                        action,
+                        image: None,
+                        swatch: Vec::new(),
+                        seg: false,
+                        palette: false,
+                        cell: false,
+                        style: Style::Word { big },
+                    });
+                }
+                x += widths[i] + gap;
+            }
+        }
+        y + rows.len() as f32 * h + (rows.len() - 1) as f32 * row_gap + GROUP_GAP * s
+    }
+
+    /// A SWITCH ROW from `y`: the name at the left, the switch at the
+    /// right; the whole row turns it.
+    fn switch_row(&self, out: &mut OpenContent, y: f32, group: u8, name: &str, on: bool) -> f32 {
+        let s = self.scale;
+        let fw = self.key.0;
+        let (left, right, h) = (2.0 * MARGIN * s, fw - 2.0 * MARGIN * s, 34.0 * s);
+        out.texts.push(Text { text: name.to_owned(), x: left, y: y + (h - 18.0 * s) / 2.0, px: 14.0, alpha: 0.85, centered: false });
+        out.chips.push(Chip {
+            rect: Rect::new(left - 6.0 * s, y, right - left + 12.0 * s, h),
+            text: String::new(),
+            on,
+            // (A click picks the other one: On ↔ Off.)
+            action: PanelAction::Pick { group, index: if on { 1 } else { 0 } },
+            image: None,
+            swatch: Vec::new(),
+            seg: false,
+            palette: false,
+            cell: false,
+            style: Style::Switch { on },
+        });
+        y + h + 10.0 * s
     }
 
     /// Lay COLOUR CELLS out from `y` down, `cols` to a row, square, across
@@ -1437,6 +1540,7 @@ impl Panel {
                 seg: false,
                 palette: false,
                 cell: true,
+                style: Style::Word { big: false },
             });
         }
         let rows = cells.len().div_ceil(cols);
@@ -1454,18 +1558,29 @@ impl Panel {
         group: u8,
         stops: &[crate::controls::Choice],
         pair: Option<(u8, &crate::controls::Group)>,
+        (name, value): (&str, &str),
     ) -> f32 {
         let s = self.scale;
         let fw = self.key.0;
-        let h = CHIP_H * s;
-        let (left, mut right) = (MARGIN * 2.0 * s, fw - MARGIN * 2.0 * s);
+        let h = 30.0 * s;
+        let (mut left, mut right) = (MARGIN * 2.0 * s, fw - MARGIN * 2.0 * s);
+        // The row's name, at the left.
+        out.texts.push(Text { text: name.to_owned(), x: left, y: y + (h - 18.0 * s) / 2.0, px: 13.5, alpha: 0.6, centered: false });
+        left += 74.0 * s;
         if let Some((pg, g)) = pair {
-            let (w, gap) = (g.width * s * 0.8, 8.0 * s);
-            let n = g.choices.len() as f32;
-            let x0 = right - n * w - (n - 1.0) * gap;
+            // Its look: small words at the right.
+            let letter = 7.0 * s;
+            let gap = 12.0 * s;
+            let widths: Vec<f32> = g.choices.iter().map(|c| c.text.chars().count().max(1) as f32 * letter + 4.0 * s).collect();
+            let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
+            let x0 = right - total;
+            // (Every row keeps the same room for its look, so the tracks line up.)
+            let lane = right - 116.0 * s;
+            let mut x = x0;
             for (ci, c) in g.choices.iter().enumerate() {
+                let w = widths[ci];
                 out.chips.push(Chip {
-                    rect: Rect::new(x0 + ci as f32 * (w + gap), y + 4.0 * s, w, h - 8.0 * s),
+                    rect: Rect::new(x - gap / 2.0, y + 2.0 * s, w + gap, h - 4.0 * s),
                     text: c.text.clone(),
                     on: c.on,
                     action: PanelAction::Pick { group: pg, index: ci as u8 },
@@ -1474,12 +1589,17 @@ impl Panel {
                     seg: false,
                     palette: false,
                     cell: false,
+                    style: Style::Word { big: false },
                 });
+                x += w + gap;
             }
-            right = x0 - 22.0 * s;
+            right = x0.min(lane) - 18.0 * s;
         }
+        // Its value, in words, before the look.
+        out.texts.push(Text { text: value.to_owned(), x: right - 36.0 * s, y: y + (h - 16.0 * s) / 2.0, px: 12.0, alpha: 0.55, centered: true });
+        right -= 84.0 * s;
         let n = stops.len().max(2);
-        let track = Rect::new(left, y + h / 2.0 - 3.0 * s, (right - left).max(40.0 * s), 6.0 * s);
+        let track = Rect::new(left, y + h / 2.0 - 1.0 * s, (right - left).max(40.0 * s), 2.0 * s);
         let step = track.w / (n - 1) as f32;
         let first = out.chips.len();
         let lit = stops.iter().position(|c| c.on).unwrap_or(0);
@@ -1489,9 +1609,9 @@ impl Panel {
             // to the look pair — so a click near the slider catches it
             // instead of landing on empty space (Max, 2026-10-16: "i miss and
             // close the box all the time").
-            let x0 = if ci == 0 { 0.0 } else { track.x + (ci as f32 - 0.5) * step };
+            let x0 = if ci == 0 { track.x - 12.0 * s } else { track.x + (ci as f32 - 0.5) * step };
             let x1 = if ci + 1 == stops.len() { right + 14.0 * s } else { track.x + (ci as f32 + 0.5) * step };
-            let (top, bottom) = (y - 27.0 * s, y + h + GROUP_GAP * s * 0.6);
+            let (top, bottom) = (y - 6.0 * s, y + h + 6.0 * s);
             out.chips.push(Chip {
                 rect: Rect::new(x0, top, x1 - x0, bottom - top),
                 text: String::new(),
@@ -1502,10 +1622,11 @@ impl Panel {
                 seg: true,
                 palette: false,
                 cell: false,
+                style: Style::Word { big: false },
             });
         }
         out.sliders.push(Slider { track, value: lit as f32 / (n - 1) as f32, stops: first..out.chips.len() });
-        y + h + GROUP_GAP * s * 0.6
+        y + h + 10.0 * s
     }
 
     /// Lay PICTURES out as a grid of previews from `y` down: as many columns
@@ -1573,6 +1694,8 @@ impl Panel {
         let pages = choices.len().div_ceil(cap);
         // The grid is as tall as the fullest page.
         let rows = choices.len().min(cap).div_ceil(cols);
+        // (A palette's name is written under its card: room for it.)
+        let nh = if swatches { 20.0 * s } else { 0.0 };
         let page_of = |page: usize| -> Vec<Chip> {
             let first = page * cap;
             let on_page = choices.len().saturating_sub(first).min(cap);
@@ -1584,7 +1707,7 @@ impl Panel {
                     let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
                     let c = &choices[first + k];
                     Chip {
-                        rect: Rect::new(x, y + row as f32 * (h + gap), w, h),
+                        rect: Rect::new(x, y + row as f32 * (h + gap + nh), w, h),
                         text: c.text.clone(),
                         on: c.on,
                         action: PanelAction::Pick { group, index: (first + k) as u8 },
@@ -1603,6 +1726,7 @@ impl Panel {
                         seg: false,
                         palette: swatches,
                         cell: false,
+                        style: Style::Word { big: false },
                     }
                 })
                 .collect()
@@ -1619,7 +1743,7 @@ impl Panel {
             out.ghosts = page_of(from);
             out.ghost_slide = -behind + if forward { -fw } else { fw };
         }
-        let foot = y + rows as f32 * h + (rows - 1) as f32 * gap;
+        let foot = y + rows as f32 * (h + nh) + (rows - 1) as f32 * gap;
         if pages > 1 {
             out.dots = Some((foot + (dots_h - TILE_DOT * s) / 2.0, pages, page));
         }
@@ -1677,6 +1801,7 @@ impl Panel {
             ghost_slide: 0.0,
             dots: None,
             sliders: Vec::new(),
+            texts: Vec::new(),
         };
         if !self.modules && crate::controls::is_control(label) {
             // Not read yet: the bare card, for the moment the read takes.
@@ -1689,20 +1814,40 @@ impl Panel {
             // de las imágenes").
             let wall = view.groups.iter().any(|g| g.tiles && !g.choices.is_empty());
             let mut y = if wall { WALL_TOP * s } else { top };
+            let title_y = if wall { 20.0 } else { 30.0 } * s;
             for (gi, g) in view.groups.iter().enumerate() {
                 if g.beside {
                     continue; // (laid out with the slider before it)
+                }
+                // THE MAIN CHOICE: bold words centred on the title's line.
+                if g.main {
+                    let chips = g.choices.iter().enumerate().map(|(ci, c)| (c.text.clone(), c.on, PanelAction::Pick { group: gi as u8, index: ci as u8 })).collect();
+                    self.flow_words(&mut out, title_y + 2.0 * s, chips, true);
+                    continue;
+                }
+                // A SLIDER is one row: its name, the track, its value, its look.
+                if g.slider {
+                    let (name, value) = match g.caption.as_deref().and_then(|c| c.split_once(" · ")) {
+                        Some((n, v)) => (n.to_owned(), v.to_owned()),
+                        None => (g.caption.clone().unwrap_or_default(), String::new()),
+                    };
+                    let pair = view.groups.get(gi + 1).filter(|n| n.beside).map(|n| (gi as u8 + 1, n));
+                    y = self.flow_slider(&mut out, y, gi as u8, &g.choices, pair, (&name, &value));
+                    continue;
+                }
+                // ON OR OFF is a switch row: its name left, the switch right.
+                let values: Vec<&str> = g.choices.iter().map(|c| c.value.as_str()).collect();
+                if values == ["on", "off"] {
+                    let on = g.choices.first().is_some_and(|c| c.on);
+                    let name = g.caption.clone().unwrap_or_else(|| crate::i18n::tr("On").to_owned());
+                    y = self.switch_row(&mut out, y, gi as u8, &name, on);
+                    continue;
                 }
                 if let Some(c) = &g.caption {
                     y = self.caption(&mut out, y, c.clone());
                 }
                 if g.cells > 0 {
                     y = self.flow_cells(&mut out, y, gi as u8, g.cells, &g.choices);
-                    continue;
-                }
-                if g.slider {
-                    let pair = view.groups.get(gi + 1).filter(|n| n.beside).map(|n| (gi as u8 + 1, n));
-                    y = self.flow_slider(&mut out, y, gi as u8, &g.choices, pair);
                     continue;
                 }
                 if g.tiles {
@@ -1716,12 +1861,21 @@ impl Panel {
                     .map(|(ci, c)| (c.text.clone(), c.on, PanelAction::Pick { group: gi as u8, index: ci as u8 }))
                     .collect();
                 let first = out.chips.len();
-                y = self.flow(&mut out, y, g.width, chips);
-                for (chip, c) in out.chips[first..].iter_mut().zip(&g.choices) {
+                let coloured = g.choices.iter().any(|c| !c.swatch.is_empty());
+                // (Pills stay for what is not a word: a coloured place, an
+                // action, a field; one lone choice is an action too.)
+                y = if g.buttons || g.field || coloured || g.choices.len() == 1 { self.flow(&mut out, y, g.width, chips) } else { self.flow_words(&mut out, y, chips, false) };
+                let n = out.chips.len() - first;
+                for (k, (chip, c)) in out.chips[first..].iter_mut().zip(&g.choices).enumerate() {
                     chip.swatch = c.swatch.clone();
+                    if g.field {
+                        chip.style = Style::Field;
+                    } else if g.buttons || (n == 1 && !coloured) {
+                        chip.style = Style::Button { main: g.buttons && k + 1 == n };
+                    }
                 }
             }
-            out.foot_y = if wall { y - (GROUP_GAP - WALL_HINT_GAP) * s } else { (y - (GROUP_GAP - 12.0) * s).max(top) };
+            out.foot_y = if wall { y - (GROUP_GAP - WALL_HINT_GAP) * s } else { (y + 8.0 * s - (GROUP_GAP - 12.0) * s).max(top) };
             return Some(out);
         }
         if !is_display_setting(label) {
@@ -2446,15 +2600,40 @@ impl Panel {
         let cx = fw / 2.0;
         let wall = self.open_has_tiles() && self.control.is_some();
         let mut y = if wall { 20.0 } else { 30.0 } * s;
-        text(out, crate::i18n::tr(p.label).to_owned(), cx, y, 30.0, 36.0, 1.0);
-        y += if wall { 40.0 } else { 44.0 } * s;
+        // (A line of text from its left edge.)
+        let text_l = |out: &mut PanelDraw, t: String, x: f32, y: f32, px: f32, a: f32| {
+            let (mx, my) = map(x, y);
+            out.labels.push(Label {
+                text: t,
+                pos: (mx, my),
+                max_w: (fw - x - 2.0 * MARGIN * s).max(40.0) * cs,
+                font_px: px * s * cs,
+                line_px: px * 1.3 * s * cs,
+                centered: false,
+                dim: false,
+                cache: resting,
+                family: TEXT_FONT,
+                color: ink(a),
+                clip: None,
+            });
+        };
         if let Some(content) = self.open_content(p.label) {
-            // A real setting: its choices as floating pills, the one in use
-            // lit and ringed (the settings boxes' preset idiom), each on its
-            // own tiny orbit like the field's pills.
-            text(out, content.subtitle, cx, y, 14.0, 18.0, 0.55);
+            // THE HAIRLINE LANGUAGE: the box's name at the left of its header
+            // (its main choice, if it has one, centred on the same line), a
+            // quiet line under it; the rows below.
+            let left = 2.0 * MARGIN * s;
+            text_l(out, crate::i18n::tr(p.label).to_owned(), left, y, 20.0, 1.0);
+            y += if wall { 30.0 } else { 34.0 } * s;
+            text_l(out, content.subtitle, left, y, 12.5, 0.5);
             for (caption, top) in content.captions {
-                text(out, caption, cx, top, 13.0, 17.0, 0.55);
+                text(out, caption, cx, top, 12.5, 16.0, 0.5);
+            }
+            for t in content.texts {
+                if t.centered {
+                    text(out, t.text, t.x, t.y, t.px, t.px * 1.3, t.alpha);
+                } else {
+                    text_l(out, t.text, t.x, t.y, t.px, t.alpha);
+                }
             }
             let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
             let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
@@ -2606,6 +2785,10 @@ impl Panel {
             for chip in content.ghosts {
                 if let Some(file) = chip.image {
                     tile_at(out, chip.rect, content.ghost_slide, file, false);
+                    let r = chip.rect;
+                    if chip.palette && r.x + content.ghost_slide >= 0.0 && r.x + content.ghost_slide + r.w <= fw {
+                        text(out, chip.text.clone(), r.x + content.ghost_slide + r.w / 2.0, r.y + r.h + 4.0 * s, 12.0, 15.0, 0.55);
+                    }
                 } else if chip.palette {
                     swatch_at(out, chip.rect, content.ghost_slide, &chip.swatch, chip.on, false);
                 }
@@ -2615,13 +2798,13 @@ impl Panel {
             for sl in &content.sliders {
                 let t = sl.track;
                 let ink_c = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], a];
-                rect(out, t.x, t.y, t.w, t.h, t.h / 2.0, crate::options::wash(!paint.bright, layer_wash[1]));
+                rect(out, t.x, t.y, t.w, t.h, t.h / 2.0, ink_c(0.16));
                 let kx = t.x + t.w * sl.value;
-                rect(out, t.x, t.y, (kx - t.x).max(t.h), t.h, t.h / 2.0, ink_c(0.55));
-                let knob = 22.0 * s;
+                rect(out, t.x, t.y, (kx - t.x).max(t.h), t.h, t.h / 2.0, ink_c(0.9));
+                let knob = 12.0 * s;
                 rect(out, kx - knob / 2.0, t.y + t.h / 2.0 - knob / 2.0, knob, knob, knob / 2.0, ink_c(0.95));
                 if resting && self.focus.is_some_and(|f| sl.stops.contains(&f)) {
-                    let g = knob + 8.0 * s;
+                    let g = knob + 7.0 * s;
                     let (mx, my) = map(kx - g / 2.0, t.y + t.h / 2.0 - g / 2.0);
                     out.rects.push(RectInst {
                         rect: Rect::new(mx, my, g * cs, g * cs),
@@ -2647,6 +2830,10 @@ impl Panel {
                 let keyed = resting && self.focus == Some(i);
                 if let Some(file) = chip.image {
                     tile_at(out, r, content.slide, file, keyed && content.slide.abs() < 0.5);
+                    if chip.palette && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
+                        let a = if chip.on || keyed { 1.0 } else { 0.55 };
+                        text(out, chip.text.clone(), r.x + content.slide + r.w / 2.0, r.y + r.h + 4.0 * s, 12.0, 15.0, a);
+                    }
                     // The palette in use, ringed (a wallpaper has no mark).
                     if chip.palette && chip.on && !keyed && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
                         let grow = 3.0 * s;
@@ -2731,44 +2918,74 @@ impl Panel {
                     });
                     continue;
                 }
-                let a = self.clock * TAU / (13.0 + 1.7 * (i % 5) as f32) + 1.9 * i as f32;
-                let (x0, y0) = (r.x + 1.1 * s * a.cos(), r.y + 1.1 * s * a.sin());
-                let wa = if keyed {
-                    hover_a
-                } else if chip.on {
-                    layer_wash[0]
-                } else {
-                    layer_wash[1]
+                let ink_c = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], a * ca];
+                // (What reads on the ink: the ground's tone.)
+                let on_ink = if paint.bright { [0.93, 0.93, 0.92, ca] } else { [0.02, 0.02, 0.025, ca] };
+                let label_in = |out: &mut PanelDraw, t: String, x: f32, y: f32, w: f32, px: f32, col: [f32; 4]| {
+                    let (mx, my) = map(x, y);
+                    out.labels.push(Label { text: t, pos: (mx, my), max_w: w * cs, font_px: px * s * cs, line_px: px * 1.3 * s * cs, centered: true, dim: false, cache: resting, family: TEXT_FONT, color: Some(col), clip: None });
                 };
-                rect(out, x0, y0, r.w, r.h, r.h / 2.0, crate::options::wash(!paint.bright, wa));
-                if chip.on {
-                    let (mx, my) = map(x0, y0);
-                    out.rects.push(RectInst {
-                        rect: Rect::new(mx, my, r.w * cs, r.h * cs),
-                        radius: r.h / 2.0 * cs,
-                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.5 * ca],
-                        glass: 0.0,
-                        border: (1.4 * s * cs).max(1.0),
-                    });
+                match chip.style {
+                    // A WORD: bright and underlined when it is the one in use.
+                    Style::Word { big } => {
+                        let (px, gap) = if big { (15.5, 28.0 * s) } else { (13.0, 22.0 * s) };
+                        let a = if chip.on || keyed { 1.0 } else { 0.55 };
+                        label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - px * 1.3 * s) / 2.0, r.w, px, ink_c(a));
+                        let uw = (r.w - gap).max(6.0 * s);
+                        let ux = r.x + (r.w - uw) / 2.0;
+                        let uy = r.y + (r.h + px * 1.3 * s) / 2.0 + 2.0 * s;
+                        if chip.on {
+                            rect(out, ux, uy, uw, if big { 1.5 } else { 1.0 } * s, 0.0, ink_c(1.0));
+                        } else if keyed {
+                            rect(out, ux, uy, uw, 1.0 * s, 0.0, ink_c(0.35));
+                        }
+                    }
+                    // A SWITCH: a slim outlined capsule; on, it fills and the knob crosses.
+                    Style::Switch { on } => {
+                        let (tw, th) = (36.0 * s, 20.0 * s);
+                        let (tx, ty) = (r.x + r.w - 6.0 * s - tw, r.y + (r.h - th) / 2.0);
+                        let (mx, my) = map(tx, ty);
+                        let knob = 12.0 * s;
+                        if on {
+                            rect(out, tx, ty, tw, th, th / 2.0, ink_c(0.92));
+                            rect(out, tx + tw - 4.0 * s - knob, ty + 4.0 * s, knob, knob, knob / 2.0, on_ink);
+                        } else {
+                            out.rects.push(RectInst { rect: Rect::new(mx, my, tw * cs, th * cs), radius: th / 2.0 * cs, color: ink_c(0.38), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
+                            rect(out, tx + 4.0 * s, ty + 4.0 * s, knob, knob, knob / 2.0, ink_c(0.75));
+                        }
+                        if keyed {
+                            let g = 3.0 * s;
+                            let (mx, my) = map(tx - g, ty - g);
+                            out.rects.push(RectInst { rect: Rect::new(mx, my, (tw + 2.0 * g) * cs, (th + 2.0 * g) * cs), radius: (th / 2.0 + g) * cs, color: ink_c(0.7), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
+                        }
+                    }
+                    // A BUTTON: a hairline capsule; the main one filled.
+                    Style::Button { main } => {
+                        let (mx, my) = map(r.x, r.y);
+                        if main {
+                            rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, ink_c(if keyed { 1.0 } else { 0.92 }));
+                            label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, on_ink);
+                        } else {
+                            if keyed {
+                                rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, crate::options::wash(!paint.bright, hover_a));
+                            }
+                            out.rects.push(RectInst { rect: Rect::new(mx, my, r.w * cs, r.h * cs), radius: r.h / 2.0 * cs, color: ink_c(0.3), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
+                            label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, ink_c(if chip.on || keyed { 1.0 } else { 0.85 }));
+                        }
+                    }
+                    // A FIELD: its words over a hairline.
+                    Style::Field => {
+                        let a = if chip.on { 1.0 } else { 0.6 };
+                        label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, ink_c(a));
+                        rect(out, r.x, r.y + r.h - 2.0 * s, r.w, 1.0 * s, 0.0, ink_c(if chip.on || keyed { 0.8 } else { 0.3 }));
+                    }
                 }
-                // Where the keys are: a full ring, brighter and thicker than
-                // the lit choice's.
-                if keyed {
-                    let (mx, my) = map(x0 - 2.5 * s, y0 - 2.5 * s);
-                    out.rects.push(RectInst {
-                        rect: Rect::new(mx, my, (r.w + 5.0 * s) * cs, (r.h + 5.0 * s) * cs),
-                        radius: (r.h / 2.0 + 2.5 * s) * cs,
-                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.9 * ca],
-                        glass: 0.0,
-                        border: (2.0 * s * cs).max(1.5),
-                    });
-                }
-                let ink_a = if chip.on || keyed { 1.0 } else { LAYER_INK[1] };
-                text(out, chip.text, x0 + r.w / 2.0, y0 + (r.h - line) / 2.0, 16.0, 20.0, ink_a);
             }
             text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             return;
         }
+        text(out, crate::i18n::tr(p.label).to_owned(), cx, y, 30.0, 36.0, 1.0);
+        y += if wall { 40.0 } else { 44.0 } * s;
         // A module: its programs as a list of switches, ONE button at the foot.
         if let Some(m) = self.modules.then(|| crate::modules::module(p.label)).flatten() {
             let l = self.mod_layout(m);
@@ -4303,7 +4520,8 @@ mod tests {
         for want in ["Scale", "Built-in screen · looks like 1440 × 900", "100%", "150%"] {
             assert!(draw.labels.iter().any(|l| l.text == want), "{want:?} is drawn");
         }
-        // The one in use wears a ring.
-        assert_eq!(draw.rects.iter().filter(|r| r.border > 0.0).count(), 1);
+        // The one in use is underlined (the hairline language: no rings).
+        assert_eq!(draw.rects.iter().filter(|r| r.border > 0.0).count(), 0);
+        assert_eq!(draw.rects.iter().filter(|r| r.rect.h <= 2.0 && r.rect.w > 4.0).count(), 1);
     }
 }
