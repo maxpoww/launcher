@@ -1733,6 +1733,8 @@ pub(crate) struct Filer {
     /// A drag of ours came over the DOCK while still in hand (set at its
     /// enter there, taken at the drop): the bin may take it.
     pub over_dock: bool,
+    /// The video or GIF under the pointer, playing in its tile (`filer_live`).
+    pub(crate) live: crate::filer_live::Live,
 }
 
 impl Filer {
@@ -1753,6 +1755,7 @@ impl Filer {
             dnd: None,
             orders: Orders::default(),
             undo: Vec::new(),
+            live: Default::default(),
             over_dock: false,
         }
     }
@@ -2412,6 +2415,7 @@ impl App {
         if self.peek.up.as_ref().is_some_and(|u| u.win == id) {
             self.peek_gone();
         }
+        self.filer_live_closed(id);
         info!("files: window {id} closed");
         self.filer_note_session();
         self.filer_note_nav();
@@ -4674,6 +4678,38 @@ impl App {
         if changed {
             self.filer_request_draw(id);
         }
+        // …but a video or a GIF under it, held there, plays in its tile.
+        self.filer_live_hover(id);
+    }
+
+    /// The thing under the pointer in window `id`: its path, its name, the
+    /// key of the picture its tile wears.
+    pub(crate) fn filer_hovered(&self, id: u32) -> Option<(String, String, String)> {
+        let win = self.filer.win(id)?;
+        let Spot::Item(i) = win.hover else { return None };
+        let it = win.items.get(i)?;
+        (it.kind == Kind::File).then(|| (it.path.clone(), it.name.clone(), it.icon.clone()))
+    }
+
+    /// Put `chain` in the layer that holds picture `key` in window `id` (the
+    /// picture stays known by its key); false when no layer holds it.
+    pub(crate) fn filer_tile_layer(&mut self, id: u32, key: &str, chain: &[u8]) -> bool {
+        let Some(win) = self.filer.win_mut(id) else {
+            return false;
+        };
+        let Some(layer) = win.uploaded.iter().position(|u| u.as_deref() == Some(key)) else {
+            return false;
+        };
+        if let Some(r) = win.renderer.as_mut() {
+            r.update_icon_layer(layer as u32, chain);
+        }
+        self.filer_request_draw(id);
+        true
+    }
+
+    /// The still picture `key` of window `id`, as it was before it moved.
+    pub(crate) fn filer_still(&self, id: u32, key: &str) -> Option<Vec<u8>> {
+        self.filer.win(id)?.chains.get(key).cloned()
     }
 
     /// Route a pointer event on window `id`.

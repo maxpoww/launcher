@@ -1360,8 +1360,16 @@ impl App {
             (Some((_, own)), Some(frames)) => {
                 let size = kinds::stream_size(own, max);
                 up.frame_size = size;
-                kinds::stream(&up.path, from, size, own, tag, frames)
-                    .map(|stream| Playing::Video { stream, tag })
+                kinds::stream(
+                    &up.path,
+                    from,
+                    size,
+                    own,
+                    tag,
+                    frames,
+                    kinds::Way::QUICK_LOOK,
+                )
+                .map(|stream| Playing::Video { stream, tag })
             }
             (Some(_), None) => None,
             (None, _) => kinds::play(&up.path, from).map(Playing::Song),

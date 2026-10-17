@@ -711,6 +711,34 @@ impl Drop for Stream {
     }
 }
 
+/// How a video plays: Quick Look's (30 a second, its sound, once through,
+/// its own shape) or a file's TILE under the pointer (fewer frames, silent,
+/// round and round, on the tile's square).
+#[derive(Clone, Copy)]
+pub(crate) struct Way {
+    pub fps: u32,
+    pub sound: bool,
+    pub looped: bool,
+    /// Frames on a clear square `w`×`w`, the picture centred (as a
+    /// thumbnail is), not stretched to `w`×`h`.
+    pub square: bool,
+}
+
+impl Way {
+    pub(crate) const QUICK_LOOK: Way = Way {
+        fps: 30,
+        sound: true,
+        looped: false,
+        square: false,
+    };
+    pub(crate) const TILE: Way = Way {
+        fps: 15,
+        sound: false,
+        looped: true,
+        square: true,
+    };
+}
+
 /// How a video is decoded: by the processor, or on the chip at this render node.
 #[derive(Clone)]
 enum Decode {
@@ -725,12 +753,23 @@ fn decoder(
     (w, h): (u32, u32),
     how: &Decode,
     frames: Option<u32>,
+    way: &Way,
 ) -> Command {
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-v", "error"]);
+    let fps = way.fps;
+    // (A tile's square: shrunk within it, then the rest clear.)
+    let (fit, pad) = if way.square {
+        (
+            ":force_original_aspect_ratio=decrease",
+            format!(",pad={w}:{h}:-1:-1:color=black@0"),
+        )
+    } else {
+        ("", String::new())
+    };
     let filter = match how {
-        Decode::Cpu => format!("fps=30,scale={w}:{h},format=rgba"),
+        Decode::Cpu => format!("fps={fps},scale={w}:{h}{fit},format=rgba{pad}"),
         Decode::Gpu(node) => {
             cmd.args([
                 "-init_hw_device",
@@ -742,12 +781,17 @@ fn decoder(
                 "-hwaccel_output_format",
                 "vaapi",
             ]);
-            format!("fps=30,scale_vaapi=w={w}:h={h}:format=rgba,hwdownload,format=rgba")
+            format!(
+                "fps={fps},scale_vaapi=w={w}:h={h}{fit}:format=rgba,hwdownload,format=rgba{pad}"
+            )
         }
     };
     cmd.args(["-ss", &format!("{from:.2}")]);
     if frames.is_none() {
         cmd.arg("-re");
+        if way.looped {
+            cmd.args(["-stream_loop", "-1"]);
+        }
     }
     cmd.arg("-i").arg(path).args(["-an", "-vf", &filter]);
     // (A try: one frame, thrown away — a frame held in a pipe nobody reads
@@ -799,9 +843,16 @@ fn gpu_node(ffmpeg: &str, path: &Path, size: (u32, u32)) -> Option<String> {
         .unwrap_or_default();
     nodes.sort();
     let found = nodes.into_iter().find(|node| {
-        let Ok(mut child) =
-            decoder(ffmpeg, path, 0.0, size, &Decode::Gpu(node.clone()), Some(1)).spawn()
-        else {
+        let Ok(mut child) = decoder(
+            ffmpeg,
+            path,
+            0.0,
+            size,
+            &Decode::Gpu(node.clone()),
+            Some(1),
+            &Way::QUICK_LOOK,
+        )
+        .spawn() else {
             return false;
         };
         let start = std::time::Instant::now();
@@ -829,6 +880,8 @@ fn gpu_node(ffmpeg: &str, path: &Path, size: (u32, u32)) -> Option<String> {
     found
 }
 
+/// (`own` (0, 0): not known yet — it is asked on the stream's thread, which
+/// only needs it to tell a big video.)
 pub(crate) fn stream(
     path: &Path,
     from: f32,
@@ -836,19 +889,25 @@ pub(crate) fn stream(
     own: (u32, u32),
     tag: u64,
     frames: smithay_client_toolkit::reexports::calloop::channel::Sender<(u64, Vec<u8>)>,
+    way: Way,
 ) -> Option<Stream> {
     use std::io::Read;
     let ffmpeg = crate::thumbs::ffmpeg_tool()?;
     let running = std::sync::Arc::new(std::sync::Mutex::new((None::<std::process::Child>, false)));
     let shared = running.clone();
     let path_buf = path.to_path_buf();
-    let big = own.0 > 1920 || own.1 > 1080;
     let size = (w * h * 4) as usize;
     let read = std::thread::Builder::new()
         .name("quick-look-video".into())
         .spawn(move || {
             // The chip first for a big one (if there is one that can), else, or
             // when it fails before its first frame, the processor.
+            let own = if own == (0, 0) {
+                probe(&path_buf).and_then(|p| p.size).unwrap_or(own)
+            } else {
+                own
+            };
+            let big = own.0 > 1920 || own.1 > 1080;
             let mut ways = Vec::new();
             if big {
                 if let Some(node) = gpu_node(&ffmpeg, &path_buf, (w, h)) {
@@ -856,14 +915,14 @@ pub(crate) fn stream(
                 }
             }
             ways.push(Decode::Cpu);
-            for way in ways {
+            for how in ways {
                 let out = {
                     let Ok(mut r) = shared.lock() else { return };
                     if r.1 {
                         return;
                     }
                     let Ok(mut child) =
-                        decoder(&ffmpeg, &path_buf, from, (w, h), &way, None).spawn()
+                        decoder(&ffmpeg, &path_buf, from, (w, h), &how, None, &way).spawn()
                     else {
                         continue;
                     };
@@ -895,7 +954,7 @@ pub(crate) fn stream(
                 }
                 tracing::info!(
                     "quick look: video: {} gave no frame, trying the next way",
-                    match way {
+                    match how {
                         Decode::Gpu(_) => "the graphics chip",
                         Decode::Cpu => "the processor",
                     }
@@ -909,7 +968,7 @@ pub(crate) fn stream(
     }
     Some(Stream {
         ffmpeg: running,
-        sound: play(path, from),
+        sound: if way.sound { play(path, from) } else { None },
     })
 }
 

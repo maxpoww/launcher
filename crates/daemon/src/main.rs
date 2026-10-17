@@ -42,6 +42,7 @@ mod drives;
 mod emoji;
 mod emoji_table;
 mod filer;
+mod filer_live;
 mod files;
 mod files_icon;
 mod gears_icon;
