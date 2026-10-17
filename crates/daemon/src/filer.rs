@@ -3565,6 +3565,8 @@ impl App {
     /// the light, a pale warm grey panel with the window's ink.
     fn filer_panel_paint(&self, rect: Rect, ground: [f32; 4]) -> MenuPaint {
         let mut paint = self.desktop_panel_paint(rect);
+        // (Golem Files keeps its menus as they were.)
+        paint.rules = true;
         if !crate::look::dark() {
             paint.fill = [0.807, 0.784, 0.73, 1.0]; // #e8e5de
             paint.ink = self.filer_palette().ink;

@@ -492,6 +492,7 @@ mod tests {
         ink: [0.9, 0.9, 0.9, 1.0],
         wash: [1.0, 1.0, 1.0, 0.1],
         radius: 10.0,
+        rules: true,
     };
 
     fn tmp(tag: &str) -> std::path::PathBuf {

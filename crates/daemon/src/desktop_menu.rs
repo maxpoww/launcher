@@ -155,6 +155,9 @@ pub(crate) struct MenuPaint {
     pub wash: [f32; 4],
     /// The panel's corner.
     pub radius: f32,
+    /// The groups parted by a drawn rule (Golem Files' windows, untouched by
+    /// the quiet pass) or by space alone (the desktop's — quiet, 2026-10-16).
+    pub rules: bool,
 }
 
 /// The rows for a right-click on an item (`on_item`) or on bare wallpaper.
@@ -496,13 +499,16 @@ impl Menu {
         for (i, (row, rect)) in self.rows.iter().zip(self.row_rects()).enumerate() {
             let rect = Rect::new(rect.x, rect.y + lift, rect.w, rect.h);
             match row {
-                Row::Sep => grid.rects.push(RectInst {
+                // (Quiet, 2026-10-16: space parts the groups — the rule's
+                // room stays, the line is not drawn.)
+                Row::Sep if paint.rules => grid.rects.push(RectInst {
                     rect: Rect::new(rect.x + 2.0, rect.y + (rect.h - 1.0) / 2.0, rect.w - 4.0, 1.0),
                     radius: 0.0,
                     color: fade(ink_at(LINE_INK)),
                     glass: 0.0,
                     border: 0.0,
                 }),
+                Row::Sep => {}
                 Row::Note(text) => grid.labels.push(Label {
                     text: (*text).to_owned(),
                     pos: (rect.x + TEXT_X, rect.y + (rect.h - LINE_PX) / 2.0),
@@ -773,6 +779,7 @@ mod tests {
         ink: [0.9, 0.9, 0.9, 1.0],
         wash: [1.0, 1.0, 1.0, 0.1],
         radius: 10.0,
+        rules: true,
     };
 
     #[test]
