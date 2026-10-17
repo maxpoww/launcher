@@ -319,6 +319,12 @@ pub struct Renderer {
     /// Shaped label buffers, keyed by label text; invalidated when a
     /// new app set arrives via [`Renderer::set_icons`].
     label_cache: std::collections::HashMap<String, TextBuffer>,
+    /// For each cached label: the width it was shaped within (physical px),
+    /// whether it fit on one line, and that line's width — its key has no
+    /// width, so one shaped narrower must not be reused wider (a file's name
+    /// shaped while its window was still small stayed cut at its first
+    /// hyphen, "h-", on the Acer: 2026-10-17).
+    label_fit: std::collections::HashMap<String, (f32, bool, f32)>,
     /// Shaped uncached labels, reused while their text stays the same.
     volatile: std::collections::HashMap<String, VolatileLabel>,
     frame_no: u64,
@@ -1454,6 +1460,7 @@ impl Renderer {
             text_atlas,
             text_renderer,
             label_cache: std::collections::HashMap::new(),
+            label_fit: std::collections::HashMap::new(),
             volatile: std::collections::HashMap::new(),
             frame_no: 0,
             anim_time: 0.0,
@@ -1496,6 +1503,7 @@ impl Renderer {
     pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
+        self.label_fit.clear();
         let reserved = crate::nix::RANK_HITS_MAX
             + crate::nix::PENDING_INSTALL_CAP
             + crate::thumbs::THUMB_CAP
@@ -1717,6 +1725,7 @@ impl Renderer {
             // pills while the uncached clock was right (Max, 2026-09-30: "the
             // macbook options are oversized").
             self.label_cache.clear();
+        self.label_fit.clear();
             self.volatile.clear();
             self.damage_prev = None;
         }
@@ -2018,8 +2027,22 @@ impl Renderer {
         for (label, _) in &all_labels {
             if label.cache {
                 let key = label_key(label);
-                if !self.label_cache.contains_key(&key) {
+                let want_w = label.max_w * scale;
+                let right = self.label_cache.contains_key(&key)
+                    && self.label_fit.get(&key).is_some_and(|&(w, fits, line_w)| {
+                        w == want_w || (fits && want_w >= line_w)
+                    });
+                if !right {
                     let buffer = shape(&mut font_system, label);
+                    let laid_out: usize = buffer
+                        .lines
+                        .iter()
+                        .map(|l| l.layout_opt().as_ref().map_or(0, Vec::len))
+                        .sum();
+                    let line_w = buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max);
+                    // (A text of several lines fits when it wrapped nowhere.)
+                    let lines = label.text.lines().count().max(1);
+                    self.label_fit.insert(key.clone(), (want_w, laid_out <= lines, line_w));
                     self.label_cache.insert(key.clone(), buffer);
                 }
                 shaped.push((false, key));

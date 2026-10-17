@@ -579,6 +579,56 @@ pub(crate) fn probe(path: &Path) -> Option<Probe> {
 
 /// A frame `at` seconds in, no bigger than `max` — or a song's cover.
 pub(crate) fn frame(path: &Path, at: f32, max: (u32, u32)) -> Option<RgbaImage> {
+    // The KEYFRAME nearest the moment, straight through a pipe: only one
+    // frame decoded, nothing written (a 4K HEVC poster on the 2013 MacBook:
+    // 3.8 s → 0.9 s; the Acer 1.3 s → 0.26 s). A video with no keyframe
+    // there is read the exact way.
+    frame_quick(path, at, max).or_else(|| frame_exact(path, at, max))
+}
+
+fn frame_quick(path: &Path, at: f32, max: (u32, u32)) -> Option<RgbaImage> {
+    let ffmpeg = crate::thumbs::ffmpeg_tool()?;
+    let out = crate::peek_edit::dies_with_us(Command::new(ffmpeg))
+        .args([
+            "-v",
+            "error",
+            "-skip_frame",
+            "nokey",
+            "-ss",
+            &format!("{at:.2}"),
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-an",
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!(
+                "scale={}:{}:force_original_aspect_ratio=decrease",
+                max.0, max.1
+            ),
+            "-c:v",
+            "bmp",
+            "-f",
+            "image2pipe",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if out.stdout.is_empty() {
+        return None;
+    }
+    Some(
+        image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Bmp)
+            .ok()?
+            .to_rgba8(),
+    )
+}
+
+fn frame_exact(path: &Path, at: f32, max: (u32, u32)) -> Option<RgbaImage> {
     let ffmpeg = crate::thumbs::ffmpeg_tool()?;
     let out = Scratch::new("peek-frame")?;
     let scale = format!(
@@ -722,6 +772,9 @@ pub(crate) struct Way {
     /// Frames on a clear square `w`×`w`, the picture centred (as a
     /// thumbnail is), not stretched to `w`×`h`.
     pub square: bool,
+    /// The decoder may skip its loop filter: a third less work, not seen
+    /// at a tile's size (a 4K HEVC tile on the 2013 MacBook: 3 cores → 2).
+    pub rough: bool,
 }
 
 impl Way {
@@ -730,12 +783,14 @@ impl Way {
         sound: true,
         looped: false,
         square: false,
+        rough: false,
     };
     pub(crate) const TILE: Way = Way {
         fps: 15,
         sound: false,
         looped: true,
         square: true,
+        rough: true,
     };
 }
 
@@ -786,6 +841,9 @@ fn decoder(
             )
         }
     };
+    if way.rough {
+        cmd.args(["-skip_loop_filter", "all"]);
+    }
     cmd.args(["-ss", &format!("{from:.2}")]);
     if frames.is_none() {
         cmd.arg("-re");

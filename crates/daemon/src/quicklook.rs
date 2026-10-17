@@ -69,6 +69,27 @@ const SOFT: u32 = 2 * TILES;
 const BADGE: u32 = 2 * TILES + 1;
 /// What is kept prepared, at most.
 const BUDGET: usize = 96 << 20;
+
+/// What may be kept prepared: `BUDGET` at least, a 24th of the machine's
+/// memory up to 256 MB. A picture is kept as 256-texel tiles (a poster ~7 MB,
+/// a moving GIF up to 48 MB): at 96 MB, walking a folder of videos on a 4 GB
+/// laptop let a neighbour go and prepared it again — a 4K poster twice in a
+/// row, 8 s each, on the 2013 MacBook (2026-10-17).
+fn budget() -> usize {
+    static IT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *IT.get_or_init(|| {
+        let total = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|m| {
+                m.lines()
+                    .find(|l| l.starts_with("MemTotal:"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|kb| kb.parse::<usize>().ok())
+            })
+            .map_or(0, |kb| kb * 1024);
+        (total / 24).clamp(BUDGET, 256 << 20)
+    })
+}
 /// Of the screen, at most.
 const MAX: f32 = 0.82;
 pub(crate) const HEAD: f32 = 46.0;
@@ -355,7 +376,7 @@ impl QuickLook {
         self.order.push(key);
         // (Never what is up.)
         let up = self.up.as_ref().map(|u| u.path.clone());
-        while self.bytes > BUDGET && self.order.len() > 1 {
+        while self.bytes > budget() && self.order.len() > 1 {
             let Some(i) = self.order.iter().position(|o| Some(&o.0) != up.as_ref()) else {
                 break;
             };
