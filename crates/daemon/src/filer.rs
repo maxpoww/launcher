@@ -5805,12 +5805,49 @@ impl App {
         let origin = crate::hypr::active_window_geom()
             .zip(crate::hypr::focused_monitor().ok())
             .map_or((0.0, 0.0), |((wx, wy, _, _), m)| (wx as f32 - m.x as f32, wy as f32 - m.y as f32));
+        // (One of several selected: its place among them.)
+        let of = (win.selected.len() > 1 && win.selected.contains(&item.path)).then(|| {
+            let before = win.items[..i].iter().filter(|it| win.selected.contains(&it.path)).count();
+            (before + 1, win.selected.len())
+        });
         Some(crate::quicklook::Thing {
             path: PathBuf::from(&item.path),
             name: item.name.clone(),
             thumb: win.chains.get(&item.icon).cloned(),
             icon: Rect::new(origin.0 + x, origin.1 + y, side, side),
+            of,
         })
+    }
+
+    /// With Quick Look up on one of SEVERAL selected, the arrows walk among
+    /// those only, round (Finder's way); the selection stays.
+    fn filer_peek_walk(&mut self, id: u32, keysym: Keysym) -> bool {
+        let by: isize = match keysym {
+            Keysym::Left | Keysym::Up => -1,
+            Keysym::Right | Keysym::Down => 1,
+            _ => return false,
+        };
+        if self.modifiers.shift || self.modifiers.alt || !self.peek.up.as_ref().is_some_and(|u| u.win == id && !u.closing) {
+            return false;
+        }
+        let icon_scale = self.icon_scale();
+        let Some(win) = self.filer.win_mut(id) else {
+            return false;
+        };
+        if win.selected.len() < 2 {
+            return false;
+        }
+        let picked: Vec<usize> = (0..win.items.len()).filter(|&i| win.selected.contains(&win.items[i].path)).collect();
+        let Some(k) = win.cursor.and_then(|c| picked.iter().position(|&i| i == c)) else {
+            return false;
+        };
+        let to = picked[(k as isize + by).rem_euclid(picked.len() as isize) as usize];
+        win.cursor = Some(to);
+        win.gliding = false;
+        win.scroll_to = win.layout(icon_scale).reveal(to, win.scroll_to, win.items.len());
+        self.filer_request_draw(id);
+        self.filer_peek_open(id);
+        true
     }
 
     /// Space: Quick Look on what the keys are on.
@@ -5871,7 +5908,7 @@ impl App {
     pub(crate) fn filer_key(&mut self, id: u32, keysym: Keysym, utf8: Option<&str>) {
         // QUICK LOOK up for this window: its keys first (the arrows walk on
         // here, and it follows them).
-        if self.peek_key(id, keysym, utf8) {
+        if self.peek_key(id, keysym, utf8) || self.filer_peek_walk(id, keysym) {
             return;
         }
         let icon_scale = self.icon_scale();

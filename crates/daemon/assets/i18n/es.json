@@ -990,5 +990,6 @@
   "Fade in and out": "Fundido al entrar y salir",
   "the sound is made again for the fades": "el sonido se vuelve a codificar para los fundidos",
   "frame": "cuadro",
-  "Photo saved: {name}": "Foto guardada: {name}"
+  "Photo saved: {name}": "Foto guardada: {name}",
+  "{n} of {all}": "{n} de {all}"
 }

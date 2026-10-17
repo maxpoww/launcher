@@ -195,6 +195,8 @@ pub(crate) struct Up {
     /// The page shown (a PDF's).
     page: u32,
     pub(crate) name: String,
+    /// Its place among several selected, and how many.
+    of: Option<(usize, usize)>,
     /// The thing's picture in its window (the soft first frame, the badge).
     thumb: Option<Vec<u8>>,
     /// Its icon on the screen: where it grows from and goes back to.
@@ -929,6 +931,9 @@ pub(crate) struct Thing {
     pub thumb: Option<Vec<u8>>,
     /// Its icon, on the screen (logical px of the output).
     pub icon: Rect,
+    /// Its place among several selected (from 1), and how many: Quick Look
+    /// walks only those.
+    pub of: Option<(usize, usize)>,
 }
 
 /// The picture a body shows in its tiles.
@@ -1111,6 +1116,7 @@ impl App {
             path: thing.path,
             page: 0,
             name: thing.name,
+            of: thing.of,
             thumb: thing.thumb,
             from: thing.icon,
             start,
@@ -2332,8 +2338,19 @@ impl App {
             ink,
         ));
         if let Some(p) = prepared {
+            let meta = match up.of {
+                Some((n, all)) => format!(
+                    "{} · {}",
+                    fill(
+                        tr("{n} of {all}"),
+                        &[("n", &n.to_string()), ("all", &all.to_string())]
+                    ),
+                    p.meta
+                ),
+                None => p.meta.clone(),
+            };
             g.labels.push(text_label(
-                &p.meta,
+                &meta,
                 (r.x + 46.0, r.y + 25.0),
                 text_w,
                 11.5,
