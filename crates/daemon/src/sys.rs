@@ -166,6 +166,9 @@ pub(crate) struct Volume {
     /// The file system ("exfat", "ext4", "ntfs", "vfat"); empty while locked.
     pub(crate) fstype: String,
     pub(crate) label: String,
+    /// The file system's own id: what tells a stick from the next one
+    /// plugged in where it was (a kernel name is given again).
+    pub(crate) uuid: String,
     pub(crate) mount: Option<String>,
     pub(crate) used: Option<u64>,
     pub(crate) size: Option<u64>,
@@ -185,6 +188,9 @@ pub(crate) struct Drive {
     pub(crate) dev: String,
     /// Kernel name (`sdb`).
     pub(crate) kname: String,
+    /// The drive's serial number, where it has one (empty otherwise): with
+    /// its size, what the disk service is asked to check before a format.
+    pub(crate) serial: String,
     /// How it is plugged in ("usb", "sata", "nvme").
     pub(crate) tran: String,
     pub(crate) vol: Option<Volume>,
@@ -1108,7 +1114,7 @@ fn read_drives() -> Vec<Drive> {
             "-J",
             "-b",
             "-o",
-            "NAME,KNAME,TYPE,SIZE,ROTA,RM,HOTPLUG,MODEL,VENDOR,TRAN,MOUNTPOINTS,LABEL,FSAVAIL,FSTYPE,FSUSED,FSSIZE",
+            "NAME,KNAME,TYPE,SIZE,ROTA,RM,HOTPLUG,MODEL,VENDOR,TRAN,MOUNTPOINTS,LABEL,FSAVAIL,FSTYPE,FSUSED,FSSIZE,SERIAL,UUID",
         ],
     ) else {
         return Vec::new();
@@ -1182,6 +1188,7 @@ pub(crate) fn parse_drives(json: &serde_json::Value) -> Vec<Drive> {
         let vol = removable.then(|| volume_of(d, &num)).flatten();
         out.push(Drive {
             kname: d["kname"].as_str().unwrap_or(name).to_owned(),
+            serial: d["serial"].as_str().unwrap_or("").trim().to_owned(),
             tran: d["tran"].as_str().unwrap_or("").to_owned(),
             vol,
             dev: format!("/dev/{name}"),
@@ -1222,6 +1229,7 @@ fn volume_of(
     let fill = |v: &mut Volume, n: &serde_json::Value| {
         v.fstype = n["fstype"].as_str().unwrap_or("").to_owned();
         v.label = n["label"].as_str().unwrap_or("").to_owned();
+        v.uuid = n["uuid"].as_str().unwrap_or("").to_owned();
         v.mount = n["mountpoints"]
             .as_array()
             .into_iter()

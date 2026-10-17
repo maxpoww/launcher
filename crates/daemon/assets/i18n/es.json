@@ -1016,5 +1016,7 @@
   "Ejecting…": "Expulsando…",
   "{0} · {1} free of {2}": "{0} · {1} libres de {2}",
   "Media": "Multimedia",
-  "Search in {folder}": "Buscar en {folder}"
+  "Search in {folder}": "Buscar en {folder}",
+  "It is not plugged in any more": "Ya no está conectado",
+  "Not a name a drive can take": "No es un nombre que una unidad pueda llevar"
 }

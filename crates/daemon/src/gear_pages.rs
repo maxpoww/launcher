@@ -148,9 +148,27 @@ fn device_at(mount: &str) -> Option<String> {
         let mut f = line.split_whitespace();
         let (dev, at) = (f.next()?, crate::desktop_send::unescape_mount(f.next()?));
         let here = at == mount || real.as_deref().is_some_and(|r| std::path::Path::new(&at) == r);
-        let name = dev.strip_prefix("/dev/")?;
-        (here && !name.is_empty() && !name.contains('/')).then(|| name.to_owned())
+        if !here || !dev.starts_with("/dev/") {
+            return None;
+        }
+        // (`/dev/mapper/luks-…` is `/dev/dm-0`: the kernel name is the
+        // real device's.)
+        let dev = std::fs::canonicalize(dev).unwrap_or_else(|_| std::path::PathBuf::from(dev));
+        let name = dev.file_name()?.to_string_lossy().into_owned();
+        (!name.is_empty()).then_some(name)
     })
+}
+
+/// The uuid of the file system on device `dev` (`sdb1`), from
+/// `/dev/disk/by-uuid`, where it has one.
+fn uuid_of(dev: &str) -> Option<String> {
+    for e in std::fs::read_dir("/dev/disk/by-uuid").ok()?.flatten() {
+        let Ok(target) = std::fs::canonicalize(e.path()) else { continue };
+        if target.file_name().is_some_and(|n| n == dev) {
+            return Some(e.file_name().to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 /// What the worker polls for the gear's page `page`.
@@ -164,6 +182,19 @@ fn sys_page_of(page: Option<PageKind>) -> Option<SysPage> {
         Some(PageKind::Battery) => Some(SysPage::Battery),
         _ => None,
     }
+}
+
+/// A desktop ask, waiting for the drive list: for which device (its kernel
+/// name, its uuid where it has one, where it is mounted), named for the
+/// notification, and since when.
+#[derive(Debug, Clone, PartialEq)]
+struct DriveAskFor {
+    dev: String,
+    uuid: Option<String>,
+    mount: String,
+    name: String,
+    ask: DriveAsk,
+    at: std::time::Instant,
 }
 
 /// What the desktop's menu asks of a plugged-in drive.
@@ -190,9 +221,13 @@ enum Erase {
 pub(crate) struct PagesState {
     /// What the desktop's menu asked of a plugged-in drive (by where it is
     /// mounted), waiting for the drive list to know it.
-    drive_ask: Option<(String, DriveAsk, std::time::Instant)>,
+    drive_ask: Option<DriveAskFor>,
     /// The drive the rename field is for, by its kernel name (as `kname`).
     rename_kname: Option<String>,
+    /// The drive whose page is up, by its kernel name: an act on that page
+    /// is for it, not for whatever stands at its place in the list now (a
+    /// stick pulled while the page was up moved the places).
+    drive_kname: String,
     /// The act under way was asked on the desktop: its end is said in a
     /// notification, by the drive's name (the gear box may not be up).
     drive_tell: Option<String>,
@@ -230,6 +265,10 @@ struct FormatDraft {
     /// list, which is read again while the page is up (a stick plugged in
     /// meanwhile moved the places: the confirm would have erased another).
     kname: String,
+    /// …and its size: a kernel name is given again to the next drive plugged
+    /// in where one was pulled, and `sdb` alone would name the newcomer.
+    size: u64,
+    serial: String,
     name: String,
     target: Target,
     lock: bool,
@@ -535,7 +574,13 @@ impl App {
                 self.sys_send_windows();
             }
             SysEvent::Disk(d) => {
+                let before: Vec<(String, u64)> = self.gear.pages.disk.drives.iter().map(|d| (d.kname.clone(), d.size)).collect();
                 self.gear.pages.disk = *d;
+                let now: Vec<(String, u64)> = self.gear.pages.disk.drives.iter().map(|d| (d.kname.clone(), d.size)).collect();
+                // (The drives changed under a "Click again": asked anew.)
+                if before != now {
+                    self.gear.arm = None;
+                }
                 self.pages_drive_resolve();
             }
             SysEvent::Cleaned { freed } => {
@@ -1777,7 +1822,7 @@ impl App {
 
     fn drive_view(&self, i: usize) -> View {
         let p = &self.gear.pages;
-        let Some(x) = p.disk.drives.get(i) else {
+        let Some(x) = p.disk.drives.get(i).filter(|d| p.drive_kname.is_empty() || d.kname == p.drive_kname) else {
             return back_only(vec![Item::Empty(tr("It was unplugged").into())]);
         };
         if x.removable {
@@ -1858,7 +1903,15 @@ impl App {
 
     fn page_view(&mut self, v: PView) {
         self.gear.pages.view = v;
+        // (A "Click again" asked on another page is not for this one.)
+        self.gear.arm = None;
         self.gear_show_view();
+    }
+
+    /// The page's drive is not there any more: said in its note.
+    fn unplugged_note(&mut self) {
+        self.gear.pages.drive_note = Some(("It was unplugged".to_owned(), false));
+        self.gear_changed();
     }
 
     /// Back out of a details view; returns whether there was one.
@@ -2051,6 +2104,7 @@ impl App {
                     Erase::Running(p) => Erase::Running(p),
                     _ => Erase::Idle,
                 };
+                self.gear.pages.drive_kname = self.gear.pages.disk.drives.get(i).map(|d| d.kname.clone()).unwrap_or_default();
                 self.page_view(PView::Drive(i));
             }
             SysHit::OpenDrive(i) => {
@@ -2203,9 +2257,10 @@ impl App {
     /// asks for one of the gear's own acts on it: the same pages and the
     /// same worker, so the two ways in never differ. `mount`: where the
     /// drive is mounted, which is how the desktop knows it.
-    /// A removable drive (never the system's) by its kernel name, and where
-    /// it is in the list now.
-    fn removable_drive(&self, kname: &str) -> Option<(usize, Drive)> {
+    /// A removable drive (never the system's) by its kernel name — and its
+    /// size, when one is given (`Some`): the same name on a drive of another
+    /// size is another drive — and where it is in the list now.
+    fn removable_drive(&self, kname: &str, same: Option<(u64, &str)>) -> Option<(usize, Drive)> {
         if kname.is_empty() {
             return None;
         }
@@ -2214,32 +2269,46 @@ impl App {
             .disk
             .drives
             .iter()
-            .position(|d| d.kname == kname && d.removable && !d.system)
+            .position(|d| {
+                d.kname == kname
+                    && d.removable
+                    && !d.system
+                    && same.is_none_or(|(size, serial)| {
+                        size == d.size && (serial.is_empty() || d.serial.is_empty() || serial == d.serial)
+                    })
+            })
             .map(|i| (i, self.gear.pages.disk.drives[i].clone()))
     }
 
-    pub(crate) fn pages_drive_ask(&mut self, mount: String, ask: DriveAsk) {
-        // The DEVICE mounted there now (`sdb1`, `mmcblk0p1`) is what the ask
-        // is for — a stick pulled meanwhile and another of the same label at
-        // the same folder must not be renamed or checked in its place.
+    pub(crate) fn pages_drive_ask(&mut self, mount: String, name: String, ask: DriveAsk) {
+        // The DEVICE mounted there now (`sdb1`, `mmcblk0p1`) and its uuid are
+        // what the ask is for — a stick pulled meanwhile and another of the
+        // same label at the same folder must not be renamed or checked in
+        // its place.
         let Some(dev) = device_at(&mount) else {
             warn!("gear: nothing is mounted at {mount}");
+            crate::desktop_send_notify(&format!("{name}: {}", tr("It was unplugged")));
             return;
         };
         let format = ask == DriveAsk::Format;
         let at = std::time::Instant::now();
-        self.gear.pages.drive_ask = Some((dev, ask, at));
-        // Not resolved in 10 s (the drive went): dropped, and the watch the
-        // ask added put back.
+        // Not resolved in 10 s (the drive went): dropped and said, and the
+        // watch the ask added put back. (No timer: no ask — one that could
+        // never expire is not made.)
         let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(10));
-        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
-            if app.gear.pages.drive_ask.as_ref().is_some_and(|(_, _, t)| *t == at) {
-                app.gear.pages.drive_ask = None;
+        let waiting = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if let Some(ask) = app.gear.pages.drive_ask.take_if(|a| a.at == at) {
+                crate::desktop_send_notify(&format!("{}: {}", ask.name, tr("It was unplugged")));
                 let watched = sys_page_of(app.gear_page());
                 app.sys_send(SysCommand::Watch(watched));
             }
             calloop::timer::TimeoutAction::Drop
         });
+        if waiting.is_err() {
+            warn!("gear: cannot time a drive ask; not asked");
+            return;
+        }
+        self.gear.pages.drive_ask = Some(DriveAskFor { uuid: uuid_of(&dev), dev, mount, name, ask, at });
         if format {
             // The gear box comes out on the drives' page at once (which
             // reads them); the Format page follows when the list is in.
@@ -2255,15 +2324,24 @@ impl App {
 
     /// Act on the waiting ask, if the drive list has its drive.
     fn pages_drive_resolve(&mut self) -> bool {
-        let Some((dev, _, _)) = &self.gear.pages.drive_ask else {
+        let Some(DriveAskFor { dev, uuid, mount, .. }) = &self.gear.pages.drive_ask else {
             return false;
         };
+        // (The device, its uuid AND where it is mounted: a name given again
+        // to a newcomer is not the drive that was asked about.)
+        let real = std::fs::canonicalize(mount).ok();
         let Some(i) = self.gear.pages.disk.drives.iter().position(|d| {
-            d.removable && !d.system && d.vol.as_ref().is_some_and(|v| v.fs_dev() == dev.as_str() || v.part == *dev)
+            d.removable
+                && !d.system
+                && d.vol.as_ref().is_some_and(|v| {
+                    (v.fs_dev() == dev.as_str() || v.part == *dev)
+                        && uuid.as_deref().is_none_or(|u| v.uuid == u)
+                        && v.mount.as_deref().is_some_and(|m| m == mount.as_str() || real.as_deref() == Some(std::path::Path::new(m)))
+                })
         }) else {
             return false;
         };
-        let Some((_, ask, _)) = self.gear.pages.drive_ask.take() else {
+        let Some(DriveAskFor { ask, name: asked_name, .. }) = self.gear.pages.drive_ask.take() else {
             return false;
         };
         // (The page on screen is watched again, or none.)
@@ -2274,11 +2352,12 @@ impl App {
         let Some(v) = self.gear.pages.disk.drives[i].vol.clone() else {
             return false;
         };
-        let name = if v.label.is_empty() { self.gear.pages.disk.drives[i].name.clone() } else { v.label.clone() };
+        let name = if v.label.is_empty() { asked_name } else { v.label.clone() };
         match ask {
             DriveAsk::Format => {
                 // Its page in the gear box: the name, what it is for, and
                 // the confirming click are there.
+                self.gear.pages.drive_kname = self.gear.pages.disk.drives[i].kname.clone();
                 if self.stats_show_page(PageKind::Disk) && self.gear_page() == Some(PageKind::Disk) {
                     self.drive_click(SysHit::ExtFormat(i));
                     self.gear_changed();
@@ -2288,20 +2367,19 @@ impl App {
                 self.gear.pages.drive_tell = Some(name);
                 self.drive_send(
                     "Checking…",
-                    DriveCommand::Check { volume: v.fs_dev().to_owned(), mounted: v.mount.is_some() },
+                    DriveCommand::Check { volume: v.fs_dev().to_owned(), mounted: v.mount.is_some(), uuid: vol_uuid(&v) },
                 );
             }
-            DriveAsk::Rename(label) => {
-                self.gear.pages.drive_tell = Some(label.clone());
-                self.drive_send(
-                    "Renaming…",
-                    DriveCommand::Rename {
-                        volume: v.fs_dev().to_owned(),
-                        label: fit_label(&clean_label(&label, &v.fstype), &v.fstype),
-                        mounted: v.mount.is_some(),
-                    },
-                );
-            }
+            DriveAsk::Rename(label) => match label_for(&label, &v.fstype) {
+                Some(fitted) => {
+                    self.gear.pages.drive_tell = Some(fitted.clone());
+                    self.drive_send(
+                        "Renaming…",
+                        DriveCommand::Rename { volume: v.fs_dev().to_owned(), label: fitted, mounted: v.mount.is_some(), uuid: vol_uuid(&v) },
+                    );
+                }
+                None => crate::desktop_send_notify(&format!("{name}: {}", tr("Not a name a drive can take"))),
+            },
         }
         true
     }
@@ -2312,7 +2390,10 @@ impl App {
             "about" => PView::About,
             "health" => PView::Health,
             "clean" => PView::Clean,
-            "drive" => PView::Drive(0),
+            "drive" => {
+                self.gear.pages.drive_kname = self.gear.pages.disk.drives.first().map(|d| d.kname.clone()).unwrap_or_default();
+                PView::Drive(0)
+            }
             "folder" => PView::Folder(0),
             "card" => PView::Card(0),
             "video" => PView::Video,
@@ -2320,10 +2401,13 @@ impl App {
                 let Some(i) = self.gear.pages.disk.drives.iter().position(|d| d.removable) else {
                     return false;
                 };
+                self.gear.pages.drive_kname = self.gear.pages.disk.drives[i].kname.clone();
                 if what == "ext" {
                     PView::Drive(i)
                 } else {
-                    PView::Format(i)
+                    // (Through the click: it fills the draft the page shows.)
+                    self.drive_click(SysHit::ExtFormat(i));
+                    return true;
                 }
             }
             "app" => match self.gear.pages.live.apps.iter().find(|a| !a.system) {
@@ -2349,6 +2433,18 @@ fn clean_label(name: &str, fstype: &str) -> String {
         return name.chars().filter(|c| !c.is_control()).collect();
     }
     name.chars().filter(|c| !c.is_control() && !"\"*/:<>?\\|".contains(*c)).collect()
+}
+
+/// A label as the file system takes it — cleaned and cut — or `None` when
+/// nothing is left of it (a format then says "Untitled", a rename refuses).
+fn label_for(name: &str, fstype: &str) -> Option<String> {
+    let l = fit_label(&clean_label(name.trim(), fstype), fstype);
+    (!l.trim().is_empty()).then_some(l)
+}
+
+/// A volume's uuid for the disk service to check, where it has one.
+fn vol_uuid(v: &crate::sys::Volume) -> Option<String> {
+    (!v.uuid.is_empty()).then(|| v.uuid.clone())
 }
 
 /// `name` cut to what a file system's label can hold. A name one letter too
@@ -2396,6 +2492,14 @@ fn health_word(pct: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_of_nothing_fat_can_take_is_none() {
+        assert_eq!(label_for(":/?*", "vfat"), None);
+        assert_eq!(label_for("   ", "ext4"), None);
+        assert_eq!(label_for("  NIKON 1 V2 ", "vfat").as_deref(), Some("NIKON 1 V2"));
+        assert_eq!(label_for("a very long name indeed", "exfat").as_deref(), Some("a very long"));
+    }
 
     #[test]
     fn a_fat_label_loses_what_fat_refuses() {
@@ -2558,10 +2662,11 @@ impl App {
             });
             self.gear.pages.drives = Some(crate::drives::spawn(tx));
         }
-        self.gear.pages.drive_busy = Some(what);
         self.gear.pages.drive_note = None;
         if let Some(h) = &self.gear.pages.drives {
-            h.send(cmd);
+            if h.send(cmd) {
+                self.gear.pages.drive_busy = Some(what);
+            }
         }
     }
 
@@ -2696,12 +2801,15 @@ impl App {
         }
     }
 
-    fn format_view(&self, i: usize) -> View {
+    fn format_view(&self, _i: usize) -> View {
         let p = &self.gear.pages;
-        let Some(x) = p.disk.drives.get(i) else {
+        let f = &p.format;
+        // (The drive the page was opened for, found again — not whatever
+        // stands at its place in the list now.)
+        let Some((_, x)) = self.removable_drive(&f.kname, Some((f.size, &f.serial))) else {
             return back_only(vec![Item::Empty("It was unplugged".into())]);
         };
-        let f = &p.format;
+        let x = &x;
         let mut items = vec![
             Item::Card {
                 glyph: G_USB,
@@ -2804,7 +2912,12 @@ impl App {
     }
 
     fn drive_click(&mut self, hit: SysHit) {
-        let drive = |app: &App, i: usize| app.gear.pages.disk.drives.get(i).cloned();
+        // (The PAGE's drive, not whatever stands at place `i` now.)
+        let drive = |app: &App, i: usize| {
+            let d = app.gear.pages.disk.drives.get(i).cloned()?;
+            let page = &app.gear.pages.drive_kname;
+            (page.is_empty() || *page == d.kname).then_some(d)
+        };
         match hit {
             SysHit::Eject(i) => {
                 if let Some(x) = drive(self, i) {
@@ -2836,6 +2949,7 @@ impl App {
                         DriveCommand::Check {
                             volume: v.fs_dev().to_owned(),
                             mounted: v.mount.is_some(),
+                            uuid: vol_uuid(&v),
                         },
                     );
                 }
@@ -2876,6 +2990,8 @@ impl App {
                 };
                 self.gear.pages.format = FormatDraft {
                     kname: x.as_ref().map(|x| x.kname.clone()).unwrap_or_default(),
+                    size: x.as_ref().map_or(0, |x| x.size),
+                    serial: x.as_ref().map(|x| x.serial.clone()).unwrap_or_default(),
                     name: vol.map(|v| v.label).unwrap_or_default(),
                     target,
                     ..FormatDraft::default()
@@ -2924,14 +3040,14 @@ impl App {
                 }
                 // The drive the page was opened for, found again now — and
                 // only a removable one that is not the system's.
-                let found = self.removable_drive(&self.gear.pages.format.kname.clone());
+                let f = self.gear.pages.format.clone();
+                let found = self.removable_drive(&f.kname, Some((f.size, &f.serial)));
                 if found.is_none() {
-                    self.gear.pages.drive_note = Some(("It was unplugged".to_owned(), false));
-                    self.gear_changed();
+                    self.unplugged_note();
                 }
                 if let Some((i, x)) = found {
-                    let f = self.gear.pages.format.clone();
                     let (volumes, locked_part) = Self::ext_parts(&x);
+                    let expect = crate::drives::Expect { size: x.size, serial: x.serial.clone() };
                     self.gear.pages.format.password.clear();
                     self.page_view(PView::Drive(i));
                     self.drive_send(
@@ -2940,16 +3056,12 @@ impl App {
                             drive: x.kname,
                             volumes,
                             locked_part,
-                            name: fit_label(
-                                &clean_label(
-                                    if f.name.trim().is_empty() { "Untitled" } else { f.name.trim() },
-                                    f.target.fstype(),
-                                ),
-                                f.target.fstype(),
-                            ),
+                            // (A name of nothing FAT can take becomes "Untitled".)
+                            name: label_for(&f.name, f.target.fstype()).unwrap_or_else(|| "Untitled".to_owned()),
                             target: f.target,
                             password: (f.lock && f.target == Target::Golem).then_some(f.password),
                             thorough: f.thorough,
+                            expect,
                         },
                     );
                 }
@@ -2975,7 +3087,9 @@ impl App {
         if !matches!(self.gear.pages.view, PView::Format(_)) {
             return;
         }
-        let Some((_, x)) = self.removable_drive(&self.gear.pages.format.kname.clone()) else {
+        let f = self.gear.pages.format.clone();
+        let Some((_, x)) = self.removable_drive(&f.kname, Some((f.size, &f.serial))) else {
+            self.unplugged_note();
             return;
         };
         let name = x.name;
@@ -2990,16 +3104,25 @@ impl App {
             PField::DriveName(_) => {
                 // (By its kernel name, found again: see `FormatDraft::kname`.)
                 let k = self.gear.pages.rename_kname.take().unwrap_or_default();
-                let vol = self.removable_drive(&k).and_then(|(_, x)| x.vol);
-                if let (Some(v), false) = (vol, trimmed.is_empty()) {
-                    self.drive_send(
-                        "Renaming…",
-                        DriveCommand::Rename {
-                            volume: v.fs_dev().to_owned(),
-                            label: fit_label(&clean_label(&trimmed, &v.fstype), &v.fstype),
-                            mounted: v.mount.is_some(),
-                        },
-                    );
+                let vol = self.removable_drive(&k, None).and_then(|(_, x)| x.vol);
+                if let Some(v) = vol {
+                    match label_for(&trimmed, &v.fstype) {
+                        Some(label) => {
+                            self.drive_send(
+                                "Renaming…",
+                                DriveCommand::Rename {
+                                    volume: v.fs_dev().to_owned(),
+                                    label,
+                                    mounted: v.mount.is_some(),
+                                    uuid: vol_uuid(&v),
+                                },
+                            );
+                        }
+                        None => {
+                            self.gear.pages.drive_note = Some(("Not a name a drive can take".to_owned(), false));
+                            self.gear_changed();
+                        }
+                    }
                 }
             }
             PField::DrivePassword(i) => {

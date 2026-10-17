@@ -50,6 +50,17 @@ impl Target {
     }
 }
 
+/// What the owner saw of a drive when they chose to format it: checked
+/// against the service's own view of the device right before, because a
+/// kernel name (`sdb`) is given again to the next drive plugged in where one
+/// was pulled.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Expect {
+    pub size: u64,
+    /// Its serial, where both sides have one (compared only then).
+    pub serial: String,
+}
+
 /// Every command names devices by their kernel name (`sdb`, `sdb1`, `dm-0`).
 #[derive(Debug)]
 pub(crate) enum DriveCommand {
@@ -65,10 +76,13 @@ pub(crate) enum DriveCommand {
         volume: String,
         label: String,
         mounted: bool,
+        /// The file system's uuid as seen when asked (`None`: not known).
+        uuid: Option<String>,
     },
     Check {
         volume: String,
         mounted: bool,
+        uuid: Option<String>,
     },
     Unlock {
         part: String,
@@ -82,6 +96,7 @@ pub(crate) enum DriveCommand {
         target: Target,
         password: Option<String>,
         thorough: bool,
+        expect: Expect,
     },
 }
 
@@ -99,9 +114,14 @@ pub(crate) struct DriveHandle {
 }
 
 impl DriveHandle {
-    pub(crate) fn send(&self, cmd: DriveCommand) {
-        if let Err(e) = self.tx.send(cmd) {
-            warn!("drives: worker gone, dropping command: {e}");
+    /// False when the worker is gone (the command was dropped).
+    pub(crate) fn send(&self, cmd: DriveCommand) -> bool {
+        match self.tx.send(cmd) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("drives: worker gone, dropping command: {e}");
+                false
+            }
         }
     }
 }
@@ -212,6 +232,36 @@ async fn unmount(conn: &Connection, kname: &str) -> zbus::Result<()> {
 /// Stop using everything on a drive: unmount what is mounted, lock what was
 /// unlocked. Problems are logged, not fatal — a volume that was not mounted
 /// refuses to be unmounted, and that is fine.
+/// The drive is still the one the owner chose: the service's own size and
+/// serial of the device at that kernel name against what they saw.
+async fn same_drive(conn: &Connection, drive: &str, expect: &Expect) -> zbus::Result<()> {
+    let block = proxy(conn, drive, BLOCK).await?;
+    let size: u64 = block.get_property("Size").await?;
+    let path: OwnedObjectPath = block.get_property("Drive").await?;
+    let serial: String = match Proxy::new(conn, DEST, path, DRIVE).await {
+        Ok(d) => d.get_property("Serial").await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    let (serial, want) = (serial.trim(), expect.serial.trim());
+    let same_serial = serial.is_empty() || want.is_empty() || serial == want;
+    if size != expect.size || !same_serial {
+        return Err(zbus::Error::Failure("another drive took its place".into()));
+    }
+    Ok(())
+}
+
+/// The volume is still the one asked about: its uuid, where one was seen.
+async fn same_volume(conn: &Connection, volume: &str, uuid: Option<&str>) -> zbus::Result<()> {
+    let Some(want) = uuid.filter(|u| !u.is_empty()) else {
+        return Ok(());
+    };
+    let have: String = proxy(conn, volume, BLOCK).await?.get_property("IdUUID").await?;
+    if have != want {
+        return Err(zbus::Error::Failure("another drive took its place".into()));
+    }
+    Ok(())
+}
+
 async fn release(conn: &Connection, volumes: &[String], locked_part: Option<&str>) {
     for v in volumes {
         if let Err(e) = unmount(conn, v).await {
@@ -251,7 +301,9 @@ async fn run(conn: &Connection, cmd: DriveCommand) -> zbus::Result<()> {
             volume,
             label,
             mounted,
+            uuid,
         } => {
+            same_volume(conn, &volume, uuid.as_deref()).await?;
             // Most file systems only take a new name while not in use.
             if mounted {
                 unmount(conn, &volume).await?;
@@ -265,7 +317,8 @@ async fn run(conn: &Connection, cmd: DriveCommand) -> zbus::Result<()> {
             }
             res
         }
-        DriveCommand::Check { volume, mounted } => {
+        DriveCommand::Check { volume, mounted, uuid } => {
+            same_volume(conn, &volume, uuid.as_deref()).await?;
             if mounted {
                 unmount(conn, &volume).await?;
             }
@@ -304,7 +357,9 @@ async fn run(conn: &Connection, cmd: DriveCommand) -> zbus::Result<()> {
             target,
             password,
             thorough,
+            expect,
         } => {
+            same_drive(conn, &drive, &expect).await?;
             release(conn, &volumes, locked_part.as_deref()).await;
             // A fresh table with one volume filling the drive: what a stick
             // from a shop looks like, and what every device expects to find.

@@ -132,6 +132,16 @@ fn ini_with(old: &str, ours: &[(String, Vec<(String, String)>)]) -> String {
 }
 
 fn kde(t: &Theme) {
+    // Only where a KDE app is (its settings there, or one of them on the
+    // path): a colour scheme for nobody is clutter in the owner's config.
+    let kdeglobals = config().join("kdeglobals");
+    let any_kde = kdeglobals.exists()
+        || ["kdeconnect-app", "easyeffects", "dolphin", "kate", "konsole", "okular", "gwenview", "krita", "kdenlive", "haruna"]
+            .iter()
+            .any(|p| crate::launch::on_path(p));
+    if !any_kde {
+        return;
+    }
     let mut sections = kde_scheme(t);
     // The scheme on its own, by name (what KDE's settings would list).
     let mut file = vec![("General".to_owned(), vec![("Name".to_owned(), "Golem".to_owned()), ("ColorScheme".to_owned(), "Golem".to_owned())])];
@@ -139,8 +149,16 @@ fn kde(t: &Theme) {
     put(&data().join("color-schemes/Golem.colors"), &ini_with("", &file));
     // …and in use: kdeglobals (its other settings kept).
     sections.push(("General".into(), vec![("ColorScheme".to_owned(), "Golem".to_owned())]));
-    let path = config().join("kdeglobals");
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let path = kdeglobals;
+    // (One that is there but cannot be read whole is never replaced.)
+    let old = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            warn!("apps: kdeglobals not read ({e}); left alone");
+            return;
+        }
+    };
     // (General's other keys kept: only ColorScheme is ours there.)
     let mut general: Vec<(String, String)> = Vec::new();
     let mut in_general = false;
@@ -285,8 +303,13 @@ fn vscode(t: &Theme) {
         let colours: serde_json::Map<String, serde_json::Value> =
             pairs.iter().map(|(k, v)| ((*k).to_owned(), serde_json::Value::String(v.clone()))).collect();
         map.insert("workbench.colorCustomizations".into(), serde_json::Value::Object(colours));
+        // (The base theme only where none is picked, or ours is: a theme the
+        // owner picked is theirs.)
         let base = if t.dark { "Default Dark Modern" } else { "Default Light Modern" };
-        map.insert("workbench.colorTheme".into(), serde_json::Value::String(base.into()));
+        let ours = |v: &serde_json::Value| v.as_str().is_some_and(|s| s.starts_with("Default ") && s.ends_with(" Modern"));
+        if map.get("workbench.colorTheme").is_none_or(ours) {
+            map.insert("workbench.colorTheme".into(), serde_json::Value::String(base.into()));
+        }
         if let Ok(text) = serde_json::to_string_pretty(&serde_json::Value::Object(map)) {
             put(&path, &(text + "\n"));
         }
@@ -343,9 +366,10 @@ fn inkscape(t: &Theme) {
 /// has quit (a thread waits; a newer wait for the same app replaces it).
 fn when_closed(name: &'static str, then: impl FnOnce() + Send + 'static) {
     static TURNS: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
-    // (Each app its own turn: a newer wait replaces only its own app's.)
-    let turn = |name: &'static str, bump: bool| -> u64 {
-        let mut t = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+    // (Each app its own turn: a newer wait replaces only its own app's. The
+    // check of the turn and the writing happen under the one lock, so an
+    // older waiter cannot write after a newer change has.)
+    fn turn_of(t: &mut Vec<(&'static str, u64)>, name: &'static str, bump: bool) -> u64 {
         let i = t.iter().position(|(n, _)| *n == name).unwrap_or_else(|| {
             t.push((name, 0));
             t.len() - 1
@@ -354,6 +378,10 @@ fn when_closed(name: &'static str, then: impl FnOnce() + Send + 'static) {
             t[i].1 += 1;
         }
         t[i].1
+    }
+    let turn = |name: &'static str, bump: bool| -> u64 {
+        let mut t = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        turn_of(&mut t, name, bump)
     };
     let running = |name: &str| {
         // (`=name`: that process name exactly; else a pattern of its command.)
@@ -370,6 +398,7 @@ fn when_closed(name: &'static str, then: impl FnOnce() + Send + 'static) {
     // must not write its older colours after it.)
     let mine = turn(name, true);
     if !running(name) {
+        let _hold = TURNS.lock().unwrap_or_else(|e| e.into_inner());
         then();
         return;
     }
@@ -381,7 +410,10 @@ fn when_closed(name: &'static str, then: impl FnOnce() + Send + 'static) {
                 return;
             }
             if !running(name) {
-                then();
+                let mut t = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+                if turn_of(&mut t, name, false) == mine {
+                    then();
+                }
                 return;
             }
         }
@@ -449,9 +481,22 @@ fn easyeffects(t: &Theme) {
             }
             quiet = if sound_playing() { 0 } else { quiet + 1 };
             if quiet >= 2 {
-                let _ = std::process::Command::new("systemctl").args(["--user", "restart", "easyeffects.service"]).status();
-                put(&file, &stamp);
-                info!("apps: Easy Effects restarted in the new colours (nothing was playing)");
+                // (One restart at a time, and only by the newest change.)
+                static RESTART: std::sync::Mutex<()> = std::sync::Mutex::new(());
+                let _one = RESTART.lock().unwrap_or_else(|e| e.into_inner());
+                if TURN.load(Ordering::Relaxed) != mine {
+                    return;
+                }
+                let ok = std::process::Command::new("systemctl")
+                    .args(["--user", "restart", "easyeffects.service"])
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    put(&file, &stamp);
+                    info!("apps: Easy Effects restarted in the new colours (nothing was playing)");
+                } else {
+                    warn!("apps: Easy Effects did not restart");
+                }
                 return;
             }
         }
@@ -524,7 +569,11 @@ fn put_bytes(path: &Path, bytes: &[u8]) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let tmp = path.with_extension("golem-tmp");
+    // (Appended, not substituted: `foo.json` and `foo.rgba` must not share
+    // one temp name — `persist.rs` learnt the same.)
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".golem-tmp");
+    let tmp = path.with_file_name(tmp_name);
     let written = std::fs::write(&tmp, bytes).and_then(|()| {
         if let Ok(m) = &old {
             std::fs::set_permissions(&tmp, m.permissions())?;

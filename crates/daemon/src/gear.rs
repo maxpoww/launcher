@@ -396,7 +396,7 @@ pub(crate) struct GearState {
     pub(crate) pages: crate::gear_pages::PagesState,
     /// A thing that cannot be undone, asked once: what the footer says, and
     /// what a second click does.
-    arm: Option<(String, Hit)>,
+    pub(crate) arm: Option<(String, Hit)>,
 }
 
 impl GearState {

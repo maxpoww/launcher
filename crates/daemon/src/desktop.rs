@@ -2275,9 +2275,15 @@ impl App {
         mut then: impl FnMut(&mut App, R) + 'static,
     ) {
         let (tx, rx) = calloop::channel::channel::<R>();
-        std::thread::spawn(move || {
+        // (A builder: `spawn` itself panics when no thread can be made, and
+        // that would take the desktop down with it.)
+        let spawned = std::thread::Builder::new().name("desktop-work".into()).spawn(move || {
             let _ = tx.send(job());
         });
+        if let Err(e) = spawned {
+            warn!("desktop: no thread for work off the loop ({e})");
+            return;
+        }
         let waiting = self.loop_handle.insert_source(rx, move |event, _, app: &mut App| {
             if let calloop::channel::Event::Msg(r) = event {
                 then(app, r);
@@ -3183,7 +3189,7 @@ impl App {
                 self.camera_stop(&path);
             }
             Action::Format | Action::CheckDrive => {
-                if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
+                if let Some((path, name)) = item.and_then(|i| self.desktop.items.get(i)).map(|it| (it.path.clone(), it.name.clone())) {
                     self.desktop.selected.clear();
                     let ask = if action == Action::Format {
                         crate::gear_pages::DriveAsk::Format
@@ -3191,7 +3197,7 @@ impl App {
                         crate::gear_pages::DriveAsk::Check
                     };
                     info!("desktop: {ask:?} {path}");
-                    self.pages_drive_ask(path, ask);
+                    self.pages_drive_ask(path, name, ask);
                 }
             }
             Action::Eject => {
@@ -3500,9 +3506,9 @@ impl App {
         // A stick or a memory card: its label, by the disk service (the
         // gear's own act); the desktop sees it come back under its new name.
         if let Some(it) = self.desktop.items.get(rename.item).filter(|it| it.kind == Kind::Volume) {
-            let (path, label) = (it.path.clone(), rename.text.trim().to_owned());
+            let (path, name, label) = (it.path.clone(), it.name.clone(), rename.text.trim().to_owned());
             if commit && !label.is_empty() && label != it.name {
-                self.pages_drive_ask(path, crate::gear_pages::DriveAsk::Rename(label));
+                self.pages_drive_ask(path, name, crate::gear_pages::DriveAsk::Rename(label));
             }
             self.request_desktop_draw();
             return;

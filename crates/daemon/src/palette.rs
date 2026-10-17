@@ -902,7 +902,9 @@ fn signals() -> Arc<Theme> {
         return current();
     }
     static OWN: [std::sync::OnceLock<Arc<Theme>>; 2] = [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
-    let dark = shell_dark();
+    // (Drawn every frame: the look is the flag `set_shell` keeps, never a
+    // read of the settings file here.)
+    let dark = SHELL_IS_DARK.load(Ordering::Relaxed);
     OWN[usize::from(dark)]
         .get_or_init(|| Arc::new(resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, dark)))
         .clone()
@@ -910,6 +912,8 @@ fn signals() -> Arc<Theme> {
 
 /// The Shell slider is above Off.
 static SHELL_COLOURED: AtomicBool = AtomicBool::new(true);
+/// The shell's own look, as `set_shell` last resolved it.
+static SHELL_IS_DARK: AtomicBool = AtomicBool::new(true);
 
 /// A colour of the palette as the renderer wants it: linear, opaque.
 pub(crate) fn linear(c: Rgb) -> [f32; 4] {
@@ -938,6 +942,12 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
     let spawned = std::thread::Builder::new().name("palette".into()).spawn(move || {
         static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        // A newer change is waiting its turn: this one's files would be
+        // written only to be written over (a drag of a slider is many
+        // changes; each rewrote everything and reloaded every GTK app).
+        if ICONS_ASKED.load(Ordering::Relaxed) != mine {
+            return;
+        }
         // What the programs wear may be what they wear already (a change of
         // the web switch only): then only the shared file is written, and no
         // app is told to reload (GTK's theme flipped name on every switch).
@@ -1024,7 +1034,7 @@ fn publish_icons() {
     }
     let Some(src) = icon_theme_dir(base) else { return };
     // (Written already for these very colours — a dock start: kept.)
-    let stamp = format!("{base} {} {f:?} v2", std::fs::canonicalize(&src).map(|p| p.display().to_string()).unwrap_or_default());
+    let stamp = format!("{base} {} {f:?} v3", std::fs::canonicalize(&src).map(|p| p.display().to_string()).unwrap_or_default());
     let now_dir = names.iter().map(|n| icons.join(n)).find(|d| d.is_dir());
     if let Some(d) = &now_dir {
         if std::fs::read_to_string(d.join(".golem-stamp")).ok().as_deref() == Some(stamp.as_str()) {
@@ -1048,7 +1058,8 @@ fn publish_icons() {
     let dest = icons.join(next);
     let _ = std::fs::remove_dir_all(&dest);
     let started = std::time::Instant::now();
-    if let Err(e) = tint_tree(&src, &dest, &f, next, 0).and_then(|()| {
+    let mut seen = std::collections::HashSet::new();
+    if let Err(e) = tint_tree(&src, &dest, &f, next, 0, &mut seen).and_then(|()| {
         add_small_papirus(&dest, if base == "Golem-Dark" { "Papirus-Dark" } else { "Papirus" }, &f)
     }) {
         warn!("palette: the apps' icons were not written ({e})");
@@ -1136,34 +1147,50 @@ fn icon_theme_dir(name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Copy a theme's tree, its drawings' colours through the filter.
-fn tint_tree(src: &std::path::Path, dest: &std::path::Path, f: &[[f32; 4]; 7], name: &str, depth: u8) -> std::io::Result<()> {
-    // (An icon theme is a few folders deep: anything deeper is not one.)
-    if depth > 6 {
+fn tint_tree(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    f: &[[f32; 4]; 7],
+    name: &str,
+    depth: u8,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    // (An icon theme is a few folders deep: anything deeper is not one. A
+    // folder is walked once, wherever a link leads back to it.)
+    if depth > 6 || !seen.insert(std::fs::canonicalize(src)?) {
         return Ok(());
     }
     std::fs::create_dir_all(dest)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let (from, to) = (e.path(), dest.join(e.file_name()));
-        // A link is kept a link (an alias of a drawing — tinted once, where
-        // it points; a link to a folder never followed: no loops).
         let kind = std::fs::symlink_metadata(&from)?.file_type();
-        if kind.is_symlink() {
+        // A RELATIVE link to a file is kept a link (an alias of a drawing —
+        // tinted once, where it points). Anything else a link leads to is
+        // walked as what it is: the installed theme's own folders are links
+        // into the store (home-manager's), and skipping them left the tinted
+        // theme without Golem's icons (the second review, 2026-10-17).
+        let meta = std::fs::metadata(&from)?;
+        if kind.is_symlink() && !meta.is_dir() {
             if let Ok(target) = std::fs::read_link(&from) {
-                if target.is_relative() {
+                if target.is_relative() && !target.to_string_lossy().contains("..") {
                     let _ = std::os::unix::fs::symlink(&target, &to);
                     continue;
                 }
             }
         }
-        let meta = std::fs::metadata(&from)?;
         if meta.is_dir() {
-            if kind.is_symlink() {
-                continue;
-            }
-            tint_tree(&from, &to, f, name, depth + 1)?;
+            tint_tree(&from, &to, f, name, depth + 1, seen)?;
+        } else if e.file_name() == "icon-theme.cache" {
+            // (It describes the source's tree, not this one.)
         } else if from.extension().is_some_and(|x| x == "svg") {
-            std::fs::write(&to, tint_svg(&std::fs::read_to_string(&from)?, f))?;
+            match std::fs::read_to_string(&from) {
+                Ok(text) => std::fs::write(&to, tint_svg(&text, f))?,
+                // (Not text as it should be: as it is, untinted.)
+                Err(_) => {
+                    std::fs::copy(&from, &to)?;
+                }
+            }
         } else if e.file_name() == "index.theme" {
             let text = std::fs::read_to_string(&from)?;
             let text: Vec<String> = text
@@ -1370,6 +1397,7 @@ pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
 
 fn set_shell(picked: &ColorChoice, system_dark: bool) {
     SHELL_COLOURED.store(picked.shell_tint != Some(0), Ordering::Relaxed);
+    SHELL_IS_DARK.store(picked.shell_dark.unwrap_or(system_dark), Ordering::Relaxed);
     let want = picked.palette_id();
     let out = if picked.shell_tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H

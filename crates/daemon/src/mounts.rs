@@ -580,7 +580,7 @@ fn scan(tried: &mut HashSet<String>, refused: &mut HashSet<String>) -> Option<Ve
 /// Eject what is mounted at `uri` (a stick is powered down where it can be;
 /// a phone is just let go). Off the loop: flushing a stick takes a while.
 pub(crate) fn eject(uri: String, name: String) {
-    std::thread::spawn(move || {
+    let spawned = std::thread::Builder::new().name("mounts-eject".into()).spawn(move || {
         let run = |flag: &str| {
             Command::new("gio")
                 .args(["mount", flag, &uri])
@@ -596,6 +596,9 @@ pub(crate) fn eject(uri: String, name: String) {
             warn!("mounts: {name} could not be ejected (in use?)");
         }
     });
+    if let Err(e) = spawned {
+        warn!("mounts: no thread to eject ({e})");
+    }
 }
 
 /// Start the watcher: mounts what is plugged in now and from now on, and

@@ -61,9 +61,17 @@ struct DrivePill {
     open: f32,
     /// Plugged in still.
     there: bool,
-    /// Being let go.
+    /// Being let go, and since when (one that stays past `EJECT_GIVE_UP` is
+    /// shown as it is again: the eject failed, the stick is in use).
     ejecting: bool,
+    eject_at: Option<Instant>,
 }
+
+/// How long "Ejecting…" is believed.
+const EJECT_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long a read of the drives' space is waited for before another is
+/// asked (a dying card can hang `statvfs`; the read is off the loop).
+const SPACE_STALE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The pills' state.
 #[derive(Debug, Default)]
@@ -73,8 +81,8 @@ pub(crate) struct DrivePills {
     want_open: Option<usize>,
     last: Option<Instant>,
     frame_pending: bool,
-    /// The drives' space is being read.
-    asking: bool,
+    /// The drives' space is being read, since when.
+    asking: Option<Instant>,
 }
 
 /// What a drive says: its name, and what is free on it.
@@ -135,11 +143,12 @@ impl App {
             }
         }
         self.drive_pills_apply();
-        // What is free, read off the loop (one read at a time).
-        if self.drive_pills.asking || now.is_empty() {
+        // What is free, read off the loop (one read at a time; one that
+        // never answers is not waited for past `SPACE_STALE`).
+        if self.drive_pills.asking.is_some_and(|t| t.elapsed() < SPACE_STALE) || now.is_empty() {
             return;
         }
-        self.drive_pills.asking = true;
+        self.drive_pills.asking = Some(Instant::now());
         let paths: Vec<String> = now.into_iter().map(|(p, _, _)| p).collect();
         self.desktop_off_loop(
             move || {
@@ -152,7 +161,7 @@ impl App {
                     .collect::<Vec<_>>()
             },
             |app, read| {
-                app.drive_pills.asking = false;
+                app.drive_pills.asking = None;
                 for (path, space) in read {
                     if let Some(p) = app.drive_pills.pills.iter_mut().find(|p| p.path == path) {
                         p.space = space;
@@ -166,6 +175,9 @@ impl App {
     /// What each pill says, from what is known of it, measured.
     fn drive_pills_apply(&mut self) {
         for p in &mut self.drive_pills.pills {
+            if p.ejecting && p.eject_at.is_some_and(|t| t.elapsed() > EJECT_GIVE_UP) {
+                p.ejecting = false;
+            }
             p.says = says(&p.name, p.space, p.ejecting);
             p.full = p.space.filter(|(t, _)| *t > 0).map(|(t, f)| 1.0 - f as f32 / t as f32);
         }
@@ -298,6 +310,7 @@ impl App {
         if ptr.0 >= rect.x + rect.w - ph {
             if let Some(p) = self.drive_pills.pills.get_mut(usize::from(i)) {
                 p.ejecting = true;
+                p.eject_at = Some(Instant::now());
             }
             self.desktop_eject(&path);
             self.drive_pills_sync();
