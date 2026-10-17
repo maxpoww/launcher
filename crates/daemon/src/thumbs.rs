@@ -236,7 +236,65 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
 /// kind — a picture read here, the system's thumbnailer for its type
 /// (`thumb_more`), FFMPEG, the old tools, and pages drawn here for text and
 /// fonts. What took an outside program is kept for next time.
+/// A file's picture with its corners a little ROUNDED (Max, 2026-10-17:
+/// "que las vistas previas tengan las esquinas un poco redondeadas") — the
+/// picture where it stands on its clear square, whatever made it.
 fn thumbnail(path: &str) -> Option<Vec<u8>> {
+    thumbnail_square(path).map(rounded)
+}
+
+/// The corner's radius, as a share of the picture's shorter side (within
+/// a few texels of the 256 square).
+const CORNER: f32 = 0.06;
+
+/// `chain`'s picture (its first level: the square, premultiplied) cut to a
+/// rounded rectangle round what is on it, its levels made again.
+fn rounded(chain: Vec<u8>) -> Vec<u8> {
+    let n = ICON_SIZE as usize;
+    if chain.len() < n * n * 4 {
+        return chain;
+    }
+    let mut base = chain[..n * n * 4].to_vec();
+    // What is on the square: where anything is not clear.
+    let (mut x0, mut y0, mut x1, mut y1) = (n, n, 0, 0);
+    for y in 0..n {
+        for x in 0..n {
+            if base[(y * n + x) * 4 + 3] > 8 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    if x1 <= x0 + 8 || y1 <= y0 + 8 {
+        return chain;
+    }
+    let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
+    let r = (w.min(h) * CORNER).clamp(3.0, 16.0);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            // The distance past the rounded corner (pixel centres), only near one.
+            let px = x as f32 + 0.5 - x0 as f32;
+            let py = y as f32 + 0.5 - y0 as f32;
+            let dx = (r - px).max(px - (w - r)).max(0.0);
+            let dy = (r - py).max(py - (h - r)).max(0.0);
+            if dx == 0.0 || dy == 0.0 {
+                continue;
+            }
+            let k = (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if k < 1.0 {
+                let at = (y * n + x) * 4;
+                for c in &mut base[at..at + 4] {
+                    *c = (f32::from(*c) * k).round() as u8;
+                }
+            }
+        }
+    }
+    crate::apps::with_mips(base)
+}
+
+fn thumbnail_square(path: &str) -> Option<Vec<u8>> {
     if let Some(px) = from_xdg_cache(path) {
         return Some(px);
     }
