@@ -228,22 +228,86 @@ fn vscode(t: &Theme) {
 
 fn inkscape(t: &Theme) {
     let path = config().join("inkscape/preferences.xml");
-    let Ok(old) = std::fs::read_to_string(&path) else { return };
-    // The system's GTK theme (Golem-A|B, the palette's), and the dark flag.
+    if !path.is_file() {
+        return;
+    }
+    // A theme name that never changes: `Golem`, a link to whichever of
+    // Golem-A|B is the system's now (the system's own flips name so GTK apps
+    // reload; Inkscape keeps the name it read, and would be left on old
+    // colours).
     let gtk = std::process::Command::new("dconf")
         .args(["read", "/org/gnome/desktop/interface/gtk-theme"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
-        .filter(|s| !s.is_empty());
-    let mut text = old.clone();
+        .filter(|s| s.starts_with("Golem-"));
     if let Some(gtk) = gtk {
-        text = set_attr(&text, "gtkTheme", &gtk);
+        let themes = data().join("themes");
+        let tmp = themes.join(".golem-link");
+        let _ = std::fs::remove_file(&tmp);
+        if std::os::unix::fs::symlink(&gtk, &tmp).and_then(|()| std::fs::rename(&tmp, themes.join("Golem"))).is_err() {
+            warn!("apps: could not point the fixed GTK theme at {gtk}");
+        }
     }
-    text = set_attr(&text, "darkTheme", if t.dark { "1" } else { "0" });
-    if text != old {
-        put(&path, &text);
+    let dark = t.dark;
+    // Inkscape writes its preferences back as it quits: written while it is
+    // open, ours would be undone — so it is written once it has quit.
+    when_closed("=inkscape", move || {
+        let Ok(old) = std::fs::read_to_string(&path) else { return };
+        let text = set_attr(&set_attr(&old, "gtkTheme", "Golem"), "darkTheme", if dark { "1" } else { "0" });
+        if text != old {
+            put(&path, &text);
+            info!("apps: Inkscape on Golem's theme");
+        }
+    });
+}
+
+/// Run `then` now if no process `name` names runs (`=name`: by its exact
+/// process name; else a pattern of the command line), else once the last one
+/// has quit (a thread waits; a newer wait for the same app replaces it).
+fn when_closed(name: &'static str, then: impl FnOnce() + Send + 'static) {
+    static TURNS: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
+    // (Each app its own turn: a newer wait replaces only its own app's.)
+    let turn = |name: &'static str, bump: bool| -> u64 {
+        let mut t = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        let i = t.iter().position(|(n, _)| *n == name).unwrap_or_else(|| {
+            t.push((name, 0));
+            t.len() - 1
+        });
+        if bump {
+            t[i].1 += 1;
+        }
+        t[i].1
+    };
+    let running = |name: &str| {
+        // (`=name`: that process name exactly; else a pattern of its command.)
+        let args: [&str; 2] = match name.strip_prefix('=') {
+            Some(exact) => ["-x", exact],
+            None => ["-f", name],
+        };
+        std::process::Command::new("pgrep")
+            .args(args)
+            .output()
+            .is_ok_and(|o| !o.stdout.is_empty())
+    };
+    if !running(name) {
+        then();
+        return;
     }
+    let mine = turn(name, true);
+    let _ = std::thread::Builder::new().name("apps-wait".into()).spawn(move || {
+        // (Half a day at most.)
+        for _ in 0..(12 * 60 * 20) {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if turn(name, false) != mine {
+                return;
+            }
+            if !running(name) {
+                then();
+                return;
+            }
+        }
+    });
 }
 
 /// `name="…"` set to `value` wherever it is.
@@ -285,15 +349,25 @@ fn jetbrains(t: &Theme) {
         return;
     }
     let jar = theme_jar(t);
-    for (conf, plugins) in ides {
+    for (_, plugins) in &ides {
         put_bytes(&plugins.join("golem-theme/lib/golem-theme.jar"), &jar);
-        let laf = conf.join("options/laf.xml");
-        put(
-            &laf,
-            "<application>\n  <component name=\"LafManager\" autodetect=\"false\">\n    <laf class-name=\"com.intellij.ide.ui.laf.UIThemeBasedLookAndFeelInfo\" themeId=\"golem-theme\" />\n  </component>\n</application>\n",
-        );
-        info!("apps: Golem's theme for {}", conf.display());
     }
+    // The IDE writes its settings back as it quits: they are chosen once it
+    // has — the look (laf.xml) AND the editor's own scheme (colors.scheme.xml:
+    // the editor keeps a scheme of its own apart from the look).
+    when_closed("android-studio-unwrapped|/jetbrains|JetBrains/Toolbox/apps", move || {
+        for (conf, _) in ides {
+            put(
+                &conf.join("options/laf.xml"),
+                "<application>\n  <component name=\"LafManager\" autodetect=\"false\">\n    <laf class-name=\"com.intellij.ide.ui.laf.UIThemeBasedLookAndFeelInfo\" themeId=\"golem-theme\" />\n  </component>\n</application>\n",
+            );
+            put(
+                &conf.join("options/colors.scheme.xml"),
+                "<application>\n  <component name=\"EditorColorsManagerImpl\">\n    <global_color_scheme name=\"Golem\" />\n  </component>\n</application>\n",
+            );
+            info!("apps: Golem's theme for {}", conf.display());
+        }
+    });
 }
 
 fn put_bytes(path: &Path, bytes: &[u8]) {
