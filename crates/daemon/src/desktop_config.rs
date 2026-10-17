@@ -36,7 +36,8 @@ const SAY_LINE: f32 = 17.0;
 /// Where a line's answer starts.
 const VALUE_X: f32 = 150.0;
 const DIM: f32 = 0.58;
-const LINE_INK: f32 = 0.12;
+/// A field's faint fill at rest, as a share of the wash (the quiet hint).
+const QUIET_HINT: f32 = 0.55;
 /// The switch that is on, the box that is ticked, Apply.
 fn accent() -> [f32; 3] {
     let a = crate::palette::accent_srgb();
@@ -224,19 +225,24 @@ impl Config {
             color: Some(color),
         };
         let lit = |hit: Hit| self.hover == Some(hit);
-        let rule = |b: &mut Built, y: &mut f32| {
-            *y += 12.0;
-            b.rects.push(RectInst { rect: Rect::new(self.rect.x, *y, self.rect.w, 1.0), radius: 0.0, color: at(LINE_INK), glass: 0.0, border: 0.0 });
-            *y += 13.0;
+        // (Quiet, 2026-10-16: space parts the sections — the rule's room
+        // stays, its line is not drawn.)
+        let rule = |_b: &mut Built, y: &mut f32| {
+            *y += 25.0;
         };
         // A switch at the right end of the line whose top is `y`.
         let switch = |b: &mut Built, y: f32, on: bool, hit: Hit, live: bool| {
             let r = Rect::new(right - 36.0, y + (LINE_PX - 20.0) / 2.0, 36.0, 20.0);
             let fade = if live { 1.0 } else { 0.4 };
-            let ground = if on { tint(accent(), 0.9 * fade) } else { at(if lit(hit) { 0.26 } else { 0.18 } * fade) };
-            b.rects.push(RectInst { rect: r, radius: 10.0, color: ground, glass: 0.0, border: 0.0 });
-            let knob = if on { r.x + r.w - 17.0 } else { r.x + 3.0 };
-            b.rects.push(RectInst { rect: Rect::new(knob, r.y + 3.0, 14.0, 14.0), radius: 7.0, color: [1.0, 1.0, 1.0, 0.95 * ink[3] * fade], glass: 0.0, border: 0.0 });
+            // (The slim switch: on, the accent with a white knob; off, an
+            // outlined capsule, its knob in the ink.)
+            if on {
+                b.rects.push(RectInst { rect: r, radius: 10.0, color: tint(accent(), 0.9 * fade), glass: 0.0, border: 0.0 });
+                b.rects.push(RectInst { rect: Rect::new(r.x + r.w - 16.0, r.y + 4.0, 12.0, 12.0), radius: 6.0, color: [1.0, 1.0, 1.0, 0.95 * ink[3] * fade], glass: 0.0, border: 0.0 });
+            } else {
+                b.rects.push(RectInst { rect: r, radius: 10.0, color: at(if lit(hit) { 0.6 } else { 0.38 } * fade), glass: 0.0, border: 1.0 });
+                b.rects.push(RectInst { rect: Rect::new(r.x + 4.0, r.y + 4.0, 12.0, 12.0), radius: 6.0, color: at(0.75 * fade), glass: 0.0, border: 0.0 });
+            }
             if live {
                 b.hits.push((hit, Rect::new(r.x - 6.0, r.y - 4.0, r.w + 12.0, r.h + 8.0)));
             }
@@ -245,7 +251,8 @@ impl Config {
         let choice = |b: &mut Built, y: f32, value: &str, hit: Hit, live: bool| {
             let r = Rect::new(x + VALUE_X, y - 4.0, w - VALUE_X, 25.0);
             let fade = if live { 1.0 } else { 0.4 };
-            b.rects.push(RectInst { rect: r, radius: 7.0, color: [wash[0], wash[1], wash[2], wash[3] * if lit(hit) { 1.7 } else { 1.0 } * fade], glass: 0.0, border: 0.0 });
+            // (A field's faint hint; the wash under the pointer.)
+            b.rects.push(RectInst { rect: r, radius: 7.0, color: [wash[0], wash[1], wash[2], wash[3] * if lit(hit) { 1.2 } else { QUIET_HINT } * fade], glass: 0.0, border: 0.0 });
             b.labels.push(text(value, (r.x + 10.0, y), r.w - 34.0, FONT_PX, LINE_PX, false, at(0.92 * fade)));
             b.labels.push(text("›", (r.x + r.w - 18.0, y), 12.0, FONT_PX, LINE_PX, false, at(DIM * fade)));
             if live {
@@ -254,9 +261,12 @@ impl Config {
         };
         // An amber chip (a red one for what deletes), like the task pill's.
         let chip = |b: &mut Built, r: Rect, word: &str, hit: Hit, danger: bool| {
+            // (Quiet: the word in its colour; the tint under the pointer.)
             let c = if danger { self::danger() } else { accent() };
-            b.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: tint(c, if lit(hit) { 0.42 } else { 0.22 }), glass: 0.0, border: 0.0 });
-            b.labels.push(centred(word, r, at(1.0)));
+            if lit(hit) {
+                b.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: tint(c, 0.3), glass: 0.0, border: 0.0 });
+            }
+            b.labels.push(centred(word, r, if lit(hit) { at(1.0) } else { tint(c, 1.0) }));
             b.hits.push((hit, r));
         };
 
@@ -279,7 +289,7 @@ impl Config {
         b.labels.push(text(tr("Name"), (x, y), VALUE_X - 8.0, FONT_PX, LINE_PX, false, at(DIM)));
         // The name, typed by its owner: a field.
         let field = Rect::new(x + VALUE_X, y - 4.0, w - VALUE_X, 25.0);
-        let field_wash = if self.editing { 2.2 } else if lit(Hit::Name) { 1.7 } else { 1.0 };
+        let field_wash = if self.editing { 2.2 } else if lit(Hit::Name) { 1.2 } else { QUIET_HINT };
         b.rects.push(RectInst { rect: field, radius: 7.0, color: [wash[0], wash[1], wash[2], wash[3] * field_wash], glass: 0.0, border: 0.0 });
         if self.editing && self.all && !self.phone.name.is_empty() {
             // Selected whole: the first key replaces it.
@@ -311,8 +321,12 @@ impl Config {
             let (cx, cy) = (x + (i % 2) as f32 * (col_w + 16.0), y + (i / 2) as f32 * ROW_H);
             let on = self.phone.kinds.iter().any(|k| k == kind.key);
             let tick = Rect::new(cx, cy + (LINE_PX - 16.0) / 2.0, 16.0, 16.0);
-            let ground = if on { tint(accent(), 0.9) } else { at(if lit(Hit::Kind(i)) { 0.26 } else { 0.16 }) };
-            b.rects.push(RectInst { rect: tick, radius: 4.0, color: ground, glass: 0.0, border: 0.0 });
+            // (Ticked: the accent, filled; not: a hairline square.)
+            if on {
+                b.rects.push(RectInst { rect: tick, radius: 4.0, color: tint(accent(), 0.9), glass: 0.0, border: 0.0 });
+            } else {
+                b.rects.push(RectInst { rect: tick, radius: 4.0, color: at(if lit(Hit::Kind(i)) { 0.7 } else { 0.4 }), glass: 0.0, border: 1.0 });
+            }
             if on {
                 b.labels.push(centred("✓", tick, [0.05, 0.08, 0.08, ink[3]]));
             }
@@ -387,7 +401,12 @@ impl Config {
         // ── Apply or cancel ──
         rule(&mut b, &mut y);
         let (apply, cancel) = (Rect::new(right - 92.0, y, 92.0, 27.0), Rect::new(right - 92.0 - 10.0 - 92.0, y, 92.0, 27.0));
-        b.rects.push(RectInst { rect: cancel, radius: 13.5, color: [wash[0], wash[1], wash[2], wash[3] * if lit(Hit::Cancel) { 1.8 } else { 1.0 }], glass: 0.0, border: 0.0 });
+        // (Cancel a hairline, filled only under the pointer; Apply the one
+        // that does it, in the accent.)
+        if lit(Hit::Cancel) {
+            b.rects.push(RectInst { rect: cancel, radius: 13.5, color: [wash[0], wash[1], wash[2], wash[3] * 1.5], glass: 0.0, border: 0.0 });
+        }
+        b.rects.push(RectInst { rect: cancel, radius: 13.5, color: at(0.3), glass: 0.0, border: 1.0 });
         b.labels.push(centred(tr("Cancel"), cancel, at(0.95)));
         b.hits.push((Hit::Cancel, cancel));
         b.rects.push(RectInst { rect: apply, radius: 13.5, color: tint(accent(), if lit(Hit::Apply) { 0.55 } else { 0.32 }), glass: 0.0, border: 0.0 });
