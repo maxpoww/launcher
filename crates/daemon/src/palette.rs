@@ -1065,8 +1065,8 @@ pub(crate) fn icon_filter() -> [[f32; 4]; 7] {
 
 /// THE SHELL'S COLOURS (the dock and the boxes): its surface and its ink,
 /// linear — the palette's variant in the shell's own look, walked to the
-/// Shell slider. None: the shell reads the screen (Dynamic, or the slider
-/// at Off).
+/// Shell slider. None: the shell reads the screen (a Dynamic palette with
+/// the slider above Off); at Off, Golem's own neutral ground.
 static SHELL: std::sync::Mutex<Option<([f32; 4], [f32; 4])>> = std::sync::Mutex::new(None);
 
 /// The shell's own look: its Dark/Light, else the system's.
@@ -1081,7 +1081,13 @@ pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
 fn set_shell(picked: &ColorChoice, system_dark: bool) {
     SHELL_COLOURED.store(picked.shell_tint != Some(0), Ordering::Relaxed);
     let want = picked.palette_id();
-    let out = if want == DYNAMIC_ID || picked.shell_tint == Some(0) {
+    let out = if picked.shell_tint == Some(0) {
+        // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
+        // boxes "have a reddish ground" — they sampled a desert wallpaper):
+        // Golem's own ground and ink, in the shell's Dark/Light.
+        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, picked.shell_dark.unwrap_or(system_dark));
+        Some((linear(t.surface()), linear(t.ink())))
+    } else if want == DYNAMIC_ID {
         None
     } else {
         let p = if want == DRAFT_ID { preview() } else { all().into_iter().find(|p| p.id == want) }.unwrap_or_else(golem);
