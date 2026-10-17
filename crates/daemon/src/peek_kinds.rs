@@ -468,6 +468,61 @@ pub(crate) fn ffmpeg_still(path: &Path, size: (u32, u32)) -> Option<image::RgbaI
     image::RgbaImage::from_raw(size.0, size.1, out.stdout)
 }
 
+/// A picture FFMPEG reads (a phone's HEIC) in ONE run: shrunk within `max`
+/// (its shape kept) through a pipe, its own size read from what ffmpeg says
+/// of its input. (A probe first, then a decode, was two runs of a program
+/// whose libraries are tens of megabytes: 12 s the first time after a start
+/// on the Acer's spinning disk.)
+pub(crate) fn ffmpeg_picture(
+    path: &Path,
+    max: (u32, u32),
+) -> Option<(image::RgbaImage, (u32, u32))> {
+    let ffmpeg = crate::thumbs::ffmpeg_tool()?;
+    let out = crate::peek_edit::dies_with_us(Command::new(ffmpeg))
+        .args(["-hide_banner", "-v", "info", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!(
+                "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos",
+                max.0, max.1
+            ),
+            "-c:v",
+            "bmp",
+            "-f",
+            "image2pipe",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let img = image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Bmp)
+        .ok()?
+        .to_rgba8();
+    let said = String::from_utf8_lossy(&out.stderr);
+    let own = input_size(&said).unwrap_or(img.dimensions());
+    Some((img, own))
+}
+
+/// The size of the first video stream of ffmpeg's INPUT, from what it says
+/// of it (`Stream #0:0…: Video: hevc (…), yuv420p(…), 2000x1500, …`).
+fn input_size(said: &str) -> Option<(u32, u32)> {
+    let input = said.split("Output #").next()?;
+    let line = input
+        .lines()
+        .find(|l| l.contains("Stream #") && l.contains("Video:"))?;
+    line.split([',', ' '])
+        .filter_map(|w| w.split_once('x'))
+        .find_map(|(a, b)| {
+            let b: String = b.chars().take_while(char::is_ascii_digit).collect();
+            let (w, h): (u32, u32) = (a.trim().parse().ok()?, b.parse().ok()?);
+            // (Not a code like `0x31637668`: both sides a real size.)
+            (w > 0 && h > 0).then_some((w, h))
+        })
+}
+
 /// A JPEG XL picture, whole, as `djxl` (libjxl's own, Golem's home brings
 /// it) decodes it: 8-bit PAM through a pipe, turned as the picture says.
 pub(crate) fn jxl_picture(path: &Path) -> Option<image::RgbaImage> {
@@ -1170,6 +1225,13 @@ pub(crate) fn thumbnailed(path: &Path, max: (u32, u32)) -> Option<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ffmpeg_says_the_input_size() {
+        let said = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.heic':\n  Stream #0:0[0x1]: Video: hevc (Main Still Picture) (hvc1 / 0x31637668), yuv420p(tv, smpte170m/unknown/unknown), 2000x1500, 1 fps, 1 tbr\nOutput #0, image2pipe, to 'pipe:':\n  Stream #0:0: Video: bmp, bgr24, 800x600";
+        assert_eq!(input_size(said), Some((2000, 1500)));
+        assert_eq!(input_size("nothing"), None);
+    }
 
     #[test]
     fn a_pam_reads_as_rgba() {

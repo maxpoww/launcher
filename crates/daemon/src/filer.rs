@@ -4446,7 +4446,14 @@ impl App {
                             crate::desktop::fit_label(&below(&item.path, &win.dir), label_w, &mut measure),
                         )
                     } else {
-                        two_lines(&item.name, label_w, &mut measure)
+                        let lines = two_lines(&item.name, label_w, &mut measure);
+                        tracing::debug!(
+                            "files: name {:?} within {label_w} (measured {}) → {:?}",
+                            item.name,
+                            measure(&item.name),
+                            lines
+                        );
+                        lines
                     });
                 }
             }

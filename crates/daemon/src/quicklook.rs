@@ -504,10 +504,15 @@ fn decode(path: &Path, max: (u32, u32)) -> Option<(image::RgbaImage, (u32, u32))
             premultiply(&mut img);
             return Some((img, own));
         }
-        // What `image` cannot read — a phone's HEIC — FFMPEG can: its own
-        // size asked first, then decoded straight at the size it is shown.
-        let own = kinds::probe(path)?.size?;
-        let mut img = kinds::ffmpeg_still(path, tile_fit(own, max))?;
+        // What `image` cannot read — a phone's HEIC — FFMPEG can, in one
+        // run (its own size read from what it says), then within the tiles.
+        let (img, own) = kinds::ffmpeg_picture(path, max)?;
+        let (w, h) = tile_fit(img.dimensions(), max);
+        let mut img = if (w, h) == img.dimensions() {
+            img
+        } else {
+            image::imageops::thumbnail(&img, w, h)
+        };
         premultiply(&mut img);
         return Some((img, own));
     };
