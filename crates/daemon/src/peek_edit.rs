@@ -454,7 +454,12 @@ pub(crate) fn whole_picture(path: &std::path::Path) -> Option<RgbaImage> {
         return got.into_inner();
     }
     // (Turned as its camera says: what is saved is upright, as it was seen.)
-    Some(crate::peek_kinds::open_oriented(path)?.to_rgba8())
+    if let Some(img) = crate::peek_kinds::open_oriented(path) {
+        return Some(img.to_rgba8());
+    }
+    // A phone's HEIC: through FFMPEG, whole (it is only ever saved as a copy).
+    let own = crate::peek_kinds::probe(path)?.size?;
+    crate::peek_kinds::ffmpeg_still(path, own)
 }
 
 #[cfg(test)]

@@ -370,7 +370,7 @@ fn is_picture(name: &str) -> bool {
     crate::thumb_more::is_raw(&lower)
         || lower.ends_with(".svg")
         // (What `image` reads, also where no MIME database is installed.)
-        || [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".ico", ".tga", ".qoi", ".pnm", ".ppm"]
+        || [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico", ".tga", ".qoi", ".pnm", ".ppm"]
             .iter()
             .any(|e| lower.ends_with(e))
         || crate::thumb_more::mime_of(&lower).is_some_and(|m| m.starts_with("image/"))
@@ -465,7 +465,14 @@ fn decode(path: &Path, max: (u32, u32)) -> Option<(image::RgbaImage, (u32, u32))
         }
     }
     // (Turned as its camera says.)
-    let img = kinds::open_oriented(path)?;
+    let Some(img) = kinds::open_oriented(path) else {
+        // What `image` cannot read — a phone's HEIC — FFMPEG can: its own
+        // size asked first, then decoded straight at the size it is shown.
+        let own = kinds::probe(path)?.size?;
+        let mut img = kinds::ffmpeg_still(path, tile_fit(own, max))?;
+        premultiply(&mut img);
+        return Some((img, own));
+    };
     let own = (img.width(), img.height());
     // (`thumbnail`: the quick reduction; a picture smaller stays as it is.)
     let img = if own.0 > max.0 || own.1 > max.1 {

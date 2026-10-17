@@ -442,6 +442,32 @@ pub(crate) struct Probe {
     pub album: Option<String>,
 }
 
+/// A picture `image` cannot read (HEIC, a phone's photo; AVIF it reads
+/// only in part…) as FFMPEG decodes it, brought to exactly `size`: straight
+/// RGBA through a pipe, nothing written to disk.
+pub(crate) fn ffmpeg_still(path: &Path, size: (u32, u32)) -> Option<image::RgbaImage> {
+    let ffmpeg = crate::thumbs::ffmpeg_tool()?;
+    let out = crate::peek_edit::dies_with_us(Command::new(ffmpeg))
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!("scale={}:{}:flags=lanczos", size.0, size.1),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    image::RgbaImage::from_raw(size.0, size.1, out.stdout)
+}
+
 pub(crate) fn probe(path: &Path) -> Option<Probe> {
     let p = path.to_str()?;
     let text = output(
