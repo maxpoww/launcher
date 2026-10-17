@@ -682,6 +682,19 @@ fn gpu_node(ffmpeg: &str, path: &Path, size: (u32, u32)) -> Option<String> {
     if let Some(found) = FOUND.lock().ok().and_then(|f| f.clone()) {
         return found;
     }
+    // (One looks at a time: a second video while the first is still being
+    // tried goes on the processor, and the next asks again.)
+    static TRYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TRYING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return None;
+    }
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            TRYING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _done = Done;
     let mut nodes: Vec<String> = std::fs::read_dir("/dev/dri")
         .map(|d| {
             d.filter_map(Result::ok)

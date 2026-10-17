@@ -379,6 +379,8 @@ pub(crate) struct DndIn {
 /// The desktop's state on the loop.
 #[derive(Default)]
 pub(crate) struct Desktop {
+    /// The one of several selected Quick Look shows (its path).
+    pub peek_on: Option<String>,
     pub items: Vec<Item>,
     pub grid: Grid,
     /// Each item's cell (`None`: no room for it).
@@ -3727,6 +3729,20 @@ impl App {
                     self.request_desktop_draw();
                 }
             }
+            // Quick Look up on one of SEVERAL selected: the arrows walk
+            // among those only, round, and the selection stays.
+            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down
+                if self.desktop.selected.len() > 1
+                    && self.peek.up.as_ref().is_some_and(|u| u.win == crate::quicklook::DESKTOP && !u.closing) =>
+            {
+                let by = if matches!(keysym, Keysym::Left | Keysym::Up) { -1 } else { 1 };
+                let picked = self.desktop_picked();
+                let k = picked.iter().position(|&i| self.desktop.peek_on.as_deref() == Some(self.desktop.items[i].path.as_str())).unwrap_or(0);
+                if let Some(&to) = picked.get((k as isize + by).rem_euclid(picked.len().max(1) as isize) as usize) {
+                    self.desktop.peek_on = Some(self.desktop.items[to].path.clone());
+                    self.desktop_peek_open();
+                }
+            }
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
                 let step = match keysym {
                     Keysym::Left => (-1, 0),
@@ -3751,16 +3767,44 @@ impl App {
                 }
             }
             // QUICK LOOK (Max, 2026-10-16: "from any part of the shell").
-            Keysym::space => self.desktop_peek_open(),
+            Keysym::space => {
+                // (Shown afresh: from the first of what is selected.)
+                self.desktop.peek_on = None;
+                self.desktop_peek_open();
+            }
             _ => {}
         }
     }
 
-    /// The selected icon (the first of several), shown by Quick Look.
+    /// The selected icons that stand somewhere, in the order of their cells
+    /// (column by column, as the desktop is filled).
+    fn desktop_picked(&self) -> Vec<usize> {
+        let mut picked: Vec<(Slot, usize)> = self
+            .desktop
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| self.desktop.selected.contains(&it.path))
+            .filter_map(|(i, _)| self.desktop.slots.get(i).copied().flatten().map(|s| (s, i)))
+            .collect();
+        picked.sort();
+        picked.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// The selected icon shown by Quick Look: of several, the one it was
+    /// walked to (else the first).
     fn desktop_peek_open(&mut self) {
-        let Some((i, item)) = self.desktop.items.iter().enumerate().find(|(_, it)| self.desktop.selected.contains(&it.path)) else {
+        let picked = self.desktop_picked();
+        let k = picked
+            .iter()
+            .position(|&i| self.desktop.peek_on.as_deref() == Some(self.desktop.items[i].path.as_str()))
+            .unwrap_or(0);
+        let Some(&i) = picked.get(k) else {
             return;
         };
+        let item = &self.desktop.items[i];
+        self.desktop.peek_on = Some(item.path.clone());
+        let of = (picked.len() > 1).then_some((k + 1, picked.len()));
         let Some(slot) = self.desktop.slots.get(i).copied().flatten() else { return };
         let thing = crate::quicklook::Thing {
             path: std::path::PathBuf::from(&item.path),
@@ -3768,7 +3812,7 @@ impl App {
             thumb: self.desktop.chains.get(&item.icon).cloned(),
             // (The top surface lies where the desktop does: a point is the same on both.)
             icon: icon_rect(&self.desktop.grid.rect(slot), self.desktop_icon_scale()),
-            of: None,
+            of,
         };
         self.peek_show(crate::quicklook::DESKTOP, thing);
     }
