@@ -1002,6 +1002,15 @@ fn publish_icons() {
         return;
     }
     let Some(src) = icon_theme_dir(base) else { return };
+    // (Written already for these very colours — a dock start: kept.)
+    let stamp = format!("{base} {f:?} v1");
+    let now_dir = names.iter().map(|n| icons.join(n)).find(|d| d.is_dir());
+    if let Some(d) = &now_dir {
+        if std::fs::read_to_string(d.join(".golem-stamp")).ok().as_deref() == Some(stamp.as_str()) {
+            dconf(&d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            return;
+        }
+    }
     // The one not in use now gets the new drawings.
     let now = names.iter().find(|n| icons.join(n).is_dir()).copied();
     let (next, old) = if now == Some(names[0]) { (names[1], names[0]) } else { (names[0], names[1]) };
@@ -1014,6 +1023,7 @@ fn publish_icons() {
         warn!("palette: the apps' icons were not written ({e})");
         return;
     }
+    let _ = std::fs::write(dest.join(".golem-stamp"), &stamp);
     info!("palette: the apps' icons written in {} ms", started.elapsed().as_millis());
     dconf(next);
     let _ = std::fs::remove_dir_all(icons.join(old));
