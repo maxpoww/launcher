@@ -2511,12 +2511,22 @@ impl Panel {
                     let ground = colours[0];
                     let bright = crate::palette::rel_lum(ground) > 0.35;
                     rect(out, x, y0, r.w, r.h, radius, lin(ground, 1.0));
-                    // (Plain light: rgb 1 at alpha a ADDS light on any colour.)
-                    let light = |a: f32| [1.0, 1.0, 1.0, a * ca];
+                    // (The panel's blend only DARKENS through alpha: a light is
+                    // painted solid, the colour under it already mixed toward
+                    // white; a shade can stay translucent black.)
+                    let lit = |c: [u8; 3], a: f32| {
+                        let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0);
+                        let m = |v: u8| f(v) + (1.0 - f(v)) * a;
+                        [m(c[0]), m(c[1]), m(c[2]), ca]
+                    };
+                    let dim = |c: [u8; 3], a: f32| {
+                        let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0) * (1.0 - a);
+                        [f(c[0]), f(c[1]), f(c[2]), ca]
+                    };
                     let shade = |a: f32| [0.0, 0.0, 0.0, a * ca];
                     const STRIPS: usize = 12;
                     // The light from above: a dome of it, fading down to 45 %.
-                    let lift = if bright { 0.22 } else { 0.05 };
+                    let lift = if bright { 0.35 } else { 0.035 };
                     let dome = r.h * 0.45;
                     for k in 0..STRIPS {
                         let t = (k as f32 + 0.5) / STRIPS as f32;
@@ -2524,7 +2534,7 @@ impl Panel {
                         let inset = if k == 0 { radius * 0.6 } else { 0.0 };
                         let (sx, sw) = (x + r.w / 2.0 - half + inset, 2.0 * (half - inset));
                         let a = lift * (1.0 - t).powf(1.6);
-                        rect(out, sx, y0 + t * dome - dome / STRIPS as f32 / 2.0, sw, dome / STRIPS as f32 + 0.5, 0.0, light(a));
+                        rect(out, sx, y0 + t * dome - dome / STRIPS as f32 / 2.0, sw, dome / STRIPS as f32 + 0.5, 0.0, lit(ground, a));
                     }
                     let soul = &colours[1..];
                     let n = soul.len().max(1) as f32;
@@ -2561,11 +2571,11 @@ impl Panel {
                             if w < 0.5 {
                                 continue;
                             }
-                            let a = if t < 0.35 { 0.13 * (1.0 - t / 0.35) } else if t > 0.7 { 0.12 * (t - 0.7) / 0.3 } else { 0.0 };
+                            let a = if t < 0.35 { 0.10 * (1.0 - t / 0.35) } else if t > 0.7 { 0.10 * (t - 0.7) / 0.3 } else { 0.0 };
                             if a <= 0.002 {
                                 continue;
                             }
-                            let col = if t < 0.5 { light(a) } else { shade(a) };
+                            let col = if t < 0.5 { lit(*c, a) } else { dim(*c, a) };
                             rect(out, cx + (pw - w) / 2.0, py + y - ph / STRIPS as f32 / 2.0, w, ph / STRIPS as f32 + 0.5, 0.0, col);
                         }
                     }
