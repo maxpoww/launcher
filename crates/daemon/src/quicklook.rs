@@ -568,10 +568,13 @@ fn text_of(path: &Path) -> Option<Vec<String>> {
 /// a `/`), folders first, then by name; how many there are. `None` for an
 /// empty folder (it is shown as what it is).
 fn folder_list(path: &Path) -> Option<(Vec<String>, usize)> {
+    // (All of them counted; the first `TEXT_LINES` listed.)
+    let mut n = 0;
     let mut things: Vec<(bool, String, u64)> = std::fs::read_dir(path)
         .ok()?
         .filter_map(Result::ok)
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .inspect(|_| n += 1)
         .take(TEXT_LINES)
         .map(|e| {
             let meta = e.metadata().ok();
@@ -590,7 +593,6 @@ fn folder_list(path: &Path) -> Option<(Vec<String>, usize)> {
         b.0.cmp(&a.0)
             .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
     });
-    let n = things.len();
     let lines = things
         .into_iter()
         .map(|(dir, name, size)| {
@@ -799,17 +801,29 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 };
             }
         }
-        if let Some(lines) = text_of(path) {
+        // (A picture that would not decode is not offered as text — its
+        // header would be, with a pencil to write in it. An SVG is text.)
+        let text = if is_picture(&name) && !name.to_ascii_lowercase().ends_with(".svg") {
+            None
+        } else {
+            text_of(path)
+        };
+        if let Some(lines) = text {
             let bytes = lines.iter().map(String::len).sum();
             let n = lines.len();
             // (Read whole: small enough, no line cut short.)
             let whole = size <= TEXT_BYTES as u64
                 && n < TEXT_LINES
                 && lines.iter().all(|l| l.chars().count() < 400);
-            let meta = format!(
-                "{kind} · {size_text} · {}",
+            let count = if size > TEXT_BYTES as u64 || n >= TEXT_LINES {
+                // (Only the start of a long file is read: said so.)
+                fill(tr("first {n} lines"), &[("n", &n)])
+            } else if n == 1 {
+                tr("1 line").to_owned()
+            } else {
                 fill(tr("{n} lines"), &[("n", &n)])
-            );
+            };
+            let meta = format!("{kind} · {size_text} · {count}");
             return Prepared {
                 body: Body::Text { lines },
                 meta,
@@ -861,14 +875,30 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         },
     ));
     if dir {
-        let n = std::fs::read_dir(path).map_or(0, |d| {
-            d.filter_map(Result::ok)
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                .count()
-        });
-        lines.push((tr("Contains"), fill(tr("{n} things"), &[("n", &n)])));
-    } else {
+        match std::fs::read_dir(path) {
+            Ok(d) => {
+                let n = d
+                    .filter_map(Result::ok)
+                    .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .count();
+                lines.push((tr("Contains"), fill(tr("{n} things"), &[("n", &n)])));
+            }
+            // (Not "0 things": it cannot be looked into.)
+            Err(_) => lines.push((tr("Access"), tr("No permission to open it").to_owned())),
+        }
+    } else if meta.is_some() {
         lines.push((tr("Size"), size_text.clone()));
+        if std::fs::File::open(path).is_err() {
+            lines.push((tr("Access"), tr("No permission to read it").to_owned()));
+        }
+    }
+    // A link: where to, and whether that is still there.
+    if let Ok(to) = std::fs::read_link(path) {
+        let mut to = to.to_string_lossy().into_owned();
+        if meta.is_none() {
+            to = format!("{to} {}", tr("(missing)"));
+        }
+        lines.push((tr("Link to"), to));
     }
     if let Some(m) = crate::desktop_props::date_text(meta.as_ref().and_then(|m| m.modified().ok()))
     {

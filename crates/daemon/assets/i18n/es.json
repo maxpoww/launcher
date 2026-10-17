@@ -991,5 +991,10 @@
   "the sound is made again for the fades": "el sonido se vuelve a codificar para los fundidos",
   "frame": "cuadro",
   "Photo saved: {name}": "Foto guardada: {name}",
-  "{n} of {all}": "{n} de {all}"
+  "{n} of {all}": "{n} de {all}",
+  "first {n} lines": "primeras {n} líneas",
+  "1 line": "1 línea",
+  "No permission to open it": "Sin permiso para abrirla",
+  "No permission to read it": "Sin permiso para leerlo",
+  "(missing)": "(no existe)"
 }
