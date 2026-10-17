@@ -2524,9 +2524,10 @@ impl Panel {
                         [f(c[0]), f(c[1]), f(c[2]), ca]
                     };
                     let shade = |a: f32| [0.0, 0.0, 0.0, a * ca];
-                    const STRIPS: usize = 12;
+                    const STRIPS: usize = 24;
                     // The light from above: a dome of it, fading down to 45 %.
-                    let lift = if bright { 0.35 } else { 0.035 };
+                    // (In linear light: a dark ground takes very little to show it.)
+                    let lift = if bright { 0.30 } else { 0.006 };
                     let dome = r.h * 0.45;
                     for k in 0..STRIPS {
                         let t = (k as f32 + 0.5) / STRIPS as f32;
