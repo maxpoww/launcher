@@ -621,6 +621,15 @@ fn folder_list(path: &Path) -> Option<(Vec<String>, usize)> {
     Some((lines, n))
 }
 
+/// Whether the file can be written in the pencil's text editor: small, and
+/// every line whole (what is written back is exactly what was read).
+fn written_whole(path: &Path, size: u64) -> bool {
+    size <= TEXT_BYTES as u64
+        && text_of(path).is_some_and(|lines| {
+            lines.len() < TEXT_LINES && lines.iter().all(|l| l.chars().count() < 400)
+        })
+}
+
 fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32) -> Prepared {
     let pic = Pic::of(&within_tiles(img));
     let bytes = pic.bytes();
@@ -706,12 +715,32 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 };
             }
         }
+        // A WEB PAGE: as Seam shows it (`peek_web`); its source under the
+        // pencil. (Not drawn: as text, as before.)
+        if crate::peek_web::is_web(&name) {
+            if let Some(img) = crate::peek_web::page(path) {
+                let own = img.dimensions();
+                return Prepared {
+                    own,
+                    whole_text: written_whole(path, size),
+                    ..picture(
+                        img,
+                        format!("{kind} · {size_text} · {}", tr("as a web page")),
+                        app,
+                        0,
+                    )
+                };
+            }
+        }
         if is_picture(&name) {
             // (Its own size first: the tiles decide how big it is decoded.)
             let own = image::image_dimensions(path).unwrap_or(max);
             if let Some((img, own)) = decode(path, tile_fit(own, max)) {
                 return Prepared {
                     own,
+                    // (An SVG is drawn; under the pencil it is its text.)
+                    whole_text: name.to_ascii_lowercase().ends_with(".svg")
+                        && written_whole(path, size),
                     ..picture(
                         img,
                         format!("{kind} · {size_text} · {} × {}", own.0, own.1),
@@ -823,11 +852,29 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         } else {
             text_of(path)
         };
+        // (JSON on one long line — as programs write it — is laid out.)
+        let laid_out = text
+            .as_ref()
+            .filter(|_| name.to_ascii_lowercase().ends_with(".json") && size <= 4 << 20)
+            .filter(|lines| lines.iter().any(|l| l.chars().count() >= 400))
+            .and_then(|_| std::fs::read_to_string(path).ok())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+            .map(|t| {
+                t.lines()
+                    .take(TEXT_LINES)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            });
+        let pretty = laid_out.is_some();
+        let text = laid_out.or(text);
         if let Some(lines) = text {
             let bytes = lines.iter().map(String::len).sum();
             let n = lines.len();
             // (Read whole: small enough, no line cut short.)
-            let whole = size <= TEXT_BYTES as u64
+            // (Laid out, it is not the file as it is: no pencil.)
+            let whole = !pretty
+                && size <= TEXT_BYTES as u64
                 && n < TEXT_LINES
                 && lines.iter().all(|l| l.chars().count() < 400);
             let count = if size > TEXT_BYTES as u64 || n >= TEXT_LINES {
