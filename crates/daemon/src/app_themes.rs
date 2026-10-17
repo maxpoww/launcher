@@ -17,6 +17,10 @@
 //!   (`golem-theme.jar`: plugin.xml + a `.theme.json` + an editor scheme),
 //!   chosen in `laf.xml` — on the IDE's next start.
 //!
+//! * Chrome / Chromium: their own seed colour (`user_color`) and dark/light
+//!   in each profile's Preferences — on their next start.
+//! * Old X programs (XTerm): X resources merged with `xrdb`.
+//!
 //! Every writer leaves an app alone when it is not installed (its config
 //! folder is not there), and never writes a file it cannot read whole.
 
@@ -34,6 +38,8 @@ pub(crate) fn write(t: &Theme) {
     vscode(t);
     inkscape(t);
     jetbrains(t);
+    chrome(t);
+    xresources(t);
 }
 
 fn home() -> PathBuf {
@@ -332,6 +338,88 @@ fn set_attr(xml: &str, name: &str, value: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+// --------------------------------------------------------------- Chrome
+
+/// Chrome and Chromium take a seed colour of their own (Settings →
+/// Appearance → the colour swatches, Material-You style): the accent, and the
+/// apps' dark/light. Written once they have quit (they write their
+/// Preferences back on quit).
+fn chrome(t: &Theme) {
+    let mut profiles = Vec::new();
+    for app in ["google-chrome", "chromium"] {
+        let Ok(list) = std::fs::read_dir(config().join(app)) else { continue };
+        for e in list.flatten() {
+            let p = e.path().join("Preferences");
+            let name = e.file_name().to_string_lossy().into_owned();
+            if p.is_file() && (name == "Default" || name.starts_with("Profile ")) {
+                profiles.push(p);
+            }
+        }
+    }
+    if profiles.is_empty() {
+        return;
+    }
+    let a = t.accent();
+    // SkColor: 0xAARRGGBB, as Chrome keeps it (a signed int).
+    let seed = i64::from(0xff00_0000u32 as i32 | (i32::from(a[0]) << 16) | (i32::from(a[1]) << 8) | i32::from(a[2]));
+    let scheme = if t.dark { 2 } else { 1 };
+    when_closed("=(chrome|chromium)", move || {
+        for p in profiles {
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let browser = map.entry("browser").or_insert_with(|| serde_json::json!({}));
+            if let Some(b) = browser.as_object_mut() {
+                let theme = b.entry("theme").or_insert_with(|| serde_json::json!({}));
+                if let Some(th) = theme.as_object_mut() {
+                    for k in ["user_color", "user_color2"] {
+                        th.insert(k.into(), seed.into());
+                    }
+                    for k in ["color_scheme", "color_scheme2"] {
+                        th.insert(k.into(), scheme.into());
+                    }
+                    th.insert("follows_system_colors".into(), false.into());
+                }
+            }
+            if let Ok(out) = serde_json::to_string(&serde_json::Value::Object(map)) {
+                put(&p, &out);
+            }
+        }
+        info!("apps: Chrome's colour is Golem's");
+    });
+}
+
+// ------------------------------------------------------------- X apps
+
+/// Old X programs (XTerm and kin) read X resources: the palette's colours,
+/// merged into the X server's (Xwayland's) resources.
+fn xresources(t: &Theme) {
+    let c = &t.c;
+    let h = |x: Rgb| format!("#{}", hex(x));
+    let mut text = format!("*background: {}\n*foreground: {}\n*cursorColor: {}\n", h(c[0]), h(t.ink()), h(t.accent()));
+    // The sixteen terminal colours (base16's usual order of slots).
+    let slots = [0, 8, 0xB, 0xA, 0xD, 0xE, 0xC, 5, 3, 8, 0xB, 0xA, 0xD, 0xE, 0xC, 7];
+    for (i, k) in slots.iter().enumerate() {
+        text.push_str(&format!("*color{i}: {}\n", h(c[*k])));
+    }
+    put(&data().join("golem/Xresources"), &text);
+    if std::env::var_os("DISPLAY").is_none() {
+        return;
+    }
+    if let Ok(mut child) = std::process::Command::new("xrdb")
+        .arg("-merge")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }
 
 // ------------------------------------------------------------ JetBrains
