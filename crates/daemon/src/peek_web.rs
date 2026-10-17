@@ -315,8 +315,10 @@ fn shoot(page: &Path, out: &Path, width: u32) -> Option<()> {
     let img = done.then(|| image::open(&tmp).ok()).flatten();
     let _ = std::fs::remove_file(&tmp);
     let img = img?.to_rgba8();
-    // Kept raw (a run is read out of it in a moment), cut at `MAX_H`.
-    let (w, h) = (img.width(), img.height().min(MAX_H));
+    // Kept raw (a run is read out of it in a moment), cut at `MAX_H` and
+    // at its end: the engine draws a page at least a window tall, and a
+    // short table stood in a frame of empty ground.
+    let (w, h) = (img.width(), content_height(&img).min(MAX_H));
     let mut raw = Vec::with_capacity(8 + (w * h * 4) as usize);
     raw.extend_from_slice(&w.to_le_bytes());
     raw.extend_from_slice(&h.to_le_bytes());
@@ -326,6 +328,23 @@ fn shoot(page: &Path, out: &Path, width: u32) -> Option<()> {
     std::fs::rename(&part, out).ok()?;
     forget_old(out.parent()?);
     Some(())
+}
+
+/// How tall `img` is down to the end of what is on it: the rows at its foot
+/// all of one colour are left out, a margin kept (`TRAIL`).
+fn content_height(img: &image::RgbaImage) -> u32 {
+    const TRAIL: u32 = 32;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return h;
+    }
+    let ground = *img.get_pixel(w - 1, h - 1);
+    let blank = |y: u32| (0..w).all(|x| *img.get_pixel(x, y) == ground);
+    let mut end = h;
+    while end > 1 && blank(end - 1) {
+        end -= 1;
+    }
+    (end + TRAIL).min(h)
 }
 
 /// The kept pages beyond the newest `KEEP` are let go (they are big).
@@ -533,6 +552,15 @@ mod tests {
         assert_eq!(img.dimensions(), (2, 3));
         assert_eq!(img.as_raw()[0], (STEP % 256) as u8);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_page_ends_where_what_is_on_it_ends() {
+        let mut img = image::RgbaImage::from_pixel(10, 200, image::Rgba([240, 235, 225, 255]));
+        img.put_pixel(3, 50, image::Rgba([0, 0, 0, 255]));
+        assert_eq!(content_height(&img), 51 + 32);
+        let full = image::RgbaImage::from_pixel(10, 20, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(content_height(&full), 20);
     }
 
     #[test]
