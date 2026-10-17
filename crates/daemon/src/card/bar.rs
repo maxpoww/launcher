@@ -553,6 +553,19 @@ fn glyph(g: &str, r: Rect, px: f32, color: [f32; 4], clip: Rect) -> Label {
     }
 }
 
+/// The faint fill a FIELD has in the quiet language (Max, 2026-10-16): the
+/// solid plate it needs over the items, lifted a little toward the ink.
+fn hint_on(plate: [f32; 4], ink: &dyn Fn(f32) -> [f32; 4]) -> [f32; 4] {
+    let i = ink(1.0);
+    let k = 0.06;
+    [
+        plate[0] + (i[0] - plate[0]) * k,
+        plate[1] + (i[1] - plate[1]) * k,
+        plate[2] + (i[2] - plate[2]) * k,
+        plate[3],
+    ]
+}
+
 fn boxed(
     grid: &mut GridContent,
     rect: Rect,
@@ -636,20 +649,17 @@ pub(super) fn draw(
         let r = name_rect(list, &text);
         named = Some(r);
         let hot = hover == Some(Hover::Name);
+        // (Quiet, 2026-10-16: the name in the accent and nothing round it.
+        // Its ground is the card's own — the items pass under it, Max
+        // 2026-10-11 — so it is not seen at rest; the wash under the
+        // pointer, the accent's line while it is being written.)
         boxed(
             grid,
             r,
             RADIUS,
-            // (Opaque: the items pass under it — Max, 2026-10-11.)
-            [plate[0], plate[1], plate[2], 1.0],
-            if naming {
-                accent(1.0)
-            } else if hot {
-                accent(0.5)
-            } else {
-                rim
-            },
-            if naming { 1.5 } else { 1.0 },
+            if hot && !naming { paint.wash() } else { paint.fill },
+            if naming { accent(1.0) } else { [0.0; 4] },
+            if naming { 1.5 } else { 0.0 },
         );
         grid.labels.push(label(
             &text,
@@ -667,19 +677,15 @@ pub(super) fn draw(
     if b.seek.w > 0.0 {
         let seeking = bar.seeking();
         let on_seek = matches!(hover, Some(Hover::Seek | Hover::SeekClear));
+        // (A field: the quiet hint of a fill, no line round it; the wash
+        // under the pointer; the accent's line while it is written in.)
         boxed(
             grid,
             b.seek,
             if seeking { RADIUS } else { SEEK / 2.0 },
-            plate,
-            if seeking {
-                accent(1.0)
-            } else if on_seek {
-                accent(0.5)
-            } else {
-                rim
-            },
-            if seeking { 1.5 } else { 1.0 },
+            if on_seek && !seeking { paint.wash() } else { hint_on(plate, &ink) },
+            if seeking { accent(1.0) } else { [0.0; 4] },
+            if seeking { 1.5 } else { 0.0 },
         );
         let lens = Rect::new(b.seek.x, b.seek.y, SEEK, SEEK);
         grid.labels.push(glyph(
@@ -739,14 +745,8 @@ pub(super) fn draw(
     // New, in the input box's place.
     if let Some(r) = b.new {
         let hot = hover == Some(Hover::New);
-        boxed(
-            grid,
-            r,
-            RADIUS,
-            accent(if hot { 0.07 } else { 0.025 }),
-            accent(0.45),
-            1.0,
-        );
+        // (Quiet: "+ New" in the accent, the wash under the pointer.)
+        boxed(grid, r, RADIUS, if hot { paint.wash() } else { [0.0; 4] }, [0.0; 4], 0.0);
         grid.labels.push(label(
             tr("+   New"),
             (r.x + r.w / 2.0, r.y + (r.h - 18.0) / 2.0),
@@ -763,7 +763,11 @@ pub(super) fn draw(
         // (In the card's own colours, as the items are — Max, 2026-10-11:
         // the panel is the darker zebra tone, what is lit on it the lighter.)
         let lit_tone = paint.zebra(true);
-        boxed(grid, tray, RADIUS, paint.zebra(false), rim, 1.0);
+        // (The emoji's own PAGE is the card itself: quiet, nothing behind
+        // the grid. Floating over the writing box it keeps its panel.)
+        if page != Page::Emoji {
+            boxed(grid, tray, RADIUS, paint.zebra(false), rim, 1.0);
+        }
         // Its search — only once something is typed; till then a line of
         // hint in its place (while the card has the keys).
         let searching = bar.field == Some(Field::Pick);
@@ -917,8 +921,9 @@ pub(super) fn draw(
             frame.unwrap_or(r),
             RADIUS,
             well,
-            if typing { accent(0.6) } else { rim },
-            1.0,
+            // (Quiet: its faint fill alone; the accent's line while typing.)
+            if typing { accent(0.6) } else { [0.0; 4] },
+            if typing { 1.0 } else { 0.0 },
         );
         for (which, br) in b.btns {
             // (The ones with no place of their own: in the +'s menu.)

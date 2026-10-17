@@ -1223,15 +1223,38 @@ impl Paint {
     pub(super) fn zebra(&self, lighter: bool) -> [f32; 4] {
         self.tone(if lighter { ZEBRA_2 } else { ZEBRA_1 })
     }
+
+    /// THE QUIET LANGUAGE (Max, 2026-10-16, the approved quiet card): at
+    /// rest nothing is behind anything; a fill only says a STATE. This is
+    /// the one under the pointer: the card's own colour a step lighter,
+    /// half through.
+    pub(super) fn wash(&self) -> [f32; 4] {
+        self.tone(QUIET_WASH)
+    }
+
+    /// …and the one that is CHOSEN (the session this window works with, the
+    /// name being written): the card's colour leaning toward the accent.
+    /// (Mixed here, solid: a see-through accent over the card came out a
+    /// block of it.)
+    pub(super) fn picked(&self) -> [f32; 4] {
+        use crate::options::srgb_to_linear;
+        let a = self.accent();
+        let t = self.tone(ZEBRA_1);
+        let mix = |c: f32, a: f32| c + (srgb_to_linear(a) - c) * QUIET_PICKED;
+        [mix(t[0], a[0]), mix(t[1], a[1]), mix(t[2], a[2]), t[3]]
+    }
 }
+
+/// The wash under the pointer: this step of lightness from the card's colour.
+const QUIET_WASH: f32 = 0.045;
+/// How far what is chosen leans toward the accent.
+const QUIET_PICKED: f32 = 0.045;
 
 /// The two zebra tones, as steps of lightness from the card's colour.
 const ZEBRA_1: f32 = 0.025;
 const ZEBRA_2: f32 = 0.07;
 /// A button under the pointer: a step past the lighter tone.
 const ZEBRA_HOT: f32 = 0.11;
-/// An item under the pointer: this much past its own tone.
-const ZEBRA_OVER: f32 = 0.035;
 
 /// How solid an item's box (and the input box, and the picker) is.
 pub(super) const ITEM: f32 = 0.96;
@@ -1534,11 +1557,6 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     // In ZEBRA tones (Max, 2026-10-10): the first item the darker of the
     // two, the second the lighter, and so on down what is on screen.
     let tile_fills = [paint.zebra(false), paint.zebra(true)];
-    let tile_rim = if bright {
-        [0.0, 0.0, 0.0, 0.10]
-    } else {
-        [1.0, 1.0, 1.0, 0.06]
-    };
     let pic_fill = if bright {
         [0.0, 0.0, 0.0, 0.08]
     } else {
@@ -1546,7 +1564,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     };
     let mut tiles = Vec::with_capacity(shown_items.len());
     let mut y = body.y + LIST_PAD + over - scroll;
-    for (nth, (item, h)) in shown_items.iter().copied().zip(heights).enumerate() {
+    for (item, h) in shown_items.iter().copied().zip(heights) {
         let shift = view.shifts.get(&item.id).copied().unwrap_or(0.0);
         let tile = Tile {
             id: item.id,
@@ -1564,42 +1582,26 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         if t.y > clip.y + clip.h || t.y + t.h < clip.y {
             continue;
         }
-        // (The item under the pointer is a step brighter, as a button
-        // under it is — Max, 2026-10-11: the border alone was weak.)
+        // THE QUIET CARD (Max, 2026-10-16): an item stands on the card
+        // with nothing behind it — space parts it from the next. Under the
+        // pointer it gets the wash; the chosen one (this window's session,
+        // the name being written) the accent's tint.
         let hovered = view.hover.is_some_and(|h| h.item() == Some(item.id));
-        list.rects.push(RectInst {
-            rect: t,
-            radius: TILE_RADIUS,
-            color: if hovered {
-                paint.tone([ZEBRA_1, ZEBRA_2][nth % 2] + ZEBRA_OVER)
-            } else {
-                tile_fills[nth % 2]
-            },
-            glass: 0.0,
-            border: 0.0,
-        });
         let mine = page == Page::Memory
             && view
                 .foot
                 .as_ref()
                 .is_some_and(|f| f.current == Some(item.id));
-        list.rects.push(RectInst {
-            rect: t,
-            radius: TILE_RADIUS,
-            color: if mine {
-                [acc[0], acc[1], acc[2], 0.55]
-            } else if titling == Some(item.id) {
-                [acc[0], acc[1], acc[2], 0.6]
-            } else if view.hover.is_some_and(|h| h.item() == Some(item.id)) {
-                // (The item under the pointer: its border a little
-                // stronger — Max, 2026-10-11.)
-                [tile_rim[0], tile_rim[1], tile_rim[2], tile_rim[3] * 3.5]
-            } else {
-                tile_rim
-            },
-            glass: 0.0,
-            border: 1.0,
-        });
+        let state = if mine || titling == Some(item.id) {
+            Some(paint.picked())
+        } else if hovered {
+            Some(paint.wash())
+        } else {
+            None
+        };
+        if let Some(color) = state {
+            list.rects.push(RectInst { rect: t, radius: TILE_RADIUS, color, glass: 0.0, border: 0.0 });
+        }
         let note = view.foot.as_ref().and_then(|f| f.notes.get(&item.id));
         if is_row(item.id) {
             // A SESSION's row: its name only, and at the right when its
@@ -1656,7 +1658,9 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     false,
                     danger,
                 ),
-                _ => put(name, (tx, mid), tw, 12.5, false, paint.ink_at(0.96)),
+                // (This window's own session: its name in the accent — the
+                // quiet card's "where you are".)
+                _ => put(name, (tx, mid), tw, 12.5, false, if mine { [acc[0], acc[1], acc[2], 1.0] } else { paint.ink_at(0.96) }),
             }
             if !arming {
                 put(
@@ -2184,23 +2188,22 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
             talk.is_some_and(|t| t.starts_with("Writing")),
         );
         let hot = view.hover == Some(Hover::Mic);
+        // (Quiet: a ring of the accent; filled only by what it is doing —
+        // red while it listens — or the wash under the pointer.)
+        let fill = if listening {
+            Some([danger()[0], danger()[1], danger()[2], 0.9])
+        } else if hot {
+            Some(paint.wash())
+        } else {
+            None
+        };
+        if let Some(color) = fill {
+            list.rects.push(RectInst { rect: mic, radius: mic.w / 2.0, color, glass: 0.0, border: 0.0 });
+        }
         list.rects.push(RectInst {
             rect: mic,
             radius: mic.w / 2.0,
-            color: if listening {
-                [danger()[0], danger()[1], danger()[2], 0.9]
-            } else if hot {
-                paint.tone(ZEBRA_HOT)
-            } else {
-                paint.zebra(true)
-            },
-            glass: 0.0,
-            border: 0.0,
-        });
-        list.rects.push(RectInst {
-            rect: mic,
-            radius: mic.w / 2.0,
-            color: tile_rim,
+            color: [acc[0], acc[1], acc[2], 0.45],
             glass: 0.0,
             border: 1.0,
         });
@@ -2383,35 +2386,22 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
         for (which, r) in foot_buttons(rect) {
             let up = which.page() == foot.page;
             let hot = view.hover == Some(Hover::Foot(which));
-            bar.rects.push(RectInst {
-                rect: r,
-                radius: if which.round() {
-                    r.h / 2.0
-                } else {
-                    TILE_RADIUS
-                },
-                // (Zebra: a button is the lighter tone, the one of the page
-                // that is up the other.)
-                color: match (up, hot) {
-                    (true, _) => paint.zebra(false),
-                    (_, true) => paint.tone(ZEBRA_HOT),
-                    _ => paint.zebra(true),
-                },
-                glass: 0.0,
-                border: 0.0,
-            });
-            // (…with the rim the items have: Max, 2026-10-10.)
-            bar.rects.push(RectInst {
-                rect: r,
-                radius: if which.round() {
-                    r.h / 2.0
-                } else {
-                    TILE_RADIUS
-                },
-                color: tile_rim,
-                glass: 0.0,
-                border: 1.0,
-            });
+            // (The quiet head, 2026-10-16: a button is its icon alone; the
+            // wash under the pointer; the page that is up says so by its
+            // icon in the accent — the arrow back to the session.)
+            if hot {
+                bar.rects.push(RectInst {
+                    rect: r,
+                    radius: if which.round() {
+                        r.h / 2.0
+                    } else {
+                        TILE_RADIUS
+                    },
+                    color: paint.wash(),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
             // (The one that is up: an arrow pointing up — back to the session.)
             let icon = if up { Some(ICON_UP) } else { which.icon() };
             // (An icon: at the size that makes its drawing as big as the
@@ -3275,12 +3265,11 @@ mod tests {
         // Its frame is the same box, the same corners.
         assert_eq!(big.grids[0].rects[0].rect, plain.grids[0].rects[0].rect);
         assert_eq!(big.grids[0].rects[0].radius, frame_radius(false));
-        // Its first item starts twice as far from the corner, twice as tall,
-        // its words twice as big.
-        let (a, b) = (plain.grids[1].rects[0].rect, big.grids[1].rects[0].rect);
-        assert_eq!(b.x - rect.x, 2.0 * (a.x - rect.x));
-        assert_eq!(b.y - rect.y, 2.0 * (a.y - rect.y));
-        assert_eq!(b.h, 2.0 * a.h);
+        // Its first item starts twice as far from the corner, its words
+        // twice as big. (At rest an item has no box: its words are it.)
+        let (a, b) = (plain.grids[1].labels[0].pos, big.grids[1].labels[0].pos);
+        assert!((b.0 - rect.x - 2.0 * (a.0 - rect.x)).abs() < 0.01);
+        assert!((b.1 - rect.y - 2.0 * (a.1 - rect.y)).abs() < 0.01);
         assert_eq!(
             big.grids[1].labels[0].font_px,
             2.0 * plain.grids[1].labels[0].font_px
@@ -3290,6 +3279,6 @@ mod tests {
         // At 1 nothing moves.
         let (mut same, _, _) = build(rect);
         zoom_scene(&mut same, (rect.x, rect.y), 1.0);
-        assert_eq!(same.grids[1].rects[0].rect, a);
+        assert_eq!(same.grids[1].labels[0].pos, a);
     }
 }
