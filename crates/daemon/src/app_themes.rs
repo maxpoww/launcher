@@ -439,7 +439,16 @@ fn sound_playing() -> bool {
     let Ok(serde_json::Value::Array(objects)) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return false };
     objects.iter().any(|o| {
         let info = &o["info"];
-        info["props"]["media.class"].as_str().is_some_and(|c| c.starts_with("Stream/Output/Audio")) && info["state"] == "running"
+        let props = &info["props"];
+        props["media.class"].as_str().is_some_and(|c| c.starts_with("Stream/Output/Audio"))
+            && info["state"] == "running"
+            // (A stream of pure silence is not sound: Golem keeps one playing
+            // so a Bluetooth speaker does not sleep — ffplay of `anullsrc`.)
+            && !props["application.process.id"]
+                .as_u64()
+                .or_else(|| props["application.process.id"].as_str().and_then(|p| p.parse().ok()))
+                .and_then(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
+                .is_some_and(|cmd| String::from_utf8_lossy(&cmd).contains("anullsrc"))
     })
 }
 
