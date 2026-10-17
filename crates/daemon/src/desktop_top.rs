@@ -146,6 +146,7 @@ impl App {
             ink,
             wash: self.options_hover_wash(),
             radius: crate::clipboard::BOX_RADIUS,
+            rules: false,
         }
     }
 

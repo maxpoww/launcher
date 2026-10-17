@@ -20,7 +20,7 @@ use crate::bt_files::{FileCommand, FileEvent, FileHandle};
 use crate::content::{GridContent, Label, Rect, RectInst, Scene};
 use crate::net::{self, Ap, NetCommand, NetDetail, NetEvent, NetHandle, NetSnapshot};
 use crate::options::{
-    hover_grow, hover_ink_for, push_hover_frame, push_neumorph, FONT_PX, HOVER_FRAME_ALPHA,
+    hover_grow, hover_ink_for, push_neumorph, FONT_PX, HOVER_FRAME_ALPHA,
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -687,31 +687,24 @@ impl Pen {
     /// The bar's one switch: a stadium track and a knob that sits at the end
     /// it is switched to.
     fn switch(&self, scene: &mut Scene, right: f32, cy: f32, on: bool) {
+        // The control panel's slim switch (quiet, 2026-10-16): off, an
+        // outlined capsule with its knob at the left; on, filled with the
+        // ink and a dark knob at the right.
         let s = self.s;
         let (w, h) = (SWITCH_W * s, SWITCH_H * s);
         let sw = Rect::new(right - w, cy - h / 2.0, w, h);
         let i = self.ink;
-        self.rect(
-            scene,
-            sw,
-            h / 2.0,
-            [i[0], i[1], i[2], if on { 0.38 } else { 0.14 }],
-            0.0,
-        );
-        let d = h - 4.0 * s;
-        let kx = if on {
-            sw.x + w - d - 2.0 * s
+        let d = h - 8.0 * s;
+        if on {
+            self.rect(scene, sw, h / 2.0, [i[0], i[1], i[2], 0.92], 0.0);
+            let dark = if i[0] + i[1] + i[2] > 1.5 { [0.02, 0.025, 0.035, 1.0] } else { [0.97, 0.97, 0.97, 1.0] };
+            self.rect(scene, Rect::new(sw.x + w - d - 4.0 * s, sw.y + 4.0 * s, d, d), d / 2.0, dark, 0.0);
         } else {
-            sw.x + 2.0 * s
-        };
-        self.rect(
-            scene,
-            Rect::new(kx, sw.y + 2.0 * s, d, d),
-            d / 2.0,
-            [i[0], i[1], i[2], 1.0],
-            0.0,
-        );
+            self.rect(scene, sw, h / 2.0, [i[0], i[1], i[2], 0.38], 1.0);
+            self.rect(scene, Rect::new(sw.x + 4.0 * s, sw.y + 4.0 * s, d, d), d / 2.0, [i[0], i[1], i[2], 0.75], 0.0);
+        }
     }
+
 }
 
 impl App {
@@ -722,7 +715,7 @@ impl App {
     }
 
     /// The page with content that is on screen, if one is.
-    fn gear_page(&self) -> Option<PageKind> {
+    pub(crate) fn gear_page(&self) -> Option<PageKind> {
         let kind = self.stats_page_kind();
         (self.stats.open && kind != PageKind::Other).then_some(kind)
     }
@@ -2055,7 +2048,9 @@ impl App {
             let top = r.y.max(content.y);
             let bot = (rect.y + rect.h).min(bottom);
             let radius = crate::clipboard::BOX_RADIUS * s;
-            let color = [stripe[0], stripe[1], stripe[2], stripe[3] * pen.a];
+            // (Quiet, 2026-10-16: a breath off the box, as Golem Files' side
+            // panel is off its content — not the zebra's full step.)
+            let color = [stripe[0], stripe[1], stripe[2], stripe[3] * pen.a * QUIET_SHEET];
             if bot > top {
                 scene.rects.push(RectInst {
                     rect: Rect::new(rect.x, top, rect.w, bot - top),
@@ -2098,19 +2093,14 @@ impl App {
                     sel,
                     hit: row_hit,
                 } => {
-                    if view.zebra && list_pos % 2 == 1 {
+                    if crate::options::BOX_ZEBRA && view.zebra && list_pos % 2 == 1 {
                         pen.rect(scene, r, 0.0, stripe, 0.0);
                     }
                     list_pos += 1;
                     let lit = (hovered && (*row_hit != Hit::None || more.is_some())) || *sel;
+                    // (Quiet, 2026-10-16: the row under the pointer is washed.)
                     if lit {
-                        pen.rect(
-                            scene,
-                            r,
-                            7.0,
-                            [pen.hot[0], pen.hot[1], pen.hot[2], HOVER_FRAME_ALPHA],
-                            1.0,
-                        );
+                        pen.rect(scene, r, 7.0, [pen.hot[0], pen.hot[1], pen.hot[2], QUIET_ROW_WASH], 0.0);
                     }
                     let col = if lit { pen.hot } else { pen.dim };
                     let mut tx = r.x + ROW_PAD_X * s;
@@ -2118,7 +2108,7 @@ impl App {
                         // A one-line row wears a smaller tile, so it fits the row's own height.
                         let d = if sub.is_empty() { SMALL_TILE } else { TILE } * s;
                         let t = Rect::new(tx, r.y + (r.h - d) / 2.0, d, d);
-                        pen.rect(scene, t, d / 2.0, [ink[0], ink[1], ink[2], 0.10], 0.0);
+                        // (The icon alone: nothing behind it at rest.)
                         pen.glyph(scene, g, (t.x + t.w / 2.0, t.y + t.h / 2.0), d * 0.52, col);
                         tx += (TILE + TILE_GAP) * s - (TILE * s - d);
                     }
@@ -2270,10 +2260,12 @@ impl App {
                     for (_, weight, opacity) in parts {
                         let pw = w * weight.max(0.0) / total;
                         if pw >= 1.0 {
+                            // (The quiet track: 2 px where it was 8, in the
+                            // middle of the same band.)
                             pen.rect(
                                 scene,
-                                Rect::new(x, top, (pw - 2.0 * s).max(1.0), 8.0 * s),
-                                3.0 * s,
+                                Rect::new(x, top + 3.0 * s, (pw - 2.0 * s).max(1.0), 2.0 * s),
+                                1.0 * s,
                                 [ink[0], ink[1], ink[2], *opacity],
                                 0.0,
                             );
@@ -2447,12 +2439,21 @@ impl App {
                     );
                     for ((h, label, on), (_, z)) in opts.iter().zip(&zones) {
                         let over = h == hit;
-                        // The settings boxes' preset idiom: the one in use is
-                        // lit and ringed.
-                        let wash = if *on || over { 0.27 } else { 0.11 };
-                        pen.rect(scene, *z, z.h / 2.0, [ink[0], ink[1], ink[2], wash], 0.0);
+                        // The control panel's words idiom (quiet, 2026-10-16):
+                        // a choice is its word; the one in use bright and
+                        // underlined, the wash under the pointer.
+                        if over {
+                            pen.rect(scene, *z, z.h / 2.0, [ink[0], ink[1], ink[2], QUIET_ROW_WASH], 0.0);
+                        }
                         if *on {
-                            pen.rect(scene, *z, z.h / 2.0, [ink[0], ink[1], ink[2], 0.55], 1.0);
+                            let uw = (est_w(label, 15.0 * s) * 1.1).min(z.w - 8.0 * s);
+                            pen.rect(
+                                scene,
+                                Rect::new(z.x + (z.w - uw) / 2.0, z.y + z.h - 3.0 * s, uw, 1.5 * s),
+                                0.0,
+                                [ink[0], ink[1], ink[2], 0.9],
+                                0.0,
+                            );
                         }
                         pen.text(
                             scene,
@@ -2480,7 +2481,6 @@ impl App {
                     let cx = r.x + r.w / 2.0;
                     let mut y = r.y + 6.0 * s;
                     let t = Rect::new(cx - CARD_TILE * s / 2.0, y, CARD_TILE * s, CARD_TILE * s);
-                    pen.rect(scene, t, t.h / 2.0, [ink[0], ink[1], ink[2], 0.10], 0.0);
                     pen.glyph(scene, glyph, (cx, t.y + t.h / 2.0), 28.0 * s, ink);
                     y += (CARD_TILE + 8.0) * s;
                     let px = (FONT_PX * s, LINE_PX * s);
@@ -2541,7 +2541,7 @@ impl App {
                                 _ => unreachable!("matched above"),
                             };
                             let bw = 150.0 * s;
-                            let bar = Rect::new(cx - bw / 2.0, y + 10.0 * s, bw, 5.0 * s);
+                            let bar = Rect::new(cx - bw / 2.0, y + 11.5 * s, bw, 2.0 * s);
                             pen.rect(scene, bar, bar.h / 2.0, [ink[0], ink[1], ink[2], 0.14], 0.0);
                             let fill_w = bw * f32::from((*b).min(100)) / 100.0;
                             pen.rect(
@@ -2621,22 +2621,12 @@ impl App {
             let over = b.hit == *hit;
             let br = if over { hover_grow(r) } else { r };
             let radius = br.h / 2.0;
-            push_neumorph(scene, br, radius, bright, alpha);
-            let mut base = if over || b.lit {
-                self.options_hover_wash()
-            } else {
-                self.options_rest_wash()
-            };
-            base[3] *= alpha;
-            scene.rects.push(RectInst {
-                rect: br,
-                radius,
-                color: base,
-                glass: 0.0,
-                border: 0.0,
-            });
-            if b.lit {
-                push_hover_frame_round(scene, br, glyph_ink, HOVER_FRAME_ALPHA * alpha);
+            // (Quiet, 2026-10-16: a round button is its icon; the wash under
+            // the pointer, or while it is the one that is on.)
+            if over || b.lit {
+                let mut base = self.options_hover_wash();
+                base[3] *= alpha;
+                scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
             }
             let gpx = r.h * 0.56;
             scene.labels.push(Label {
@@ -3826,6 +3816,12 @@ fn field_eye_rect(fr: Rect) -> Rect {
     Rect::new(fr.x + fr.w - d - 5.0, fr.y + 3.0, d, d)
 }
 
+/// How much of the zebra's tone a details sheet keeps.
+const QUIET_SHEET: f32 = 0.12;
+
+/// The wash on a row under the pointer, as much of the ink as this.
+const QUIET_ROW_WASH: f32 = 0.07;
+
 fn push_hover_frame_clipped(pen: &Pen, scene: &mut Scene, r: Rect) {
     pen.rect(
         scene,
@@ -3834,21 +3830,6 @@ fn push_hover_frame_clipped(pen: &Pen, scene: &mut Scene, r: Rect) {
         [pen.hot[0], pen.hot[1], pen.hot[2], HOVER_FRAME_ALPHA],
         1.0,
     );
-}
-
-/// The ring a lit round button wears: the hovered row's frame, on a circle.
-fn push_hover_frame_round(scene: &mut Scene, r: Rect, ink: [f32; 4], alpha: f32) {
-    if r.w < 4.0 {
-        push_hover_frame(scene, r, ink, alpha);
-        return;
-    }
-    scene.rects.push(RectInst {
-        rect: r,
-        radius: r.h / 2.0,
-        color: [ink[0], ink[1], ink[2], alpha],
-        glass: 0.0,
-        border: 1.0,
-    });
 }
 
 #[cfg(test)]

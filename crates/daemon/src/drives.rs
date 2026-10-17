@@ -34,14 +34,18 @@ pub(crate) enum Target {
     Golem,
     /// NTFS.
     Windows,
+    /// FAT32: what cameras, car radios and older things read (Max,
+    /// 2026-10-17: a camera's memory card wants it back the way it came).
+    Camera,
 }
 
 impl Target {
-    fn fstype(self) -> &'static str {
+    pub(crate) fn fstype(self) -> &'static str {
         match self {
             Target::Any => "exfat",
             Target::Golem => "ext4",
             Target::Windows => "ntfs",
+            Target::Camera => "vfat",
         }
     }
 }
@@ -374,5 +378,6 @@ mod tests {
         assert_eq!(Target::Any.fstype(), "exfat");
         assert_eq!(Target::Golem.fstype(), "ext4");
         assert_eq!(Target::Windows.fstype(), "ntfs");
+        assert_eq!(Target::Camera.fstype(), "vfat");
     }
 }

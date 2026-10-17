@@ -116,6 +116,7 @@ mod stats;
 mod surface;
 mod sys;
 mod phone_pill;
+mod drive_pill;
 mod task_pill;
 mod task_title;
 mod tasks;
@@ -703,6 +704,7 @@ fn main() -> anyhow::Result<()> {
         bar_zoom_keys: false,
         zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
+        drive_pills: drive_pill::DrivePills::default(),
         desktop_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
@@ -1645,6 +1647,8 @@ pub struct App {
     zoom_keys_for: Option<&'static str>,
     /// The bar's phone pill (`phone_pill.rs`).
     phone_pill: phone_pill::PhonePill,
+    /// The bar's pills of the plugged-in sticks and cards (`drive_pill.rs`).
+    drive_pills: drive_pill::DrivePills,
     desktop_layer: Option<LayerSurface>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.

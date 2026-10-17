@@ -3011,17 +3011,10 @@ impl Panel {
                 let was = self.installed.contains(&row.prog.name.to_lowercase());
                 let hot = resting
                     && self.pointer.is_some_and(|pos| clip.contains(pos) && Rect::new(f.x + rx, f.y + ry, rw, rh).contains(pos));
-                let fill = if hot { hover_a } else if on { 0.11 } else { 0.07 };
-                rect(&mut inside, rx, ry, rw, rh, rh / 2.0, wash(fill));
-                if on {
-                    let (mx, my) = map(rx, ry);
-                    inside.rects.push(RectInst {
-                        rect: Rect::new(mx, my, rw * cs, rh * cs),
-                        radius: rh / 2.0 * cs,
-                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.55 * ca],
-                        glass: 0.0,
-                        border: 1.0,
-                    });
+                // (Quiet, 2026-10-16: a program is its words and its switch;
+                // the wash under the pointer only — the switch says on.)
+                if hot {
+                    rect(&mut inside, rx, ry, rw, rh, rh / 2.0, wash(hover_a));
                 }
                 // The name, then what it is (or what will happen to it).
                 let left = |t: String, x: f32, px: f32, a: f32, max: f32| {
@@ -3054,13 +3047,26 @@ impl Panel {
                 if room > 20.0 * s {
                     inside.labels.push(left(what, dx, 16.0, 0.65, room));
                 }
-                // The switch: on, white with a dark knob; off, a quiet wash.
-                let (tx, ty) = (rx + rw - 9.0 * s - sw.0, ry + (rh - sw.1) / 2.0);
-                rect(&mut inside, tx, ty, sw.0, sw.1, sw.1 / 2.0, if on { [paint.ink[0], paint.ink[1], paint.ink[2], 0.92] } else { wash(0.16) });
-                let knob = 19.0 * s;
-                let kx = if on { tx + sw.0 - 3.0 * s - knob } else { tx + 3.0 * s };
-                let kc = if on { [0.02, 0.025, 0.035, 1.0] } else { [paint.ink[0], paint.ink[1], paint.ink[2], 0.8] };
-                rect(&mut inside, kx, ty + (sw.1 - knob) / 2.0, knob, knob, knob / 2.0, kc);
+                // The slim switch (the panel's own): on, filled with the ink
+                // and a dark knob; off, an outlined capsule.
+                let (tw, th) = (36.0 * s, 20.0 * s);
+                let (tx, ty) = (rx + rw - 9.0 * s - tw, ry + (rh - th) / 2.0);
+                let knob = 12.0 * s;
+                if on {
+                    rect(&mut inside, tx, ty, tw, th, th / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.92]);
+                    let dark = if paint.bright { [0.93, 0.93, 0.92, 1.0] } else { [0.02, 0.025, 0.035, 1.0] };
+                    rect(&mut inside, tx + tw - 4.0 * s - knob, ty + 4.0 * s, knob, knob, knob / 2.0, dark);
+                } else {
+                    let (mx, my) = map(tx, ty);
+                    inside.rects.push(RectInst {
+                        rect: Rect::new(mx, my, tw * cs, th * cs),
+                        radius: th / 2.0 * cs,
+                        color: [paint.ink[0], paint.ink[1], paint.ink[2], 0.38 * ca],
+                        glass: 0.0,
+                        border: (1.0 * s * cs).max(1.0),
+                    });
+                    rect(&mut inside, tx + 4.0 * s, ty + 4.0 * s, knob, knob, knob / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.75]);
+                }
             }
             out.clipped.push((clip, inside.rects, inside.labels));
             // The one button and what it means.
@@ -3069,7 +3075,8 @@ impl Panel {
             let (fill, ring) = match l.kind {
                 ModButton::ConfirmRemove => ([1.0, 0.18, 0.18, 0.35], [1.0, 0.55, 0.55, 0.7]),
                 ModButton::Apply | ModButton::Confirm => (wash(if hot { 0.30 } else { 0.22 }), [paint.ink[0], paint.ink[1], paint.ink[2], 0.9]),
-                _ => (wash(if hot { 0.27 } else { 0.14 }), [paint.ink[0], paint.ink[1], paint.ink[2], 0.6]),
+                // (Quiet: the plain button a hairline, filled only under the pointer.)
+                _ => (wash(if hot { 0.27 } else { 0.0 }), [paint.ink[0], paint.ink[1], paint.ink[2], 0.3]),
             };
             rect(out, b.x, b.y, b.w, b.h, b.h / 2.0, fill);
             let (mx, my) = map(b.x, b.y);

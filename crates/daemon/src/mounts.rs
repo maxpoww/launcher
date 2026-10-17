@@ -97,7 +97,15 @@ pub(crate) fn volume_icon(v: &Mounted) -> &'static str {
     if v.phone {
         return "phone";
     }
-    icon_of_mount(&std::fs::read_to_string("/proc/mounts").unwrap_or_default(), &v.path)
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    match icon_of_mount(&mounts, &v.path) {
+        // (Not found by the name it is seen through: by where it really is.)
+        "drive-removable-media-usb" => match std::fs::canonicalize(&v.path) {
+            Ok(real) if real != v.path => icon_of_mount(&mounts, &real),
+            _ => "drive-removable-media-usb",
+        },
+        icon => icon,
+    }
 }
 
 /// The owner's own DISKS (Max, 2026-10-15): filesystems mounted for good
