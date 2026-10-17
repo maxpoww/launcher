@@ -4456,15 +4456,23 @@ impl App {
                 } else if win.hover == Spot::Place(n) {
                     pills.rects.push(rect(shown, corner, pal.hover));
                 }
-                if let Some(layer) = win.layer_of(&win.place_key(place)) {
+                let key = win.place_key(place);
+                // (Only a SYMBOL is carved; a folder icon carries its own
+                // symbol pressed in, and a wash would flatten it away.)
+                let symbol = key.ends_with("-symbolic");
+                if let Some(layer) = win.layer_of(&key) {
                     let at = Rect::new(side_box.x + (layout.side_w - icon) / 2.0, y + (row_h - icon) / 2.0, icon, icon);
                     if at.y >= side_box.y && at.y + at.h <= side_box.y + side_box.h {
                         pills.icons.push(IconInst {
                             rect: at,
                             layer,
                             // CARVED: the symbol in the pill's colour pressed in.
-                            tint: if here { carved_lit } else { carved },
-                            ring: -1.3,
+                            tint: match (symbol, here) {
+                                (false, _) => [0.0; 4],
+                                (true, true) => carved_lit,
+                                (true, false) => carved,
+                            },
+                            ring: if symbol { -1.3 } else { -1.0 },
                             plate: NO_PLATE,
                         });
                     }
