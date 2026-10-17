@@ -2509,7 +2509,12 @@ impl Panel {
                     let ground = colours[0];
                     let bright = crate::palette::rel_lum(ground) > 0.35;
                     rect(out, x, y0, r.w, r.h, radius, lin(ground, 1.0));
-                    let white = |a: f32| [1.0, 1.0, 1.0, a * ca];
+                    // (The panel's own washes: a white is coded for blending
+                    // in linear light — a plain 1.0 at a low alpha glares.)
+                    let white = |a: f32| {
+                        let w = crate::options::wash(true, a);
+                        [w[0], w[1], w[2], w[3] * ca]
+                    };
                     let black = |a: f32| [0.0, 0.0, 0.0, a * ca];
                     // The light from above: rings of a radial lift, widest faintest.
                     let lift = if bright { 0.16 } else { 0.035 };
