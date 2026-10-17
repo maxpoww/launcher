@@ -1574,6 +1574,8 @@ impl Panel {
             let widths: Vec<f32> = g.choices.iter().map(|c| c.text.chars().count().max(1) as f32 * letter + 4.0 * s).collect();
             let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
             let x0 = right - total;
+            // (Every row keeps the same room for its look, so the tracks line up.)
+            let lane = right - 116.0 * s;
             let mut x = x0;
             for (ci, c) in g.choices.iter().enumerate() {
                 let w = widths[ci];
@@ -1591,7 +1593,7 @@ impl Panel {
                 });
                 x += w + gap;
             }
-            right = x0 - 18.0 * s;
+            right = x0.min(lane) - 18.0 * s;
         }
         // Its value, in words, before the look.
         out.texts.push(Text { text: value.to_owned(), x: right - 36.0 * s, y: y + (h - 16.0 * s) / 2.0, px: 12.0, alpha: 0.55, centered: true });
@@ -1692,6 +1694,8 @@ impl Panel {
         let pages = choices.len().div_ceil(cap);
         // The grid is as tall as the fullest page.
         let rows = choices.len().min(cap).div_ceil(cols);
+        // (A palette's name is written under its card: room for it.)
+        let nh = if swatches { 20.0 * s } else { 0.0 };
         let page_of = |page: usize| -> Vec<Chip> {
             let first = page * cap;
             let on_page = choices.len().saturating_sub(first).min(cap);
@@ -1703,7 +1707,7 @@ impl Panel {
                     let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
                     let c = &choices[first + k];
                     Chip {
-                        rect: Rect::new(x, y + row as f32 * (h + gap), w, h),
+                        rect: Rect::new(x, y + row as f32 * (h + gap + nh), w, h),
                         text: c.text.clone(),
                         on: c.on,
                         action: PanelAction::Pick { group, index: (first + k) as u8 },
@@ -1739,7 +1743,7 @@ impl Panel {
             out.ghosts = page_of(from);
             out.ghost_slide = -behind + if forward { -fw } else { fw };
         }
-        let foot = y + rows as f32 * h + (rows - 1) as f32 * gap;
+        let foot = y + rows as f32 * (h + nh) + (rows - 1) as f32 * gap;
         if pages > 1 {
             out.dots = Some((foot + (dots_h - TILE_DOT * s) / 2.0, pages, page));
         }
@@ -1871,7 +1875,7 @@ impl Panel {
                     }
                 }
             }
-            out.foot_y = if wall { y - (GROUP_GAP - WALL_HINT_GAP) * s } else { (y - (GROUP_GAP - 12.0) * s).max(top) };
+            out.foot_y = if wall { y - (GROUP_GAP - WALL_HINT_GAP) * s } else { (y + 8.0 * s - (GROUP_GAP - 12.0) * s).max(top) };
             return Some(out);
         }
         if !is_display_setting(label) {
@@ -2781,6 +2785,10 @@ impl Panel {
             for chip in content.ghosts {
                 if let Some(file) = chip.image {
                     tile_at(out, chip.rect, content.ghost_slide, file, false);
+                    let r = chip.rect;
+                    if chip.palette && r.x + content.ghost_slide >= 0.0 && r.x + content.ghost_slide + r.w <= fw {
+                        text(out, chip.text.clone(), r.x + content.ghost_slide + r.w / 2.0, r.y + r.h + 4.0 * s, 12.0, 15.0, 0.55);
+                    }
                 } else if chip.palette {
                     swatch_at(out, chip.rect, content.ghost_slide, &chip.swatch, chip.on, false);
                 }
@@ -2822,6 +2830,10 @@ impl Panel {
                 let keyed = resting && self.focus == Some(i);
                 if let Some(file) = chip.image {
                     tile_at(out, r, content.slide, file, keyed && content.slide.abs() < 0.5);
+                    if chip.palette && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
+                        let a = if chip.on || keyed { 1.0 } else { 0.55 };
+                        text(out, chip.text.clone(), r.x + content.slide + r.w / 2.0, r.y + r.h + 4.0 * s, 12.0, 15.0, a);
+                    }
                     // The palette in use, ringed (a wallpaper has no mark).
                     if chip.palette && chip.on && !keyed && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
                         let grow = 3.0 * s;
