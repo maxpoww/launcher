@@ -169,7 +169,10 @@ fn kde(t: &Theme) {
             let Some(start) = text.find("[UiSettings]") else { continue };
             let section = &text[start..];
             let end = section[1..].find("\n[").map_or(section.len(), |i| i + 1);
-            if !section[..end].lines().any(|l| l.starts_with("ColorScheme=")) || section[..end].contains("ColorScheme=Golem\n") {
+            // (An empty pick is "the system's" — the live way: left alone.)
+            if !section[..end].lines().any(|l| l.starts_with("ColorScheme=") && l.len() > "ColorScheme=".len())
+                || section[..end].contains("ColorScheme=Golem\n")
+            {
                 continue;
             }
             let fixed: String = text[..start].to_owned()
