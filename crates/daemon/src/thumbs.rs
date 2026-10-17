@@ -243,9 +243,10 @@ fn thumbnail(path: &str) -> Option<Vec<u8>> {
     thumbnail_square(path).map(rounded)
 }
 
-/// The corner's radius, as a share of the picture's shorter side (within
-/// a few texels of the 256 square).
-const CORNER: f32 = 0.06;
+/// The corner's radius, as a share of the icon square: the SAME as the
+/// icons' and the folders' beside it (Golem's folder is a 52-wide rect with
+/// rx 4.5 — Max, 2026-10-17: "igual de redondeadas que el resto… coherente").
+const CORNER: f32 = 4.5 / 52.0;
 
 /// `chain`'s picture (its first level: the square, premultiplied) cut to a
 /// rounded rectangle round what is on it, its levels made again.
@@ -271,7 +272,7 @@ fn rounded(chain: Vec<u8>) -> Vec<u8> {
         return chain;
     }
     let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
-    let r = (w.min(h) * CORNER).clamp(3.0, 16.0);
+    let r = (ICON_SIZE as f32 * CORNER).min(w.min(h) / 2.0);
     for y in y0..y1 {
         for x in x0..x1 {
             // The distance past the rounded corner (pixel centres), only near one.
