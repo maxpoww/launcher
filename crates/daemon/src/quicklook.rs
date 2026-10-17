@@ -1253,6 +1253,7 @@ impl App {
             return;
         }
         let (path, name) = (path.to_path_buf(), name.to_owned());
+        debug!("quick look: waiting for the page of {}", path.display());
         let started = Instant::now();
         let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(500));
         let _ = self
@@ -1264,9 +1265,11 @@ impl App {
                     .as_ref()
                     .is_some_and(|u| u.path == path && !u.closing);
                 if !up || started.elapsed().as_secs() > 60 {
+                    debug!("quick look: no more waiting for the page of {}", path.display());
                     return calloop::timer::TimeoutAction::Drop;
                 }
                 if crate::peek_web::ready(&path, &name) {
+                    debug!("quick look: the page of {} is there", path.display());
                     app.peek_forget(&path);
                     app.peek_want_now((path.clone(), 0));
                     app.request_desktop_top_draw();
