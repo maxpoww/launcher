@@ -951,11 +951,161 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
             write_all(&theme_dir(), &theme);
             poke(&apps, look_changed);
         }
+        publish_icons();
         info!("palette: {} ({}), accent {}", theme.name, if theme.dark { "dark" } else { "light" }, slot_name(theme.accent_slot));
     });
     if let Err(e) = spawned {
         warn!("palette: no thread to write the theme ({e})");
     }
+}
+
+// ------------------------------------------------------- the apps' icons
+
+/// THE ICONS IN EVERY APP (Max, 2026-10-17: "the icons on thunar are not
+/// tinted… we cant have this inconsistency in any app"). The dock tints its
+/// icons in its shader; the apps read the icon theme from disk. So while the
+/// Icons slider is above Off (or its Dark is on), Golem's theme is written
+/// again through the SAME filter (`filter_rgb`, the shader's sums on the hex
+/// colours of each drawing) as `Golem-Tinted-a|b` in the data home, and
+/// that is made the system's icon theme. The name turns a↔b at each change:
+/// an app reloads its icons only when the theme's NAME changes. At Off the
+/// plain theme is put back and the copies go. (The dock itself keeps the
+/// plain theme and its shader: nothing is tinted twice.)
+fn publish_icons() {
+    let f = icon_filter();
+    let (k, dim) = (f[0][0], f[0][1] > 0.5);
+    let base = if dim || crate::look::dark() { "Golem-Dark" } else { "Golem" };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let icons = std::path::Path::new(&data).join("icons");
+    let names = ["Golem-Tinted-a", "Golem-Tinted-b"];
+    let dconf = |name: &str| {
+        let _ = std::process::Command::new("dconf")
+            .args(["write", "/org/gnome/desktop/interface/icon-theme", &format!("'{name}'")])
+            .status();
+    };
+    if !crate::look::installed(base) {
+        return;
+    }
+    if k <= 0.0 && !dim {
+        dconf(base);
+        for n in names {
+            let _ = std::fs::remove_dir_all(icons.join(n));
+        }
+        return;
+    }
+    let Some(src) = icon_theme_dir(base) else { return };
+    // The one not in use now gets the new drawings.
+    let now = names.iter().find(|n| icons.join(n).is_dir()).copied();
+    let (next, old) = if now == Some(names[0]) { (names[1], names[0]) } else { (names[0], names[1]) };
+    let dest = icons.join(next);
+    let _ = std::fs::remove_dir_all(&dest);
+    if let Err(e) = tint_tree(&src, &dest, &f, next) {
+        warn!("palette: the apps' icons were not written ({e})");
+        return;
+    }
+    dconf(next);
+    let _ = std::fs::remove_dir_all(icons.join(old));
+}
+
+/// Where an installed icon theme lives.
+fn icon_theme_dir(name: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+    std::iter::once(data_home)
+        .chain(dirs.split(':').map(str::to_owned))
+        .map(|d| std::path::Path::new(&d).join("icons").join(name))
+        .find(|p| p.join("index.theme").is_file())
+}
+
+/// Copy a theme's tree, its drawings' colours through the filter.
+fn tint_tree(src: &std::path::Path, dest: &std::path::Path, f: &[[f32; 4]; 7], name: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let (from, to) = (e.path(), dest.join(e.file_name()));
+        let meta = std::fs::metadata(&from)?;
+        if meta.is_dir() {
+            tint_tree(&from, &to, f, name)?;
+        } else if from.extension().is_some_and(|x| x == "svg") {
+            std::fs::write(&to, tint_svg(&std::fs::read_to_string(&from)?, f))?;
+        } else if e.file_name() == "index.theme" {
+            let text = std::fs::read_to_string(&from)?;
+            let text: Vec<String> = text
+                .lines()
+                .map(|l| if l.starts_with("Name=") { format!("Name={name}") } else { l.to_owned() })
+                .collect();
+            std::fs::write(&to, text.join("\n") + "\n")?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every `#rrggbb` (and `#rgb`) of a drawing through the filter.
+fn tint_svg(svg: &str, f: &[[f32; 4]; 7]) -> String {
+    let b = svg.as_bytes();
+    let mut out = String::with_capacity(svg.len());
+    let mut i = 0;
+    let hexd = |c: u8| (c as char).to_digit(16);
+    while i < b.len() {
+        if b[i] == b'#' {
+            let six = i + 7 <= b.len() && b[i + 1..i + 7].iter().all(|c| hexd(*c).is_some())
+                && !(i + 7 < b.len() && hexd(b[i + 7]).is_some());
+            let three = !six && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|c| hexd(*c).is_some())
+                && !(i + 4 < b.len() && hexd(b[i + 4]).is_some());
+            if six || three {
+                let n = if six { 6 } else { 3 };
+                let d: Vec<u8> = b[i + 1..i + 1 + n].iter().map(|c| hexd(*c).unwrap_or(0) as u8).collect();
+                let rgb = if six { [d[0] * 16 + d[1], d[2] * 16 + d[3], d[4] * 16 + d[5]] } else { [d[0] * 17, d[1] * 17, d[2] * 17] };
+                let t = filter_rgb(rgb, f);
+                out.push_str(&format!("#{:02x}{:02x}{:02x}", t[0], t[1], t[2]));
+                i += 1 + n;
+                continue;
+            }
+        }
+        // (Copied a character at a time: a drawing may hold any UTF-8.)
+        let ch = svg[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// The icon shader's filter (`icon.wgsl`, `icon_filter`) on one colour.
+fn filter_rgb(rgb: Rgb, f: &[[f32; 4]; 7]) -> Rgb {
+    let (k, dim, n) = (f[0][0], f[0][1] > 0.5, f[0][2] as usize);
+    let mut out = rgb;
+    if n > 0 && k > 0.0 {
+        let (l, c, h) = tint::lch(rgb);
+        let targets = &f[1..=n.min(6)];
+        let painted = if c < 0.03 {
+            let best = targets.iter().fold(targets[0], |a, t| if t[1] > a[1] { *t } else { a });
+            let mid = (4.0 * l * (1.0 - l)).clamp(0.0, 1.0);
+            tint::from_lch(l, (best[1] * 0.6 * mid).max(0.035), best[2].to_degrees())
+        } else {
+            let hr = h.to_radians();
+            let best = targets
+                .iter()
+                .min_by(|a, b| {
+                    let d = |t: &[f32; 4]| (t[2] - hr).sin().atan2((t[2] - hr).cos()).abs();
+                    d(a).total_cmp(&d(b))
+                })
+                .copied()
+                .unwrap_or(targets[0]);
+            tint::from_lch(l * 0.5 + best[0] * 0.5, best[1], best[2].to_degrees())
+        };
+        // Mixed in sRGB, as the shader does.
+        out = std::array::from_fn(|i| (f32::from(rgb[i]) + (f32::from(painted[i]) - f32::from(rgb[i])) * k).round() as u8);
+    }
+    if dim {
+        let (l, c, h) = tint::lch(out);
+        let l2 = if l > 0.45 { 0.45 + (l - 0.45) * 0.55 } else { l * 0.96 };
+        out = tint::from_lch(l2, c * 0.92, h);
+    }
+    out
 }
 
 /// Whether two themes dress the programs alike: the same colours, accent and
@@ -2106,6 +2256,23 @@ impl crate::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drawing_for_the_apps_takes_the_icon_filter() {
+        let mut f = [[0.0f32; 4]; 7];
+        f[0] = [1.0, 0.0, 1.0, 0.0];
+        f[1] = [0.6, 0.15, 330f32.to_radians(), 0.0];
+        let svg = r##"<path fill="#808080" id="a#b"/><stop style="stop-color:#fff"/>"##;
+        let out = tint_svg(svg, &f);
+        assert!(out.contains(r#"id="a#b""#), "not a colour: left alone");
+        let grey = &out[out.find("fill=\"#").unwrap() + 7..][..6];
+        assert_ne!(grey, "808080", "a grey takes the palette's colour");
+        let (_, c, _) = tint::lch([u8::from_str_radix(&grey[0..2], 16).unwrap(), u8::from_str_radix(&grey[2..4], 16).unwrap(), u8::from_str_radix(&grey[4..6], 16).unwrap()]);
+        assert!(c > 0.05, "clearly coloured, not a hint ({c})");
+        // Off: nothing changes.
+        f[0][0] = 0.0;
+        assert_eq!(tint_svg(svg, &f), svg.replace("#fff", "#ffffff"));
+    }
 
     fn golem_choice() -> ColorChoice {
         ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }
