@@ -72,7 +72,13 @@ fn icon_filter(rgb: vec3<f32>) -> vec3<f32> {
         if (c < 0.03) {
             var best = globals.filt[1];
             for (var i = 2; i <= n; i = i + 1) { if (globals.filt[i].y > best.y) { best = globals.filt[i]; } }
-            painted = lch_rgb(lab.x, 0.035, best.z);
+            // (A grey takes a real share of the palette's colour: Golem's
+            // own silver and graphite icons are almost all grey, and stayed
+            // "slightly pink" at the slider's max — Max, 2026-10-17. Its
+            // own lightness kept, so it stays metal.)
+            // (Less toward pure white and black: those stay what they are.)
+            let mid = clamp(4.0 * lab.x * (1.0 - lab.x), 0.0, 1.0);
+            painted = lch_rgb(lab.x, max(0.035, best.y * 0.6 * mid), best.z);
         } else {
             var best = globals.filt[1];
             var bd = 99.0;
