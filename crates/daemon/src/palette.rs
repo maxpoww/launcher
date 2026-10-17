@@ -884,14 +884,32 @@ pub(crate) fn srgb(c: Rgb) -> [f32; 4] {
 /// palette "as deep as possible"). Golem's own palette gives back exactly
 /// the colours these were before (#ffbe98, #e05252).
 pub(crate) fn accent_srgb() -> [f32; 4] {
-    srgb(current().accent())
+    srgb(signals().accent())
 }
 pub(crate) fn danger_srgb() -> [f32; 4] {
-    srgb(current().c[0x08])
+    srgb(signals().c[0x08])
 }
 pub(crate) fn warn_srgb() -> [f32; 4] {
-    srgb(current().c[0x0A])
+    srgb(signals().c[0x0A])
 }
+
+/// Whose colours the shell's signals wear: the palette's while the Shell
+/// slider takes colour, GOLEM'S OWN at Off (Max, 2026-10-17: "i have the
+/// shell off on the slider, and it is still red" — a Dynamic palette from a
+/// desert wallpaper had made the bell, the chips and the card red).
+fn signals() -> Arc<Theme> {
+    if SHELL_COLOURED.load(Ordering::Relaxed) {
+        return current();
+    }
+    static OWN: [std::sync::OnceLock<Arc<Theme>>; 2] = [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
+    let dark = shell_dark();
+    OWN[usize::from(dark)]
+        .get_or_init(|| Arc::new(resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, dark)))
+        .clone()
+}
+
+/// The Shell slider is above Off.
+static SHELL_COLOURED: AtomicBool = AtomicBool::new(true);
 
 /// A colour of the palette as the renderer wants it: linear, opaque.
 pub(crate) fn linear(c: Rgb) -> [f32; 4] {
@@ -1061,6 +1079,7 @@ pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
 }
 
 fn set_shell(picked: &ColorChoice, system_dark: bool) {
+    SHELL_COLOURED.store(picked.shell_tint != Some(0), Ordering::Relaxed);
     let want = picked.palette_id();
     let out = if want == DYNAMIC_ID || picked.shell_tint == Some(0) {
         None
