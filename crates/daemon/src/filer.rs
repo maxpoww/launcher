@@ -6282,6 +6282,7 @@ impl App {
                     "escape" => Keysym::Escape,
                     "space" => Keysym::space,
                     "pgdown" => Keysym::Page_Down,
+                    "pgup" => Keysym::Page_Up,
                     "p" => Keysym::p,
                     "plus" => Keysym::plus,
                     "minus" => Keysym::minus,

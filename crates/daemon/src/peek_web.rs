@@ -10,9 +10,29 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The page's screen, in CSS pixels, and how fine it is drawn.
-const VIEW: (u32, u32) = (1280, 800);
-const DENSITY: &str = "1.5";
+/// A page is drawn this wide (CSS pixels, one to a pixel) and WHOLE, as
+/// tall as it is (Max, 2026-10-17: "una captura de la página completa
+/// scrolleable"), up to `MAX_H`; kept raw, so the part on screen is read
+/// straight out of it.
+const WIDTH: u32 = 1280;
+const WIDTH_DOC: u32 = 900;
+const DENSITY: &str = "1.0";
+const MAX_H: u32 = 16_000;
+/// What Quick Look holds of a page at once: a run `CROP` tall starting
+/// every `STEP` (`k` = which), always more than the frame shows — the next
+/// is read before the frame reaches its end (within the tiles at 1280 wide).
+pub(crate) const STEP: u32 = 500;
+pub(crate) const CROP: u32 = 2500;
+
+/// The part of a long page a picture is: the page's size, and where in it
+/// this run starts and how tall it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Long {
+    pub w: u32,
+    pub h: u32,
+    pub y: u32,
+    pub ch: u32,
+}
 /// The longest a page may take (a page that never settles is let go).
 const PATIENCE: Duration = Duration::from_secs(12);
 
@@ -93,44 +113,63 @@ fn kept(path: &Path, salt: &str) -> Option<PathBuf> {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
-    Some(crate::apps::cache_base().join(format!("waverunner/web/{h:016x}.png")))
+    Some(crate::apps::cache_base().join(format!("waverunner/web/{h:016x}.rgba")))
 }
 
-/// What Quick Look shows of `path` drawn as a page, and the words for its
-/// head: a web page as it is; Markdown formatted; a table (CSV, TSV) as a
-/// table. `None`: not one of these, or it could not be drawn.
-pub(crate) fn drawn(path: &Path, name: &str) -> Option<(image::RgbaImage, String)> {
+/// What Quick Look shows of `path` drawn as a page — its run `k` — and the
+/// words for its head: a web page as it is; Markdown formatted; a table
+/// (CSV, TSV) as a table. `None`: not one of these, or it could not be drawn.
+pub(crate) fn drawn(path: &Path, name: &str, k: u32) -> Option<(image::RgbaImage, Long, String)> {
     use crate::i18n::{fill, tr};
     let lower = name.to_ascii_lowercase();
     if is_web(&lower) {
         let out = kept(path, "")?;
-        return Some((shoot(path, &out, VIEW)?, tr("as a web page").to_owned()));
+        shoot(path, &out, WIDTH)?;
+        let (img, long) = crop(&out, k)?;
+        return Some((img, long, tr("as a web page").to_owned()));
     }
     if is_markdown(&lower) {
         let style = style();
         let out = kept(path, &style)?;
-        let img = made(&out, VIEW_DOC, || markdown(path, &style))?;
-        return Some((img, tr("formatted").to_owned()));
+        made(&out, WIDTH_DOC, || markdown(path, &style))?;
+        let (img, long) = crop(&out, k)?;
+        return Some((img, long, tr("formatted").to_owned()));
     }
     if is_table(&lower) {
         let style = style();
         let out = kept(path, &style)?;
-        let rows = std::cell::Cell::new(0usize);
-        // (A short table on a short page: as tall as its rows, a screen at most.)
-        let lines = std::fs::read_to_string(path).map_or(0, |t| t.lines().count());
-        let view = (VIEW.0, (96 + 34 * lines as u32).clamp(240, VIEW.1));
-        let img = made(&out, view, || {
-            let (html, n) = table(path, &lower, &style)?;
-            rows.set(n);
-            Some(html)
-        })?;
-        let words = match rows.get() {
+        made(&out, WIDTH, || table(path, &lower, &style).map(|t| t.0))?;
+        let (img, long) = crop(&out, k)?;
+        let rows = std::fs::read_to_string(path).map_or(0, |t| {
+            parse_rows(&t, sep_of(&t, &lower)).len().saturating_sub(1)
+        });
+        let words = match rows {
             0 => tr("as a table").to_owned(),
             n => fill(tr("{n} rows"), &[("n", &n)]),
         };
-        return Some((img, words));
+        return Some((img, long, words));
     }
     None
+}
+
+/// Run `k` of the page kept raw at `out` (8 bytes of size, then its rows).
+fn crop(out: &Path, k: u32) -> Option<(image::RgbaImage, Long)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(out).ok()?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head).ok()?;
+    let w = u32::from_le_bytes(head[..4].try_into().ok()?);
+    let h = u32::from_le_bytes(head[4..].try_into().ok()?);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let y = (k * STEP).min(h - 1);
+    let ch = CROP.min(h - y);
+    f.seek(SeekFrom::Start(8 + u64::from(y) * u64::from(w) * 4))
+        .ok()?;
+    let mut px = vec![0u8; (w * ch * 4) as usize];
+    f.read_exact(&mut px).ok()?;
+    Some((image::RgbaImage::from_raw(w, ch, px)?, Long { w, h, y, ch }))
 }
 
 /// Whether a file of this name is Markdown.
@@ -145,30 +184,23 @@ pub(crate) fn is_table(lower: &str) -> bool {
     [".csv", ".tsv"].iter().any(|e| lower.ends_with(e))
 }
 
-/// A document's page: its screen, in CSS pixels (a page's shape).
-const VIEW_DOC: (u32, u32) = (900, 1100);
-
 /// The page `html` makes, drawn (or read from where it was kept as `out`).
-fn made(
-    out: &Path,
-    view: (u32, u32),
-    html: impl FnOnce() -> Option<String>,
-) -> Option<image::RgbaImage> {
-    if let Ok(img) = image::open(out) {
-        return Some(img.to_rgba8());
+fn made(out: &Path, width: u32, html: impl FnOnce() -> Option<String>) -> Option<()> {
+    if out.is_file() {
+        return Some(());
     }
     let page = out.with_extension(format!("{}.html", crate::peek_edit::nonce()));
     std::fs::create_dir_all(out.parent()?).ok()?;
     std::fs::write(&page, html()?).ok()?;
-    let img = shoot(&page, out, view);
+    let done = shoot(&page, out, width);
     let _ = std::fs::remove_file(&page);
-    img
+    done
 }
 
 /// The page in the file `page`, drawn `view` big, kept as `out`.
-fn shoot(page: &Path, out: &Path, view: (u32, u32)) -> Option<image::RgbaImage> {
-    if let Ok(img) = image::open(out) {
-        return Some(img.to_rgba8());
+fn shoot(page: &Path, out: &Path, width: u32) -> Option<()> {
+    if out.is_file() {
+        return Some(());
     }
     let engine = engine()?;
     let profile = profile()?;
@@ -179,8 +211,9 @@ fn shoot(page: &Path, out: &Path, view: (u32, u32)) -> Option<image::RgbaImage> 
         .args(["--headless", "--no-remote", "--profile"])
         .arg(&profile)
         .args([
+            // (A width alone: the page is taken whole, as tall as it is.)
             "--window-size",
-            &format!("{},{}", view.0, view.1),
+            &width.to_string(),
             "--screenshot",
         ])
         .arg(&tmp)
@@ -207,12 +240,38 @@ fn shoot(page: &Path, out: &Path, view: (u32, u32)) -> Option<image::RgbaImage> 
         }
     };
     let img = done.then(|| image::open(&tmp).ok()).flatten();
-    if img.is_some() {
-        let _ = std::fs::rename(&tmp, out);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let img = img?.to_rgba8();
+    // Kept raw (a run is read out of it in a moment), cut at `MAX_H`.
+    let (w, h) = (img.width(), img.height().min(MAX_H));
+    let mut raw = Vec::with_capacity(8 + (w * h * 4) as usize);
+    raw.extend_from_slice(&w.to_le_bytes());
+    raw.extend_from_slice(&h.to_le_bytes());
+    raw.extend_from_slice(&img.as_raw()[..(w * h * 4) as usize]);
+    let part = out.with_extension(format!("{}.part", crate::peek_edit::nonce()));
+    std::fs::write(&part, raw).ok()?;
+    std::fs::rename(&part, out).ok()?;
+    forget_old(out.parent()?);
+    Some(())
+}
+
+/// The kept pages beyond the newest `KEEP` are let go (they are big).
+fn forget_old(dir: &Path) {
+    const KEEP: usize = 40;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut kept: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if kept.len() <= KEEP {
+        return;
     }
-    Some(img?.to_rgba8())
+    kept.sort();
+    for (_, p) in &kept[..kept.len() - KEEP] {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// The stylesheet documents are drawn with: the palette's own colours, in
@@ -264,17 +323,7 @@ fn markdown(path: &Path, style: &str) -> Option<String> {
 fn table(path: &Path, lower: &str, style: &str) -> Option<(String, usize)> {
     const ROWS: usize = 300;
     let text = std::fs::read_to_string(path).ok()?;
-    let first = text.lines().next().unwrap_or("");
-    let sep = if lower.ends_with(".tsv") {
-        '\t'
-    } else {
-        // (The one the first line has most of.)
-        [',', ';', '\t']
-            .into_iter()
-            .max_by_key(|c| first.matches(*c).count())
-            .unwrap_or(',')
-    };
-    let rows = parse_rows(&text, sep);
+    let rows = parse_rows(&text, sep_of(&text, lower));
     let n = rows.len().saturating_sub(1);
     let mut body = String::from("<table class=values>");
     for (i, row) in rows.iter().take(ROWS + 1).enumerate() {
@@ -292,6 +341,19 @@ fn table(path: &Path, lower: &str, style: &str) -> Option<(String, usize)> {
     }
     body.push_str("</table>");
     Some((page_of(path, style, &body), n))
+}
+
+/// What stands between a table's values: a tab in a `.tsv`, else the one
+/// its first line has most of (a comma, a semicolon, a tab).
+fn sep_of(text: &str, lower: &str) -> char {
+    if lower.ends_with(".tsv") {
+        return '\t';
+    }
+    let first = text.lines().next().unwrap_or("");
+    [',', ';', '\t']
+        .into_iter()
+        .max_by_key(|c| first.matches(*c).count())
+        .unwrap_or(',')
 }
 
 /// Rows of cells: `sep` between them, quotes around a cell that holds one
@@ -369,6 +431,35 @@ mod tests {
                 vec!["1".to_owned(), "two\nlines".to_owned()],
             ]
         );
+    }
+
+    #[test]
+    fn a_run_is_read_out_of_the_kept_page() {
+        let dir = std::env::temp_dir().join(format!("peek-web-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("p.rgba");
+        // A page 2 wide and STEP + 3 tall, each row its own number.
+        let h = STEP + 3;
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&2u32.to_le_bytes());
+        raw.extend_from_slice(&h.to_le_bytes());
+        for y in 0..h {
+            raw.extend_from_slice(&[(y % 256) as u8; 8]);
+        }
+        std::fs::write(&out, raw).unwrap();
+        let (img, long) = crop(&out, 1).unwrap();
+        assert_eq!(
+            long,
+            Long {
+                w: 2,
+                h,
+                y: STEP,
+                ch: 3
+            }
+        );
+        assert_eq!(img.dimensions(), (2, 3));
+        assert_eq!(img.as_raw()[0], (STEP % 256) as u8);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

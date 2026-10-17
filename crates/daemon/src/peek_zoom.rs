@@ -102,7 +102,8 @@ impl App {
         } else {
             p.own
         };
-        if p.video.is_some() || p.anim.is_some() || own == (0, 0) {
+        // (A long page scrolls; it does not zoom.)
+        if p.video.is_some() || p.anim.is_some() || p.long.is_some() || own == (0, 0) {
             return None;
         }
         let body = Rect::new(up.rect.x, up.rect.y + HEAD, up.rect.w, up.rect.h - HEAD);

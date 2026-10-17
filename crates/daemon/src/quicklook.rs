@@ -173,6 +173,9 @@ pub(crate) struct Prepared {
     stamp: Option<(std::time::SystemTime, u64)>,
     /// Code's colours, a line at a time (`peek_syntax`; empty: plain).
     syntax: Vec<Vec<crate::peek_syntax::Span>>,
+    /// A long page (a web page, a document, a table): which run of it this
+    /// picture is (`peek_web`); the frame scrolls through the runs.
+    pub(crate) long: Option<crate::peek_web::Long>,
     bytes: usize,
 }
 
@@ -644,6 +647,7 @@ fn picture(img: image::RgbaImage, meta: String, app: Option<String>, pages: u32)
         anim: None,
         stamp: None,
         syntax: Vec::new(),
+        long: None,
         bytes,
     }
 }
@@ -718,11 +722,11 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         // A WEB PAGE: as Seam shows it (`peek_web`); its source under the
         // pencil. (Not drawn: as text, as before.)
         // So are Markdown (formatted) and a table of values (a table).
-        if let Some((img, words)) = crate::peek_web::drawn(path, &name) {
+        if let Some((img, long, words)) = crate::peek_web::drawn(path, &name, page) {
             {
-                let own = img.dimensions();
                 return Prepared {
-                    own,
+                    own: (long.w, long.h),
+                    long: Some(long),
                     whole_text: written_whole(path, size),
                     ..picture(img, format!("{kind} · {size_text} · {words}"), app, 0)
                 };
@@ -806,6 +810,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     anim: None,
                     stamp: None,
                     syntax: Vec::new(),
+                    long: None,
                     bytes,
                 };
             }
@@ -837,6 +842,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                     anim: None,
                     stamp: None,
                     syntax: Vec::new(),
+                    long: None,
                     bytes,
                 };
             }
@@ -893,6 +899,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 anim: None,
                 stamp: None,
                 syntax: Vec::new(),
+                long: None,
                 bytes,
             };
         }
@@ -919,6 +926,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
                 anim: None,
                 stamp: None,
                 syntax: Vec::new(),
+                long: None,
                 bytes,
             };
         }
@@ -983,6 +991,7 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         anim: None,
         stamp: None,
         syntax: Vec::new(),
+        long: None,
         bytes: 1024,
     }
 }
@@ -1521,6 +1530,33 @@ impl App {
 
     fn peek_scroll(&mut self, by: f32) {
         let body_h = self.peek.up.as_ref().map_or(0.0, |u| u.rect.h - HEAD);
+        // A LONG PAGE: it moves under the frame; the run that holds the
+        // part on screen is asked for as the frame reaches it, its
+        // neighbours ahead.
+        if let Some(l) = self.peek_shown().and_then(|(_, p)| p.long) {
+            let Some(up) = self.peek.up.as_mut() else {
+                return;
+            };
+            let s = up.rect.w / l.w as f32;
+            let most = (l.h as f32 * s - body_h).max(0.0);
+            up.scroll = (up.scroll + by).clamp(0.0, most);
+            let last = l.h.saturating_sub(1) / crate::peek_web::STEP;
+            let k = (((up.scroll / s) as u32) / crate::peek_web::STEP).min(last);
+            if k != up.page {
+                up.page = k;
+                let path = up.path.clone();
+                // (The one wanted last is made first.)
+                if k < last {
+                    self.peek_want_now((path.clone(), k + 1));
+                }
+                if k > 0 {
+                    self.peek_want_now((path.clone(), k - 1));
+                }
+                self.peek_want_now((path, k));
+            }
+            self.request_desktop_top_draw();
+            return;
+        }
         let Some(n) = self.peek_shown().and_then(|(_, p)| match &p.body {
             Body::Text { lines } => Some(lines.len()),
             _ => None,
@@ -1759,6 +1795,20 @@ impl App {
             );
         }
         let (w, h) = match self.peek_shown().map(|(_, p)| &p.body) {
+            // A long page: as wide as it is drawn, as tall as there is room.
+            Some(Body::Picture(_)) if self.peek_shown().is_some_and(|(_, p)| p.long.is_some()) => {
+                let l =
+                    self.peek_shown()
+                        .and_then(|(_, p)| p.long)
+                        .unwrap_or(crate::peek_web::Long {
+                            w: 1,
+                            h: 1,
+                            y: 0,
+                            ch: 1,
+                        });
+                let w = (l.w as f32).min(mw);
+                ((w).max(380.0), (l.h as f32 * w / l.w as f32).min(mh))
+            }
             Some(Body::Picture(p)) => {
                 let (pw, ph) = (p.w as f32 / scale, p.h as f32 / scale);
                 let fit = (mw / pw).min(mh / ph);
@@ -2176,7 +2226,41 @@ impl App {
                 // picture would show that as a grid.)
                 let into = crate::peek_editor::pic_rect(body, pic.w, pic.h);
                 let a = if up.closing { open } else { up.sharp };
-                if self.peek_zoom_frame().is_some() && up.zoom.zoomed() {
+                if let Some(l) = prepared.and_then(|p| p.long) {
+                    // A LONG PAGE: its run where it stands in the page, the
+                    // page moved by the scroll, cut to the body.
+                    let s = body.w / l.w as f32;
+                    let r = Rect::new(
+                        body.x,
+                        body.y + l.y as f32 * s - up.scroll,
+                        body.w,
+                        l.ch as f32 * s,
+                    );
+                    let mut zg = GridContent {
+                        clip: body,
+                        ..Default::default()
+                    };
+                    tiles_in(&mut zg, pic, r, a, 0);
+                    zoom_grid = Some(zg);
+                    // Where in the page: a thin bar at the right.
+                    let total = l.h as f32 * s;
+                    if total > body.h + 1.0 {
+                        let mut over = GridContent {
+                            clip: g.clip,
+                            ..Default::default()
+                        };
+                        let bh = (body.h * body.h / total).max(28.0);
+                        let by = body.y + up.scroll / (total - body.h) * (body.h - bh);
+                        over.rects.push(RectInst {
+                            rect: Rect::new(body.x + body.w - 9.0, by + 2.0, 5.0, bh - 4.0),
+                            radius: 2.5,
+                            color: [0.5, 0.5, 0.5, 0.55 * open],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                        over_page = Some(over);
+                    }
+                } else if self.peek_zoom_frame().is_some() && up.zoom.zoomed() {
                     // ZOOMED: the whole where it stands, its sharp part over
                     // it, in a grid cut to the body.
                     let mut zg = GridContent {
