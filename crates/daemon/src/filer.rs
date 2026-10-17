@@ -169,6 +169,8 @@ const BAR_TOP: f32 = 56.0;
 const MODE_D: f32 = 44.0;
 const MODE_OPEN: f32 = 96.0;
 const MODE_GAP: f32 = 10.0;
+/// The rail at the places' own zoom (1×): the size the pills are round at.
+const SIDE_REST: f32 = PLACE_ICON + 2.0 * RAIL_AIR;
 /// The air inside the places' pill above the first place and under the last.
 const PLACES_PAD: f32 = 6.0;
 /// The pills' symbols are the bar's font (`options::NERD`).
@@ -1682,7 +1684,7 @@ impl Win {
     /// too narrow for the places.
     fn places_box(&self, width: f32) -> Rect {
         let (_, h) = self.virt();
-        let top_min = PATH_TOP + MODE_D + MODE_GAP;
+        let top_min = PATH_TOP + self.rail() + MODE_GAP;
         let tall = self.places_tall().min((h - PILL_EDGE - top_min).max(0.0));
         let y = (HEAD_H + (h - HEAD_H - tall) / 2.0).max(top_min);
         Rect::new(PILL_EDGE, y, width, tall)
@@ -1691,9 +1693,19 @@ impl Win {
     /// The mode's circle above the places (`open`: as wide as it opens), and
     /// the other one at its right.
     fn mode_boxes(&self, open: f32) -> [Rect; 2] {
-        let side = self.places_box(0.0);
-        let main = Rect::new(PILL_EDGE, side.y - MODE_GAP - MODE_D, MODE_D + (MODE_OPEN - MODE_D) * open, MODE_D);
-        [main, Rect::new(main.x + main.w + TOOL_GAP, main.y, MODE_D, MODE_D)]
+        // (As wide as the places' pill and grown with it: Max, 2026-10-17.)
+        let (side, d) = (self.places_box(0.0), self.rail());
+        let main = Rect::new(PILL_EDGE, side.y - MODE_GAP - d, d + (MODE_OPEN - MODE_D) * open, d);
+        [main, Rect::new(main.x + main.w + TOOL_GAP, main.y, d, d)]
+    }
+
+    /// The corner of the places' pill and the mode's circle: round at the
+    /// rail's own size, more SQUARE as they grow (Max, 2026-10-17: "less
+    /// and less rounded") — half the width at rest, toward 30 % of it.
+    fn pill_corner(&self) -> f32 {
+        let d = self.rail();
+        let f = ((d - SIDE_REST) / 40.0).clamp(0.0, 1.0);
+        d * (0.5 - 0.2 * f)
     }
 
     /// Search and list, out at the path's right end.
@@ -4420,7 +4432,7 @@ impl App {
             win.side_now = side_w;
             let side_box = win.places_box(side_w);
             hits.side = side_box;
-            pill(&mut pills.rects, side_box, layout.side_w / 2.0, side_ground, 1.0);
+            pill(&mut pills.rects, side_box, win.pill_corner(), side_ground, 1.0);
             let mut y = side_box.y + PLACES_PAD - win.side_scroll;
             for (n, place) in win.places.iter().enumerate() {
                 if place.gap {
@@ -4437,10 +4449,12 @@ impl App {
                 let up = place.name == UP;
                 let here = (win.dir == place.path && !up) || win.drop_place == Some(n);
                 let shown = Rect::new(row.x, row.y.max(side_box.y + 3.0), row.w, (row.y + row.h).min(side_box.y + side_box.h - 3.0) - row.y.max(side_box.y + 3.0));
+                // (Its square as square as the pill's corner.)
+                let corner = (win.pill_corner() - 3.0).min(row_h / 2.0);
                 if here {
-                    pills.rects.push(rect(shown, row_h / 2.0, sunk));
+                    pills.rects.push(rect(shown, corner, sunk));
                 } else if win.hover == Spot::Place(n) {
-                    pills.rects.push(rect(shown, row_h / 2.0, pal.hover));
+                    pills.rects.push(rect(shown, corner, pal.hover));
                 }
                 if let Some(layer) = win.layer_of(&win.place_key(place)) {
                     let at = Rect::new(side_box.x + (layout.side_w - icon) / 2.0, y + (row_h - icon) / 2.0, icon, icon);
@@ -4487,23 +4501,24 @@ impl App {
             if t2 > 0.0 {
                 let r = boxes[1];
                 let s = 0.85 + 0.15 * t2;
-                let slide = (1.0 - t2) * (MODE_D + TOOL_GAP);
+                let slide = (1.0 - t2) * (r.w + TOOL_GAP);
                 let r = Rect::new(r.x - slide + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s);
                 let hovered = win.hover == Spot::Mode(1);
-                pill(&mut pills.rects, r, r.h / 2.0, if hovered { lift(side_ground, 0.04) } else { side_ground }, t2);
+                pill(&mut pills.rects, r, win.pill_corner() * r.h / boxes[1].h, if hovered { lift(side_ground, 0.04) } else { side_ground }, t2);
                 let mut sign = glyph(other_sign, r, carved);
                 sign.color = sign.color.map(|c| [c[0], c[1], c[2], t2]);
                 sign.clip = Some(Rect::new(boxes[0].x + boxes[0].w, 0.0, w, h));
                 pills.labels.push(sign);
             }
             let main = boxes[0];
-            pill(&mut pills.rects, main, MODE_D / 2.0, side_ground, 1.0);
-            pills.labels.push(glyph(now_sign, Rect::new(main.x, main.y, MODE_D, MODE_D), carved));
+            let d = main.h;
+            pill(&mut pills.rects, main, win.pill_corner(), side_ground, 1.0);
+            pills.labels.push(glyph(now_sign, Rect::new(main.x, main.y, d, d), carved));
             if t > 0.0 {
                 pills.labels.push(Label {
                     clip: Some(main),
                     color: Some([ink[0], ink[1], ink[2], t]),
-                    ..label(now_words, (main.x + MODE_D - 6.0, main.y + (MODE_D - TEXT_LINE) / 2.0), MODE_OPEN, false, false)
+                    ..label(now_words, (main.x + d - 6.0, main.y + (d - TEXT_LINE) / 2.0), MODE_OPEN, false, false)
                 });
             }
             hits.mode = [main, boxes[1]];
