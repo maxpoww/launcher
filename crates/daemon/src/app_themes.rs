@@ -17,7 +17,11 @@
 //!   (`golem-theme.jar`: plugin.xml + a `.theme.json` + an editor scheme),
 //!   chosen in `laf.xml` — on the IDE's next start.
 //!
-//! * Old X programs (XTerm): X resources merged with `xrdb`.
+//!
+//! THE RULE (Max, 2026-10-17: "more is just ambition that can kill us"): a
+//! route is added only for an app Golem ships or many people use, and every
+//! route fails quietly — an app it cannot reach just keeps its own colours.
+//! `theme-reach` (golem-deep) lists what is not reached; that is fine.
 //!
 //! Browsers other than Seam are never coloured (Max, 2026-10-17: "i dont
 //! want to color browsers, only seam").
@@ -39,7 +43,6 @@ pub(crate) fn write(t: &Theme) {
     vscode(t);
     inkscape(t);
     jetbrains(t);
-    xresources(t);
     easyeffects(t);
 }
 
@@ -450,38 +453,6 @@ fn sound_playing() -> bool {
                 .and_then(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
                 .is_some_and(|cmd| String::from_utf8_lossy(&cmd).contains("anullsrc"))
     })
-}
-
-// ------------------------------------------------------------- X apps
-
-/// Old X programs (XTerm and kin) read X resources: the palette's colours,
-/// merged into the X server's (Xwayland's) resources.
-fn xresources(t: &Theme) {
-    let c = &t.c;
-    let h = |x: Rgb| format!("#{}", hex(x));
-    let mut text = format!("*background: {}\n*foreground: {}\n*cursorColor: {}\n", h(c[0]), h(t.ink()), h(t.accent()));
-    // The sixteen terminal colours (base16's usual order of slots).
-    let slots = [0, 8, 0xB, 0xA, 0xD, 0xE, 0xC, 5, 3, 8, 0xB, 0xA, 0xD, 0xE, 0xC, 7];
-    for (i, k) in slots.iter().enumerate() {
-        text.push_str(&format!("*color{i}: {}\n", h(c[*k])));
-    }
-    put(&data().join("golem/Xresources"), &text);
-    if std::env::var_os("DISPLAY").is_none() {
-        return;
-    }
-    if let Ok(mut child) = std::process::Command::new("xrdb")
-        .arg("-merge")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-    }
 }
 
 // ------------------------------------------------------------ JetBrains
