@@ -49,6 +49,7 @@ mod files_icon;
 mod gears_icon;
 mod compass_icon;
 mod whatsapp_icon;
+mod youtube_icon;
 mod quicklook;
 mod peek_kinds;
 mod peek_edit;
@@ -918,6 +919,7 @@ fn main() -> anyhow::Result<()> {
         gears_spin: gears_icon::Spin::default(),
         compass: compass_icon::Motion::default(),
         whatsapp: whatsapp_icon::Motion::default(),
+        youtube: youtube_icon::Motion::default(),
         peek: quicklook::QuickLook::default(),
         apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
@@ -2182,6 +2184,9 @@ pub struct App {
     /// WhatsApp's mark: a hover shakes its phone and turns its plate, a
     /// click turns both round (`whatsapp_icon`).
     whatsapp: whatsapp_icon::Motion,
+    /// YouTube's mark: a hover runs a seek bar and turns the play, a click
+    /// swells a pause away (`youtube_icon`).
+    youtube: youtube_icon::Motion,
     /// QUICK LOOK: Space on a thing in a file window (`quicklook`).
     peek: quicklook::QuickLook,
     /// The apps button: its pages under the pointer, its squares down while
@@ -5527,6 +5532,10 @@ impl App {
                     // WhatsApp's plate and phone turn round, each its own way.
                     if self.entries.get(entry_idx).is_some_and(|e| e.id == whatsapp_icon::WHATSAPP_ID) {
                         self.whatsapp.click();
+                        self.dirty = true;
+                    }
+                    if self.entries.get(entry_idx).is_some_and(|e| e.id == youtube_icon::YOUTUBE_ID) {
+                        self.youtube.click();
                         self.dirty = true;
                     }
                     // A minimized window's tile: the click asks the PLUGIN to

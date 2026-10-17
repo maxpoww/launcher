@@ -432,6 +432,11 @@ pub(crate) fn whatsapp_at(plate: f32, phone: f32) -> Option<Vec<u8>> {
     Some(frame_chain(&crate::whatsapp_icon::frame(plate, phone)?, crate::whatsapp_icon::FRAME))
 }
 
+/// YouTube's mark in pose `p`, ready to upload.
+pub(crate) fn youtube_at(p: &crate::youtube_icon::Pose) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::youtube_icon::frame(p)?, crate::youtube_icon::FRAME))
+}
+
 /// The apps button's stencil (its nine squares), ready to upload.
 pub(crate) fn apps_stencil() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::stencil_svg().as_bytes())?.take()))
@@ -468,6 +473,10 @@ pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     if id == crate::whatsapp_icon::WHATSAPP_ID {
         crate::whatsapp_icon::warm();
         return Some(with_mips(rasterize_svg(crate::whatsapp_icon::rest_svg().as_bytes())?.take()));
+    }
+    // YouTube wears its moving mark (`youtube_icon`).
+    if id == crate::youtube_icon::YOUTUBE_ID {
+        return Some(with_mips(rasterize_svg(crate::youtube_icon::rest_svg().as_bytes())?.take()));
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
