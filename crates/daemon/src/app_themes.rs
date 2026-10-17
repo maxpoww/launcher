@@ -40,6 +40,7 @@ pub(crate) fn write(t: &Theme) {
     inkscape(t);
     jetbrains(t);
     xresources(t);
+    easyeffects(t);
 }
 
 fn home() -> PathBuf {
@@ -381,6 +382,65 @@ fn set_attr(xml: &str, name: &str, value: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+// ---------------------------------------------------------- Easy Effects
+
+/// Easy Effects runs as a user SERVICE and reads its colour scheme once, as
+/// that service starts (its own "Golem" pick; following the system's left it
+/// white). So a change of the apps' colours restarts the service — but only
+/// once nothing is playing (Max, 2026-10-17: "do the restart when there is
+/// no sound happening"): it waits for 10 s of silence; a newer change takes
+/// the place of a waiting one. It is not restarted for colours it already
+/// wears (the stamp is kept across dock starts).
+fn easyeffects(t: &Theme) {
+    let picked = std::fs::read_to_string(config().join("easyeffectsrc")).is_ok_and(|s| s.contains("ColorScheme=Golem"));
+    if !picked {
+        return;
+    }
+    let stamp = format!("{} {} {} {}", t.dark, hex(t.c[0]), hex(t.ink()), hex(t.accent()));
+    let file = data().join("golem/easyeffects-stamp");
+    if std::fs::read_to_string(&file).ok().as_deref() == Some(stamp.as_str()) {
+        return;
+    }
+    let active = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "easyeffects.service"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !active {
+        put(&file, &stamp);
+        return;
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TURN: AtomicU64 = AtomicU64::new(0);
+    let mine = TURN.fetch_add(1, Ordering::Relaxed) + 1;
+    let _ = std::thread::Builder::new().name("easyeffects-wait".into()).spawn(move || {
+        let mut quiet = 0;
+        // (Six hours at most.)
+        for _ in 0..(6 * 60 * 12) {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if TURN.load(Ordering::Relaxed) != mine {
+                return;
+            }
+            quiet = if sound_playing() { 0 } else { quiet + 1 };
+            if quiet >= 2 {
+                let _ = std::process::Command::new("systemctl").args(["--user", "restart", "easyeffects.service"]).status();
+                put(&file, &stamp);
+                info!("apps: Easy Effects restarted in the new colours (nothing was playing)");
+                return;
+            }
+        }
+    });
+}
+
+/// Whether any app is playing sound now: a PipeWire output stream running.
+fn sound_playing() -> bool {
+    let Ok(out) = std::process::Command::new("pw-dump").output() else { return false };
+    let Ok(serde_json::Value::Array(objects)) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return false };
+    objects.iter().any(|o| {
+        let info = &o["info"];
+        info["props"]["media.class"].as_str().is_some_and(|c| c.starts_with("Stream/Output/Audio")) && info["state"] == "running"
+    })
 }
 
 // ------------------------------------------------------------- X apps
