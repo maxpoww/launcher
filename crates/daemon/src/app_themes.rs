@@ -17,9 +17,10 @@
 //!   (`golem-theme.jar`: plugin.xml + a `.theme.json` + an editor scheme),
 //!   chosen in `laf.xml` — on the IDE's next start.
 //!
-//! * Chrome / Chromium: their own seed colour (`user_color`) and dark/light
-//!   in each profile's Preferences — on their next start.
 //! * Old X programs (XTerm): X resources merged with `xrdb`.
+//!
+//! Browsers other than Seam are never coloured (Max, 2026-10-17: "i dont
+//! want to color browsers, only seam").
 //!
 //! Every writer leaves an app alone when it is not installed (its config
 //! folder is not there), and never writes a file it cannot read whole.
@@ -38,7 +39,6 @@ pub(crate) fn write(t: &Theme) {
     vscode(t);
     inkscape(t);
     jetbrains(t);
-    chrome(t);
     xresources(t);
 }
 
@@ -338,56 +338,6 @@ fn set_attr(xml: &str, name: &str, value: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-// --------------------------------------------------------------- Chrome
-
-/// Chrome and Chromium take a seed colour of their own (Settings →
-/// Appearance → the colour swatches, Material-You style): the accent, and the
-/// apps' dark/light. Written once they have quit (they write their
-/// Preferences back on quit).
-fn chrome(t: &Theme) {
-    let mut profiles = Vec::new();
-    for app in ["google-chrome", "chromium"] {
-        let Ok(list) = std::fs::read_dir(config().join(app)) else { continue };
-        for e in list.flatten() {
-            let p = e.path().join("Preferences");
-            let name = e.file_name().to_string_lossy().into_owned();
-            if p.is_file() && (name == "Default" || name.starts_with("Profile ")) {
-                profiles.push(p);
-            }
-        }
-    }
-    if profiles.is_empty() {
-        return;
-    }
-    let a = t.accent();
-    // SkColor: 0xAARRGGBB, as Chrome keeps it (a signed int).
-    let seed = i64::from(0xff00_0000u32 as i32 | (i32::from(a[0]) << 16) | (i32::from(a[1]) << 8) | i32::from(a[2]));
-    let scheme = if t.dark { 2 } else { 1 };
-    when_closed("=(chrome|chromium)", move || {
-        for p in profiles {
-            let Ok(text) = std::fs::read_to_string(&p) else { continue };
-            let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-            let browser = map.entry("browser").or_insert_with(|| serde_json::json!({}));
-            if let Some(b) = browser.as_object_mut() {
-                let theme = b.entry("theme").or_insert_with(|| serde_json::json!({}));
-                if let Some(th) = theme.as_object_mut() {
-                    for k in ["user_color", "user_color2"] {
-                        th.insert(k.into(), seed.into());
-                    }
-                    for k in ["color_scheme", "color_scheme2"] {
-                        th.insert(k.into(), scheme.into());
-                    }
-                    th.insert("follows_system_colors".into(), false.into());
-                }
-            }
-            if let Ok(out) = serde_json::to_string(&serde_json::Value::Object(map)) {
-                put(&p, &out);
-            }
-        }
-        info!("apps: Chrome's colour is Golem's");
-    });
 }
 
 // ------------------------------------------------------------- X apps
