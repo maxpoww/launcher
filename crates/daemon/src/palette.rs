@@ -949,8 +949,10 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
             write_shared(&theme_dir(), &theme);
         } else {
             write_all(&theme_dir(), &theme);
-            crate::app_themes::write(&apps);
             poke(&apps, look_changed);
+            // (After the poke: the GTK theme in use has just turned name, and
+            // Inkscape's fixed theme points at the new one.)
+            crate::app_themes::write(&apps);
         }
         // (The apps' icons once the slider rests: a drag is many changes.)
         let mine = ICONS_ASKED.fetch_add(1, Ordering::Relaxed) + 1;
