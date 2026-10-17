@@ -442,6 +442,11 @@ pub(crate) fn ytmusic_at(p: &crate::ytmusic_icon::Pose) -> Option<Vec<u8>> {
     Some(frame_chain(&crate::ytmusic_icon::frame(p)?, crate::ytmusic_icon::FRAME))
 }
 
+/// Discord's mark in pose `p`, ready to upload.
+pub(crate) fn discord_at(p: &crate::discord_icon::Pose) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::discord_icon::frame(p)?, crate::discord_icon::FRAME))
+}
+
 /// The apps button's stencil (its nine squares), ready to upload.
 pub(crate) fn apps_stencil() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::stencil_svg().as_bytes())?.take()))
@@ -486,6 +491,10 @@ pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     // YouTube Music wears its moving mark (`ytmusic_icon`).
     if id == crate::ytmusic_icon::YTMUSIC_ID {
         return Some(with_mips(rasterize_svg(crate::ytmusic_icon::rest_svg().as_bytes())?.take()));
+    }
+    // Discord wears its moving mark (`discord_icon`).
+    if id == crate::discord_icon::DISCORD_ID {
+        return Some(with_mips(rasterize_svg(crate::discord_icon::rest_svg().as_bytes())?.take()));
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
