@@ -2504,23 +2504,27 @@ impl Panel {
                     // PAPER (the approved card, ~/Golem/work/palettes): the
                     // ground, lit from above; the soul as tall capsules
                     // fanned like a deck — the first on top — each with a
-                    // sheen, a lit top edge and its shadow cast to the left;
-                    // a soft oval shadow under the fan.
+                    // sheen and its shadow cast to the left; a soft oval
+                    // shadow under the fan. The renderer has no gradients:
+                    // each is a stack of thin strips, every strip cut to the
+                    // shape it lies in.
                     let ground = colours[0];
                     let bright = crate::palette::rel_lum(ground) > 0.35;
                     rect(out, x, y0, r.w, r.h, radius, lin(ground, 1.0));
-                    // (The panel's own washes: a white is coded for blending
-                    // in linear light — a plain 1.0 at a low alpha glares.)
-                    let white = |a: f32| {
-                        let w = crate::options::wash(true, a);
-                        [w[0], w[1], w[2], w[3] * ca]
-                    };
-                    let black = |a: f32| [0.0, 0.0, 0.0, a * ca];
-                    // The light from above: rings of a radial lift, widest faintest.
-                    let lift = if bright { 0.16 } else { 0.035 };
-                    for (k, f) in [1.0f32, 0.72, 0.48].iter().enumerate() {
-                        let (lw, lh) = (r.w * 0.9 * f, r.h * 0.7 * f);
-                        rect(out, x + (r.w - lw) / 2.0, y0, lw, lh * 0.55, (lh * 0.55 / 2.0).min(radius * 2.0), white(lift * (1.0 + k as f32 * 0.4)));
+                    // (Plain light: rgb 1 at alpha a ADDS light on any colour.)
+                    let light = |a: f32| [1.0, 1.0, 1.0, a * ca];
+                    let shade = |a: f32| [0.0, 0.0, 0.0, a * ca];
+                    const STRIPS: usize = 12;
+                    // The light from above: a dome of it, fading down to 45 %.
+                    let lift = if bright { 0.22 } else { 0.05 };
+                    let dome = r.h * 0.45;
+                    for k in 0..STRIPS {
+                        let t = (k as f32 + 0.5) / STRIPS as f32;
+                        let half = r.w * 0.45 * (1.0 - t * t).sqrt().max(0.0);
+                        let inset = if k == 0 { radius * 0.6 } else { 0.0 };
+                        let (sx, sw) = (x + r.w / 2.0 - half + inset, 2.0 * (half - inset));
+                        let a = lift * (1.0 - t).powf(1.6);
+                        rect(out, sx, y0 + t * dome - dome / STRIPS as f32 / 2.0, sw, dome / STRIPS as f32 + 0.5, 0.0, light(a));
                     }
                     let soul = &colours[1..];
                     let n = soul.len().max(1) as f32;
@@ -2528,27 +2532,42 @@ impl Panel {
                     let step = pw * 0.5;
                     let span = pw + (n - 1.0) * step;
                     let (px0, py) = (x + (r.w - span) / 2.0, y0 + (r.h - ph) / 2.0);
-                    // The shadow the fan leaves on the paper.
-                    for (sw, a) in [(1.0f32, 0.16f32), (0.8, 0.16), (0.6, 0.18)] {
-                        let w = r.w * 0.52 * sw;
-                        let h = r.h * 0.1 * (0.6 + 0.4 * sw);
-                        rect(out, x + (r.w - w) / 2.0, y0 + r.h * 0.86 - h / 2.0, w, h, h / 2.0, black(a));
-                    }
                     let cap = pw / 2.0;
+                    // A capsule's width at `y` down it (its ends are half circles).
+                    let width_at = |y: f32| -> f32 {
+                        let d = if y < cap { cap - y } else if y > ph - cap { y - (ph - cap) } else { 0.0 };
+                        2.0 * (cap * cap - d * d).max(0.0).sqrt()
+                    };
+                    // The shadow the fan leaves on the paper: an oval, soft.
+                    for k in 0..STRIPS {
+                        let t = (k as f32 + 0.5) / STRIPS as f32 * 2.0 - 1.0;
+                        let half = r.w * 0.26 * (1.0 - t * t).sqrt();
+                        let h = r.h * 0.09 / STRIPS as f32;
+                        rect(out, x + r.w / 2.0 - half, y0 + r.h * 0.86 + t * r.h * 0.045, 2.0 * half, h + 0.5, 0.0, shade(0.30 * (1.0 - t.abs())));
+                    }
                     // The last first, so the first lies on top.
                     for (k, c) in soul.iter().enumerate().rev() {
                         let cx = px0 + k as f32 * step;
                         // Its shadow, cast to the left (soft: three passes).
-                        for (o, a) in [(4.0f32, 0.10f32), (2.6, 0.12), (1.4, 0.14)] {
-                            rect(out, cx - o * s, py + 0.5 * o * s, pw, ph, cap, black(a));
+                        for (o, a) in [(5.0f32, 0.08f32), (3.4, 0.10), (1.8, 0.14)] {
+                            rect(out, cx - o * s, py + 0.4 * o * s, pw, ph, cap, shade(a));
                         }
-                        // The lit top edge (a hair of white above the body)…
-                        rect(out, cx, py, pw, ph, cap, white(0.15));
-                        // …the body…
-                        rect(out, cx, py + 1.0 * s, pw, ph - 1.0 * s, cap, lin(*c, 1.0));
-                        // …its sheen, light at the top, a shade at the foot.
-                        rect(out, cx, py + 1.0 * s, pw, ph * 0.35, cap, white(0.12));
-                        rect(out, cx, py + ph * 0.7, pw, ph * 0.3, cap, black(0.10));
+                        rect(out, cx, py, pw, ph, cap, lin(*c, 1.0));
+                        // Its sheen: light down the top third, shade at the foot.
+                        for k in 0..STRIPS {
+                            let t = (k as f32 + 0.5) / STRIPS as f32;
+                            let y = t * ph;
+                            let w = width_at(y);
+                            if w < 0.5 {
+                                continue;
+                            }
+                            let a = if t < 0.35 { 0.13 * (1.0 - t / 0.35) } else if t > 0.7 { 0.12 * (t - 0.7) / 0.3 } else { 0.0 };
+                            if a <= 0.002 {
+                                continue;
+                            }
+                            let col = if t < 0.5 { light(a) } else { shade(a) };
+                            rect(out, cx + (pw - w) / 2.0, py + y - ph / STRIPS as f32 / 2.0, w, ph / STRIPS as f32 + 0.5, 0.0, col);
+                        }
                     }
                 }
                 if on || keyed {
