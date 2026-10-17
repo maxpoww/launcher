@@ -3559,7 +3559,12 @@ impl App {
 
     /// This look's colours of a file window.
     pub(crate) fn filer_palette(&self) -> Palette {
-        palette(crate::look::dark(), self.config.theme.background_rgba(), self.config.theme.text_rgba(), &crate::palette::current())
+        // Golem Files is an app: it wears what the APPS slider gives the apps
+        // (Max, 2026-10-17: "now the bg color on golem files"), its Dark/Light
+        // included — never the dock's sampled colour.
+        let mut t = crate::palette::for_apps(&crate::palette::current());
+        t.dynamic = false;
+        palette(t.dark, self.config.theme.background_rgba(), self.config.theme.text_rgba(), &t)
     }
 
     /// The menu's and the box's paint in a window: the boxes' own surface,
