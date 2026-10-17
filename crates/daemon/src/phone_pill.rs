@@ -1337,14 +1337,9 @@ impl App {
                     if l.step > 0 {
                         let d = LINE_PX * s;
                         let chip = Rect::new(row.x + BOX_PAD, row.y + (row.h - d) / 2.0, d, d);
+                        // (Quiet, 2026-10-16: the step's number in the
+                        // accent, nothing behind it.)
                         let amber = crate::notif::amber();
-                        scene.rects.push(RectInst {
-                            rect: chip,
-                            radius: d / 2.0,
-                            color: [amber[0], amber[1], amber[2], 0.3 * solid * out],
-                            glass: 0.0,
-                            border: 0.0,
-                        });
                         scene.labels.push(Label {
                             text: l.step.to_string(),
                             pos: (chip.x + chip.w / 2.0, ty),
@@ -1355,7 +1350,7 @@ impl App {
                             dim: false,
                             cache: true,
                             family: TEXT_FONT,
-                            color: Some([ink[0], ink[1], ink[2], ink[3] * solid * out]),
+                            color: Some([amber[0], amber[1], amber[2], solid * out]),
                             clip: Some(row),
                         });
                     }
@@ -1471,13 +1466,17 @@ impl App {
             if let (Some(chip), Some(word)) = (self.phone_pill_chip(long), shown.button) {
                 let lit = ptr.is_some_and(|p| chip.contains(p));
                 let amber = crate::notif::amber();
-                scene.rects.push(RectInst {
-                    rect: chip,
-                    radius: chip.h / 2.0,
-                    color: [amber[0], amber[1], amber[2], if lit { 0.38 } else { 0.2 } * out],
-                    glass: 0.0,
-                    border: 0.0,
-                });
+                // (Quiet: the word in the accent; its tint under the pointer.)
+                if lit {
+                    scene.rects.push(RectInst {
+                        rect: chip,
+                        radius: chip.h / 2.0,
+                        color: [amber[0], amber[1], amber[2], 0.3 * out],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+                let color = if lit { color } else { Some([amber[0], amber[1], amber[2], out]) };
                 scene.labels.push(Label {
                     text: tr(word).to_owned(),
                     pos: (chip.x + chip.w / 2.0, ty),

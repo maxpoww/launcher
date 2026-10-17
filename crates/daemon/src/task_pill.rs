@@ -459,14 +459,18 @@ impl App {
         }
         let s = self.options_scale();
         let amber = crate::notif::amber();
-        scene.rects.push(RectInst {
-            rect: chip,
-            radius: chip.h / 2.0,
-            // (A little stronger under the pointer: it is a button.)
-            color: [amber[0], amber[1], amber[2], if lit { 0.38 } else { 0.2 } * alpha],
-            glass: 0.0,
-            border: 0.0,
-        });
+        // (Quiet, 2026-10-16: a button is its word in the accent; the
+        // accent's tint behind it only under the pointer.)
+        if lit {
+            scene.rects.push(RectInst {
+                rect: chip,
+                radius: chip.h / 2.0,
+                color: [amber[0], amber[1], amber[2], 0.3 * alpha],
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
+        let ink = if lit { ink } else { amber };
         scene.labels.push(Label {
             text: text.to_owned(),
             pos: (chip.x + chip.w / 2.0, chip.y + (chip.h - LINE_PX * s) / 2.0),
