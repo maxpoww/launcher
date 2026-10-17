@@ -722,7 +722,13 @@ fn prepare_kind(path: &Path, page: u32, max: (u32, u32), ink: [u8; 3]) -> Prepar
         // A WEB PAGE: as Seam shows it (`peek_web`); its source under the
         // pencil. (Not drawn: as text, as before.)
         // So are Markdown (formatted) and a table of values (a table).
-        if let Some((img, long, words)) = crate::peek_web::drawn(path, &name, page) {
+        // (Not drawn yet: as text now, drawn off the way — `peek_page_watch`
+        // swaps it in when it is there.)
+        let page_now = crate::peek_web::drawn(path, &name, page, false);
+        if page_now.is_none() && crate::peek_web::is_drawn(&name) {
+            crate::peek_web::draw_soon(path, &name);
+        }
+        if let Some((img, long, words)) = page_now {
             {
                 return Prepared {
                     own: (long.w, long.h),
@@ -1199,6 +1205,37 @@ impl App {
     }
 
     /// Show `thing` of file window `win` (or, if something is up, walk to it).
+    /// `path` is a web page, a document or a table not drawn yet: look again
+    /// every half second while it is the one up, and when its page is there,
+    /// read it again (the text it was meanwhile gives way).
+    fn peek_page_watch(&mut self, path: &Path, name: &str) {
+        if !crate::peek_web::is_drawn(name) || crate::peek_web::ready(path, name) {
+            return;
+        }
+        let (path, name) = (path.to_path_buf(), name.to_owned());
+        let started = Instant::now();
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(500));
+        let _ = self
+            .loop_handle
+            .insert_source(timer, move |_, _, app: &mut App| {
+                let up = app
+                    .peek
+                    .up
+                    .as_ref()
+                    .is_some_and(|u| u.path == path && !u.closing);
+                if !up || started.elapsed().as_secs() > 60 {
+                    return calloop::timer::TimeoutAction::Drop;
+                }
+                if crate::peek_web::ready(&path, &name) {
+                    app.peek_forget(&path);
+                    app.peek_want_now((path.clone(), 0));
+                    app.request_desktop_top_draw();
+                    return calloop::timer::TimeoutAction::Drop;
+                }
+                calloop::timer::TimeoutAction::ToDuration(std::time::Duration::from_millis(500))
+            });
+    }
+
     /// What was prepared of `path`, if the file changed since: let go.
     fn peek_fresh(&mut self, path: &Path) {
         let stale = self
@@ -1229,6 +1266,8 @@ impl App {
         let key = (thing.path.clone(), 0);
         // (Changed on disk by another program since it was read: read again.)
         self.peek_fresh(&thing.path);
+        // A page still being drawn: it takes the text's place when it is.
+        self.peek_page_watch(&thing.path, &thing.name);
         // (Shown: the newest of what is kept.)
         let ready = self.peek.get(&key).is_some();
         let was = self.peek.up.as_ref().filter(|u| !u.closing).map(|u| u.rect);

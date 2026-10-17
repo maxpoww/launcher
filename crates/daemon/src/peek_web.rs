@@ -34,7 +34,7 @@ pub(crate) struct Long {
     pub ch: u32,
 }
 /// The longest a page may take (a page that never settles is let go).
-const PATIENCE: Duration = Duration::from_secs(12);
+const PATIENCE: Duration = Duration::from_secs(40);
 
 /// Whether a file of this name is a web page.
 pub(crate) fn is_web(name: &str) -> bool {
@@ -119,11 +119,23 @@ fn kept(path: &Path, salt: &str) -> Option<PathBuf> {
 /// What Quick Look shows of `path` drawn as a page — its run `k` — and the
 /// words for its head: a web page as it is; Markdown formatted; a table
 /// (CSV, TSV) as a table. `None`: not one of these, or it could not be drawn.
-pub(crate) fn drawn(path: &Path, name: &str, k: u32) -> Option<(image::RgbaImage, Long, String)> {
+///
+/// `make`: draw it if it is not kept yet (seconds: the engine starts — 17 s
+/// the first time after a start on the Acer's spinning disk); else only
+/// what is kept already is read (`draw_soon` makes it off the way).
+pub(crate) fn drawn(
+    path: &Path,
+    name: &str,
+    k: u32,
+    make: bool,
+) -> Option<(image::RgbaImage, Long, String)> {
     use crate::i18n::{fill, tr};
     let lower = name.to_ascii_lowercase();
     if is_web(&lower) {
         let out = kept(path, "")?;
+        if !make && !out.is_file() {
+            return None;
+        }
         shoot(path, &out, WIDTH)?;
         let (img, long) = crop(&out, k)?;
         return Some((img, long, tr("as a web page").to_owned()));
@@ -131,6 +143,9 @@ pub(crate) fn drawn(path: &Path, name: &str, k: u32) -> Option<(image::RgbaImage
     if is_markdown(&lower) {
         let style = style();
         let out = kept(path, &style)?;
+        if !make && !out.is_file() {
+            return None;
+        }
         made(&out, WIDTH_DOC, || markdown(path, &style))?;
         let (img, long) = crop(&out, k)?;
         return Some((img, long, tr("formatted").to_owned()));
@@ -138,6 +153,9 @@ pub(crate) fn drawn(path: &Path, name: &str, k: u32) -> Option<(image::RgbaImage
     if is_table(&lower) {
         let style = style();
         let out = kept(path, &style)?;
+        if !make && !out.is_file() {
+            return None;
+        }
         made(&out, WIDTH, || table(path, &lower, &style).map(|t| t.0))?;
         let (img, long) = crop(&out, k)?;
         let rows = std::fs::read_to_string(path).map_or(0, |t| {
@@ -170,6 +188,61 @@ fn crop(out: &Path, k: u32) -> Option<(image::RgbaImage, Long)> {
     let mut px = vec![0u8; (w * ch * 4) as usize];
     f.read_exact(&mut px).ok()?;
     Some((image::RgbaImage::from_raw(w, ch, px)?, Long { w, h, y, ch }))
+}
+
+/// Whether a file of this name is drawn as a page.
+pub(crate) fn is_drawn(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    is_web(&lower) || is_markdown(&lower) || is_table(&lower)
+}
+
+/// Whether the page of `path` is kept (drawn) already.
+pub(crate) fn ready(path: &Path, name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let salt = if is_web(&lower) {
+        String::new()
+    } else {
+        style()
+    };
+    kept(path, &salt).is_some_and(|p| p.is_file())
+}
+
+/// Draw the page of `path` off the way: ONE thread of its own, in turn
+/// (the engine is a browser), each asked once while it is being made.
+pub(crate) fn draw_soon(path: &Path, name: &str) {
+    use std::sync::mpsc::Sender;
+    use std::sync::{Mutex, OnceLock};
+    static QUEUE: OnceLock<Mutex<Sender<(PathBuf, String)>>> = OnceLock::new();
+    static ASKED: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    let asked = ASKED.get_or_init(Default::default);
+    if !asked.lock().is_ok_and(|mut a| a.insert(path.to_path_buf())) {
+        return;
+    }
+    let queue = QUEUE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, String)>();
+        let _ = std::thread::Builder::new()
+            .name("quick-look-pages".into())
+            .spawn(move || {
+                for (path, name) in rx {
+                    let started = Instant::now();
+                    let done = drawn(&path, &name, 0, true).is_some();
+                    tracing::info!(
+                        "quick look: page of {} drawn ({done}) in {:?}",
+                        path.display(),
+                        started.elapsed()
+                    );
+                    if let Some(asked) = ASKED.get() {
+                        if let Ok(mut a) = asked.lock() {
+                            a.remove(&path);
+                        }
+                    }
+                }
+            });
+        Mutex::new(tx)
+    });
+    if let Ok(q) = queue.lock() {
+        let _ = q.send((path.to_path_buf(), name.to_owned()));
+    }
 }
 
 /// Whether a file of this name is Markdown.

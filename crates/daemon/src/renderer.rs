@@ -1609,7 +1609,12 @@ impl Renderer {
         if self.video_size != (w, h) || self.video_texture.is_none() {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("waverunner.video"),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                // TWO layers, one used: read as an array (the icon pipeline's
+                // way), a one-layer texture is a plain 2D one to OpenGL — no
+                // views there — and the GL path (the MacBook's crocus) drew
+                // the video enlarged and cut (2026-10-17). Two make it an
+                // array everywhere.
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 2 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,

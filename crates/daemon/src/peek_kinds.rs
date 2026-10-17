@@ -816,8 +816,33 @@ fn decoder(
 /// The render node whose chip decodes and scales video here, found once
 /// (one frame of `path` tried on each, at most four seconds).
 fn gpu_node(ffmpeg: &str, path: &Path, size: (u32, u32)) -> Option<String> {
-    static FOUND: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
-    if let Some(found) = FOUND.lock().ok().and_then(|f| f.clone()) {
+    // Known once a session FOR EACH KIND OF VIDEO: a chip that cannot read
+    // one (HEVC on a Broadwell, an Acer's or a 2013 MacBook's) may read
+    // another (H.264) — one answer for all said "none here" to both (Acer,
+    // 2026-10-17: its first big video was HEVC).
+    static FOUND: std::sync::Mutex<Option<std::collections::HashMap<String, Option<String>>>> =
+        std::sync::Mutex::new(None);
+    let codec = output(
+        "ffprobe",
+        &[
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            path.to_str()?,
+        ],
+    )
+    .map(|c| c.trim().to_owned())
+    .unwrap_or_default();
+    if let Some(found) = FOUND
+        .lock()
+        .ok()
+        .and_then(|f| f.as_ref().and_then(|m| m.get(&codec).cloned()))
+    {
         return found;
     }
     // (One looks at a time: a second video while the first is still being
@@ -871,11 +896,12 @@ fn gpu_node(ffmpeg: &str, path: &Path, size: (u32, u32)) -> Option<String> {
         }
     });
     tracing::info!(
-        "quick look: video on the graphics chip: {}",
+        "quick look: {codec} video on the graphics chip: {}",
         found.as_deref().unwrap_or("none here")
     );
     if let Ok(mut f) = FOUND.lock() {
-        *f = Some(found.clone());
+        f.get_or_insert_with(Default::default)
+            .insert(codec, found.clone());
     }
     found
 }
