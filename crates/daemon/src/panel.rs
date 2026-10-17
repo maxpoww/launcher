@@ -2501,13 +2501,84 @@ impl Panel {
                         rect(out, x + k as f32 * w, y0, w + 0.5, r.h, if k == 0 || k == n - 1 { radius } else { 0.0 }, lin(c, 1.0));
                     }
                 } else {
-                    rect(out, x, y0, r.w, r.h, radius, lin(colours[0], 1.0));
+                    // PAPER (the approved card, ~/Golem/work/palettes): the
+                    // ground, lit from above; the soul as tall capsules
+                    // fanned like a deck — the first on top — each with a
+                    // sheen and its shadow cast to the left; a soft oval
+                    // shadow under the fan. The renderer has no gradients:
+                    // each is a stack of thin strips, every strip cut to the
+                    // shape it lies in.
+                    let ground = colours[0];
+                    let bright = crate::palette::rel_lum(ground) > 0.35;
+                    rect(out, x, y0, r.w, r.h, radius, lin(ground, 1.0));
+                    // (The panel's blend only DARKENS through alpha: a light is
+                    // painted solid, the colour under it already mixed toward
+                    // white; a shade can stay translucent black.)
+                    let lit = |c: [u8; 3], a: f32| {
+                        let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0);
+                        let m = |v: u8| f(v) + (1.0 - f(v)) * a;
+                        [m(c[0]), m(c[1]), m(c[2]), ca]
+                    };
+                    let dim = |c: [u8; 3], a: f32| {
+                        let f = |v: u8| crate::options::srgb_to_linear(f32::from(v) / 255.0) * (1.0 - a);
+                        [f(c[0]), f(c[1]), f(c[2]), ca]
+                    };
+                    let shade = |a: f32| [0.0, 0.0, 0.0, a * ca];
+                    const STRIPS: usize = 24;
+                    // The light from above: a dome of it, fading down to 45 %.
+                    // (In linear light: a dark ground takes very little to show it.)
+                    let lift = if bright { 0.30 } else { 0.006 };
+                    let dome = r.h * 0.45;
+                    for k in 0..STRIPS {
+                        let t = (k as f32 + 0.5) / STRIPS as f32;
+                        let half = r.w * 0.45 * (1.0 - t * t).sqrt().max(0.0);
+                        let inset = if k == 0 { radius * 0.6 } else { 0.0 };
+                        let (sx, sw) = (x + r.w / 2.0 - half + inset, 2.0 * (half - inset));
+                        let a = lift * (1.0 - t).powf(1.6);
+                        rect(out, sx, y0 + t * dome - dome / STRIPS as f32 / 2.0, sw, dome / STRIPS as f32 + 0.5, 0.0, lit(ground, a));
+                    }
                     let soul = &colours[1..];
-                    let band = r.h * 0.38;
-                    let pad = r.w * 0.1;
-                    let w = (r.w - 2.0 * pad) / soul.len().max(1) as f32;
-                    for (k, c) in soul.iter().enumerate() {
-                        rect(out, x + pad + k as f32 * w, y0 + r.h - pad * 0.6 - band, w, band, 2.0 * s, lin(*c, 1.0));
+                    let n = soul.len().max(1) as f32;
+                    let (pw, ph) = (r.w * 0.15, r.h * 0.62);
+                    let step = pw * 0.5;
+                    let span = pw + (n - 1.0) * step;
+                    let (px0, py) = (x + (r.w - span) / 2.0, y0 + (r.h - ph) / 2.0);
+                    let cap = pw / 2.0;
+                    // A capsule's width at `y` down it (its ends are half circles).
+                    let width_at = |y: f32| -> f32 {
+                        let d = if y < cap { cap - y } else if y > ph - cap { y - (ph - cap) } else { 0.0 };
+                        2.0 * (cap * cap - d * d).max(0.0).sqrt()
+                    };
+                    // The shadow the fan leaves on the paper: an oval, soft.
+                    for k in 0..STRIPS {
+                        let t = (k as f32 + 0.5) / STRIPS as f32 * 2.0 - 1.0;
+                        let half = r.w * 0.26 * (1.0 - t * t).sqrt();
+                        let h = r.h * 0.09 / STRIPS as f32;
+                        rect(out, x + r.w / 2.0 - half, y0 + r.h * 0.86 + t * r.h * 0.045, 2.0 * half, h + 0.5, 0.0, shade(0.30 * (1.0 - t.abs())));
+                    }
+                    // The last first, so the first lies on top.
+                    for (k, c) in soul.iter().enumerate().rev() {
+                        let cx = px0 + k as f32 * step;
+                        // Its shadow, cast to the left (soft: three passes).
+                        for (o, a) in [(5.0f32, 0.08f32), (3.4, 0.10), (1.8, 0.14)] {
+                            rect(out, cx - o * s, py + 0.4 * o * s, pw, ph, cap, shade(a));
+                        }
+                        rect(out, cx, py, pw, ph, cap, lin(*c, 1.0));
+                        // Its sheen: light down the top third, shade at the foot.
+                        for k in 0..STRIPS {
+                            let t = (k as f32 + 0.5) / STRIPS as f32;
+                            let y = t * ph;
+                            let w = width_at(y);
+                            if w < 0.5 {
+                                continue;
+                            }
+                            let a = if t < 0.35 { 0.10 * (1.0 - t / 0.35) } else if t > 0.7 { 0.10 * (t - 0.7) / 0.3 } else { 0.0 };
+                            if a <= 0.002 {
+                                continue;
+                            }
+                            let col = if t < 0.5 { lit(*c, a) } else { dim(*c, a) };
+                            rect(out, cx + (pw - w) / 2.0, py + y - ph / STRIPS as f32 / 2.0, w, ph / STRIPS as f32 + 0.5, 0.0, col);
+                        }
                     }
                 }
                 if on || keyed {
