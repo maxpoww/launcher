@@ -931,6 +931,10 @@ pub(crate) fn contrast(a: f32, b: f32) -> f32 {
 /// Write the theme out for everything outside the daemon and tell the
 /// running apps — on a thread of its own: it runs programs.
 pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
+    // (Counted HERE, before the writer's lock: counted inside, a newer change
+    // could not count until the older had finished, and a drag of the slider
+    // rewrote the apps' icons once a step.)
+    let mine = ICONS_ASKED.fetch_add(1, Ordering::Relaxed) + 1;
     let spawned = std::thread::Builder::new().name("palette".into()).spawn(move || {
         static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
@@ -955,7 +959,6 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
             crate::app_themes::write(&apps);
         }
         // (The apps' icons once the slider rests: a drag is many changes.)
-        let mine = ICONS_ASKED.fetch_add(1, Ordering::Relaxed) + 1;
         std::thread::sleep(std::time::Duration::from_millis(400));
         if ICONS_ASKED.load(Ordering::Relaxed) == mine {
             publish_icons();
@@ -993,6 +996,21 @@ fn publish_icons() {
         let _ = std::process::Command::new("dconf")
             .args(["write", "/org/gnome/desktop/interface/icon-theme", &format!("'{name}'")])
             .status();
+        // Qt apps are told the same name at the same moment (their settings
+        // file, where it is ours): a name told earlier could be one already
+        // gone.
+        for app in ["qt5ct", "qt6ct"] {
+            let conf = config_home().join(app).join(format!("{app}.conf"));
+            let Ok(text) = std::fs::read_to_string(&conf) else { continue };
+            if std::fs::symlink_metadata(&conf).is_ok_and(|m| m.file_type().is_symlink()) || !text.contains("golem/theme/qt") {
+                continue;
+            }
+            let text: String = text
+                .lines()
+                .map(|l| if l.starts_with("icon_theme=") { format!("icon_theme={name}\n") } else { format!("{l}\n") })
+                .collect();
+            crate::persist::write_text("theme", &conf, &text);
+        }
     };
     if !crate::look::installed(base) {
         return;
@@ -1006,7 +1024,7 @@ fn publish_icons() {
     }
     let Some(src) = icon_theme_dir(base) else { return };
     // (Written already for these very colours — a dock start: kept.)
-    let stamp = format!("{base} {f:?} v1");
+    let stamp = format!("{base} {} {f:?} v2", std::fs::canonicalize(&src).map(|p| p.display().to_string()).unwrap_or_default());
     let now_dir = names.iter().map(|n| icons.join(n)).find(|d| d.is_dir());
     if let Some(d) = &now_dir {
         if std::fs::read_to_string(d.join(".golem-stamp")).ok().as_deref() == Some(stamp.as_str()) {
@@ -1014,16 +1032,27 @@ fn publish_icons() {
             return;
         }
     }
-    // The one not in use now gets the new drawings.
-    let now = names.iter().find(|n| icons.join(n).is_dir()).copied();
+    // The one not in use now gets the new drawings (in use = the one dconf
+    // names; failing that, the one with a stamp).
+    let in_use = std::process::Command::new("dconf")
+        .args(["read", "/org/gnome/desktop/interface/icon-theme"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned());
+    let now = names
+        .iter()
+        .find(|n| in_use.as_deref() == Some(**n))
+        .or_else(|| names.iter().find(|n| icons.join(n).join(".golem-stamp").is_file()))
+        .copied();
     let (next, old) = if now == Some(names[0]) { (names[1], names[0]) } else { (names[0], names[1]) };
     let dest = icons.join(next);
     let _ = std::fs::remove_dir_all(&dest);
     let started = std::time::Instant::now();
-    if let Err(e) = tint_tree(&src, &dest, &f, next).and_then(|()| {
+    if let Err(e) = tint_tree(&src, &dest, &f, next, 0).and_then(|()| {
         add_small_papirus(&dest, if base == "Golem-Dark" { "Papirus-Dark" } else { "Papirus" }, &f)
     }) {
         warn!("palette: the apps' icons were not written ({e})");
+        let _ = std::fs::remove_dir_all(&dest);
         return;
     }
     let _ = std::fs::write(dest.join(".golem-stamp"), &stamp);
@@ -1107,14 +1136,32 @@ fn icon_theme_dir(name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Copy a theme's tree, its drawings' colours through the filter.
-fn tint_tree(src: &std::path::Path, dest: &std::path::Path, f: &[[f32; 4]; 7], name: &str) -> std::io::Result<()> {
+fn tint_tree(src: &std::path::Path, dest: &std::path::Path, f: &[[f32; 4]; 7], name: &str, depth: u8) -> std::io::Result<()> {
+    // (An icon theme is a few folders deep: anything deeper is not one.)
+    if depth > 6 {
+        return Ok(());
+    }
     std::fs::create_dir_all(dest)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let (from, to) = (e.path(), dest.join(e.file_name()));
+        // A link is kept a link (an alias of a drawing — tinted once, where
+        // it points; a link to a folder never followed: no loops).
+        let kind = std::fs::symlink_metadata(&from)?.file_type();
+        if kind.is_symlink() {
+            if let Ok(target) = std::fs::read_link(&from) {
+                if target.is_relative() {
+                    let _ = std::os::unix::fs::symlink(&target, &to);
+                    continue;
+                }
+            }
+        }
         let meta = std::fs::metadata(&from)?;
         if meta.is_dir() {
-            tint_tree(&from, &to, f, name)?;
+            if kind.is_symlink() {
+                continue;
+            }
+            tint_tree(&from, &to, f, name, depth + 1)?;
         } else if from.extension().is_some_and(|x| x == "svg") {
             std::fs::write(&to, tint_svg(&std::fs::read_to_string(&from)?, f))?;
         } else if e.file_name() == "index.theme" {
@@ -1138,7 +1185,13 @@ fn tint_svg(svg: &str, f: &[[f32; 4]; 7]) -> String {
     let mut i = 0;
     let hexd = |c: u8| (c as char).to_digit(16);
     while i < b.len() {
-        if b[i] == b'#' {
+        // (Not a colour: an entity `&#160;`, a link `url(#a1b2c3)` or
+        // `href="#abc"`.)
+        let link = i > 0 && matches!(b[i - 1], b'&' | b'(' | b'"' | b'\'') && {
+            let before = &svg[..i];
+            before.ends_with('&') || before.ends_with("url(") || before.ends_with("href=\"") || before.ends_with("href='")
+        };
+        if b[i] == b'#' && !link {
             let six = i + 7 <= b.len() && b[i + 1..i + 7].iter().all(|c| hexd(*c).is_some())
                 && !(i + 7 < b.len() && hexd(b[i + 7]).is_some());
             let three = !six && i + 4 <= b.len() && b[i + 1..i + 4].iter().all(|c| hexd(*c).is_some())
@@ -1842,8 +1895,23 @@ fn qtct_conf(scheme: &Path, t: &Theme) -> String {
     format!(
         "[Appearance]\ncolor_scheme_path={}\ncustom_palette=true\nicon_theme={}\nstandard_dialogs=default\nstyle=Fusion\n\n[Golem]\nstamp={stamp:016x}\n",
         scheme.display(),
-        if t.dark { "Golem-Dark" } else { "Golem" },
+        qt_icon_theme(t.dark),
     )
+}
+
+/// The icon theme Qt apps are told: the apps' tinted one while it is in use
+/// (the one dconf names), else Golem's own in the look.
+fn qt_icon_theme(dark: bool) -> String {
+    let named = std::process::Command::new("dconf")
+        .args(["read", "/org/gnome/desktop/interface/icon-theme"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
+        .unwrap_or_default();
+    if named.starts_with("Golem-Tinted-") {
+        return named;
+    }
+    if dark { "Golem-Dark" } else { "Golem" }.to_owned()
 }
 
 /// btop (Omarchy themes it too): a `golem` theme in btop's own themes folder,
@@ -2253,6 +2321,8 @@ impl crate::App {
         // Qt's palette route too, without a new login.
         let vars = launch_vars();
         for (k, v) in &vars {
+            // (Quoted for Lua: a ' or a \ in a path must not end the string.)
+            let v = v.replace('\\', "\\\\").replace('\'', "\\'");
             crate::hypr::eval(&format!("hl.env('{k}', '{v}')"));
         }
         // …and so do the apps systemd and D-Bus start (Easy Effects runs as
@@ -2376,6 +2446,9 @@ mod tests {
         assert_ne!(grey, "808080", "a grey takes the palette's colour");
         let (_, c, _) = tint::lch([u8::from_str_radix(&grey[0..2], 16).unwrap(), u8::from_str_radix(&grey[2..4], 16).unwrap(), u8::from_str_radix(&grey[4..6], 16).unwrap()]);
         assert!(c > 0.05, "clearly coloured, not a hint ({c})");
+        // Not colours: an entity, a link to a gradient, an href.
+        let links = r##"<t>&#160;</t><g fill="url(#abcdef)"/><use href="#abc"/>"##;
+        assert_eq!(tint_svg(links, &f), links);
         // Off: nothing changes.
         f[0][0] = 0.0;
         assert_eq!(tint_svg(svg, &f), svg.replace("#fff", "#ffffff"));

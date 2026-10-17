@@ -58,15 +58,12 @@ fn data() -> PathBuf {
     std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".local/share"))
 }
 
-/// Written whole or not at all (a tmp file renamed over it).
+/// Written whole or not at all (a tmp file renamed over it), keeping the
+/// file's permissions. A LINK is never written through or over: it is
+/// someone else's (home-manager links settings into the store, and a plain
+/// file in its place breaks the next activation).
 fn put(path: &Path, text: &str) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let tmp = path.with_extension("golem-tmp");
-    if std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
-        warn!("apps: could not write {}", path.display());
-    }
+    put_bytes(path, text.as_bytes());
 }
 
 fn mix(a: Rgb, b: Rgb, k: f32) -> Rgb {
@@ -145,18 +142,20 @@ fn kde(t: &Theme) {
     let path = config().join("kdeglobals");
     let old = std::fs::read_to_string(&path).unwrap_or_default();
     // (General's other keys kept: only ColorScheme is ours there.)
-    let general: Vec<(String, String)> = old
-        .split("\n[")
-        .find(|s| s.trim_start_matches('[').starts_with("General]"))
-        .map(|s| {
-            s.lines()
-                .skip(1)
-                .filter_map(|l| l.split_once('='))
-                .filter(|(k, _)| *k != "ColorScheme")
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut general: Vec<(String, String)> = Vec::new();
+    let mut in_general = false;
+    for line in old.lines() {
+        let l = line.trim();
+        if l.starts_with('[') && l.ends_with(']') {
+            in_general = l == "[General]";
+        } else if in_general {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim() != "ColorScheme" {
+                    general.push((k.to_owned(), v.to_owned()));
+                }
+            }
+        }
+    }
     if let Some((_, keys)) = sections.iter_mut().find(|(n, _)| n == "General") {
         keys.extend(general);
     }
@@ -170,24 +169,35 @@ fn kde(t: &Theme) {
             let p = e.path();
             let is_rc = p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("rc") && n != "kdeglobals");
             let Ok(text) = std::fs::read_to_string(&p).map_err(|_| ()).and_then(|t| if is_rc { Ok(t) } else { Err(()) }) else { continue };
-            let Some(start) = text.find("[UiSettings]") else { continue };
-            let section = &text[start..];
-            let end = section[1..].find("\n[").map_or(section.len(), |i| i + 1);
-            // (An empty pick is "the system's" — the live way: left alone.)
-            if !section[..end].lines().any(|l| l.starts_with("ColorScheme=") && l.len() > "ColorScheme=".len())
-                || section[..end].contains("ColorScheme=Golem\n")
-            {
+            if !text.contains("[UiSettings]") {
                 continue;
             }
-            let fixed: String = text[..start].to_owned()
-                + &section[..end]
-                    .lines()
-                    .map(|l| if l.starts_with("ColorScheme=") { "ColorScheme=Golem".to_owned() } else { l.to_owned() })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                + "\n"
-                + section[end..].trim_start_matches('\n');
-            put(&p, &fixed);
+            // Line by line, the file's own layout kept: only the pick of
+            // [UiSettings] turns to Golem. (An empty pick is "the system's" —
+            // the live way: left alone.)
+            let mut in_ui = false;
+            let mut changed = false;
+            let lines: Vec<String> = text
+                .split_inclusive('\n')
+                .map(|line| {
+                    let l = line.trim();
+                    if l.starts_with('[') && l.ends_with(']') {
+                        in_ui = l == "[UiSettings]";
+                    } else if in_ui {
+                        if let Some(v) = l.strip_prefix("ColorScheme=") {
+                            if !v.is_empty() && v != "Golem" {
+                                changed = true;
+                                let end = &line[line.trim_end().len()..];
+                                return format!("ColorScheme=Golem{end}");
+                            }
+                        }
+                    }
+                    line.to_owned()
+                })
+                .collect();
+            if changed {
+                put(&p, &lines.concat());
+            }
         }
     }
     // KDE apps reload their colours on these: KConfig's own notice that
@@ -260,7 +270,13 @@ fn vscode(t: &Theme) {
             continue;
         }
         let path = dir.join("settings.json");
-        let old = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
+        // (Only a file that is not there starts from nothing: one that
+        // cannot be read is left alone, never replaced by our two keys.)
+        let old = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+            Err(_) => continue,
+        };
         // (A settings file with comments is not JSON: left as it is.)
         let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(if old.trim().is_empty() { "{}" } else { &old }) else {
             warn!("apps: {} is not plain JSON — its colours left alone", path.display());
@@ -293,7 +309,7 @@ fn inkscape(t: &Theme) {
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
-        .filter(|s| s.starts_with("Golem-"));
+        .filter(|s| s.starts_with("Golem-") && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     if let Some(gtk) = gtk {
         // A REAL folder (Inkscape lists the themes folders and passes over a
         // link — it fell back to Adwaita): its sheet imports the one in use.
@@ -302,6 +318,10 @@ fn inkscape(t: &Theme) {
             let _ = std::fs::remove_file(&dir);
         }
         let now = data().join("themes").join(&gtk).join("gtk-3.0/gtk.css");
+        // (A path a CSS url cannot hold as it is: left as it was.)
+        if now.to_string_lossy().contains(['"', '\\', '\n']) {
+            return;
+        }
         put(&dir.join("gtk-3.0/gtk.css"), &format!("@import url(\"file://{}\");\n", now.display()));
         put(&dir.join("index.theme"), "[Desktop Entry]\nType=X-GNOME-Metatheme\nName=Golem\n\n[X-GNOME-Metatheme]\nGtkTheme=Golem\n");
     }
@@ -346,11 +366,13 @@ fn when_closed(name: &'static str, then: impl FnOnce() + Send + 'static) {
             .output()
             .is_ok_and(|o| !o.stdout.is_empty())
     };
+    // (Every call takes a turn — the one done at once too: an older waiter
+    // must not write its older colours after it.)
+    let mine = turn(name, true);
     if !running(name) {
         then();
         return;
     }
-    let mine = turn(name, true);
     let _ = std::thread::Builder::new().name("apps-wait".into()).spawn(move || {
         // (Half a day at most.)
         for _ in 0..(12 * 60 * 20) {
@@ -479,7 +501,7 @@ fn jetbrains(t: &Theme) {
     // The IDE writes its settings back as it quits: they are chosen once it
     // has — the look (laf.xml) AND the editor's own scheme (colors.scheme.xml:
     // the editor keeps a scheme of its own apart from the look).
-    when_closed("android-studio-unwrapped|/jetbrains|JetBrains/Toolbox/apps", move || {
+    when_closed("android-studio-unwrapped/bin/studio|JetBrains/Toolbox/apps/[^ ]+/bin/[a-z]+(\\.sh)?( |$)", move || {
         for (conf, _) in ides {
             put(
                 &conf.join("options/laf.xml"),
@@ -495,11 +517,22 @@ fn jetbrains(t: &Theme) {
 }
 
 fn put_bytes(path: &Path, bytes: &[u8]) {
+    let old = std::fs::symlink_metadata(path);
+    if old.as_ref().is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("golem-tmp");
-    if std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
+    let written = std::fs::write(&tmp, bytes).and_then(|()| {
+        if let Ok(m) = &old {
+            std::fs::set_permissions(&tmp, m.permissions())?;
+        }
+        std::fs::rename(&tmp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
         warn!("apps: could not write {}", path.display());
     }
 }

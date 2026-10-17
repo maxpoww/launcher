@@ -44,6 +44,10 @@ const METER_H: f32 = 2.0;
 struct DrivePill {
     /// Its folder (what it is known by, what is ejected and opened).
     path: String,
+    /// Its name, and its size and what is free (read off the loop: a dying
+    /// card can hang `statvfs`, and the bar must not hang with it).
+    name: String,
+    space: Option<(u64, u64)>,
     glyph: &'static str,
     /// "NIKON · 12.4 GB free of 15.9 GB".
     says: String,
@@ -69,6 +73,8 @@ pub(crate) struct DrivePills {
     want_open: Option<usize>,
     last: Option<Instant>,
     frame_pending: bool,
+    /// The drives' space is being read.
+    asking: bool,
 }
 
 /// What a drive says: its name, and what is free on it.
@@ -113,24 +119,55 @@ impl App {
         for p in &mut self.drive_pills.pills {
             p.there = now.iter().any(|(path, _, _)| *path == p.path);
         }
-        for (path, name, glyph) in now {
-            let space = crate::desktop_props::space(std::path::Path::new(&path));
-            let full = space.filter(|(t, _)| *t > 0).map(|(t, f)| 1.0 - f as f32 / t as f32);
-            match self.drive_pills.pills.iter_mut().find(|p| p.path == path) {
+        for (path, name, glyph) in &now {
+            match self.drive_pills.pills.iter_mut().find(|p| p.path == *path) {
                 Some(p) => {
-                    p.says = says(&name, space, p.ejecting);
-                    p.full = full;
+                    p.name.clone_from(name);
                     p.glyph = glyph;
                 }
                 None => self.drive_pills.pills.push(DrivePill {
-                    says: says(&name, space, false),
-                    path,
+                    path: path.clone(),
+                    name: name.clone(),
                     glyph,
-                    full,
                     there: true,
                     ..Default::default()
                 }),
             }
+        }
+        self.drive_pills_apply();
+        // What is free, read off the loop (one read at a time).
+        if self.drive_pills.asking || now.is_empty() {
+            return;
+        }
+        self.drive_pills.asking = true;
+        let paths: Vec<String> = now.into_iter().map(|(p, _, _)| p).collect();
+        self.desktop_off_loop(
+            move || {
+                paths
+                    .into_iter()
+                    .map(|p| {
+                        let space = crate::desktop_props::space(std::path::Path::new(&p));
+                        (p, space)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |app, read| {
+                app.drive_pills.asking = false;
+                for (path, space) in read {
+                    if let Some(p) = app.drive_pills.pills.iter_mut().find(|p| p.path == path) {
+                        p.space = space;
+                    }
+                }
+                app.drive_pills_apply();
+            },
+        );
+    }
+
+    /// What each pill says, from what is known of it, measured.
+    fn drive_pills_apply(&mut self) {
+        for p in &mut self.drive_pills.pills {
+            p.says = says(&p.name, p.space, p.ejecting);
+            p.full = p.space.filter(|(t, _)| *t > 0).map(|(t, f)| 1.0 - f as f32 / t as f32);
         }
         let font_px = FONT_PX * self.options_scale();
         if let Some(r) = self.options_renderer.as_mut() {
@@ -172,6 +209,11 @@ impl App {
             self.drive_pills.pills.retain(|p| p.there || p.t > 0.01);
             if self.drive_pills.pills.len() != before {
                 self.drive_pills.want_open = None;
+                // (The pills after a gone one moved down a place: a hover
+                // held by number must not land a click on a neighbour.)
+                if matches!(self.options_hover, Some(PillId::Drive(_))) {
+                    self.options_hover = None;
+                }
             }
         }
         self.sync_options_input();

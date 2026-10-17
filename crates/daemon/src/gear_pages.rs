@@ -139,6 +139,20 @@ enum PView {
     Video,
 }
 
+/// The device (its kernel name: `sdb1`) mounted at `mount`, from
+/// `/proc/mounts` — at the folder as given or where it really is.
+fn device_at(mount: &str) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    let real = std::fs::canonicalize(mount).ok();
+    mounts.lines().find_map(|line| {
+        let mut f = line.split_whitespace();
+        let (dev, at) = (f.next()?, crate::desktop_send::unescape_mount(f.next()?));
+        let here = at == mount || real.as_deref().is_some_and(|r| std::path::Path::new(&at) == r);
+        let name = dev.strip_prefix("/dev/")?;
+        (here && !name.is_empty() && !name.contains('/')).then(|| name.to_owned())
+    })
+}
+
 /// What the worker polls for the gear's page `page`.
 fn sys_page_of(page: Option<PageKind>) -> Option<SysPage> {
     match page {
@@ -176,7 +190,9 @@ enum Erase {
 pub(crate) struct PagesState {
     /// What the desktop's menu asked of a plugged-in drive (by where it is
     /// mounted), waiting for the drive list to know it.
-    drive_ask: Option<(String, DriveAsk)>,
+    drive_ask: Option<(String, DriveAsk, std::time::Instant)>,
+    /// The drive the rename field is for, by its kernel name (as `kname`).
+    rename_kname: Option<String>,
     /// The act under way was asked on the desktop: its end is said in a
     /// notification, by the drive's name (the gear box may not be up).
     drive_tell: Option<String>,
@@ -210,6 +226,10 @@ pub(crate) struct PagesState {
 /// What the format view has been told so far.
 #[derive(Debug, Clone, Default)]
 struct FormatDraft {
+    /// The drive it is for, by its kernel name — never by its place in the
+    /// list, which is read again while the page is up (a stick plugged in
+    /// meanwhile moved the places: the confirm would have erased another).
+    kname: String,
     name: String,
     target: Target,
     lock: bool,
@@ -2183,9 +2203,43 @@ impl App {
     /// asks for one of the gear's own acts on it: the same pages and the
     /// same worker, so the two ways in never differ. `mount`: where the
     /// drive is mounted, which is how the desktop knows it.
+    /// A removable drive (never the system's) by its kernel name, and where
+    /// it is in the list now.
+    fn removable_drive(&self, kname: &str) -> Option<(usize, Drive)> {
+        if kname.is_empty() {
+            return None;
+        }
+        self.gear
+            .pages
+            .disk
+            .drives
+            .iter()
+            .position(|d| d.kname == kname && d.removable && !d.system)
+            .map(|i| (i, self.gear.pages.disk.drives[i].clone()))
+    }
+
     pub(crate) fn pages_drive_ask(&mut self, mount: String, ask: DriveAsk) {
+        // The DEVICE mounted there now (`sdb1`, `mmcblk0p1`) is what the ask
+        // is for — a stick pulled meanwhile and another of the same label at
+        // the same folder must not be renamed or checked in its place.
+        let Some(dev) = device_at(&mount) else {
+            warn!("gear: nothing is mounted at {mount}");
+            return;
+        };
         let format = ask == DriveAsk::Format;
-        self.gear.pages.drive_ask = Some((mount, ask));
+        let at = std::time::Instant::now();
+        self.gear.pages.drive_ask = Some((dev, ask, at));
+        // Not resolved in 10 s (the drive went): dropped, and the watch the
+        // ask added put back.
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(10));
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.gear.pages.drive_ask.as_ref().is_some_and(|(_, _, t)| *t == at) {
+                app.gear.pages.drive_ask = None;
+                let watched = sys_page_of(app.gear_page());
+                app.sys_send(SysCommand::Watch(watched));
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
         if format {
             // The gear box comes out on the drives' page at once (which
             // reads them); the Format page follows when the list is in.
@@ -2201,21 +2255,15 @@ impl App {
 
     /// Act on the waiting ask, if the drive list has its drive.
     fn pages_drive_resolve(&mut self) -> bool {
-        let Some((mount, _)) = &self.gear.pages.drive_ask else {
+        let Some((dev, _, _)) = &self.gear.pages.drive_ask else {
             return false;
         };
-        // (By where it is mounted, or where that really is.)
-        let real = std::fs::canonicalize(mount).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let Some(i) = self.gear.pages.disk.drives.iter().position(|d| {
-            d.removable
-                && d.vol
-                    .as_ref()
-                    .and_then(|v| v.mount.as_deref())
-                    .is_some_and(|m| m == mount.as_str() || m == real)
+            d.removable && !d.system && d.vol.as_ref().is_some_and(|v| v.fs_dev() == dev.as_str() || v.part == *dev)
         }) else {
             return false;
         };
-        let Some((_, ask)) = self.gear.pages.drive_ask.take() else {
+        let Some((_, ask, _)) = self.gear.pages.drive_ask.take() else {
             return false;
         };
         // (The page on screen is watched again, or none.)
@@ -2249,7 +2297,7 @@ impl App {
                     "Renaming…",
                     DriveCommand::Rename {
                         volume: v.fs_dev().to_owned(),
-                        label: fit_label(&label, &v.fstype),
+                        label: fit_label(&clean_label(&label, &v.fstype), &v.fstype),
                         mounted: v.mount.is_some(),
                     },
                 );
@@ -2291,6 +2339,16 @@ impl App {
         self.page_view(v);
         true
     }
+}
+
+/// A label as a FAT or exFAT volume can take it: without the characters
+/// those refuse (`"*/:<>?\|` and control characters), which made the
+/// disk service fail with a vague error.
+fn clean_label(name: &str, fstype: &str) -> String {
+    if !matches!(fstype, "vfat" | "exfat" | "msdos") {
+        return name.chars().filter(|c| !c.is_control()).collect();
+    }
+    name.chars().filter(|c| !c.is_control() && !"\"*/:<>?\\|".contains(*c)).collect()
 }
 
 /// `name` cut to what a file system's label can hold. A name one letter too
@@ -2338,6 +2396,13 @@ fn health_word(pct: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fat_label_loses_what_fat_refuses() {
+        assert_eq!(clean_label("My: Pics/2026?", "vfat"), "My Pics2026");
+        assert_eq!(clean_label("a\u{7}b", "ext4"), "ab");
+        assert_eq!(clean_label("Pics/2026", "ext4"), "Pics/2026");
+    }
 
     const BASE: &str = "general {\n  lock_cmd=/nix/store/x-golem-lock\n}\n\nlistener {\n  on-timeout=/nix/store/x-golem-lock\n  timeout=300\n}\n\nlistener {\n  on-resume=/nix/store/y-golem-dpms on\n  on-timeout=/nix/store/y-golem-dpms off\n  timeout=360\n}\n\nlistener {\n  on-timeout=/nix/store/z-golem-idle-suspend\n  timeout=900\n}\n";
 
@@ -2776,6 +2841,7 @@ impl App {
                 }
             }
             SysHit::ExtRename(i) => {
+                self.gear.pages.rename_kname = drive(self, i).map(|x| x.kname);
                 let label = drive(self, i)
                     .and_then(|x| x.vol)
                     .map(|v| v.label)
@@ -2799,7 +2865,7 @@ impl App {
             }
             SysHit::ExtFormat(i) => {
                 let x = drive(self, i);
-                let vol = x.and_then(|x| x.vol);
+                let vol = x.clone().and_then(|x| x.vol);
                 // Offered back the way it is now (a camera's card stays a
                 // camera's card); exFAT for anything else.
                 let target = match vol.as_ref().map(|v| v.fstype.as_str()) {
@@ -2809,6 +2875,7 @@ impl App {
                     _ => Target::Any,
                 };
                 self.gear.pages.format = FormatDraft {
+                    kname: x.as_ref().map(|x| x.kname.clone()).unwrap_or_default(),
                     name: vol.map(|v| v.label).unwrap_or_default(),
                     target,
                     ..FormatDraft::default()
@@ -2852,10 +2919,17 @@ impl App {
                 self.ask_format();
             }
             SysHit::DoFormat => {
-                let PView::Format(i) = self.gear.pages.view else {
+                if !matches!(self.gear.pages.view, PView::Format(_)) {
                     return;
-                };
-                if let Some(x) = drive(self, i) {
+                }
+                // The drive the page was opened for, found again now — and
+                // only a removable one that is not the system's.
+                let found = self.removable_drive(&self.gear.pages.format.kname.clone());
+                if found.is_none() {
+                    self.gear.pages.drive_note = Some(("It was unplugged".to_owned(), false));
+                    self.gear_changed();
+                }
+                if let Some((i, x)) = found {
                     let f = self.gear.pages.format.clone();
                     let (volumes, locked_part) = Self::ext_parts(&x);
                     self.gear.pages.format.password.clear();
@@ -2867,11 +2941,10 @@ impl App {
                             volumes,
                             locked_part,
                             name: fit_label(
-                                if f.name.trim().is_empty() {
-                                    "Untitled"
-                                } else {
-                                    f.name.trim()
-                                },
+                                &clean_label(
+                                    if f.name.trim().is_empty() { "Untitled" } else { f.name.trim() },
+                                    f.target.fstype(),
+                                ),
                                 f.target.fstype(),
                             ),
                             target: f.target,
@@ -2899,17 +2972,13 @@ impl App {
     }
 
     fn ask_format(&mut self) {
-        let PView::Format(i) = self.gear.pages.view else {
+        if !matches!(self.gear.pages.view, PView::Format(_)) {
+            return;
+        }
+        let Some((_, x)) = self.removable_drive(&self.gear.pages.format.kname.clone()) else {
             return;
         };
-        let name = self
-            .gear
-            .pages
-            .disk
-            .drives
-            .get(i)
-            .map(|x| x.name.clone())
-            .unwrap_or_default();
+        let name = x.name;
         self.gear_arm(&format!("Erase {name}? Click again"), sys(SysHit::DoFormat));
     }
 
@@ -2918,20 +2987,16 @@ impl App {
         let trimmed = text.trim().to_owned();
         match what {
             PField::FastApp => self.pages_add_fast_app(&trimmed),
-            PField::DriveName(i) => {
-                let vol = self
-                    .gear
-                    .pages
-                    .disk
-                    .drives
-                    .get(i)
-                    .and_then(|x| x.vol.clone());
+            PField::DriveName(_) => {
+                // (By its kernel name, found again: see `FormatDraft::kname`.)
+                let k = self.gear.pages.rename_kname.take().unwrap_or_default();
+                let vol = self.removable_drive(&k).and_then(|(_, x)| x.vol);
                 if let (Some(v), false) = (vol, trimmed.is_empty()) {
                     self.drive_send(
                         "Renaming…",
                         DriveCommand::Rename {
                             volume: v.fs_dev().to_owned(),
-                            label: fit_label(&trimmed, &v.fstype),
+                            label: fit_label(&clean_label(&trimmed, &v.fstype), &v.fstype),
                             mounted: v.mount.is_some(),
                         },
                     );
