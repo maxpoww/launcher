@@ -1834,8 +1834,13 @@ pub(crate) fn launch_vars() -> Vec<(&'static str, String)> {
 }
 
 fn qtct_conf(scheme: &Path, t: &Theme) -> String {
+    // (The colours' stamp: qt5ct/qt6ct reload their palette LIVE when their
+    // own folder changes, and this file must differ for that — the scheme
+    // file it points at lives elsewhere. Max, 2026-10-17: KDE Connect did
+    // not change live.)
+    let stamp = qt_scheme(t).bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
     format!(
-        "[Appearance]\ncolor_scheme_path={}\ncustom_palette=true\nicon_theme={}\nstandard_dialogs=default\nstyle=Fusion\n",
+        "[Appearance]\ncolor_scheme_path={}\ncustom_palette=true\nicon_theme={}\nstandard_dialogs=default\nstyle=Fusion\n\n[Golem]\nstamp={stamp:016x}\n",
         scheme.display(),
         if t.dark { "Golem-Dark" } else { "Golem" },
     )
@@ -2246,9 +2251,24 @@ impl crate::App {
     pub(crate) fn colors_apply(&mut self, look_changed: bool) {
         // Programs the compositor starts (keys, a terminal's children) get
         // Qt's palette route too, without a new login.
-        for (k, v) in launch_vars() {
+        let vars = launch_vars();
+        for (k, v) in &vars {
             crate::hypr::eval(&format!("hl.env('{k}', '{v}')"));
         }
+        // …and so do the apps systemd and D-Bus start (Easy Effects runs as
+        // a user service; KDE Connect's daemon is D-Bus activated) — once a
+        // dock start, off the loop.
+        static TOLD: std::sync::Once = std::sync::Once::new();
+        TOLD.call_once(|| {
+            let pairs: Vec<String> = vars.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            if pairs.is_empty() {
+                return;
+            }
+            let _ = std::thread::Builder::new().name("qt-env".into()).spawn(move || {
+                let _ = std::process::Command::new("systemctl").args(["--user", "set-environment"]).args(&pairs).status();
+                let _ = std::process::Command::new("dbus-update-activation-environment").arg("--systemd").args(&pairs).status();
+            });
+        });
         let mut picked = choice();
         if previewing() {
             picked.palette = Some(DRAFT_ID.to_owned());

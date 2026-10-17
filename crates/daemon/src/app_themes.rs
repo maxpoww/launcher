@@ -157,7 +157,21 @@ fn kde(t: &Theme) {
         keys.extend(general);
     }
     put(&path, &ini_with(&old, &sections));
-    // KDE apps reload their colours on this (KGlobalSettings::PaletteChanged).
+    // KDE apps reload their colours on these: KConfig's own notice that
+    // kdeglobals changed, naming the groups (what Kirigami's desktop style
+    // watches — KDE Connect did not change live without it), and the older
+    // KGlobalSettings palette notice.
+    let groups: Vec<String> = sections
+        .iter()
+        .map(|(name, keys)| {
+            let keys: Vec<String> = keys.iter().map(|(k, _)| format!("b'{k}'")).collect();
+            format!("'{name}': [{}]", keys.join(", "))
+        })
+        .collect();
+    let _ = std::process::Command::new("gdbus")
+        .args(["emit", "--session", "--object-path", "/kdeglobals", "--signal", "org.kde.kconfig.notify.ConfigChanged"])
+        .arg(format!("{{{}}}", groups.join(", ")))
+        .status();
     let _ = std::process::Command::new("dbus-send")
         .args(["--session", "--type=signal", "/KGlobalSettings", "org.kde.KGlobalSettings.notifyChange", "int32:0", "int32:0"])
         .status();
