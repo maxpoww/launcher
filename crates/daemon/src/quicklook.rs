@@ -87,6 +87,8 @@ const SONG: (f32, f32) = (720.0, 280.0);
 /// How much taller a song's frame grows while it is cut: the cutting line
 /// goes UNDER the song, not over its cover.
 const TRIM_ROOM: f32 = 108.0;
+/// How much of the room a small moving picture grows to.
+const MOVING_SHARE: f32 = 0.6;
 const WAVE: usize = 120;
 /// How far the wheel goes for a page of a PDF.
 const WHEEL_PAGE: f32 = 60.0;
@@ -1715,9 +1717,23 @@ impl App {
         }
         let (w, h) = match self.peek_shown().map(|(_, p)| &p.body) {
             Some(Body::Picture(p)) => {
-                // (Never bigger than the picture itself.)
                 let (pw, ph) = (p.w as f32 / scale, p.h as f32 / scale);
-                let k = (mw / pw).min(mh / ph).min(1.0);
+                let fit = (mw / pw).min(mh / ph);
+                // A still: never bigger than the picture itself. What MOVES
+                // (a GIF, a video) is seen from further away: a small one
+                // grows to a good part of the screen, as a player shows it
+                // (Max, 2026-10-17: "the gifs show pretty small").
+                let moving = self
+                    .peek_shown()
+                    .is_some_and(|(_, p)| p.anim.is_some() || p.video.is_some());
+                let k = if moving {
+                    (MOVING_SHARE * mw / pw)
+                        .min(MOVING_SHARE * mh / ph)
+                        .max(1.0)
+                        .min(fit)
+                } else {
+                    fit.min(1.0)
+                };
                 ((pw * k).max(380.0), ph * k)
             }
             Some(Body::Song { .. }) => (SONG.0.min(mw), SONG.1 + self.song_room()),
