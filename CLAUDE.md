@@ -851,7 +851,27 @@ The big daemon files are cohesive but long — go straight to the function:
   window: the desktop's cell with TWO lines of name (`two_lines`), row by row (`Layout`: `cell`,
   `index_at`, `in_view`, `reveal`), scrolling THE CARD'S WAY (Max, 2026-10-14; `filer_scroll` / `filer_fling`, the card's own numbers: a step ×2.4, fingers followed step for step, a wheel's notch eased at 24, a fast scroll let go of gliding on at 4.5 for its speed × 0.32), only what is
   on screen laid out and holding a texture layer (`filer_sync_icons`; thumbnails ride the Files
-  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). Head: the way here. BACK AND FORWARD ARE ON THE WINDOW'S BAR (Max, 2026-10-14: "como las webapps"): each window is TAGGED `golem-files-<id>` (xdg-toplevel-tag, `Filer::tags`) and its history is published to `$XDG_RUNTIME_DIR/waverunner-files-nav` (`filer_note_nav`, the webapps' `seam/nav` format: `<tag> <back 0|1> <fwd 0|1>`); waveview ≥ 2.18 draws the arrows only while there is somewhere to go and a click sends the window Alt+←/→. Keys and the mouse's side buttons as ever. `..` is the FIRST PLACE, a folder like the others right above Home (`UP`, `with_up`: the folder this one is in, per window; a click goes up leaving this folder selected, a drop on it takes things OUT of the folder; NONE at the root; in a window too narrow for the places it stands in the head, `Spot::Up`)
+  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). THE PILLS (Max, 2026-10-17, the
+  approved mockup https://claude.ai/artifact/Ei5kCq1PFvnH1DowocvYzj): the field is the WHOLE
+  window and four pills float over it (one `GridContent` drawn after the field; `pill()` = a soft
+  shadow of stacked rings, the places' colour, a 6 % white rim): the PLACES a tall pill at the left
+  (`places_box`: the rail wide, as tall as its places, centred in the field's height, scrolling
+  inside when the window is short), opening wider OVER the field with their names on hover
+  (`side_follow`, `side_t`); the PATH a pill centred at the top (`hits.path`: dim steps, the folder
+  in ink) out of which SEARCH and LIST slide on hover, the list a beat later (`tools_open/t`,
+  `tool_boxes`; `Spot::Find`/`View`) — search turns the path into the FIELD ("Search in
+  <folder>", Escape or a click away while empty puts it back), the lit one is SUNKEN; the SCROLL a
+  44×140 pill at the right travelling from `BAR_TOP` to the bottom by the scroll fraction, held to
+  drag (`Win::bar_hold`, `Spot::Bar`), faint and inert when nothing scrolls; the MODE a circle
+  above the places (`mode_boxes`, `Spot::Mode`): on hover it says "Files" and the other circle
+  comes out, a click on that one swaps them — MEDIA shows only pictures and videos (`Win::media`,
+  `is_media`, in `show_found`). Symbols are CARVED: the pill's colour pressed in (`carve`, k in the
+  mockup's sRGB alpha; icons tinted with `ring = -1.3`); the place shown is a sunken square. The
+  grid stands between `FIELD_AIR` (52, never narrower than the rail) on each side, the same air
+  both sides; the list's rows run the window's width with a ZEBRA (`Palette::zebra`) and their
+  words `LIST_AIR` in. A name under a pill is left out (`covered`: the renderer paints every grid's
+  words in one late pass). Rig: `files mode media|files`, `files tools|side|modes open|close`,
+  `files where path|bar|mode <n>`. BACK AND FORWARD ARE ON THE WINDOW'S BAR (Max, 2026-10-14: "como las webapps"): each window is TAGGED `golem-files-<id>` (xdg-toplevel-tag, `Filer::tags`) and its history is published to `$XDG_RUNTIME_DIR/waverunner-files-nav` (`filer_note_nav`, the webapps' `seam/nav` format: `<tag> <back 0|1> <fwd 0|1>`); waveview ≥ 2.18 draws the arrows only while there is somewhere to go and a click sends the window Alt+←/→. Keys and the mouse's side buttons as ever. `..` is the FIRST PLACE, a folder like the others right above Home (`UP`, `with_up`: the folder this one is in, per window; a click goes up leaving this folder selected, a drop on it takes things OUT of the folder; NONE at the root; in a window too narrow for the places it stands in the head, `Spot::Up`)
   (`crumbs`: from Home, a stick or a phone, else `/`; the first steps give way in a narrow
   window). Side: `places` (Home, the owner's folders under their names on disk from
   `user-dirs.dirs`, `~/Phones`, what is plugged in — `Desktop::volumes`, refreshed from
@@ -933,12 +953,12 @@ The big daemon files are cohesive but long — go straight to the function:
   folder (`EDGE_ZONE`, `filer_edge_tick`). ARCHIVES: "Extract here" on one, "Compress" on any
   selection = File Roller (`file-roller --extract-here` / `--add`, `Action::Extract|Compress`,
   `is_archive`). `menu_rows` takes an `Asked`. THE LIST (`settings.files_list`, one
-  choice for every window; the head's right button or Ctrl+1 / Ctrl+2, `filer_set_list`): a
+  choice for every window; the path's list pill or Ctrl+1 / Ctrl+2, `filer_set_list`): a
   `Layout` of ONE column whose cell is a row (`Layout::of(…, list)`, `LIST_ROW`), so the pointer,
   the keys, the band, drags and make-room know rows with no code of their own (`slot_at` gives
   how far DOWN a row); only the drawing differs (`icon_in`, `columns`: name · size · date, the
-  last two only where there is room; `Win::meta`, read with the listing). Its strip names the
-  columns; a click orders by one (`Spot::Col`, `Win::sort`, `sorted`: size/date in THIS window,
+  last two only where there is room; `Win::meta`, read with the listing). It has no strip of
+  column names since the pills (2026-10-17); `files sort` orders by one (`Win::sort`, `sorted`: size/date in THIS window,
   folders first; Name = the folder's own order) — while ordered by size or date no room is made
   for a drag. SEARCH (JUST TYPING — the first letter brings the field out, the clipboard box's way; also the
   magnifier, or Ctrl+F): a field at the head's right, the folder showing
