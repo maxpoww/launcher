@@ -256,6 +256,17 @@ fn rounded(chain: Vec<u8>) -> Vec<u8> {
         return chain;
     }
     let mut base = chain[..n * n * 4].to_vec();
+    if !round_corners(&mut base) {
+        return chain;
+    }
+    crate::apps::with_mips(base)
+}
+
+/// Round the corners of what stands on the square `base` (premultiplied,
+/// `ICON_SIZE`²) in place — also each frame of a tile that plays, so it
+/// keeps its still's shape. False when nothing is on it.
+pub(crate) fn round_corners(base: &mut [u8]) -> bool {
+    let n = ICON_SIZE as usize;
     // What is on the square: where anything is not clear.
     let (mut x0, mut y0, mut x1, mut y1) = (n, n, 0, 0);
     for y in 0..n {
@@ -269,7 +280,7 @@ fn rounded(chain: Vec<u8>) -> Vec<u8> {
         }
     }
     if x1 <= x0 + 8 || y1 <= y0 + 8 {
-        return chain;
+        return false;
     }
     let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
     let r = (ICON_SIZE as f32 * CORNER).min(w.min(h) / 2.0);
@@ -292,7 +303,7 @@ fn rounded(chain: Vec<u8>) -> Vec<u8> {
             }
         }
     }
-    crate::apps::with_mips(base)
+    true
 }
 
 fn thumbnail_square(path: &str) -> Option<Vec<u8>> {

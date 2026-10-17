@@ -237,6 +237,8 @@ impl App {
         *shown = at;
         let (win, key) = (p.win, p.key.clone());
         if let Some(frame) = frame {
+            let mut frame = frame;
+            crate::thumbs::round_corners(&mut frame);
             let chain = crate::apps::with_mips(frame);
             if !self.filer_tile_layer(win, &key, &chain) {
                 self.filer_live_stop();
@@ -257,6 +259,8 @@ impl App {
             return self.filer_live_stop();
         }
         let (win, key) = (p.win, p.key.clone());
+        let mut frame = frame;
+        crate::thumbs::round_corners(&mut frame);
         let chain = crate::apps::with_mips(frame);
         if !self.filer_tile_layer(win, &key, &chain) {
             // (Its layer was given to another picture: scrolled away.)
