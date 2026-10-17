@@ -10,6 +10,7 @@
 
 mod action_track;
 mod animation;
+mod app_themes;
 mod applier;
 mod apps;
 mod battery;

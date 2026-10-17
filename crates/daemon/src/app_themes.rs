@@ -1,0 +1,456 @@
+//! THE OTHER APPS' THEMES (Max, 2026-10-17: "on WS 2 i have a bunch of apps
+//! that wont take our theme… cover as many approaches as possible").
+//!
+//! GTK and Qt apps take the palette from the files `palette.rs` writes. The
+//! rest each read colours in a place of their own; each route is one writer
+//! here, all from the APPS' theme (`palette::for_apps`: the Apps slider and
+//! its Dark/Light):
+//!
+//! * KDE / Kirigami (Easy Effects, KDE Connect, every KDE app): a KDE colour
+//!   scheme in `kdeglobals` (+ `color-schemes/Golem.colors`), and the D-Bus
+//!   signal KDE apps reload on.
+//! * VS Code and its kin (Code, VSCodium, Code - OSS): `workbench.color
+//!   Customizations` in their `settings.json` (they reload it live).
+//! * Inkscape: it pins a GTK theme of its own in `preferences.xml` — set to
+//!   the system's (Golem's) and its dark flag (on its next start).
+//! * JetBrains IDEs and Android Studio (Swing): a theme plugin of our own
+//!   (`golem-theme.jar`: plugin.xml + a `.theme.json` + an editor scheme),
+//!   chosen in `laf.xml` — on the IDE's next start.
+//!
+//! Every writer leaves an app alone when it is not installed (its config
+//! folder is not there), and never writes a file it cannot read whole.
+
+use std::path::{Path, PathBuf};
+
+use tracing::{info, warn};
+
+use crate::palette::{hex, Theme};
+
+type Rgb = [u8; 3];
+
+/// Dress every app that has a route of its own.
+pub(crate) fn write(t: &Theme) {
+    kde(t);
+    vscode(t);
+    inkscape(t);
+    jetbrains(t);
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+fn config() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".config"))
+}
+
+fn data() -> PathBuf {
+    std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".local/share"))
+}
+
+/// Written whole or not at all (a tmp file renamed over it).
+fn put(path: &Path, text: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("golem-tmp");
+    if std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
+        warn!("apps: could not write {}", path.display());
+    }
+}
+
+fn mix(a: Rgb, b: Rgb, k: f32) -> Rgb {
+    std::array::from_fn(|i| (f32::from(a[i]) + (f32::from(b[i]) - f32::from(a[i])) * k).round() as u8)
+}
+
+// ------------------------------------------------------------------ KDE
+
+fn rgb(c: Rgb) -> String {
+    format!("{},{},{}", c[0], c[1], c[2])
+}
+
+/// The KDE colour scheme's sections.
+fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
+    let c = &t.c;
+    let set = |bg: Rgb, alt: Rgb, fg: Rgb| {
+        vec![
+            ("BackgroundNormal".to_owned(), rgb(bg)),
+            ("BackgroundAlternate".to_owned(), rgb(alt)),
+            ("ForegroundNormal".to_owned(), rgb(fg)),
+            ("ForegroundInactive".to_owned(), rgb(t.ink_dim())),
+            ("ForegroundActive".to_owned(), rgb(t.accent())),
+            ("ForegroundLink".to_owned(), rgb(c[0xD])),
+            ("ForegroundVisited".to_owned(), rgb(c[0xE])),
+            ("ForegroundNegative".to_owned(), rgb(c[0x8])),
+            ("ForegroundNeutral".to_owned(), rgb(c[0xA])),
+            ("ForegroundPositive".to_owned(), rgb(c[0xB])),
+            ("DecorationFocus".to_owned(), rgb(t.accent())),
+            ("DecorationHover".to_owned(), rgb(t.accent())),
+        ]
+    };
+    let ink = t.ink();
+    vec![
+        ("Colors:Window".into(), set(c[1], c[2], ink)),
+        ("Colors:View".into(), set(c[0], c[1], ink)),
+        ("Colors:Button".into(), set(c[2], c[3], ink)),
+        ("Colors:Header".into(), set(c[1], c[2], ink)),
+        ("Colors:Tooltip".into(), set(c[2], c[3], ink)),
+        ("Colors:Complementary".into(), set(c[0], c[1], ink)),
+        ("Colors:Selection".into(), set(t.accent(), mix(t.accent(), c[0], 0.3), t.accent_ink())),
+    ]
+}
+
+/// An INI file with these sections put in place of their old selves (the
+/// rest of the file kept as it was).
+fn ini_with(old: &str, ours: &[(String, Vec<(String, String)>)]) -> String {
+    let mut out = String::new();
+    let mut skip = false;
+    for line in old.lines() {
+        let l = line.trim();
+        if l.starts_with('[') && l.ends_with(']') {
+            skip = ours.iter().any(|(name, _)| l[1..l.len() - 1] == *name);
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for (name, keys) in ours {
+        out.push_str(&format!("\n[{name}]\n"));
+        for (k, v) in keys {
+            out.push_str(&format!("{k}={v}\n"));
+        }
+    }
+    out
+}
+
+fn kde(t: &Theme) {
+    let mut sections = kde_scheme(t);
+    // The scheme on its own, by name (what KDE's settings would list).
+    let mut file = vec![("General".to_owned(), vec![("Name".to_owned(), "Golem".to_owned()), ("ColorScheme".to_owned(), "Golem".to_owned())])];
+    file.extend(sections.iter().cloned());
+    put(&data().join("color-schemes/Golem.colors"), &ini_with("", &file));
+    // …and in use: kdeglobals (its other settings kept).
+    sections.push(("General".into(), vec![("ColorScheme".to_owned(), "Golem".to_owned())]));
+    let path = config().join("kdeglobals");
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    // (General's other keys kept: only ColorScheme is ours there.)
+    let general: Vec<(String, String)> = old
+        .split("\n[")
+        .find(|s| s.trim_start_matches('[').starts_with("General]"))
+        .map(|s| {
+            s.lines()
+                .skip(1)
+                .filter_map(|l| l.split_once('='))
+                .filter(|(k, _)| *k != "ColorScheme")
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some((_, keys)) = sections.iter_mut().find(|(n, _)| n == "General") {
+        keys.extend(general);
+    }
+    put(&path, &ini_with(&old, &sections));
+    // KDE apps reload their colours on this (KGlobalSettings::PaletteChanged).
+    let _ = std::process::Command::new("dbus-send")
+        .args(["--session", "--type=signal", "/KGlobalSettings", "org.kde.KGlobalSettings.notifyChange", "int32:0", "int32:0"])
+        .status();
+}
+
+// -------------------------------------------------------------- VS Code
+
+fn vscode(t: &Theme) {
+    let c = &t.c;
+    let h = |x: Rgb| format!("#{}", hex(x));
+    let ink = h(t.ink());
+    let pairs: Vec<(&str, String)> = vec![
+        ("foreground", ink.clone()),
+        ("focusBorder", h(t.accent())),
+        ("editor.background", h(c[0])),
+        ("editor.foreground", ink.clone()),
+        ("editorGutter.background", h(c[0])),
+        ("editor.lineHighlightBackground", h(c[1])),
+        ("editor.selectionBackground", h(mix(t.accent(), c[0], 0.65))),
+        ("editorCursor.foreground", h(t.accent())),
+        ("editorGroupHeader.tabsBackground", h(c[1])),
+        ("tab.activeBackground", h(c[0])),
+        ("tab.inactiveBackground", h(c[1])),
+        ("tab.activeBorderTop", h(t.accent())),
+        ("sideBar.background", h(c[1])),
+        ("sideBarSectionHeader.background", h(c[1])),
+        ("activityBar.background", h(c[1])),
+        ("activityBar.foreground", ink.clone()),
+        ("activityBarBadge.background", h(t.accent())),
+        ("activityBarBadge.foreground", h(t.accent_ink())),
+        ("titleBar.activeBackground", h(c[1])),
+        ("titleBar.inactiveBackground", h(c[1])),
+        ("statusBar.background", h(c[1])),
+        ("statusBar.foreground", ink.clone()),
+        ("panel.background", h(c[0])),
+        ("terminal.background", h(c[0])),
+        ("terminal.foreground", ink.clone()),
+        ("input.background", h(c[2])),
+        ("dropdown.background", h(c[2])),
+        ("button.background", h(t.accent())),
+        ("button.foreground", h(t.accent_ink())),
+        ("list.activeSelectionBackground", h(c[2])),
+        ("list.hoverBackground", h(c[1])),
+        ("menu.background", h(c[1])),
+        ("progressBar.background", h(t.accent())),
+        ("textLink.foreground", h(t.accent())),
+        ("badge.background", h(t.accent())),
+        ("badge.foreground", h(t.accent_ink())),
+    ];
+    for app in ["Code", "VSCodium", "Code - OSS"] {
+        let dir = config().join(app).join("User");
+        if !dir.is_dir() {
+            continue;
+        }
+        let path = dir.join("settings.json");
+        let old = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
+        // (A settings file with comments is not JSON: left as it is.)
+        let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(if old.trim().is_empty() { "{}" } else { &old }) else {
+            warn!("apps: {} is not plain JSON — its colours left alone", path.display());
+            continue;
+        };
+        let colours: serde_json::Map<String, serde_json::Value> =
+            pairs.iter().map(|(k, v)| ((*k).to_owned(), serde_json::Value::String(v.clone()))).collect();
+        map.insert("workbench.colorCustomizations".into(), serde_json::Value::Object(colours));
+        let base = if t.dark { "Default Dark Modern" } else { "Default Light Modern" };
+        map.insert("workbench.colorTheme".into(), serde_json::Value::String(base.into()));
+        if let Ok(text) = serde_json::to_string_pretty(&serde_json::Value::Object(map)) {
+            put(&path, &(text + "\n"));
+        }
+    }
+}
+
+// -------------------------------------------------------------- Inkscape
+
+fn inkscape(t: &Theme) {
+    let path = config().join("inkscape/preferences.xml");
+    let Ok(old) = std::fs::read_to_string(&path) else { return };
+    // The system's GTK theme (Golem-A|B, the palette's), and the dark flag.
+    let gtk = std::process::Command::new("dconf")
+        .args(["read", "/org/gnome/desktop/interface/gtk-theme"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
+        .filter(|s| !s.is_empty());
+    let mut text = old.clone();
+    if let Some(gtk) = gtk {
+        text = set_attr(&text, "gtkTheme", &gtk);
+    }
+    text = set_attr(&text, "darkTheme", if t.dark { "1" } else { "0" });
+    if text != old {
+        put(&path, &text);
+    }
+}
+
+/// `name="…"` set to `value` wherever it is.
+fn set_attr(xml: &str, name: &str, value: &str) -> String {
+    let key = format!("{name}=\"");
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(i) = rest.find(&key) {
+        // (A whole attribute name: what comes before is a space.)
+        let whole = i == 0 || rest.as_bytes()[i - 1].is_ascii_whitespace();
+        out.push_str(&rest[..i + key.len()]);
+        rest = &rest[i + key.len()..];
+        if whole {
+            if let Some(end) = rest.find('"') {
+                out.push_str(value);
+                rest = &rest[end..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+// ------------------------------------------------------------ JetBrains
+
+fn jetbrains(t: &Theme) {
+    // Each IDE's settings folder, and where its plugins go.
+    let mut ides: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (vendor, conf) in [("JetBrains", config().join("JetBrains")), ("Google", config().join("Google"))] {
+        let Ok(list) = std::fs::read_dir(&conf) else { continue };
+        for e in list.flatten() {
+            let name = e.file_name();
+            if e.path().join("options").is_dir() {
+                ides.push((e.path(), data().join(vendor).join(&name)));
+            }
+        }
+    }
+    if ides.is_empty() {
+        return;
+    }
+    let jar = theme_jar(t);
+    for (conf, plugins) in ides {
+        put_bytes(&plugins.join("golem-theme/lib/golem-theme.jar"), &jar);
+        let laf = conf.join("options/laf.xml");
+        put(
+            &laf,
+            "<application>\n  <component name=\"LafManager\" autodetect=\"false\">\n    <laf class-name=\"com.intellij.ide.ui.laf.UIThemeBasedLookAndFeelInfo\" themeId=\"golem-theme\" />\n  </component>\n</application>\n",
+        );
+        info!("apps: Golem's theme for {}", conf.display());
+    }
+}
+
+fn put_bytes(path: &Path, bytes: &[u8]) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("golem-tmp");
+    if std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
+        warn!("apps: could not write {}", path.display());
+    }
+}
+
+/// The plugin: its declaration, the UI theme, and an editor scheme.
+fn theme_jar(t: &Theme) -> Vec<u8> {
+    let c = &t.c;
+    let h = |x: Rgb| format!("#{}", hex(x));
+    let plugin = r#"<idea-plugin>
+  <id>org.golem.theme</id>
+  <name>Golem</name>
+  <version>1</version>
+  <vendor>Golem</vendor>
+  <description>Golem's palette, written by the dock.</description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <themeProvider id="golem-theme" path="/golem.theme.json"/>
+  </extensions>
+</idea-plugin>
+"#;
+    let theme = serde_json::json!({
+        "name": "Golem",
+        "dark": t.dark,
+        "author": "Golem",
+        "parentTheme": if t.dark { "Darcula" } else { "IntelliJ" },
+        "editorScheme": "/golem.icls",
+        "ui": {
+            "*": {
+                "background": h(c[1]),
+                "foreground": h(t.ink()),
+                "infoForeground": h(t.ink_dim()),
+                "selectionBackground": h(t.accent()),
+                "selectionForeground": h(t.accent_ink()),
+                "selectionInactiveBackground": h(c[2]),
+                "borderColor": h(c[2]),
+                "separatorColor": h(c[2]),
+                "focusColor": h(t.accent()),
+                "hoverBackground": h(c[2]),
+            },
+            "MainToolbar": { "background": h(c[1]) },
+            "ToolWindow.Header.background": h(c[1]),
+            "Editor.background": h(c[0]),
+            "EditorTabs.background": h(c[1]),
+            "EditorTabs.underlineColor": h(t.accent()),
+            "Button.default.startBackground": h(t.accent()),
+            "Button.default.endBackground": h(t.accent()),
+            "Button.default.foreground": h(t.accent_ink()),
+            "Link.activeForeground": h(t.accent()),
+            "ProgressBar.progressColor": h(t.accent()),
+        }
+    });
+    let hx = |x: Rgb| hex(x);
+    let icls = format!(
+        r#"<scheme name="Golem" version="142" parent_scheme="{parent}">
+  <colors>
+    <option name="CARET_COLOR" value="{acc}"/>
+    <option name="CARET_ROW_COLOR" value="{row}"/>
+    <option name="GUTTER_BACKGROUND" value="{bg}"/>
+    <option name="SELECTION_BACKGROUND" value="{sel}"/>
+  </colors>
+  <attributes>
+    <option name="TEXT">
+      <value>
+        <option name="FOREGROUND" value="{fg}"/>
+        <option name="BACKGROUND" value="{bg}"/>
+      </value>
+    </option>
+  </attributes>
+</scheme>
+"#,
+        parent = if t.dark { "Darcula" } else { "Default" },
+        acc = hx(t.accent()),
+        row = hx(c[1]),
+        bg = hx(c[0]),
+        sel = hx(mix(t.accent(), c[0], 0.65)),
+        fg = hx(t.ink()),
+    );
+    zip_stored(&[
+        ("META-INF/plugin.xml", plugin.as_bytes()),
+        ("golem.theme.json", serde_json::to_string_pretty(&theme).unwrap_or_default().as_bytes()),
+        ("golem.icls", icls.as_bytes()),
+    ])
+}
+
+/// A zip (a jar) of these files, stored without compression.
+fn zip_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in files {
+        let crc = crc32fast::hash(data);
+        let at = out.len() as u32;
+        let (n, len) = (name.len() as u16, data.len() as u32);
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0]); // version, flags, method, time, date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0]);
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&len.to_le_bytes());
+        central.extend_from_slice(&len.to_le_bytes());
+        central.extend_from_slice(&n.to_le_bytes());
+        central.extend_from_slice(&[0; 12]); // extra, comment, disk, attrs
+        central.extend_from_slice(&at.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let (start, size) = (out.len() as u32, central.len() as u32);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kde_scheme_replaces_only_its_own_sections() {
+        let old = "[General]\nfont=x\n\n[Colors:View]\nBackgroundNormal=1,2,3\n\n[KDE]\nSingleClick=false\n";
+        let ours = vec![("Colors:View".to_owned(), vec![("BackgroundNormal".to_owned(), "9,9,9".to_owned())])];
+        let out = ini_with(old, &ours);
+        assert!(out.contains("font=x") && out.contains("SingleClick=false"));
+        assert!(out.contains("BackgroundNormal=9,9,9") && !out.contains("1,2,3"));
+    }
+
+    #[test]
+    fn inkscape_takes_the_systems_theme() {
+        let xml = r#"<group id="theme" gtkTheme="Adwaita" darkTheme="1" mygtkTheme="keep"/>"#;
+        let out = set_attr(&set_attr(xml, "gtkTheme", "Golem-A"), "darkTheme", "0");
+        assert_eq!(out, r#"<group id="theme" gtkTheme="Golem-A" darkTheme="0" mygtkTheme="keep"/>"#);
+    }
+
+    #[test]
+    fn the_plugin_is_a_jar_with_its_files() {
+        let z = zip_stored(&[("META-INF/plugin.xml", b"<idea-plugin/>"), ("a.json", b"{}")]);
+        assert_eq!(&z[..4], b"PK\x03\x04");
+        let s = String::from_utf8_lossy(&z);
+        assert!(s.contains("META-INF/plugin.xml") && s.contains("<idea-plugin/>"));
+        assert_eq!(&z[z.len() - 22..z.len() - 18], b"PK\x05\x06");
+    }
+}

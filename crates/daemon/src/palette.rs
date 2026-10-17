@@ -949,6 +949,7 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
             write_shared(&theme_dir(), &theme);
         } else {
             write_all(&theme_dir(), &theme);
+            crate::app_themes::write(&apps);
             poke(&apps, look_changed);
         }
         // (The apps' icons once the slider rests: a drag is many changes.)

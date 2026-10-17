@@ -2632,6 +2632,7 @@ dependencies = [
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
+ "crc32fast",
  "freedesktop-icons",
  "futures-util",
  "glyphon",
