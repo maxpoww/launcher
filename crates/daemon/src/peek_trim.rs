@@ -4,7 +4,10 @@
 //! its end; a video's sound can be taken away. Saved WITHOUT re-encoding
 //! (`ffmpeg -c copy`): quick on any machine, the cut falling on the nearest
 //! keyframe before the start (as Android's does). Save writes it over (the
-//! original kept in the versions folder), Save copy beside it.
+//! original kept in the versions folder), Save copy beside it. A song can
+//! FADE in and out (its sound alone is made again for that — a song is
+//! quick to encode). A video's moment is kept as a PHOTO from the camera on
+//! its bar (`peek_snap`).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -21,6 +24,9 @@ use crate::App;
 
 /// The shortest a cut may leave, in seconds.
 const SHORTEST: f32 = 1.0;
+/// A fade's length, in seconds (a song a third of it at most).
+const FADE_IN: f32 = 2.0;
+const FADE_OUT: f32 = 3.0;
 
 pub(crate) struct TrimEdit {
     tag: u64,
@@ -30,6 +36,8 @@ pub(crate) struct TrimEdit {
     a: f32,
     b: f32,
     mute: bool,
+    /// A song fades in and out.
+    fade: bool,
     /// The handle in hand (0 the start, 1 the end).
     grab: Option<usize>,
     armed: bool,
@@ -38,20 +46,21 @@ pub(crate) struct TrimEdit {
 
 impl TrimEdit {
     fn changed(&self) -> bool {
-        self.a > 0.05 || self.b < self.secs - 0.05 || self.mute
+        self.a > 0.05 || self.b < self.secs - 0.05 || self.mute || self.fade
     }
 }
 
-/// The trim's parts in a frame `r`: the line, and the sound switch.
+/// The trim's parts in a frame `r`: the line, and the switch (a video's
+/// sound, a song's fades).
 pub(crate) struct TrimParts {
     pub strip: Rect,
     pub mute: Rect,
 }
 
-pub(crate) fn trim_parts(r: Rect) -> TrimParts {
+pub(crate) fn trim_parts(r: Rect, video: bool) -> TrimParts {
     let w = (r.w - 48.0).max(120.0);
     let strip = Rect::new(r.x + 24.0, r.y + r.h - 16.0 - 30.0 - 46.0, w, 40.0);
-    let mute_w = tr("Take the sound away").chars().count() as f32 * 12.0 * 0.56 + 26.0;
+    let mute_w = switch_word(video).chars().count() as f32 * 12.0 * 0.56 + 26.0;
     let mute = Rect::new(
         r.x + r.w - 24.0 - mute_w,
         r.y + r.h - 16.0 - 28.0,
@@ -61,13 +70,47 @@ pub(crate) fn trim_parts(r: Rect) -> TrimParts {
     TrimParts { strip, mute }
 }
 
+/// What the switch says.
+fn switch_word(video: bool) -> &'static str {
+    if video {
+        tr("Take the sound away")
+    } else {
+        tr("Fade in and out")
+    }
+}
+
+/// The encoder's settings for a sound made again, by the file's ending (as
+/// good as what is usual for it; else ffmpeg's own choice).
+fn audio_quality(ext: &str) -> &'static [&'static str] {
+    match ext.to_ascii_lowercase().as_str() {
+        ".mp3" => &["-q:a", "2"],
+        ".m4a" | ".aac" | ".mp4" => &["-b:a", "192k"],
+        ".ogg" | ".oga" => &["-q:a", "6"],
+        ".opus" => &["-b:a", "160k"],
+        _ => &[],
+    }
+}
+
+/// The fades for a cut `len` seconds long.
+fn fades(len: f32) -> String {
+    let fin = FADE_IN.min(len / 3.0);
+    let fout = FADE_OUT.min(len / 3.0);
+    format!(
+        "afade=t=in:st=0:d={fin:.3},afade=t=out:st={:.3}:d={fout:.3}",
+        (len - fout).max(0.0)
+    )
+}
+
 /// Cut `path` to `a`..`b` seconds (no re-encoding), its sound taken away if
-/// `mute`; over it (its original kept) or beside it.
+/// `mute` or faded in and out if `fade` (only the sound made again); over it
+/// (its original kept) or beside it.
+#[allow(clippy::too_many_arguments)]
 fn save(
     path: &Path,
     a: f32,
     b: f32,
     mute: bool,
+    fade: bool,
     how: SaveAs,
     word: &str,
 ) -> anyhow::Result<PathBuf> {
@@ -98,8 +141,14 @@ fn save(
         &format!("{b:.3}"),
         "-i",
     ])
-    .arg(path)
-    .args(["-map", "0", "-c", "copy"]);
+    .arg(path);
+    if fade && !mute {
+        // (A cover picture rides along as it is.)
+        cmd.args(["-map", "0", "-c:v", "copy", "-af", &fades(b - a)])
+            .args(audio_quality(&ext));
+    } else {
+        cmd.args(["-map", "0", "-c", "copy"]);
+    }
     if mute {
         cmd.arg("-an");
     }
@@ -144,7 +193,111 @@ fn save(
     Ok(to)
 }
 
+/// Keep the frame `at` seconds into the video `path` as a JPEG beside it.
+fn snap(path: &Path, at: f32, word: &str) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    let ffmpeg = crate::thumbs::ffmpeg_tool().context("ffmpeg is not here")?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = match name.rsplit_once('.') {
+        Some((s, _)) if !s.is_empty() => s.to_owned(),
+        _ => name.clone(),
+    };
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // ("clip (frame 1-05).jpg": no colon in a file's name.)
+    let when = clock(at).replace(':', "-");
+    let to = (1..)
+        .map(|n| {
+            dir.join(if n == 1 {
+                format!("{stem} ({word} {when}).jpg")
+            } else {
+                format!("{stem} ({word} {when} {n}).jpg")
+            })
+        })
+        .find(|p| !p.exists())
+        .context("no free name")?;
+    let tmp = dir.join(format!(
+        ".{stem}.{}.golem-tmp.jpg",
+        crate::peek_edit::nonce()
+    ));
+    let out = crate::peek_edit::dies_with_us(std::process::Command::new(ffmpeg))
+        .args(["-v", "error", "-y", "-ss", &format!("{at:.3}"), "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-q:v", "2"])
+        .arg(&tmp)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("running ffmpeg")?;
+    if !out.status.success() || !tmp.is_file() {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!(
+            "ffmpeg: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("failed")
+        );
+    }
+    std::fs::rename(&tmp, &to).context("writing")?;
+    Ok(to)
+}
+
 impl App {
+    /// The video's moment on screen, kept as a photo beside it (the camera
+    /// on its bar).
+    pub(crate) fn peek_snap(&mut self) {
+        let Some(secs) = self.peek_shown().and_then(|(_, p)| p.video).map(|(s, _)| s) else {
+            return;
+        };
+        let Some(tx) = self.peek_edit_channel() else {
+            return;
+        };
+        let Some(up) = self.peek.up.as_mut() else {
+            return;
+        };
+        // (Playing, it stops there: the photo is of what is seen.)
+        let at = up.song_at().clamp(0.0, (secs - 0.05).max(0.0));
+        up.stop();
+        up.at = at;
+        let path = up.path.clone();
+        let word = tr("frame").to_owned();
+        let spawned = std::thread::Builder::new()
+            .name("quick-look-snap".into())
+            .spawn(move || {
+                let result = snap(&path, at, &word).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(crate::peek_editor::Msg::Snapped(result));
+            });
+        if let Err(e) = spawned {
+            warn!("quick look: no snap thread: {e}");
+        }
+        self.request_desktop_top_draw();
+    }
+
+    /// A photo of a video's moment came back.
+    pub(crate) fn snapped(&mut self, result: Result<PathBuf, String>) {
+        let word = match result {
+            Ok(to) => fill(
+                tr("Photo saved: {name}"),
+                &[(
+                    "name",
+                    &to.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )],
+            ),
+            Err(e) => {
+                warn!("quick look: no photo: {e}");
+                fill(tr("Could not save: {why}"), &[("why", &e)])
+            }
+        };
+        if let Some(up) = self.peek.up.as_mut() {
+            up.notice = Some((word, Instant::now()));
+        }
+        self.request_desktop_top_draw();
+    }
+
     /// Whether what is up can be cut: a video or a song.
     pub(crate) fn trim_able(&self) -> Option<(f32, bool)> {
         let (_, p) = self.peek_shown()?;
@@ -175,6 +328,7 @@ impl App {
             a: 0.0,
             b: secs,
             mute: false,
+            fade: false,
             grab: None,
             armed: false,
             saving: false,
@@ -219,12 +373,13 @@ impl App {
             return self.trim_end();
         }
         t.saving = true;
-        let (a, b, mute, tag) = (t.a, t.b, t.mute, t.tag);
+        let (a, b, mute, fade, tag) = (t.a, t.b, t.mute, t.fade, t.tag);
         let word = tr("edited").to_owned();
         let spawned = std::thread::Builder::new()
             .name("quick-look-trim".into())
             .spawn(move || {
-                let result = save(&path, a, b, mute, how, &word).map_err(|e| format!("{e:#}"));
+                let result =
+                    save(&path, a, b, mute, fade, how, &word).map_err(|e| format!("{e:#}"));
                 let _ = tx.send(crate::peek_editor::Msg::Saved(tag, result));
             });
         if let Err(e) = spawned {
@@ -303,7 +458,11 @@ impl App {
                 t.b = b.clamp(t.a + SHORTEST, t.secs);
             }
             if mute.is_some() {
-                t.mute = !t.mute;
+                if t.video {
+                    t.mute = !t.mute;
+                } else {
+                    t.fade = !t.fade;
+                }
             }
         }
         self.request_desktop_top_draw();
@@ -332,7 +491,7 @@ impl App {
             return;
         };
         let at = up.ptr.unwrap_or((-1.0, -1.0));
-        let parts = trim_parts(up.rect);
+        let parts = trim_parts(up.rect, up.trim_edit.as_ref().is_none_or(|t| t.video));
         let head = crate::peek_editor::edit_parts(up.rect, false);
         match event {
             Event::Motion {
@@ -374,8 +533,12 @@ impl App {
                 let Some(t) = self.peek.up.as_mut().and_then(|u| u.trim_edit.as_mut()) else {
                     return;
                 };
-                if t.video && parts.mute.contains(at) {
-                    t.mute = !t.mute;
+                if parts.mute.contains(at) {
+                    if t.video {
+                        t.mute = !t.mute;
+                    } else {
+                        t.fade = !t.fade;
+                    }
                     t.armed = false;
                 } else if Rect::new(
                     parts.strip.x - 12.0,
@@ -423,7 +586,7 @@ impl App {
         let Some(t) = up.trim_edit.as_ref() else {
             return;
         };
-        let parts = trim_parts(r);
+        let parts = trim_parts(r, t.video);
         let head = crate::peek_editor::edit_parts(r, false);
         let white = [1.0, 1.0, 1.0, open];
         // A dark band under the line and the time, so they read on any picture.
@@ -483,11 +646,14 @@ impl App {
         ));
         let note = if t.mute {
             tr("without sound · cut at the nearest keyframe")
+        } else if t.fade {
+            tr("the sound is made again for the fades")
         } else {
             tr("not re-encoded · cut at the nearest keyframe")
         };
-        if t.video {
-            let lit = [1.0, 1.0, 1.0, (if t.mute { 0.32 } else { 0.12 }) * open];
+        {
+            let on = t.mute || t.fade;
+            let lit = [1.0, 1.0, 1.0, (if on { 0.32 } else { 0.12 }) * open];
             over.rects.push(RectInst {
                 rect: parts.mute,
                 radius: 13.0,
@@ -498,7 +664,7 @@ impl App {
             over.labels.push(Label {
                 centered: true,
                 ..text_label(
-                    tr("Take the sound away"),
+                    switch_word(t.video),
                     (parts.mute.x + parts.mute.w / 2.0, parts.mute.y + 5.0),
                     parts.mute.w,
                     12.0,
@@ -513,12 +679,7 @@ impl App {
             note,
             (s.x + 270.0, s.y + s.h + 12.0),
             // (A song has no sound button: the note has the line's width.)
-            (if t.video {
-                parts.mute.x - s.x - 290.0
-            } else {
-                s.w - 270.0
-            })
-            .max(60.0),
+            (parts.mute.x - s.x - 290.0).max(60.0),
             11.5,
             None,
             dim,
@@ -608,6 +769,7 @@ mod tests {
             a: 0.0,
             b: 60.0,
             mute: false,
+            fade: false,
             grab: None,
             armed: false,
             saving: false,
@@ -618,5 +780,21 @@ mod tests {
         t.a = 0.0;
         t.mute = true;
         assert!(t.changed());
+        t.mute = false;
+        t.fade = true;
+        assert!(t.changed());
+    }
+
+    #[test]
+    fn fades_fit_a_short_cut() {
+        assert_eq!(
+            fades(60.0),
+            "afade=t=in:st=0:d=2.000,afade=t=out:st=57.000:d=3.000"
+        );
+        // (Three seconds: a second each way.)
+        assert_eq!(
+            fades(3.0),
+            "afade=t=in:st=0:d=1.000,afade=t=out:st=2.000:d=1.000"
+        );
     }
 }

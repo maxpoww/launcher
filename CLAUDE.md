@@ -835,7 +835,7 @@ The big daemon files are cohesive but long — go straight to the function:
   (`App::thumb_stale`). A VIDEO or a SONG is
   CUT (`peek_trim.rs`): two handles on a line as long as it lasts, "Take the sound away" for a
   video; saved with `ffmpeg -ss a -to b -c copy` (no re-encoding: quick anywhere, the cut on the
-  keyframe before), over (original kept) or beside. Rig: `peek cut <a> <b>|mute|save|copy|cancel`.
+  keyframe before), over (original kept) or beside. A SONG's switch is "Fade in and out" instead (2 s in, 3 s out, a third of the cut at most; only the sound is encoded again, `-c:v copy` keeps the cover, quality by ending — `audio_quality`). The CAMERA on a video's bar keeps the moment on screen as a JPEG beside it (`peek_snap`, "name (frame 0-02).jpg"; playing, it pauses there). Rig: `peek cut <a> <b>|mute|save|copy|cancel` (`mute` = the switch: a song's fades), `peek snap`.
   A PDF's page is MARKED (`peek_pdf.rs`): Highlight · Draw · Text · Sign on the page drawn at
   the screen's size; saved as the PDF's own ANNOTATIONS (Highlight, Ink, FreeText) by `mutool run`
   with a generated script — the page itself is never changed. The signature is drawn once in a

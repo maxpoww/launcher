@@ -986,5 +986,9 @@
  "Clear": "Borrar",
  "Your signature": "Tu firma",
  "Click where the signature goes": "Hacé clic donde va la firma",
- "{n} frames": "{n} cuadros"
+ "{n} frames": "{n} cuadros",
+  "Fade in and out": "Fundido al entrar y salir",
+  "the sound is made again for the fades": "el sonido se vuelve a codificar para los fundidos",
+  "frame": "cuadro",
+  "Photo saved: {name}": "Foto guardada: {name}"
 }

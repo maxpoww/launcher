@@ -50,6 +50,8 @@ pub(crate) enum Msg {
     Base(u64, RgbaImage),
     /// Saved there (or why not).
     Saved(u64, Result<PathBuf, String>),
+    /// A video's moment kept as a photo there (or why not).
+    Snapped(Result<PathBuf, String>),
 }
 
 pub(crate) struct Edit {
@@ -485,6 +487,7 @@ impl App {
 
     fn edit_msg(&mut self, msg: Msg) {
         match msg {
+            Msg::Snapped(result) => self.snapped(result),
             Msg::Base(tag, img) => {
                 let Some(edit) = self
                     .peek
@@ -1607,6 +1610,11 @@ impl App {
             }
             let z = self.peek.up.as_ref().map(|u| (u.zoom.k, u.zoom.center));
             return format!("zoom {z:?}");
+        }
+        // A video's moment as a photo.
+        if verb == "snap" {
+            self.peek_snap();
+            return "snap".to_owned();
         }
         // A cut: `cut <from s> <to s>`, `mute`, `save`, `copy`, `cancel`.
         if self.peek.up.as_ref().is_some_and(|u| u.trim_edit.is_some()) {

@@ -214,7 +214,7 @@ pub(crate) struct Up {
     pub(crate) ptr: Option<(f32, f32)>,
     play: Option<Play>,
     /// Where a stopped song or video is.
-    at: f32,
+    pub(crate) at: f32,
     /// A video's newest frame not yet on the screen, how many it has shown,
     /// and their size.
     frame: Option<Vec<u8>>,
@@ -260,7 +260,7 @@ impl Up {
     }
 
     /// Where the song is, in seconds.
-    fn song_at(&self) -> f32 {
+    pub(crate) fn song_at(&self) -> f32 {
         self.play
             .as_ref()
             .map_or(self.at, |p| p.from + p.since.elapsed().as_secs_f32())
@@ -1563,6 +1563,8 @@ impl App {
                 let secs = self.peek_secs().unwrap_or(0.0);
                 if video && bar.play.contains(at) {
                     self.peek_play();
+                } else if video && bar.snap.contains(at) {
+                    self.peek_snap();
                 } else if video && bar.track.contains(at) {
                     // (A click on the line: from there.)
                     let k = ((at.0 - bar.track.x) / bar.track.w).clamp(0.0, 1.0);
@@ -2099,11 +2101,33 @@ impl App {
                     over.labels.push(text_label(
                         &time,
                         (bar.track.x + bar.track.w + 12.0, bar.play.y + 8.0),
-                        110.0,
+                        100.0,
                         12.0,
                         None,
                         white,
                     ));
+                    // The camera: this moment kept as a photo beside the video.
+                    if up.ptr.is_some_and(|p| bar.snap.contains(p)) {
+                        over.rects.push(RectInst {
+                            rect: bar.snap,
+                            radius: bar.snap.h / 2.0,
+                            color: [1.0, 1.0, 1.0, 0.18 * open],
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
+                    over.labels.push(Label {
+                        centered: true,
+                        family: Some(crate::options::NERD),
+                        ..text_label(
+                            "\u{f030}",
+                            (bar.snap.x + bar.snap.w / 2.0, bar.snap.y + 6.0),
+                            bar.snap.w,
+                            14.0,
+                            None,
+                            white,
+                        )
+                    });
                     over_page = Some(over);
                 }
             }
@@ -2438,19 +2462,27 @@ struct VideoBar {
     pill: Rect,
     play: Rect,
     track: Rect,
+    /// Keep the moment on screen as a photo.
+    snap: Rect,
 }
 
 fn video_bar(r: Rect) -> VideoBar {
     let w = (r.w - 48.0).clamp(160.0, 560.0);
     let pill = Rect::new(r.x + (r.w - w) / 2.0, r.y + r.h - 16.0 - 36.0, w, 36.0);
     let play = Rect::new(pill.x + 6.0, pill.y + 4.0, 28.0, 28.0);
+    let snap = Rect::new(pill.x + pill.w - 6.0 - 28.0, pill.y + 4.0, 28.0, 28.0);
     let track = Rect::new(
         play.x + play.w + 12.0,
         pill.y + 6.0,
-        (pill.x + pill.w - 124.0 - (play.x + play.w + 12.0)).max(20.0),
+        (snap.x - 112.0 - (play.x + play.w + 12.0)).max(20.0),
         24.0,
     );
-    VideoBar { pill, play, track }
+    VideoBar {
+        pill,
+        play,
+        track,
+        snap,
+    }
 }
 
 /// A song's body, for a frame at `r`: its cover, its loudness, its button.
