@@ -60,6 +60,11 @@ pub(crate) struct Group {
     pub beside: bool,
     /// A TEXT FIELD: its one choice shows the text (a click takes the keys).
     pub field: bool,
+    /// The box's MAIN choice (the hairline language: bold words centred on
+    /// the title's line).
+    pub main: bool,
+    /// Its choices are ACTIONS (buttons), not one-of-several (words).
+    pub buttons: bool,
     /// The choices are COLOUR CELLS (their `swatch`), this many to a row:
     /// the palette editor's field and hue strip. 0 = not cells.
     pub cells: usize,
@@ -443,7 +448,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -454,7 +459,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -1613,7 +1618,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 Choice { value: "colors-edit-name".to_owned(), ..name.choices[0].clone() },
             ];
             view.groups.push(Group { field: true, ..group(None, "colors-edit-text", 240.0, both) });
-            view.groups.push(group(None, "colors-edit", 120.0, vec![choice(tr("Save"), false, "save"), choice(tr("Cancel"), false, "cancel")]));
+            view.groups.push(Group { buttons: true, ..group(None, "colors-edit", 120.0, vec![choice(tr("Cancel"), false, "cancel"), choice(tr("Save"), false, "save")]) });
         }
         "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
             let picked = crate::palette::choice();
@@ -1634,7 +1639,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let dark = dark_now();
             let picked = crate::palette::choice();
             view.subtitle = tr("How everything looks. Some apps change the next time they open.").to_owned();
-            view.groups.push(look_pair(None, "dark", dark, "on", "off"));
+            view.groups.push(Group { main: true, ..look_pair(None, "dark", dark, "on", "off") });
             // The three sliders (Max, 2026-10-16): 0 = Off (the makers' own
             // colours), the middle = the palette as made, the end = full
             // colour; each with a [Dark][Light] of its own that follows the
