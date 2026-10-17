@@ -1235,7 +1235,21 @@ impl App {
     /// every half second while it is the one up, and when its page is there,
     /// read it again (the text it was meanwhile gives way).
     fn peek_page_watch(&mut self, path: &Path, name: &str) {
-        if !crate::peek_web::is_drawn(name) || crate::peek_web::ready(path, name) {
+        if !crate::peek_web::is_drawn(name) {
+            return;
+        }
+        if crate::peek_web::ready(path, name) {
+            // Drawn while it was a NEIGHBOUR, as text then: what is kept is
+            // the stand-in — read it again as its page (walking a folder
+            // showed the text for good).
+            let stand_in = self
+                .peek
+                .cache
+                .iter()
+                .any(|(k, p)| k.0 == path && p.long.is_none());
+            if stand_in {
+                self.peek_forget(path);
+            }
             return;
         }
         let (path, name) = (path.to_path_buf(), name.to_owned());
