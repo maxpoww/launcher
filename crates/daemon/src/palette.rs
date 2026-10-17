@@ -1562,6 +1562,9 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     let skipped = crate::webapps::hosts_of(&picked.skip);
     m.insert("webapp_hosts".into(), webapp_hosts.iter().filter(|h| !skipped.contains(h)).cloned().collect::<Vec<_>>().into());
     m.insert("web_skip".into(), skipped.into());
+    // The accent, for what Seam's chrome lights with it (the drop on its
+    // bar: "your colours on this site").
+    m.insert("accent".into(), format!("#{}", hex(t.accent())).into());
     for (i, c) in t.c.iter().enumerate() {
         m.insert(slot_name(i), format!("#{}", hex(*c)).into());
     }
