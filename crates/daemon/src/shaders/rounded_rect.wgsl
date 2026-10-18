@@ -93,6 +93,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let coverage = clamp(0.5 - sd, 0.0, 1.0);
 
+    // THE VEIL (glass < -1.5; Max, 2026-10-18, Auto Lighting "include the
+    // background"): a wash over the whole surface that the scene's fade does
+    // not touch — the desktop's icons fade away when they are put away, the
+    // light over the wallpaper stays. A plain colour, no material.
+    if in.glass < -1.5 {
+        let a = in.color.a * coverage;
+        return vec4<f32>(in.color.rgb * a, a);
+    }
+
     // Banner blister (glass ≈ 2): a SOLID fill of the bar's own colour whose
     // shape is the rounded rect smooth-unioned with the half-plane above the
     // bar edge — so the banner bulges around the module (drawn on a quad

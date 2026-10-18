@@ -3867,7 +3867,7 @@ impl App {
                     *t = None;
                 }
             }
-            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-shell" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" => {
+            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-shell" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {

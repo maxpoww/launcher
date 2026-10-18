@@ -35,6 +35,7 @@ mod desktop_send;
 mod desktop_top;
 mod mounts;
 mod logging;
+mod lighting;
 mod look;
 mod dict;
 mod display;
@@ -613,6 +614,11 @@ fn main() -> anyhow::Result<()> {
     let pointer_gestures = globals
         .bind::<ZwpPointerGesturesV1, App, _>(&qh, 1..=3, ())
         .ok();
+    // Who is at the screen (ext-idle-notify): Auto Lighting changes the
+    // light only in front of the owner. Optional like the rest.
+    let idle_notifier = globals
+        .bind::<wayland_protocols::ext::idle_notify::v1::client::ext_idle_notifier_v1::ExtIdleNotifierV1, App, _>(&qh, 1..=2, ())
+        .ok();
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -659,6 +665,7 @@ fn main() -> anyhow::Result<()> {
         pointer_constraints,
         relative_pointer_manager,
         pointer_gestures,
+        lighting: lighting::Lighting::new(idle_notifier),
         dock_fscale,
         dock_visible,
         options_visible,
@@ -1343,6 +1350,8 @@ fn main() -> anyhow::Result<()> {
     controls::reassert();
     // The palette: the shell wears it, the apps get its files.
     app.colors_apply(true);
+    // …and, if the owner asked, the light follows the sun (in front of them).
+    app.lighting_start();
     app.gear_startup();
     // Each app's remembered window place rides its own rule (`window_memory`).
     app.reassert_place_rules();
@@ -1551,6 +1560,8 @@ pub struct App {
     /// alive so their events flow). Used to resize the window from a gesture on
     /// the current-task pill; None if the compositor lacks the protocol.
     pointer_gestures: Option<ZwpPointerGesturesV1>,
+    /// Auto Lighting: who is at the screen, the hour's look, the fade.
+    lighting: lighting::Lighting,
     swipe_gesture: Option<ZwpPointerGestureSwipeV1>,
     pinch_gesture: Option<ZwpPointerGesturePinchV1>,
     /// OPTIONS content (pills): which surface the pointer is on, its position,
@@ -7050,7 +7061,9 @@ impl SeatHandler for App {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.lighting_watch(qh, &seat);
+    }
 
     fn new_capability(
         &mut self,
@@ -7059,6 +7072,8 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        // (Whichever of the seat's first calls comes first; asked once.)
+        self.lighting_watch(qh, &seat);
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             let lh = self.loop_handle.clone();
             match self.seat_state.get_keyboard_with_repeat(

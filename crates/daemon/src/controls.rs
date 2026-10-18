@@ -362,7 +362,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
-        "open" | "night" | "dnd" | "restart" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+        "open" | "night" | "dnd" | "restart" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell" | "colors-shell-look"
     )
 }
@@ -1642,6 +1642,13 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             // LIGHTING first (Max, 2026-10-18): light is the first thing of colour.
             let lighting = picked.lighting.unwrap_or(50);
             view.groups.push(Group { caption: Some(format!("{} · {lighting}", tr("Lighting"))), ..slider("colors-lighting", lighting) });
+            // AUTO beside it (Max, 2026-10-18): the light follows the sun, in
+            // front of the owner (`lighting.rs`). A word at the row's end, lit
+            // while on; a click asks for the other. The slider turns it off.
+            let auto = picked.lighting_auto.unwrap_or(false);
+            view.groups.push(Group { beside: true, ..group(None, "colors-lighting-auto", 84.0, vec![choice(tr("Auto"), auto, if auto { "off" } else { "on" })]) });
+            // …and whether the wallpaper is lit with the rest.
+            view.groups.push(on_off(Some("Include the background"), "colors-lighting-veil", picked.lighting_veil.unwrap_or(false)));
             let apps = picked.apps_level().unwrap_or(MADE);
             let web = picked.web_level().unwrap_or(MADE);
             for (name, key, look_key, level, own) in [

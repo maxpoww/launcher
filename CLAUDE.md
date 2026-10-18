@@ -336,6 +336,18 @@ The big daemon files are cohesive but long — go straight to the function:
   "Dark websites" (`colors-websites`) is on the DARK MODE page, not Colours (it is a choice of the
   dark look; Colours must fit a 900 px field — the panel does not scroll). The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
   the UI thread in `App::control_pick`).
+- `lighting.rs` — AUTO LIGHTING (Max, 2026-10-18; Colours page: "Auto" beside the Lighting slider, "Include the
+  background" under it): the Lighting follows the sun (`curve`: 50 from +6° up, 20 from -12° down, eased; the
+  elevation is `options_engine::sun_elevation_deg`, the place from the timezone) and changes ONLY IN FRONT OF THE
+  OWNER (Golem §7). Presence = ext-idle-notify-v1 (120 s "away", 3 s "quiet"; `hyprlock` running or a sleep =
+  gone); `Plan` (pure, tested) says when to look: present AND settled (2 min) AND not under a fullscreen window,
+  once per clock hour and at once on settling after an absence; missed hours are never replayed. The look starts a
+  20 s eased FADE: ~15 frames a second move only the SHELL's pair (`palette::ShellPlan`, made once; a frame on the
+  same step redraws nothing) and the desktop's VEIL; the end saves the step (what the owner last saw) and the apps/
+  web/files are made for it once, at the next quiet moment (`colors_apply`). Auto turned ON is the owner's act: the
+  fade starts at once; the slider turns Auto off. THE VEIL: a black wash under the desktop's icons (`Lighting` <
+  50, `veil_alpha`), a `RectInst` with `glass = VEIL_GLASS` (`rounded_rect.wgsl` skips the scene's fade for it).
+  A change of the Lighting alone is a change for `colors_apply` (`lighting::applied`).
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
   as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its
   leave (`bar_zoom_keys`, the card's way) → `waverunner-ctl debug-desktop zoom bar in|out|reset`;

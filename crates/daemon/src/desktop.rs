@@ -4035,6 +4035,23 @@ impl App {
             },
         );
         scene.alpha = if lit { 1.0 } else { group_alpha };
+        // THE VEIL (Max, 2026-10-18: Lighting "include the background"): the
+        // wallpaper darkened with the rest, a black wash under the icons —
+        // not faded with them when they are put away, and gone at 50 and
+        // above or with the switch off.
+        let veil = crate::lighting::veil_now();
+        if veil > 0.0 {
+            scene.rects.insert(
+                0,
+                crate::content::RectInst {
+                    rect: crate::content::Rect::new(0.0, 0.0, w as f32, h as f32),
+                    radius: 0.0,
+                    color: [0.0, 0.0, 0.0, veil],
+                    glass: crate::content::VEIL_GLASS,
+                    border: 0.0,
+                },
+            );
+        }
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
             &self.qh,

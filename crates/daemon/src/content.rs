@@ -44,6 +44,10 @@ impl Rect {
 /// config, this and the shader together.
 pub(crate) const WINDOW_CORNER: f32 = -(14.0 * 3.0 / 2.0);
 
+/// A `RectInst::glass` that makes the rect a VEIL: a plain wash that the
+/// scene's own fade (`Scene::alpha`) does not touch (`rounded_rect.wgsl`).
+pub const VEIL_GLASS: f32 = -2.0;
+
 /// One rounded rectangle to fill (card background, hover highlight).
 #[derive(Debug, Clone, Copy)]
 pub struct RectInst {

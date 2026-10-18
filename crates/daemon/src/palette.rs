@@ -116,6 +116,15 @@ pub(crate) struct ColorChoice {
     /// None = 50, as designed. Moves every ground within its look's band.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<u8>,
+    /// AUTO LIGHTING (Max, 2026-10-18): the lighting follows the sun —
+    /// day as designed, night down to 20 — changed only in front of the
+    /// owner (`lighting.rs`). None = off: the slider is the owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting_auto: Option<bool>,
+    /// "Include the background": the lighting darkens the wallpaper too
+    /// (a black wash under the desktop's icons). None = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting_veil: Option<bool>,
     /// Before 2026-10-16 the apps and the web were switches; read once.
     #[serde(default, skip_serializing)]
     pub apps: Option<bool>,
@@ -133,7 +142,7 @@ fn web_off() -> Option<u8> {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, apps: None, web: None, dynamic: None }
     }
 }
 
@@ -856,7 +865,7 @@ pub(crate) mod tint {
     pub(crate) fn walk(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
         lit(&walk_unlit(c, own, dark, level), dark, lighting())
     }
-    fn walk_unlit(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
+    pub(crate) fn walk_unlit(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
         let Some(s) = level.filter(|s| *s > 0) else { return *c };
         let (cum, made) = path(c, own, dark);
         if (f32::from(s) - made).abs() <= 1.5 {
@@ -1506,26 +1515,65 @@ pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
 fn set_shell(picked: &ColorChoice, system_dark: bool) {
     SHELL_COLOURED.store(picked.shell_tint != Some(0), Ordering::Relaxed);
     SHELL_IS_DARK.store(picked.shell_dark.unwrap_or(system_dark), Ordering::Relaxed);
+    store_shell(shell_plan(picked, system_dark).pair(tint::lighting()));
+}
+
+/// Put the shell's pair in use (None: it reads the screen).
+pub(crate) fn store_shell(out: Option<([f32; 4], [f32; 4])>) {
+    if let Ok(mut g) = SHELL.lock() {
+        *g = out;
+    }
+}
+
+/// How the shell's pair is made, split from the Lighting so a fade of the
+/// Lighting (`lighting.rs`: 20 s, ~15 frames a second) can make the pair at
+/// each value without finding the palette, walking its path or reading the
+/// settings again: that is done once, here.
+pub(crate) enum ShellPlan {
+    /// The shell reads the screen (the Dynamic palette): no pair.
+    Screen,
+    /// A pair the Lighting does not move (Off: Golem's own neutral ground).
+    Fixed(([f32; 4], [f32; 4])),
+    /// The palette's variant walked to the Shell slider, not yet lit.
+    Walked { unlit: [Rgb; 16], dark: bool },
+}
+
+impl ShellPlan {
+    /// The surface and the ink, linear, at the Lighting `v`.
+    pub(crate) fn pair(&self, v: u8) -> Option<([f32; 4], [f32; 4])> {
+        match self {
+            Self::Screen => None,
+            Self::Fixed(p) => Some(*p),
+            // (`readable` moves only the hues, slots 8..16: neither the
+            // surface nor the ink, so it is not run for every frame.)
+            Self::Walked { unlit, dark } => {
+                let c = tint::lit(unlit, *dark, v);
+                Some((linear(c[0x01]), linear(c[0x05])))
+            }
+        }
+    }
+
+    /// Whether the Lighting moves the shell's colours at all.
+    pub(crate) fn follows_lighting(&self) -> bool {
+        matches!(self, Self::Walked { .. })
+    }
+}
+
+pub(crate) fn shell_plan(picked: &ColorChoice, system_dark: bool) -> ShellPlan {
     let want = picked.palette_id();
-    let out = if picked.shell_tint == Some(0) {
+    if picked.shell_tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
         // boxes "have a reddish ground" — they sampled a desert wallpaper):
         // Golem's own ground and ink, in the shell's Dark/Light.
         let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, picked.shell_dark.unwrap_or(system_dark));
-        Some((linear(t.surface()), linear(t.ink())))
+        ShellPlan::Fixed((linear(t.surface()), linear(t.ink())))
     } else if want == DYNAMIC_ID {
-        None
+        ShellPlan::Screen
     } else {
         let p = if want == DRAFT_ID { preview() } else { all().into_iter().find(|p| p.id == want) }.unwrap_or_else(golem);
         let dark = picked.shell_dark.unwrap_or(system_dark);
         let base = if dark { p.dark } else { p.light };
-        let mut c = tint::walk(&base, p.dark[p.accent], dark, picked.shell_tint);
-        readable(&mut c, dark, if dark { p.accent } else { p.accent_light });
-        let t = Theme { c, accent_slot: if dark { p.accent } else { p.accent_light }, dark, ..current().as_ref().clone() };
-        Some((linear(t.surface()), linear(t.ink())))
-    };
-    if let Ok(mut g) = SHELL.lock() {
-        *g = out;
+        ShellPlan::Walked { unlit: tint::walk_unlit(&base, p.dark[p.accent], dark, picked.shell_tint), dark }
     }
 }
 
@@ -2482,7 +2530,12 @@ impl crate::App {
         if previewing() {
             picked.palette = Some(DRAFT_ID.to_owned());
         }
-        tint::set_lighting(picked.lighting.unwrap_or(50));
+        // (A fade of the Lighting in progress is what is shown: whatever else
+        // asks for a re-apply must not jump it back — `lighting.rs`.)
+        let lit_now = crate::lighting::shown().unwrap_or(picked.lighting.unwrap_or(50));
+        tint::set_lighting(lit_now);
+        let veil_moved = crate::lighting::set_veil(picked.lighting_veil.unwrap_or(false));
+        self.lighting_mirror(picked.lighting_auto.unwrap_or(false));
         let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's
         // stands in, and this comes back when it is ready.
@@ -2497,10 +2550,16 @@ impl crate::App {
         set_shell(&picked, crate::look::dark());
         set_skipped_programs(&self.entries, &choice().skip);
         let changed = set(theme);
-        if changed || look_changed {
+        // A move of the Lighting alone leaves the theme as it was, yet the
+        // shell, the apps and the web all wear it.
+        let lit_moved = crate::lighting::applied(lit_now);
+        if changed || look_changed || lit_moved {
             publish(current(), look_changed);
         }
-        if changed {
+        if !changed && !lit_moved && veil_moved {
+            self.request_desktop_draw();
+        }
+        if changed || lit_moved {
             self.reassert_window_border();
             self.draw_options();
             self.draw();
@@ -2513,6 +2572,9 @@ impl crate::App {
 
     /// A choice in the "Colours" setting: save it, then put it in use.
     pub(crate) fn colors_pick(&mut self, key: &str, value: &str) {
+        // The slider is the owner's own hand, and Auto turned off keeps the
+        // light it was showing: a fade in progress ends here (`lighting.rs`).
+        let frozen = if matches!(key, "colors-lighting" | "colors-lighting-auto") { self.lighting_cancel() } else { None };
         GolemSettings::change(|s| {
             let mut c = s.colors.clone().unwrap_or_default();
             match key {
@@ -2538,9 +2600,28 @@ impl crate::App {
                         _ => c.icons_tint = level.unwrap_or(50),
                     }
                 }
+                // One kills the other: the slider is manual (Max, 2026-10-18).
                 "colors-lighting" => match value.parse::<u8>() {
-                    Ok(n) => c.lighting = Some(n.min(100)),
+                    Ok(n) => {
+                        c.lighting = Some(n.min(100));
+                        c.lighting_auto = None;
+                    }
                     Err(_) => return,
+                },
+                "colors-lighting-auto" => match value {
+                    "on" => c.lighting_auto = Some(true),
+                    "off" => {
+                        c.lighting_auto = None;
+                        if let Some(v) = frozen {
+                            c.lighting = Some(v);
+                        }
+                    }
+                    _ => return,
+                },
+                "colors-lighting-veil" => match value {
+                    "on" => c.lighting_veil = Some(true),
+                    "off" => c.lighting_veil = None,
+                    _ => return,
                 },
                 // An app in its own colours or the palette's: its id turns it.
                 "colors-skip" => {
@@ -2580,6 +2661,12 @@ impl crate::App {
                 let dark = c.apps_dark.unwrap_or(true);
                 let _ = std::thread::Builder::new().name("apps-look".into()).spawn(move || crate::controls::assert_dark(dark));
                 self.colors_apply(true);
+            }
+            // Auto turned ON is the owner's own act, and they are plainly
+            // there: the light goes to the sun's at once, in front of them.
+            "colors-lighting-auto" if value == "on" => {
+                self.colors_apply(false);
+                self.lighting_auto_on();
             }
             _ => self.colors_apply(false),
         }
@@ -2633,6 +2720,45 @@ mod tests {
             icons_dark: dark,
             pair: None,
         }
+    }
+
+    #[test]
+    fn the_shells_pair_at_any_lighting_is_the_walked_palette_lit() {
+        let picked = ColorChoice { palette: Some(GOLEM.to_owned()), shell_dark: Some(true), ..Default::default() };
+        let plan = shell_plan(&picked, true);
+        assert!(plan.follows_lighting());
+        let p = golem();
+        for v in [0u8, 20, 50, 80, 100] {
+            let (surface, ink) = plan.pair(v).expect("a palette gives a pair");
+            // The old way: walk, light, make readable, read the surface and the ink.
+            let mut c = tint::lit(&tint::walk_unlit(&p.dark, p.dark[p.accent], true, None), true, v);
+            readable(&mut c, true, p.accent);
+            assert_eq!((surface, ink), (linear(c[0x01]), linear(c[0x05])), "at {v}");
+        }
+        let (dim, _) = plan.pair(10).unwrap();
+        let (bright, _) = plan.pair(90).unwrap();
+        assert!(dim[0] <= bright[0] && dim != bright, "less light, a darker ground");
+        // Off is Golem's own neutral pair: the Lighting does not move it.
+        let off = ColorChoice { shell_tint: Some(0), ..picked.clone() };
+        let plan = shell_plan(&off, true);
+        assert!(!plan.follows_lighting());
+        assert_eq!(plan.pair(10), plan.pair(90));
+        // Dynamic: the shell reads the screen, there is no pair.
+        let dynamic = ColorChoice { palette: Some(DYNAMIC_ID.to_owned()), ..Default::default() };
+        assert!(shell_plan(&dynamic, true).pair(30).is_none());
+    }
+
+    #[test]
+    fn auto_lighting_is_saved_only_when_on() {
+        let c = ColorChoice { lighting_auto: Some(true), lighting_veil: Some(true), ..Default::default() };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("lighting_auto") && json.contains("lighting_veil"));
+        let back: ColorChoice = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.lighting_auto, back.lighting_veil), (Some(true), Some(true)));
+        let json = serde_json::to_string(&ColorChoice::default()).unwrap();
+        assert!(!json.contains("lighting"), "off writes nothing: {json}");
+        let old: ColorChoice = serde_json::from_str(r#"{"lighting": 30}"#).unwrap();
+        assert_eq!((old.lighting, old.lighting_auto, old.lighting_veil), (Some(30), None, None));
     }
 
     #[test]
