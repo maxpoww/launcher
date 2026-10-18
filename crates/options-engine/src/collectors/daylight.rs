@@ -166,6 +166,16 @@ fn parse_dms(s: &str, deg_digits: usize) -> Option<f64> {
     Some(sign * (deg + min / 60.0 + sec / 3600.0))
 }
 
+/// The sun's elevation (degrees) at this machine's place and a UTC instant
+/// (unix seconds): the place from its timezone, as the collector finds it.
+/// `None` when the place is unknown (no zone, no tz database) — whoever asks
+/// then has nothing to follow. Nothing is cached: the one caller (Auto
+/// Lighting, once an hour) would pick up a timezone changed since.
+pub fn sun_elevation_deg(unix_secs: f64) -> Option<f64> {
+    let (lat, lon) = system_location()?;
+    Some(solar_elevation_deg(unix_secs, lat, lon))
+}
+
 /// The sun's elevation above the horizon (degrees) at a UTC instant (unix
 /// seconds) and location — the standard low-precision solar position
 /// (Astronomical Almanac / NOAA approximation, ~0.01° accuracy). Pure, so the
@@ -251,6 +261,14 @@ mod tests {
         // 04:00 UTC = local midnight: deep below the horizon.
         let midnight = solar_elevation_deg(SEP7 + 4.0 * 3600.0, LA_PAZ.0, LA_PAZ.1);
         assert!(midnight < -40.0, "midnight elevation {midnight}");
+    }
+
+    #[test]
+    fn the_public_elevation_is_a_real_angle_or_nothing() {
+        // (Where this runs there may be no zone: then there is no answer.)
+        if let Some(e) = sun_elevation_deg(SEP7) {
+            assert!((-90.0..=90.0).contains(&e), "{e}");
+        }
     }
 
     #[test]

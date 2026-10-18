@@ -63,6 +63,7 @@ mod self_capture;
 mod state;
 
 pub use child::die_with_parent;
+pub use collectors::daylight::sun_elevation_deg;
 pub use collector::{Collector, CollectorFuture};
 pub use engine::Engine;
 pub use message::{ContextDelta, Update};
