@@ -1225,6 +1225,26 @@ impl App {
                 }
             }
         }
+        // Google: the bar sweeps the G away and back under the pointer, the
+        // G spins on a click; each pose drawn as it comes.
+        let on_google = self.gesture.dragging.is_none()
+            && matches!(self.hover, Some(content::Hit::DockIcon(slot))
+                if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::google_icon::GOOGLE_ID));
+        if self.google.step(on_google, dt) {
+            self.dirty = true;
+            let layers: Vec<u32> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.id == crate::google_icon::GOOGLE_ID)
+                .filter_map(|(i, _)| self.icon_layers.get(i).copied())
+                .collect();
+            if let (Some(chain), Some(renderer)) = (apps::google_at(&self.google.pose()), self.renderer.as_mut()) {
+                for layer in layers {
+                    renderer.update_icon_layer(layer, &chain);
+                }
+            }
+        }
         // The control panel's gears: they turn under the pointer, the frame
         // for each angle put in its layer.
         let on_gears = self.gesture.dragging.is_none()
