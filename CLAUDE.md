@@ -348,6 +348,21 @@ The big daemon files are cohesive but long — go straight to the function:
   fade starts at once; the slider turns Auto off. THE VEIL: a black wash under the desktop's icons (`Lighting` <
   50, `veil_alpha`), a `RectInst` with `glass = VEIL_GLASS` (`rounded_rect.wgsl` skips the scene's fade for it).
   A change of the Lighting alone is a change for `colors_apply` (`lighting::applied`).
+- `wall_follow.rs` + `palette_card::wall_svg` — THE WALLPAPER THAT FOLLOWS YOUR COLOURS (Max, 2026-10-18): the
+  wallpaper box's FIRST tile is the palette in use as its card, "Follows your colours" (`Choice::caption` = a
+  picture with its words under it, `Panel::flow_tiles`; its `value` is the card's PNG, a pick of it is told by where
+  that file lives, `wall_follow::is_tile`). Picked, `GolemSettings::wallpaper_follows` turns on and the palette's
+  card is made for the screen — the card's capsules about half its relative size, centred and a little low, the
+  ground run out to the exact shape, resvg at the screen's pixel size (`display::wallpaper_size`: the biggest
+  connected screen), a ±1 dither (`palette_card::dither`) against banding — into `~/.cache/waverunner/palette-walls/`
+  (named by colours + size + version, written whole then renamed, the newest four kept) off every loop, and put up
+  through the ordinary pick (`controls::pick_wallpaper`: the picture program's 1 s fade). `wallpaper` holds that
+  file while it follows, so the login restore, the box's mark and Dynamic need no knowledge of it
+  (`wall_follow::login_picture` makes it again if it is gone). A palette or shell-look pick in Colours calls
+  `wall_follow::refresh` (`App::colors_pick`). DYNAMIC AND FOLLOWING ARE OPPOSITES: with Dynamic in use the tile says
+  "Choose a palette to use this" and does nothing; choosing Dynamic ends following (`after_palette`) and the last
+  picture stays as the wallpaper; any other wallpaper pick ends it too (`picked_other`, under the same lock a
+  finishing picture takes). Samples: `cargo test -- --ignored four_samples` → `/tmp/claude-1000/follow-samples/`.
 - `zoom.rs` — ZOOM (Max, 2026-10-10): Ctrl +/−/0 make the top bar and the desktop bigger, smaller,
   as shipped. The BAR on HOVER: compositor binds made on the pointer's enter and taken away on its
   leave (`bar_zoom_keys`, the card's way) → `waverunner-ctl debug-desktop zoom bar in|out|reset`;

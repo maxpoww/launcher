@@ -432,6 +432,27 @@ pub(crate) fn choice() -> ColorChoice {
     GolemSettings::load().colors.unwrap_or_default()
 }
 
+/// A palette's SWATCH in a look (what its card and its wallpaper are drawn
+/// with): the ground of that look first, then the palette's soul — its own
+/// six, else the bright half of its sixteen.
+pub(crate) fn swatch(p: &Palette, dark: bool) -> Vec<Rgb> {
+    let mut out = vec![if dark { p.dark[0] } else { p.light[0] }];
+    out.extend(if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() });
+    out
+}
+
+/// The swatch of the palette in use, in the shell's look. `None` for
+/// Dynamic (it has no colours of its own: they are made from the wallpaper)
+/// and for a palette that is not there.
+pub(crate) fn swatch_in_use() -> Option<Vec<Rgb>> {
+    let c = choice();
+    let id = c.palette_id();
+    if id == DYNAMIC_ID {
+        return None;
+    }
+    palette_of(id).map(|p| swatch(&p, c.shell_dark.unwrap_or_else(crate::look::dark)))
+}
+
 /// The general Dark toggle is gone (Max, 2026-10-18): each row — apps, web,
 /// icons, shell — has its own Dark/Light. A row that used to follow the
 /// general one takes, once, the look it was showing, so an update changes
@@ -2581,6 +2602,9 @@ impl crate::App {
                 "colors-palette" => {
                     c.palette = Some(value.to_owned());
                     c.dynamic = None;
+                    // Dynamic is made FROM the wallpaper, so the wallpaper
+                    // stops being made from the colours; the last picture stays.
+                    crate::wall_follow::after_palette(s, value);
                 }
                 // A slider: "0".."100", "made" (the palette as made); the old "on"/"off" too.
                 "colors-apps" | "colors-web" | "colors-icons" | "colors-shell" => {
@@ -2652,6 +2676,11 @@ impl crate::App {
             s.store();
         });
         let c = choice();
+        // A wallpaper that follows the colours is made again for the palette
+        // or the look just chosen (it does nothing for any other key).
+        if matches!(key, "colors-palette" | "colors-shell-look") {
+            crate::wall_follow::refresh();
+        }
         match key {
             // The shell's look is the dock's whole look (its glass, figures,
             // boxes, the desktop) — what the general Light used to be.
@@ -2676,6 +2705,19 @@ impl crate::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_swatch_is_the_ground_of_the_look_then_the_soul() {
+        let p = all().into_iter().find(|p| p.id == "jade").expect("a curated palette");
+        let dark = swatch(&p, true);
+        let light = swatch(&p, false);
+        assert_eq!((dark[0], light[0]), (p.dark[0], p.light[0]));
+        assert_eq!(dark[1..], p.soul[..]);
+        assert_eq!(dark[1..], light[1..], "the soul is the same in both looks");
+        // A palette with no soul of its own shows the bright half of its sixteen.
+        let bare = Palette { soul: Vec::new(), ..p.clone() };
+        assert_eq!(swatch(&bare, true)[1..], p.dark[8..16]);
+    }
 
     #[test]
     fn a_drawing_for_the_apps_takes_the_icon_filter() {

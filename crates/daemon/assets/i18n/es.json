@@ -1021,5 +1021,7 @@
   "Not a name a drive can take": "No es un nombre que una unidad pueda llevar",
   "Lighting": "Iluminación",
   "Auto": "Auto",
-  "Include the background": "Incluir el fondo"
+  "Include the background": "Incluir el fondo",
+  "Follows your colours": "Sigue tus colores",
+  "Choose a palette to use this": "Elige una paleta para usar esto"
 }

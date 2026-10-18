@@ -37,6 +37,10 @@ pub(crate) struct Choice {
     /// A PALETTE: the colours its swatch is painted with (ground first, then
     /// its soul), drawn in place of a picture. Empty for every other choice.
     pub swatch: Vec<[u8; 3]>,
+    /// A PICTURE WITH ITS WORDS UNDER IT (Max, 2026-10-18: the wallpaper box's
+    /// first tile, the palette's card — "Follows your colours"): `text` is
+    /// written under the preview, and the one in use is ringed.
+    pub caption: bool,
 }
 
 /// A group of choices under an optional caption. A caption with no choices
@@ -440,7 +444,7 @@ fn run(program: &str, args: &[&str]) -> bool {
 }
 
 fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice {
-    Choice { text: text.into(), on, value: value.into(), swatch: Vec::new() }
+    Choice { text: text.into(), on, value: value.into(), swatch: Vec::new(), caption: false }
 }
 
 fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: Vec<Choice>) -> Group {
@@ -1464,7 +1468,7 @@ const PLAYER_UP: std::time::Duration = std::time::Duration::from_millis(450);
 /// seconds of preparation hold up neither the settings nor a later pick,
 /// and remembered once it is up. A newer pick overtakes an older one still
 /// being prepared (`WALLPAPER_PICK`: only the newest is remembered).
-fn pick_wallpaper(path: String) {
+pub(crate) fn pick_wallpaper(path: String) {
     static WALLPAPER_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mine = WALLPAPER_PICK.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     *WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
@@ -1493,6 +1497,26 @@ fn pick_wallpaper(path: String) {
     if let Err(e) = spawned {
         warn!("controls: no thread for the wallpaper: {e}");
     }
+}
+
+/// Whether a wallpaper is picked and not yet up and saved.
+pub(crate) fn wallpaper_pending() -> bool {
+    WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// THE FIRST TILE of the wallpaper box (Max, 2026-10-18): the palette in use,
+/// as its card, "Follows your colours" — lit while the wallpaper does. With
+/// Dynamic in use (its colours are made FROM the wallpaper, so the wallpaper
+/// cannot be made from them) it is Dynamic's wheel and says "Choose a palette
+/// to use this". Its `value` is the picture shown on it: the box finds a
+/// pick of it by where that picture lives (`wall_follow::is_tile`). `None`
+/// until the card is drawn (it is, here, on the worker).
+fn follow_tile(following: bool) -> Option<Choice> {
+    let (text, card, on) = match crate::palette::swatch_in_use() {
+        Some(swatch) => (tr("Follows your colours"), crate::palette_card::ensure(&swatch)?, following),
+        None => (tr("Choose a palette to use this"), crate::palette_card::wheel(crate::palette::shell_dark())?, false),
+    };
+    Some(Choice { caption: true, ..choice(text, on, card.to_string_lossy()) })
 }
 
 /// The most pictures shown: three pages of the wall (`panel.rs`
@@ -1669,11 +1693,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let now = picked.palette_id().to_owned();
             // (The cards sit in the shell: they wear its look.)
             let card_dark = picked.shell_dark.unwrap_or(dark);
-            let ground = |p: &crate::palette::Palette| if card_dark { p.dark[0] } else { p.light[0] };
             let mut choices = vec![Choice { swatch: Vec::new(), ..choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID) }];
             choices.extend(crate::palette::all().into_iter().map(|p| {
-                let mut swatch = vec![ground(&p)];
-                swatch.extend(if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() });
+                let swatch = crate::palette::swatch(&p, card_dark);
                 Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
             }));
             // Each card as a picture (drawn once, here on the worker).
@@ -1869,7 +1891,11 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Wallpaper" => {
             let found = pictures();
             let want = WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let now = want.or_else(|| GolemSettings::load().wallpaper);
+            let settings = GolemSettings::load();
+            // (A picture on its way up is the one in use: following, if it is
+            // one of the colours' own.)
+            let following = want.as_deref().map_or(settings.wallpaper_follows, crate::wall_follow::is_wall);
+            let now = want.or(settings.wallpaper);
             view.subtitle = if found.is_empty() {
                 tr("Put pictures in Pictures/Wallpapers to choose one here.").to_owned()
             } else if wallpaper_tool().is_none() {
@@ -1877,17 +1903,19 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             } else {
                 tr("The pictures in Pictures/Wallpapers.").to_owned()
             };
-            if !found.is_empty() && wallpaper_tool().is_some() {
-                let choices = found
-                    .iter()
-                    .take(MAX_PICTURES)
-                    .map(|p| {
-                        let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                        let path = p.to_string_lossy().into_owned();
-                        choice(short(&name.replace(['-', '_'], " "), 18), now.as_deref() == Some(path.as_str()), path)
-                    })
-                    .collect();
-                view.groups.push(Group { tiles: true, ..group(None, "wallpaper", 170.0, choices) });
+            if wallpaper_tool().is_some() {
+                // THE FIRST TILE: the palette in use, "Follows your colours"
+                // (Max, 2026-10-18). Even with no picture in the folder: the
+                // colours need none.
+                let mut choices: Vec<Choice> = follow_tile(following).into_iter().collect();
+                choices.extend(found.iter().take(MAX_PICTURES).map(|p| {
+                    let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let path = p.to_string_lossy().into_owned();
+                    choice(short(&name.replace(['-', '_'], " "), 18), now.as_deref() == Some(path.as_str()), path)
+                }));
+                if !choices.is_empty() {
+                    view.groups.push(Group { tiles: true, ..group(None, "wallpaper", 170.0, choices) });
+                }
             }
         }
         _ => {}
@@ -2057,8 +2085,14 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         }
         "wallpaper" => {
             let path = std::path::Path::new(value);
-            if path.starts_with(wallpaper_dir()) && path.is_file() {
-                pick_wallpaper(value.to_owned());
+            if crate::wall_follow::is_tile(value) {
+                // The first tile: the wallpaper follows the colours from now
+                // (Dynamic in use: it says "Choose a palette to use this", and
+                // nothing is done).
+                crate::wall_follow::start();
+            } else if path.starts_with(wallpaper_dir()) && path.is_file() {
+                // (Any other wallpaper ends following.)
+                crate::wall_follow::picked_other(|| pick_wallpaper(value.to_owned()));
             }
         }
         // The wallpaper's own thread reporting back (`pick_wallpaper`).
@@ -2132,10 +2166,14 @@ pub(crate) fn reassert() {
         if s.language.is_some() || s.time_zone.is_some() {
             assert_session_env(&s);
         }
+        // WHICH picture: the saved one — or, when the wallpaper follows the
+        // colours, the picture of THIS palette on THIS screen (made again if
+        // the cache lost it, or the screen is another size than it was).
+        let picture = crate::wall_follow::login_picture().or_else(|| s.wallpaper.clone());
         // The session starts with no picture at all (the compositor's bare
         // grey): the owner's goes up as soon as the picture program answers
         // — it is started beside us, so a few tries may pass first.
-        if let Some(picture) = &s.wallpaper {
+        if let Some(picture) = &picture {
             if let Some(tool) = wallpaper_tool() {
                 for _ in 0..40 {
                     if run(tool, &["query"]) {

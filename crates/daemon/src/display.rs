@@ -190,6 +190,24 @@ fn monitors() -> Vec<Monitor> {
     hypr::monitors_json().map(|json| parse_monitors(&json)).unwrap_or_default()
 }
 
+/// The size, in pixels, of the picture that covers the biggest of these
+/// screens exactly (what a wallpaper made to measure is drawn at: the
+/// picture program puts ONE picture on every screen and fits it to each, so
+/// the biggest screen is the one that must not be asked to stretch it).
+pub(crate) fn largest_screen(monitors: &[Monitor]) -> Option<(u32, u32)> {
+    monitors
+        .iter()
+        .map(|m| (m.mode.w, m.mode.h))
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .max_by_key(|(w, h)| u64::from(*w) * u64::from(*h))
+}
+
+/// The wallpaper's size now: the biggest connected screen's, in pixels.
+/// Asks the compositor (a socket): call it from a thread.
+pub(crate) fn wallpaper_size() -> Option<(u32, u32)> {
+    largest_screen(&monitors())
+}
+
 /// Every scale, in 120ths, that divides a `w`×`h` panel into whole logical
 /// pixels — the only ones the compositor takes as given (any other it moves
 /// to the nearest of these and complains).
@@ -345,6 +363,13 @@ pub(crate) struct GolemSettings {
     /// The picture on the desktop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<String>,
+    /// The wallpaper FOLLOWS the colours (Max, 2026-10-18): it is the palette
+    /// in use, drawn to the screen's size, and changes when the palette or the
+    /// shell's look does ([`crate::wall_follow`]). While it does, `wallpaper`
+    /// is the picture that was made (so everything that reads it — the
+    /// login, Dynamic — keeps working).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wallpaper_follows: bool,
     /// The desktop's colours: the palette and how the shell wears it
     /// ([`crate::palette`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1087,6 +1112,19 @@ mod tests {
         // On another screen: left alone.
         assert!(pointer_after((100.0, 100.0), (2000.0, 0.0), (1920, 1080), 1.0, 1.5).is_none());
         assert!(pointer_after((2000.0 + 1920.0, 10.0), (2000.0, 0.0), (1920, 1080), 1.0, 1.5).is_none());
+    }
+
+    #[test]
+    fn the_wallpaper_is_made_for_the_biggest_screen() {
+        let screen = |w: u64, h: u64| {
+            serde_json::json!({ "name": "X", "description": "", "model": "", "width": w, "height": h, "refreshRate": 60.0, "scale": 1.0 })
+        };
+        let one = parse_monitors(&serde_json::json!([screen(2560, 1600)]));
+        assert_eq!(largest_screen(&one), Some((2560, 1600)));
+        // Several: the one with the most pixels, not the widest.
+        let two = parse_monitors(&serde_json::json!([screen(1920, 1080), screen(3440, 1440), screen(2560, 1600)]));
+        assert_eq!(largest_screen(&two), Some((3440, 1440)));
+        assert_eq!(largest_screen(&[]), None);
     }
 
     #[test]

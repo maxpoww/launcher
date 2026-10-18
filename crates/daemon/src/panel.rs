@@ -1649,11 +1649,18 @@ impl Panel {
         // The dots' room is kept whether or not there are pages: the size
         // of the previews must not depend on it.
         let dots_h = TILE_DOTS_H * s;
+        // THE FIRST TILE WITH ITS WORDS (Max, 2026-10-18: the wallpaper box's
+        // "Follows your colours"): a line of room under the first row for them,
+        // and under no other (a wallpaper has no words on it).
+        let swatches = choices.iter().any(|c| !c.swatch.is_empty());
+        let captioned = !swatches && choices.first().is_some_and(|c| c.caption);
+        let nh = if swatches || captioned { 20.0 * s } else { 0.0 };
+        let cap_h = if captioned { nh } else { 0.0 };
         // The room top to foot: the box's own height (a box made to hug the
         // wall says how much it may take), less what is above the grid, the
         // dots and the closing hint under it.
         let whole = if self.tile_room_h > 0.0 { self.tile_room_h } else { self.field.h.max(self.key.1) };
-        let room_h = (whole - y - 40.0 * s - dots_h).max(TILE_ASPECT * 80.0 * s);
+        let room_h = (whole - y - 40.0 * s - dots_h - cap_h).max(TILE_ASPECT * 80.0 * s);
         // The biggest previews whose grid — as many rows as fit, each one
         // FULL — holds them all, or a page's worth ([`TILES_PER_PAGE`]) when
         // there are more. A page holds its whole grid, so every page but the
@@ -1663,7 +1670,6 @@ impl Panel {
         // eight left the eighth row with seven, and the rest on page two).
         let want = choices.len().min(TILES_PER_PAGE);
         let mut best: Option<(usize, usize, f32)> = None;
-        let swatches = choices.iter().any(|c| !c.swatch.is_empty());
         for cols in 2..=12usize {
             let w = ((room_w - (cols - 1) as f32 * gap) / cols as f32).min(TILE_MAX_W * s);
             let h = w * TILE_ASPECT;
@@ -1696,8 +1702,11 @@ impl Panel {
         let pages = choices.len().div_ceil(cap);
         // The grid is as tall as the fullest page.
         let rows = choices.len().min(cap).div_ceil(cols);
-        // (A palette's name is written under its card: room for it.)
-        let nh = if swatches { 20.0 * s } else { 0.0 };
+        // (A palette's name is written under its card: room for it — under
+        // every row of palettes, under the first row only of a wall.)
+        let row_y = |row: usize| {
+            y + row as f32 * (h + gap) + if swatches { row as f32 * nh } else if row > 0 { cap_h } else { 0.0 }
+        };
         let page_of = |page: usize| -> Vec<Chip> {
             let first = page * cap;
             let on_page = choices.len().saturating_sub(first).min(cap);
@@ -1709,7 +1718,7 @@ impl Panel {
                     let x = (fw - row_w) / 2.0 + col as f32 * (w + gap);
                     let c = &choices[first + k];
                     Chip {
-                        rect: Rect::new(x, y + row as f32 * (h + gap + nh), w, h),
+                        rect: Rect::new(x, row_y(row), w, h),
                         text: c.text.clone(),
                         on: c.on,
                         action: PanelAction::Pick { group, index: (first + k) as u8 },
@@ -1726,7 +1735,7 @@ impl Panel {
                         },
                         swatch: c.swatch.clone(),
                         seg: false,
-                        palette: swatches,
+                        palette: swatches || c.caption,
                         cell: false,
                         style: Style::Word { big: false },
                     }
@@ -1745,7 +1754,7 @@ impl Panel {
             out.ghosts = page_of(from);
             out.ghost_slide = -behind + if forward { -fw } else { fw };
         }
-        let foot = y + rows as f32 * (h + nh) + (rows - 1) as f32 * gap;
+        let foot = y + rows as f32 * h + if swatches { rows as f32 * nh } else { cap_h } + (rows - 1) as f32 * gap;
         if pages > 1 {
             out.dots = Some((foot + (dots_h - TILE_DOT * s) / 2.0, pages, page));
         }
@@ -2834,7 +2843,14 @@ impl Panel {
                     tile_at(out, r, content.slide, file, keyed && content.slide.abs() < 0.5);
                     if chip.palette && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
                         let a = if chip.on || keyed { 1.0 } else { 0.55 };
-                        text(out, chip.text.clone(), r.x + content.slide + r.w / 2.0, r.y + r.h + 4.0 * s, 12.0, 15.0, a);
+                        // (Centred under its tile — unless its words are wider than
+                        // the tile and the tile stands at the box's side: then they
+                        // are kept inside the margin, not cut by the box's edge.)
+                        let half = chip.text.chars().count() as f32 * 3.0 * s;
+                        let lo = MARGIN * s + half;
+                        let hi = (fw - MARGIN * s - half).max(lo);
+                        let mid = (r.x + content.slide + r.w / 2.0).clamp(lo, hi);
+                        text(out, chip.text.clone(), mid, r.y + r.h + 4.0 * s, 12.0, 15.0, a);
                     }
                     // The palette in use, ringed (a wallpaper has no mark).
                     if chip.palette && chip.on && !keyed && r.x + content.slide >= 0.0 && r.x + content.slide + r.w <= fw {
@@ -3813,7 +3829,9 @@ impl App {
             return;
         };
         info!("control panel: {label}: {key} = {value}");
-        if key == "wallpaper" {
+        // (The first tile with Dynamic in use puts no picture up: nothing is
+        // changing, so the dock is not told to watch for it.)
+        if key == "wallpaper" && !crate::wall_follow::is_idle_tile(&value) {
             self.wallpaper_changing(&value);
         }
         if !crate::controls::ui_key(key) {
@@ -4422,6 +4440,68 @@ mod tests {
             p.step(1.0 / 60.0, None);
         }
         p
+    }
+
+    /// The wallpaper box open on `n` pictures, the first of them (when
+    /// `caption`) the palette's card with its words.
+    fn wall_open(n: usize, caption: bool) -> Panel {
+        let mut p = panel();
+        p.field = Rect::new(40.0, 90.0, 960.0, 560.0);
+        p.step(0.0, None);
+        p.open_named("Wallpaper");
+        for _ in 0..40 {
+            p.step(1.0 / 60.0, None);
+        }
+        let choices = (0..n)
+            .map(|i| crate::controls::Choice {
+                text: if i == 0 && caption { "Follows your colours".into() } else { format!("p{i}") },
+                on: i == 0 && caption,
+                value: format!("/pictures/{i}.png"),
+                swatch: Vec::new(),
+                caption: i == 0 && caption,
+            })
+            .collect();
+        let group = crate::controls::Group {
+            caption: None,
+            key: "wallpaper",
+            width: 170.0,
+            choices,
+            tiles: true,
+            slider: false,
+            beside: false,
+            field: false,
+            main: false,
+            buttons: false,
+            cells: 0,
+        };
+        assert!(p.set_control(ControlView { label: "Wallpaper", subtitle: String::new(), groups: vec![group] }));
+        p
+    }
+
+    #[test]
+    fn the_first_tile_of_a_wall_has_a_line_for_its_words_and_no_other_does() {
+        let plain = wall_open(30, false).open_content("Wallpaper").unwrap();
+        let worded = wall_open(30, true).open_content("Wallpaper").unwrap();
+        assert_eq!(plain.chips.len(), worded.chips.len());
+        // Only the first tile is a captioned picture (its words under it, a ring when lit).
+        assert!(worded.chips[0].palette && worded.chips[0].image.is_some());
+        assert!(worded.chips.iter().skip(1).all(|c| !c.palette));
+        assert!(plain.chips.iter().all(|c| !c.palette));
+        // The tiles of a row: where the next row starts.
+        let row_len = |c: &OpenContent| c.chips.iter().take_while(|t| (t.rect.y - c.chips[0].rect.y).abs() < 0.5).count();
+        let (n_plain, n_worded) = (row_len(&plain), row_len(&worded));
+        assert!(n_worded >= 2 && n_worded < worded.chips.len(), "{n_worded} to a row");
+        // Under the first row there is a line more room than between plain rows…
+        let under = |c: &OpenContent, n: usize| c.chips[n].rect.y - (c.chips[0].rect.y + c.chips[0].rect.h);
+        assert!(under(&worded, n_worded) > under(&plain, n_plain) + 10.0, "{} against {}", under(&worded, n_worded), under(&plain, n_plain));
+        // …and between the rows below it the plain gap again.
+        if let Some(i) = (n_worded..worded.chips.len()).find(|&i| worded.chips[i].rect.y > worded.chips[n_worded].rect.y + 0.5) {
+            let gap = worded.chips[i].rect.y - (worded.chips[n_worded].rect.y + worded.chips[n_worded].rect.h);
+            assert!((gap - TILE_GAP).abs() < 0.5, "{gap}");
+        }
+        // The grid ends where the next thing is told to start: below its last row.
+        let last = worded.chips.last().unwrap().rect;
+        assert!(worded.foot_y >= last.y + last.h, "{} under {}", worded.foot_y, last.y + last.h);
     }
 
     fn centre(p: &Panel, chip: &Chip) -> (f32, f32) {
