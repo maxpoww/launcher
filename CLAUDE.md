@@ -1042,4 +1042,5 @@ The big daemon files are cohesive but long — go straight to the function:
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
   <px>|hidden|menu [<n>]|pick <row>|copy|cut|paste|newfolder|rename <n>|bin|props <n>|close|state`
   drive the newest (⚠ `activate`/`key enter` on a file really opens it; `bin`, `paste`, `pick` are REAL).
+- `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
