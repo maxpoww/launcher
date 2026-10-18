@@ -113,6 +113,12 @@ fn system_location() -> Option<(f64, f64)> {
 /// The IANA zone name (`America/La_Paz`) from `/etc/localtime`'s target path,
 /// which ends `…/zoneinfo/<zone>` wherever the tzdb itself lives.
 fn system_zone() -> Option<String> {
+    // (A rig or a test names the place: `GOLEM_ZONE=America/Argentina/Buenos_Aires`.)
+    if let Ok(zone) = std::env::var("GOLEM_ZONE") {
+        if !zone.is_empty() {
+            return Some(zone);
+        }
+    }
     let target = std::fs::read_link("/etc/localtime").ok()?;
     let s = target.to_str()?;
     let idx = s.find("/zoneinfo/")?;
