@@ -7,7 +7,8 @@
 //! and stays tangent to the lens: a smaller lens means the long sides reach
 //! further in, as an iris closes. A HOVER opens the lens `OPEN` times its size
 //! (held while the pointer stays) and turns the whole plate `TURN` degrees
-//! with it; a CLICK snaps the iris shut to a dot and springs it open again.
+//! with it; a CLICK snaps the iris shut to a dot and springs it back to rest,
+//! where it stays until the pointer has left.
 //!
 //! Plain shapes, so a frame is drawn as it is needed (as `youtube_icon`).
 
@@ -91,6 +92,9 @@ pub(crate) struct Motion {
     s: f32,
     /// The click: ms in, and the size it started from.
     click: Option<(f32, f32)>,
+    /// A click was made with the pointer on it: the lens rests until the
+    /// pointer leaves (Max: the hover must not come back by itself).
+    spent: bool,
 }
 
 impl Default for Motion {
@@ -99,6 +103,7 @@ impl Default for Motion {
             hovered: false,
             s: 1.0,
             click: None,
+            spent: false,
         }
     }
 }
@@ -107,13 +112,17 @@ impl Motion {
     /// A click on Chrome's icon.
     pub(crate) fn click(&mut self) {
         self.click = Some((0.0, self.s));
+        self.spent = true;
     }
 
     /// Step by `dt` seconds with the pointer on the icon or not; whether
     /// anything moved.
     pub(crate) fn step(&mut self, hover: bool, dt: f32) -> bool {
         self.hovered = hover;
-        let target = if hover { OPEN } else { 1.0 };
+        if !hover {
+            self.spent = false;
+        }
+        let target = if hover && !self.spent { OPEN } else { 1.0 };
         let before = self.s;
         let ms = dt * 1000.0;
         if let Some((t, from)) = self.click {
@@ -178,7 +187,11 @@ mod tests {
             least = least.min(m.pose());
         }
         assert!(least < 0.45, "nearly shut ({least})");
-        assert_eq!(m.pose(), OPEN, "open again while still pointed at");
+        assert_eq!(m.pose(), 1.0, "back to rest, though still pointed at");
+        for _ in 0..30 {
+            m.step(true, 0.016);
+        }
+        assert_eq!(m.pose(), 1.0, "and the hover does not come back by itself");
         for _ in 0..60 {
             m.step(false, 0.016);
         }
