@@ -15,8 +15,9 @@
 //!   copy: it stays the original, because Dynamic makes its palette from the
 //!   wallpaper and would otherwise chase its own tint.
 //!
-//! What follows the colours already (`wall_follow`) and what moves (a video,
-//! a GIF) is never tinted.
+//! What follows the colours already (`wall_follow`) is never tinted. What
+//! MOVES (a video, a GIF: played by `mpvpaper`) is graded on the screen by an
+//! mpv shader that does exactly `Grade::apply` (`grade_shader`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,11 +67,19 @@ pub(crate) fn filter_hash(f: &Filter) -> u64 {
     h
 }
 
-/// Whether the picture at `path` is one the slider tints: a still, that is
+/// Whether the picture at `path` is one the slider tints: a still or a
+/// moving one (Max, 2026-10-18: the GIFs and videos too), that is
 /// not the colours' own picture nor a tile of the first kind, with a filter
 /// that does something.
 pub(crate) fn tintable(path: &str, f: &Filter) -> bool {
-    active(f) && !crate::controls::wallpaper_moves(path) && !crate::wall_follow::is_wall(path) && !crate::wall_follow::is_tile(path) && !is_copy(path)
+    active(f) && !crate::wall_follow::is_wall(path) && !crate::wall_follow::is_tile(path) && !is_copy(path)
+}
+
+/// Whether the slider tints `path` by making a COPY of it: a still. What
+/// moves is graded on the screen by a shader (`grade_shader`), its tile
+/// like a still's.
+pub(crate) fn copyable(path: &str, f: &Filter) -> bool {
+    tintable(path, f) && !crate::controls::wallpaper_moves(path)
 }
 
 /// Whether `path` is one of the copies made here.
@@ -394,6 +403,9 @@ fn prune(in_use: &str) {
         let Some(modified) = entry.metadata().and_then(|m| m.modified()).ok() else {
             continue;
         };
+        if path.extension().is_some_and(|e| e == "glsl") {
+            continue; // (the shaders have their own pruning)
+        }
         if path.extension().is_some_and(|e| e == "png") {
             pictures.push((path, modified));
         } else if modified.elapsed().is_ok_and(|age| age > Duration::from_secs(600)) {
@@ -410,7 +422,7 @@ fn prune(in_use: &str) {
 /// itself. Records what it chose. For a thread that may wait.
 pub(crate) fn for_display(path: &str) -> String {
     let f = crate::palette::wall_filter_now();
-    if tintable(path, &f) {
+    if copyable(path, &f) {
         if let Some(copy) = screen().and_then(|size| ensure(path, &f, size)) {
             let copy = copy.to_string_lossy().into_owned();
             set_shown(Some(copy.clone()));
@@ -443,19 +455,150 @@ pub(crate) fn refresh() {
 
 fn apply() {
     let s = GolemSettings::load();
-    // (Following the colours is already the palette; a moving wallpaper is
-    // never tinted: both are `tintable`'s no.)
+    // (Following the colours is already the palette.)
     let Some(original) = s.wallpaper.clone().filter(|_| !s.wallpaper_follows) else {
         return;
     };
     let f = crate::palette::wall_filter_now();
-    let want = if tintable(&original, &f) { screen().and_then(|size| target(&original, &f, size)) } else { None };
+    if crate::controls::wallpaper_moves(&original) {
+        // A moving wallpaper keeps playing: the shader is swapped in place;
+        // a player that cannot be told (one from before the shader, or none)
+        // is started again the normal way.
+        let shader = if tintable(&original, &f) { grade_shader(&f) } else { None };
+        if !crate::controls::wallpaper_grade(shader.as_deref()) {
+            crate::controls::pick_wallpaper(original);
+        }
+        return;
+    }
+    let want = if copyable(&original, &f) { screen().and_then(|size| target(&original, &f, size)) } else { None };
     let now = shown();
     if want.as_ref().map(|p| p.to_string_lossy().into_owned()) == now {
         return;
     }
     // The same road as a pick (its fade); it saves the ORIGINAL again.
     crate::controls::pick_wallpaper(original);
+}
+
+// ----------------------------------------------------------------- shader
+
+/// The shader's drawing: a new look makes new files.
+const SHADER_VERSION: u64 = 1;
+
+/// The most shaders kept.
+const SHADERS_KEPT: usize = 8;
+
+fn glsl_f(v: f32) -> String {
+    let s = format!("{v:?}");
+    if s.contains(['.', 'e', 'E']) { s } else { format!("{s}.0") }
+}
+
+/// THE GRADE AS AN MPV SHADER: `Grade::apply` written in GLSL, the palette's
+/// ramp (sorted stops) and the slider baked in as constants, so a video is
+/// graded by the graphics card, frame by frame, exactly as a photo is by the
+/// processor (Max, 2026-10-18: the slider "should also colour the GIF and
+/// animated MP4 wallpapers"). `None` when the filter does nothing.
+pub(crate) fn grade_glsl(f: &Filter) -> Option<String> {
+    if !active(f) {
+        return None;
+    }
+    let g = Grade::of(f);
+    let st = &g.stops;
+    let mut ramp = String::new();
+    if let Some(first) = st.first() {
+        ramp.push_str(&format!("    if (l <= {}) return vec2({}, {});\n", glsl_f(first.0), glsl_f(first.1), glsl_f(first.2)));
+        for w in st.windows(2) {
+            ramp.push_str(&format!(
+                "    if (l <= {l1}) return mix(vec2({a0}, {b0}), vec2({a1}, {b1}), clamp((l - {l0}) / max({l1} - {l0}, 1e-6), 0.0, 1.0));\n",
+                l0 = glsl_f(w[0].0), a0 = glsl_f(w[0].1), b0 = glsl_f(w[0].2),
+                l1 = glsl_f(w[1].0), a1 = glsl_f(w[1].1), b1 = glsl_f(w[1].2),
+            ));
+        }
+        let last = st[st.len() - 1];
+        ramp.push_str(&format!("    return vec2({}, {});\n", glsl_f(last.1), glsl_f(last.2)));
+    } else {
+        ramp.push_str("    return vec2(0.0);\n");
+    }
+    Some(format!(
+        r#"//!HOOK OUTPUT
+//!BIND HOOKED
+//!DESC golem wallpaper grade
+// Written by Golem: the wallpapers' grade (wall_tint.rs Grade::apply) on the GPU.
+const float T = {t};
+
+float s2l(float x) {{ return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }}
+float l2s(float x) {{ x = clamp(x, 0.0, 1.0); return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }}
+float cbrt1(float x) {{ return sign(x) * pow(abs(x), 1.0 / 3.0); }}
+
+vec2 ramp(float l) {{
+{ramp}}}
+
+vec4 hook() {{
+    vec4 px = HOOKED_texOff(0);
+    vec3 c = vec3(s2l(px.r), s2l(px.g), s2l(px.b));
+    float l_ = cbrt1(0.41222147 * c.r + 0.53633255 * c.g + 0.05144599 * c.b);
+    float m_ = cbrt1(0.2119035 * c.r + 0.6806995 * c.g + 0.10739696 * c.b);
+    float s_ = cbrt1(0.08830246 * c.r + 0.28171885 * c.g + 0.6299787 * c.b);
+    float L = 0.21045426 * l_ + 0.7936178 * m_ - 0.004072047 * s_;
+    float A = 1.9779985 * l_ - 2.4285922 * m_ + 0.4505937 * s_;
+    float B = 0.025904037 * l_ + 0.78277177 * m_ - 0.80867577 * s_;
+    vec2 r = ramp(L);
+    float room = 0.6 * max(min(L, 1.0 - L), 0.0);
+    float rc = length(r);
+    if (rc > room) r *= room / rc;
+    A += (r.x - A) * T;
+    B += (r.y - B) * T;
+    float lp = pow(L + 0.39633778 * A + 0.21580376 * B, 3.0);
+    float mp = pow(L - 0.105561346 * A - 0.06385417 * B, 3.0);
+    float sp = pow(L - 0.08948418 * A - 1.2914855 * B, 3.0);
+    vec3 o = vec3(4.0767417 * lp - 3.3077116 * mp + 0.23096994 * sp,
+                  -1.268438 * lp + 2.6097574 * mp - 0.34131938 * sp,
+                  -0.004196086 * lp - 0.7034186 * mp + 1.7076147 * sp);
+    return vec4(l2s(o.r), l2s(o.g), l2s(o.b), px.a);
+}}
+"#,
+        t = glsl_f(g.t),
+        ramp = ramp,
+    ))
+}
+
+/// Where the shader for `f` is kept.
+fn shader_path(f: &Filter) -> Option<PathBuf> {
+    let h = filter_hash(f) ^ SHADER_VERSION.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    Some(copies_dir()?.join(format!("grade-{h:016x}.glsl")))
+}
+
+/// The shader file for `f`, written if it is not kept (atomically: a player
+/// never reads half of one). `None`: the filter does nothing, or it could
+/// not be written.
+pub(crate) fn grade_shader(f: &Filter) -> Option<PathBuf> {
+    let text = grade_glsl(f)?;
+    let out = shader_path(f)?;
+    if out.is_file() {
+        return Some(out);
+    }
+    std::fs::create_dir_all(out.parent()?).ok()?;
+    let tmp = out.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, &out).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    prune_shaders(&out);
+    Some(out)
+}
+
+fn prune_shaders(in_use: &Path) {
+    let Some(dir) = in_use.parent() else { return };
+    let mut found: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "glsl"))
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
+        .collect();
+    found.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
+    for (p, _) in found.into_iter().skip(SHADERS_KEPT).filter(|(p, _)| p != in_use) {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 #[cfg(test)]
@@ -523,11 +666,14 @@ mod tests {
     }
 
     #[test]
-    fn what_follows_or_moves_is_never_tinted() {
+    fn what_follows_is_never_tinted_and_what_moves_has_no_copy() {
         let f = jade();
         assert!(tintable("/home/x/Pictures/Wallpapers/a.jpg", &f));
-        assert!(!tintable("/home/x/Pictures/Wallpapers/a.mp4", &f));
-        assert!(!tintable("/home/x/Pictures/Wallpapers/a.gif", &f));
+        assert!(tintable("/home/x/Pictures/Wallpapers/a.mp4", &f), "a video's tile is graded");
+        assert!(tintable("/home/x/Pictures/Wallpapers/a.gif", &f));
+        assert!(copyable("/home/x/Pictures/Wallpapers/a.jpg", &f));
+        assert!(!copyable("/home/x/Pictures/Wallpapers/a.mp4", &f), "what moves gets a shader, not a copy");
+        assert!(!copyable("/home/x/Pictures/Wallpapers/a.gif", &f));
         assert!(!tintable("/home/x/Pictures/Wallpapers/a.jpg", &crate::palette::filter_for("jade", 0, false)));
         std::env::set_var("XDG_CACHE_HOME", "/tmp/wt-cache");
         assert!(!tintable("/tmp/wt-cache/waverunner/palette-walls/a-1x1.png", &f), "the colours' own picture");
@@ -553,10 +699,10 @@ mod tests {
         assert_eq!((back, orig.as_str()), (f, file.as_str()));
         // A slider that moved on: its tile is stale.
         assert!(matches!(parse_key(&key, &crate::palette::filter_for("jade", 30, false)), Some(Err(()))));
-        // Off, a moving picture, the first tile: the file as it is.
+        // Off, the first tile: the file as it is.
         assert_eq!(tile_key(&file, &crate::palette::filter_for("jade", 0, false)), file);
         let gif = dir.join("a.gif").to_string_lossy().into_owned();
-        assert_eq!(tile_key(&gif, &f), gif);
+        assert!(tile_key(&gif, &f).starts_with(KEY), "a GIF's tile is graded too");
         assert_eq!(tile_key("/elsewhere/a.jpg", &f), "/elsewhere/a.jpg");
         assert!(parse_key(&file, &f).is_none());
     }
@@ -583,6 +729,94 @@ mod tests {
         assert_eq!(copy_size(6000, 4000, 2560, 1600), (2560, 1707));
         assert_eq!(copy_size(4000, 6000, 2560, 1600), (2560, 3840));
         assert_eq!(copy_size(1920, 1080, 2560, 1600), (1920, 1080));
+    }
+
+    /// The shader's maths written out in Rust, step for step (floats, no
+    /// lookup table), for the test below.
+    fn glsl_port(g: &Grade, c: [f32; 3]) -> [f32; 3] {
+        let s2l = |x: f32| if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) };
+        let l2s = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+        };
+        let cb = |x: f32| x.signum() * x.abs().powf(1.0 / 3.0);
+        let [r, gg, b] = c.map(s2l);
+        let l_ = cb(0.412_221_47 * r + 0.536_332_55 * gg + 0.051_445_99 * b);
+        let m_ = cb(0.211_903_5 * r + 0.680_699_5 * gg + 0.107_396_96 * b);
+        let s_ = cb(0.088_302_46 * r + 0.281_718_85 * gg + 0.629_978_7 * b);
+        let l = 0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_;
+        let mut a = 1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_;
+        let mut bb = 0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_;
+        let (mut ra, mut rb) = g.ramp(l);
+        let room = 0.6 * l.min(1.0 - l).max(0.0);
+        let rc = ra.hypot(rb);
+        if rc > room {
+            ra *= room / rc;
+            rb *= room / rc;
+        }
+        a += (ra - a) * g.t;
+        bb += (rb - bb) * g.t;
+        let lp = (l + 0.396_337_78 * a + 0.215_803_76 * bb).powi(3);
+        let mp = (l - 0.105_561_346 * a - 0.063_854_17 * bb).powi(3);
+        let sp = (l - 0.089_484_18 * a - 1.291_485_5 * bb).powi(3);
+        [
+            l2s(4.076_741_7 * lp - 3.307_711_6 * mp + 0.230_969_94 * sp),
+            l2s(-1.268_438 * lp + 2.609_757_4 * mp - 0.341_319_38 * sp),
+            l2s(-0.004_196_086 * lp - 0.703_418_6 * mp + 1.707_614_7 * sp),
+        ]
+    }
+
+    #[test]
+    fn the_shader_carries_the_palette_and_the_slider() {
+        let f = crate::palette::filter_for("jade", 60, false);
+        let g = Grade::of(&f);
+        let text = grade_glsl(&f).unwrap();
+        assert!(text.starts_with("//!HOOK OUTPUT\n//!BIND HOOKED\n"));
+        assert!(text.contains(&format!("const float T = {};", glsl_f(g.t))));
+        for (l, a, b) in &g.stops {
+            assert!(text.contains(&glsl_f(*l)) && text.contains(&glsl_f(*a)) && text.contains(&glsl_f(*b)), "stop {l} {a} {b}");
+        }
+        assert_eq!(text.matches("if (l <=").count(), g.stops.len(), "one branch per stop");
+        assert!(grade_glsl(&crate::palette::filter_for("jade", 0, false)).is_none(), "level 0 has no shader");
+        assert_ne!(shader_path(&f), shader_path(&jade()));
+        assert_eq!(glsl_f(1.0), "1.0");
+        assert_eq!(glsl_f(-0.25), "-0.25");
+    }
+
+    #[test]
+    fn the_shaders_maths_is_the_photos_grade() {
+        // (A hand-made two-colour palette too: warm dark, pale blue.)
+        let mut two = [[0.0f32; 4]; 7];
+        two[0] = [0.8, 0.0, 2.0, 0.0];
+        two[1] = [0.35, 0.12, 0.9, 0.0];
+        two[2] = [0.9, 0.05, 4.0, 0.0];
+        for (pal, f) in [("jade 100", jade()), ("jade 55", crate::palette::filter_for("jade", 55, false)), ("two", two)] {
+            let g = Grade::of(&f);
+            let mut worst = 0.0f32;
+            for r in (0..=255).step_by(17) {
+                for gr in (0..=255).step_by(17) {
+                    for b in (0..=255).step_by(17) {
+                        let cpu = g.apply([r as u8, gr as u8, b as u8]);
+                        let gpu = glsl_port(&g, [r as f32 / 255.0, gr as f32 / 255.0, b as f32 / 255.0]).map(|x| x * 255.0);
+                        for k in 0..3 {
+                            worst = worst.max((cpu[k] - gpu[k]).abs());
+                        }
+                    }
+                }
+            }
+            assert!(worst < 0.05, "{pal}: worst difference {worst}");
+        }
+    }
+
+    /// Writes the shader for jade at 100 and 50 to $SHADER_OUT (for trying in mpv).
+    #[test]
+    #[ignore]
+    fn write_shaders() {
+        let out = std::env::var("SHADER_OUT").unwrap();
+        for level in [100u8, 50] {
+            let f = crate::palette::filter_for("jade", level, false);
+            std::fs::write(format!("{out}/grade{level}.glsl"), grade_glsl(&f).unwrap()).unwrap();
+        }
     }
 
     #[test]

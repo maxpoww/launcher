@@ -1320,6 +1320,57 @@ fn wallpaper_tell(paused: bool) {
     });
 }
 
+/// The shader the player of the moving wallpaper wears now (`None`: none).
+static GRADED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The Colours slider (or the palette) moved while a moving wallpaper plays:
+/// swap its shader in place over the player's socket — `None` takes it off —
+/// with no restart. Returns whether that is settled: `true` when it was told
+/// (or already wore it, or nothing plays); `false` when a player is there
+/// but cannot be told (one started before it listened), and the caller
+/// starts the wallpaper again the normal way. For a thread that may wait.
+pub(crate) fn wallpaper_grade(shader: Option<&std::path::Path>) -> bool {
+    use std::io::{BufRead, Write};
+    let want = shader.map(|s| s.to_string_lossy().into_owned());
+    if *GRADED.lock().unwrap_or_else(|e| e.into_inner()) == want {
+        return true;
+    }
+    if players().is_empty() {
+        return true;
+    }
+    let Some(socket) = player_socket() else {
+        return false;
+    };
+    let command = match &want {
+        Some(file) => serde_json::json!({"command": ["change-list", "glsl-shaders", "set", file]}),
+        None => serde_json::json!({"command": ["change-list", "glsl-shaders", "clr", ""]}),
+    };
+    let timeout = Some(std::time::Duration::from_millis(800));
+    let told = (|| {
+        let mut s = std::os::unix::net::UnixStream::connect(&socket).ok()?;
+        s.set_write_timeout(timeout).ok()?;
+        s.set_read_timeout(timeout).ok()?;
+        writeln!(s, "{command}").ok()?;
+        // (Events may come first; the answer is the line with an error.)
+        let mut lines = std::io::BufReader::new(s).lines();
+        for _ in 0..20 {
+            let line = lines.next()?.ok()?;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(e) = v.get("error") {
+                    return Some(e == "success");
+                }
+            }
+        }
+        None
+    })();
+    if told == Some(true) {
+        *GRADED.lock().unwrap_or_else(|e| e.into_inner()) = want;
+        true
+    } else {
+        false
+    }
+}
+
 /// The players of moving wallpapers running now, by process id.
 fn players() -> Vec<String> {
     out("pgrep", &["-f", PLAYERS]).map(|found| found.split_whitespace().map(str::to_owned).collect()).unwrap_or_default()
@@ -1426,6 +1477,17 @@ fn show_wallpaper(path: &str, fade: bool) -> bool {
                 let _ = std::fs::remove_file(&socket);
                 how.push_str(&format!(" input-ipc-server={}", socket.display()));
             }
+            // Under the Colours slider the player grades every frame with
+            // the palette's shader (Max, 2026-10-18: "also colour the GIF
+            // and animated MP4 wallpapers"). A path with a space cannot be
+            // handed over (the options are split at spaces).
+            let filter = crate::palette::wall_filter_now();
+            let shader = if crate::wall_tint::tintable(path, &filter) { crate::wall_tint::grade_shader(&filter) } else { None }
+                .filter(|s| !s.to_string_lossy().contains([' ', ':']));
+            if let Some(shader) = &shader {
+                how.push_str(&format!(" glsl-shaders={}", shader.display()));
+            }
+            *GRADED.lock().unwrap_or_else(|e| e.into_inner()) = shader.map(|s| s.to_string_lossy().into_owned());
             if !run(&player, &["-f", "-o", &how, "*", path]) {
                 return false;
             }
