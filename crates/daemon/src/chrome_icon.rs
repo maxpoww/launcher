@@ -7,8 +7,9 @@
 //! and stays tangent to the lens: a smaller lens means the long sides reach
 //! further in, as an iris closes. A HOVER opens the lens `OPEN` times its size
 //! (held while the pointer stays) and turns the whole plate `TURN` degrees
-//! with it; a CLICK snaps the iris shut to a dot and springs it back to rest,
-//! where it stays until the pointer has left.
+//! with it, spinning twice as it opens; a CLICK snaps the iris shut to a dot
+//! (the shot) and springs it back to rest spinning twice the other way, where
+//! it stays until the pointer has left.
 //!
 //! Plain shapes, so a frame is drawn as it is needed (as `youtube_icon`).
 
@@ -35,9 +36,14 @@ const TAU_MS: f32 = 110.0;
 const SHUT: f32 = 0.22;
 const CLOSE_MS: f32 = 180.0;
 const CLICK_MS: f32 = 700.0;
+/// The spins: two as a hover opens it, two the other way after the shot.
+const HOVER_SPIN_MS: f32 = 700.0;
+const SHOT_SPIN_MS: f32 = 800.0;
+const SPINS: f32 = 2.0;
 
-/// The figure with the lens `s` times its size.
-fn figure(s: f32) -> String {
+/// The figure with the lens `s` times its size and the plate spun `spin`
+/// degrees past its tilt.
+fn figure(s: f32, spin: f32) -> String {
     let ri = LENS * s;
     let c = MID;
     let at = |a: f32, r: f32| format!("{:.2} {:.2}", c + r * a.cos(), c + r * a.sin());
@@ -56,7 +62,7 @@ fn figure(s: f32) -> String {
             at(inner(t1), ri)
         ));
     }
-    let turn = TURN * ((s - 1.0) / (OPEN - 1.0)).clamp(0.0, 1.0);
+    let turn = TURN * ((s - 1.0) / (OPEN - 1.0)).clamp(0.0, 1.0) + spin;
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256"><g {LAB}><g transform="rotate({turn:.2} {c} {c})">{blades}<circle cx="{c}" cy="{c}" r="{ri:.3}" fill="#fff"/><circle cx="{c}" cy="{c}" r="{:.3}" fill="#4285f4"/></g></g></svg>"##,
         ri * 10.2 / LENS
@@ -65,15 +71,15 @@ fn figure(s: f32) -> String {
 
 /// The figure at rest.
 pub(crate) fn rest_svg() -> String {
-    figure(1.0)
+    figure(1.0, 0.0)
 }
 
 /// A frame's side.
 pub(crate) const FRAME: u32 = 128;
 
-/// The frame with the lens `s` times its size.
-pub(crate) fn frame(s: f32) -> Option<Vec<u8>> {
-    let svg = figure(s);
+/// The frame with the lens `s` times its size, the plate spun `spin`.
+pub(crate) fn frame(s: f32, spin: f32) -> Option<Vec<u8>> {
+    let svg = figure(s, spin);
     let tree =
         resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(FRAME, FRAME)?;
@@ -95,6 +101,9 @@ pub(crate) struct Motion {
     /// A click was made with the pointer on it: the lens rests until the
     /// pointer leaves (Max: the hover must not come back by itself).
     spent: bool,
+    /// Ms since the pointer came on it, and since the click.
+    hover_t: Option<f32>,
+    shot_t: Option<f32>,
 }
 
 impl Default for Motion {
@@ -104,6 +113,8 @@ impl Default for Motion {
             s: 1.0,
             click: None,
             spent: false,
+            hover_t: None,
+            shot_t: None,
         }
     }
 }
@@ -113,6 +124,7 @@ impl Motion {
     pub(crate) fn click(&mut self) {
         self.click = Some((0.0, self.s));
         self.spent = true;
+        self.shot_t = Some(0.0);
     }
 
     /// Step by `dt` seconds with the pointer on the icon or not; whether
@@ -122,9 +134,16 @@ impl Motion {
         if !hover {
             self.spent = false;
         }
+        let ms = dt * 1000.0;
+        self.hover_t = match (hover, self.hover_t) {
+            (true, None) if !self.spent => Some(0.0),
+            (true, Some(t)) => Some(t + ms),
+            _ => None,
+        };
+        self.shot_t = self.shot_t.map(|t| t + ms).filter(|t| *t < CLOSE_MS + SHOT_SPIN_MS);
+        let spinning = self.spin() != 0.0 || self.shot_t.is_some();
         let target = if hover && !self.spent { OPEN } else { 1.0 };
         let before = self.s;
-        let ms = dt * 1000.0;
         if let Some((t, from)) = self.click {
             let t = t + ms;
             self.s = if t < CLOSE_MS {
@@ -142,7 +161,24 @@ impl Motion {
         if (target - self.s).abs() < 0.002 {
             self.s = target;
         }
-        self.s != before
+        self.s != before || spinning
+    }
+
+    /// The spin now (degrees, past the plate's tilt).
+    pub(crate) fn spin(&self) -> f32 {
+        let run = |t: f32, ms: f32, turns: f32| {
+            if (0.0..ms).contains(&t) {
+                -360.0 * turns * bezier(0.45, 0.0, 0.25, 1.0, t / ms)
+            } else {
+                0.0
+            }
+        };
+        let hover = match self.hover_t {
+            Some(t) if !self.spent => run(t, HOVER_SPIN_MS, SPINS),
+            _ => 0.0,
+        };
+        let shot = self.shot_t.map_or(0.0, |t| run(t - CLOSE_MS, SHOT_SPIN_MS, -SPINS));
+        hover + shot
     }
 
     /// The lens's size now.
@@ -158,14 +194,14 @@ mod tests {
     #[test]
     fn every_opening_draws() {
         for s in [SHUT, 0.5, 1.0, 1.3, OPEN] {
-            assert!(frame(s).is_some());
+            assert!(frame(s, 100.0).is_some());
         }
     }
 
     #[test]
     fn the_outer_ends_stay_on_the_rim_whatever_the_opening() {
         let ends = |s: f32| {
-            let svg = figure(s);
+            let svg = figure(s, 0.0);
             let a = svg.find("A28 28").unwrap();
             svg[a..].split('L').next().unwrap_or_default().to_string()
         };
@@ -176,9 +212,12 @@ mod tests {
     #[test]
     fn a_hover_opens_and_holds_a_click_shuts_and_reopens() {
         let mut m = Motion::default();
+        let mut most = 0.0f32;
         for _ in 0..60 {
             m.step(true, 0.016);
+            most = most.min(m.spin());
         }
+        assert!(most < -600.0, "two turns as it opens ({most})");
         assert_eq!(m.pose(), OPEN);
         m.click();
         let mut least = OPEN;
@@ -192,6 +231,7 @@ mod tests {
             m.step(true, 0.016);
         }
         assert_eq!(m.pose(), 1.0, "and the hover does not come back by itself");
+        assert_eq!(m.spin(), 0.0);
         for _ in 0..60 {
             m.step(false, 0.016);
         }

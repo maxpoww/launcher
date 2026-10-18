@@ -1259,7 +1259,7 @@ impl App {
                 .filter(|(_, e)| e.id == crate::chrome_icon::CHROME_ID)
                 .filter_map(|(i, _)| self.icon_layers.get(i).copied())
                 .collect();
-            if let (Some(chain), Some(renderer)) = (apps::chrome_at(self.chrome.pose()), self.renderer.as_mut()) {
+            if let (Some(chain), Some(renderer)) = (apps::chrome_at(self.chrome.pose(), self.chrome.spin()), self.renderer.as_mut()) {
                 for layer in layers {
                     renderer.update_icon_layer(layer, &chain);
                 }

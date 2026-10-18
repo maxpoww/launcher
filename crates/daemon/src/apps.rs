@@ -457,9 +457,10 @@ pub(crate) fn google_at(p: &crate::google_icon::Pose) -> Option<Vec<u8>> {
     Some(frame_chain(&crate::google_icon::frame(p)?, crate::google_icon::FRAME))
 }
 
-/// Chrome's mark with its lens `s` times its size, ready to upload.
-pub(crate) fn chrome_at(s: f32) -> Option<Vec<u8>> {
-    Some(frame_chain(&crate::chrome_icon::frame(s)?, crate::chrome_icon::FRAME))
+/// Chrome's mark with its lens `s` times its size and spun `spin`, ready to
+/// upload.
+pub(crate) fn chrome_at(s: f32, spin: f32) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::chrome_icon::frame(s, spin)?, crate::chrome_icon::FRAME))
 }
 
 /// The apps button's stencil (its nine squares), ready to upload.
