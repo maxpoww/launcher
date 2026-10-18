@@ -41,7 +41,7 @@ fn colours_hash(colours: &[Rgb], salt: u64) -> u64 {
 /// Where the card of these colours (ground first, then the soul) is kept.
 pub(crate) fn path(colours: &[Rgb]) -> Option<PathBuf> {
     // (The version of the drawing: a new look makes new files.)
-    Some(cards_dir()?.join(format!("{:016x}.png", colours_hash(colours, 2))))
+    Some(cards_dir()?.join(format!("{:016x}.png", colours_hash(colours, 3))))
 }
 
 /// The card of these colours, drawn if it is not there yet.
@@ -157,10 +157,10 @@ fn fan(n: usize) -> (f32, f32) {
 /// The floor's shadow and the capsules, on the board (the first on top:
 /// drawn last). The card draws them as they are; the wallpaper draws them
 /// scaled and moved, inside a group.
-/// `top_line`: the thin light at each capsule's top — the card's; the
-/// wallpaper goes without (Max, 2026-10-18: at a screen's size it read as "a
-/// line on top of the palette colours that shows the colours behind").
-fn capsule_group(soul: &[Rgb], top_line: bool) -> String {
+/// (No thin light along each capsule's top: on the cards and the wallpaper
+/// alike it read as "a line on top of the palette colours that shows the
+/// colours behind" — Max, 2026-10-18.)
+fn capsule_group(soul: &[Rgb]) -> String {
     let (pw, ph) = CAPSULE;
     let (x0, y) = (fan(soul.len()).0, (BOARD.1 - ph) / 2.0);
     let mut out = format!(
@@ -179,18 +179,13 @@ fn capsule_group(soul: &[Rgb], top_line: bool) -> String {
 <clipPath id="p{k}"><rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}"/></clipPath>
 <rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}" fill="#{c}"/>
 <rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}" fill="url(#sheen)"/>
-{line}"##,
+"##,
             sx = x - 7.0 + 4.2,
             sy = y + 4.2,
             sw = pw - 8.4,
             sh = ph - 8.4,
             sr = r - 4.2,
             c = hex(*c),
-            line = if top_line {
-                format!("<rect x=\"{x}\" y=\"{y}\" width=\"{pw}\" height=\"1.2\" fill=\"#ffffff\" fill-opacity=\"0.15\" clip-path=\"url(#p{k})\"/>\n")
-            } else {
-                String::new()
-            },
         ));
     }
     out
@@ -232,7 +227,7 @@ pub(crate) fn svg(colours: &[Rgb]) -> String {
         lift = lift(ground),
         defs = CAPSULE_DEFS,
     );
-    out.push_str(&capsule_group(soul, true));
+    out.push_str(&capsule_group(soul));
     out.push_str("</svg>\n");
     out
 }
@@ -316,7 +311,7 @@ pub(crate) fn wall_svg(colours: &[Rgb], w: u32, h: u32) -> String {
         gy = f.cy,
         unit = f.unit,
     );
-    out.push_str(&capsule_group(soul, false));
+    out.push_str(&capsule_group(soul));
     out.push_str("</g>\n</svg>\n");
     out
 }
