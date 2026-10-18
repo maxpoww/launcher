@@ -160,11 +160,13 @@ fn fan(n: usize) -> (f32, f32) {
 /// (No thin light along each capsule's top: on the cards and the wallpaper
 /// alike it read as "a line on top of the palette colours that shows the
 /// colours behind" — Max, 2026-10-18.)
-fn capsule_group(soul: &[Rgb]) -> String {
+/// `shade`: how dark their shadows are (the card's 0.35; the wallpaper's
+/// subtle — Max, 2026-10-18: "the shadows outside the palette, make it subtle").
+fn capsule_group(soul: &[Rgb], shade: f32) -> String {
     let (pw, ph) = CAPSULE;
     let (x0, y) = (fan(soul.len()).0, (BOARD.1 - ph) / 2.0);
     let mut out = format!(
-        r##"<ellipse cx="80" cy="{fy}" rx="{frx}" ry="3.6" fill="#000000" fill-opacity="0.35" filter="url(#floor)"/>
+        r##"<ellipse cx="80" cy="{fy}" rx="{frx}" ry="3.6" fill="#000000" fill-opacity="{shade}" filter="url(#floor)"/>
 "##,
         fy = 100.0 - 14.0 - 4.0,
         frx = 160.0 * 0.26,
@@ -175,7 +177,7 @@ fn capsule_group(soul: &[Rgb]) -> String {
         // box-shadow: -5px 0 9px -3px #00000059 (one pill-width 24 ↔ the
         // mockup's ~17 px: the numbers scaled by 1.4).
         out.push_str(&format!(
-            r##"<rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" rx="{sr}" fill="#000000" fill-opacity="0.35" filter="url(#cast)"/>
+            r##"<rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" rx="{sr}" fill="#000000" fill-opacity="{shade}" filter="url(#cast)"/>
 <clipPath id="p{k}"><rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}"/></clipPath>
 <rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}" fill="#{c}"/>
 <rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}" fill="url(#sheen)"/>
@@ -227,7 +229,7 @@ pub(crate) fn svg(colours: &[Rgb]) -> String {
         lift = lift(ground),
         defs = CAPSULE_DEFS,
     );
-    out.push_str(&capsule_group(soul));
+    out.push_str(&capsule_group(soul, 0.35));
     out.push_str("</svg>\n");
     out
 }
@@ -311,7 +313,7 @@ pub(crate) fn wall_svg(colours: &[Rgb], w: u32, h: u32) -> String {
         gy = f.cy,
         unit = f.unit,
     );
-    out.push_str(&capsule_group(soul));
+    out.push_str(&capsule_group(soul, 0.15));
     out.push_str("</g>\n</svg>\n");
     out
 }
@@ -354,7 +356,7 @@ pub(crate) fn wall_pixels(colours: &[Rgb], w: u32, h: u32) -> Option<Vec<u8>> {
 }
 
 /// The wallpapers' drawing: a new look makes new files.
-const WALL_VERSION: u64 = 2;
+const WALL_VERSION: u64 = 4;
 
 /// The most a wallpaper may be asked for in a side (a screen of 8K).
 const WALL_MAX: u32 = 8192;
