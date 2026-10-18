@@ -1970,6 +1970,19 @@ impl App {
             ],
             None => vec![strip(-2.0, -2.0, w + 4.0, bottom + 2.0)],
         };
+        // THE VEIL behind the banner (Max, 2026-10-18: "include BG darks the
+        // BG but not the bg behind OPTIONS banner"): the desktop's veil stops
+        // at the bar, and the faint strip lets the wallpaper through — so the
+        // bar lays the same wash under its own strip, at full strength (the
+        // wallpaper does not fade with the bar). Not over a matched window's
+        // colour (opaque, no wallpaper there), and not where the card hangs.
+        let veil = crate::lighting::veil_now();
+        let mut rects = rects;
+        if veil > 0.0 && !matched {
+            let veils: Vec<content::RectInst> =
+                rects.iter().map(|r| content::RectInst { color: [0.0, 0.0, 0.0, veil], glass: -1.0, ..*r }).collect();
+            rects.splice(0..0, veils);
+        }
         let mut scene = content::Scene {
             alpha: 1.0,
             rects,

@@ -469,6 +469,10 @@ impl App {
             }
             if veil_moved {
                 self.request_desktop_draw();
+                // (The banner lays the veil under its strip too.)
+                if !follows {
+                    self.draw_options();
+                }
             }
         }
         if done {

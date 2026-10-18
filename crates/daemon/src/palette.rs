@@ -2656,6 +2656,8 @@ impl crate::App {
         }
         if !changed && !lit_moved && veil_moved {
             self.request_desktop_draw();
+            // (The banner lays the veil under its strip too.)
+            self.draw_options();
         }
         if changed || lit_moved {
             self.reassert_window_border();
