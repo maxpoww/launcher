@@ -1382,6 +1382,8 @@ fn main() -> anyhow::Result<()> {
     // The same for Escape: a daemon that died while a dictation was being
     // written out left the key bound to its cancel (card/dictate.rs).
     app.dictate_esc(false);
+    // …and for Ctrl +/−/0, held by the bar, the card, fast launch or a group.
+    app.zoom_keys_release();
     // The file manager's windows that stood open when the dock last went
     // down within this login come back on their folders.
     app.filer_restore_session();

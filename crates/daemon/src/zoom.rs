@@ -196,6 +196,20 @@ impl App {
         self.sync_zoom_keys();
     }
 
+    /// A dock that went down while it held Ctrl +/−/0 — the pointer on the
+    /// bar or the card, fast launch or a group open — left them bound to it,
+    /// and a new one starts believing nothing is: every app lost its own
+    /// zoom keys (Seam's page zoom among them) until the pointer crossed the
+    /// bar again (the Acer, 2026-10-17, after a restart). A dock starts by
+    /// giving them back. (The card binds the same keys: one release for both.)
+    pub(crate) fn zoom_keys_release(&mut self) {
+        let lua: String = KEYS.iter().map(|(key, _)| format!("hl.unbind(\"{key}\") ")).collect();
+        self.zoom_keys_for = None;
+        if !crate::hypr::eval_ok(&lua) {
+            tracing::debug!("zoom: Ctrl +/- not given back at start (no compositor yet?)");
+        }
+    }
+
     /// Bind Ctrl +/−/0 to what they zoom now — fast launch or the quick
     /// controls when one is up, else a group open over the dock, else the
     /// bar under the pointer — or give them back.
