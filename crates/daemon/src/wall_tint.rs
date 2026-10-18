@@ -819,6 +819,33 @@ mod tests {
         }
     }
 
+    /// Compares real screenshots of mpv with and without the shader ($SHOTS: a
+    /// folder with plain.png, g100.png, g50.png, cleared.png).
+    #[test]
+    #[ignore]
+    fn compare_shots() {
+        let dir = std::env::var("SHOTS").unwrap();
+        let open = |n: &str| image::open(format!("{dir}/{n}.png")).unwrap().to_rgb8();
+        let plain = open("plain");
+        let points = [(100u32, 300u32), (300, 300), (600, 300), (850, 300), (1100, 400), (1350, 300), (850, 850), (100, 850), (600, 850), (1100, 850)];
+        for (name, level) in [("g100", 100u8), ("g50", 50), ("cleared", 0)] {
+            let shot = open(name);
+            let g = Grade::of(&crate::palette::filter_for("jade", level, false));
+            let mut worst = 0.0f32;
+            let mut sum = 0.0f32;
+            for &(x, y) in &points {
+                let c = plain.get_pixel(x, y).0;
+                let want = if level == 0 { c.map(f32::from) } else { g.apply(c) };
+                let got = shot.get_pixel(x, y).0;
+                let d = (0..3).map(|k| (want[k] - f32::from(got[k])).abs()).fold(0.0f32, f32::max);
+                println!("{name} ({x},{y}) plain {c:?} -> cpu {:?} shader {got:?} max diff {d:.1}", want.map(|v| v.round() as i32));
+                worst = worst.max(d);
+                sum += d;
+            }
+            println!("{name}: worst {worst:.1}, mean {:.2}", sum / points.len() as f32);
+        }
+    }
+
     #[test]
     fn the_grade_is_smooth_and_keeps_the_light() {
         // A hue wheel at one lightness: the icons' maths snapped it to the
