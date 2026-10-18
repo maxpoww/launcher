@@ -971,7 +971,7 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
         // (The apps' icons once the slider rests: a drag is many changes.)
         std::thread::sleep(std::time::Duration::from_millis(400));
         if ICONS_ASKED.load(Ordering::Relaxed) == mine {
-            publish_icons();
+            publish_icons(mine);
         }
         info!("palette: {} ({}), accent {}", theme.name, if theme.dark { "dark" } else { "light" }, slot_name(theme.accent_slot));
     });
@@ -994,7 +994,7 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
 /// plain theme and its shader: nothing is tinted twice.)
 static ICONS_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn publish_icons() {
+fn publish_icons(mine: u64) {
     let f = icon_filter();
     let (k, dim) = (f[0][0], f[0][1] > 0.5);
     let base = if dim || crate::look::dark() { "Golem-Dark" } else { "Golem" };
@@ -1033,8 +1033,15 @@ fn publish_icons() {
         return;
     }
     let Some(src) = icon_theme_dir(base) else { return };
-    // (Written already for these very colours — a dock start: kept.)
-    let stamp = format!("{base} {} {f:?} v3", std::fs::canonicalize(&src).map(|p| p.display().to_string()).unwrap_or_default());
+    let small = if base == "Golem-Dark" { "Papirus-Dark" } else { "Papirus" };
+    // (Written already for these very colours — a dock start: kept. The
+    // drawings are named by their packages — where each theme's index really
+    // lives — not by the profile around them, which every update renews: on
+    // the Acer's disk that rewrite read cold for 80 s after each update.)
+    let package = |dir: Option<std::path::PathBuf>| {
+        dir.and_then(|d| std::fs::canonicalize(d.join("index.theme")).ok()).map(|p| p.display().to_string()).unwrap_or_default()
+    };
+    let stamp = format!("{base} {} {} {f:?} v4", package(Some(src.clone())), package(icon_theme_dir(small)));
     let now_dir = names.iter().map(|n| icons.join(n)).find(|d| d.is_dir());
     if let Some(d) = &now_dir {
         if std::fs::read_to_string(d.join(".golem-stamp")).ok().as_deref() == Some(stamp.as_str()) {
@@ -1059,10 +1066,16 @@ fn publish_icons() {
     let _ = std::fs::remove_dir_all(&dest);
     let started = std::time::Instant::now();
     let mut seen = std::collections::HashSet::new();
-    if let Err(e) = tint_tree(&src, &dest, &f, next, 0, &mut seen).and_then(|()| {
-        add_small_papirus(&dest, if base == "Golem-Dark" { "Papirus-Dark" } else { "Papirus" }, &f)
-    }) {
-        warn!("palette: the apps' icons were not written ({e})");
+    // A newer change gives up this one where it is: the writer's lock is
+    // held meanwhile, and on a cold disk this is a minute (the Acer: 78 s)
+    // the apps' colours would wait behind.
+    let newer = || ICONS_ASKED.load(Ordering::Relaxed) != mine;
+    if let Err(e) = tint_tree(&src, &dest, &f, next, 0, &mut seen, &newer).and_then(|()| add_small_papirus(&dest, small, &f, &newer)) {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            info!("palette: the apps' icons left for a newer change");
+        } else {
+            warn!("palette: the apps' icons were not written ({e})");
+        }
         let _ = std::fs::remove_dir_all(&dest);
         return;
     }
@@ -1078,7 +1091,7 @@ fn publish_icons() {
 /// same way, as directories of the tinted theme. A name Golem draws is left
 /// to Golem's; a symbolic icon to GTK (it colours those with the text). Each
 /// drawing is tinted once; its other names are hard links to it.
-fn add_small_papirus(dest: &std::path::Path, variant: &str, f: &[[f32; 4]; 7]) -> std::io::Result<()> {
+fn add_small_papirus(dest: &std::path::Path, variant: &str, f: &[[f32; 4]; 7], newer: &dyn Fn() -> bool) -> std::io::Result<()> {
     let Some(src) = icon_theme_dir(variant) else { return Ok(()) };
     // The names Golem's own theme has.
     let mut golem = std::collections::HashSet::new();
@@ -1104,6 +1117,9 @@ fn add_small_papirus(dest: &std::path::Path, variant: &str, f: &[[f32; 4]; 7]) -
             let to = dest.join(&rel);
             std::fs::create_dir_all(&to)?;
             for e in list.flatten() {
+                if newer() {
+                    return Err(given_up());
+                }
                 let name = e.file_name().to_string_lossy().into_owned();
                 if !name.ends_with(".svg") || name.contains("-symbolic") || golem.contains(&name) {
                     continue;
@@ -1135,6 +1151,11 @@ fn add_small_papirus(dest: &std::path::Path, variant: &str, f: &[[f32; 4]; 7]) -
     Ok(())
 }
 
+/// A tinting given up for a newer change.
+fn given_up() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "a newer change")
+}
+
 /// Where an installed icon theme lives.
 fn icon_theme_dir(name: &str) -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1154,6 +1175,7 @@ fn tint_tree(
     name: &str,
     depth: u8,
     seen: &mut std::collections::HashSet<std::path::PathBuf>,
+    newer: &dyn Fn() -> bool,
 ) -> std::io::Result<()> {
     // (An icon theme is a few folders deep: anything deeper is not one. A
     // folder is walked once, wherever a link leads back to it.)
@@ -1162,6 +1184,9 @@ fn tint_tree(
     }
     std::fs::create_dir_all(dest)?;
     for e in std::fs::read_dir(src)? {
+        if newer() {
+            return Err(given_up());
+        }
         let e = e?;
         let (from, to) = (e.path(), dest.join(e.file_name()));
         let kind = std::fs::symlink_metadata(&from)?.file_type();
@@ -1180,7 +1205,7 @@ fn tint_tree(
             }
         }
         if meta.is_dir() {
-            tint_tree(&from, &to, f, name, depth + 1, seen)?;
+            tint_tree(&from, &to, f, name, depth + 1, seen, newer)?;
         } else if e.file_name() == "icon-theme.cache" {
             // (It describes the source's tree, not this one.)
         } else if from.extension().is_some_and(|x| x == "svg") {
