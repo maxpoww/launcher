@@ -54,6 +54,7 @@ mod ytmusic_icon;
 mod discord_icon;
 mod spotify_icon;
 mod google_icon;
+mod chrome_icon;
 mod quicklook;
 mod peek_kinds;
 mod peek_edit;
@@ -928,6 +929,7 @@ fn main() -> anyhow::Result<()> {
         discord: discord_icon::Motion::default(),
         spotify: spotify_icon::Motion::default(),
         google: google_icon::Motion::default(),
+        chrome: chrome_icon::Motion::default(),
         peek: quicklook::QuickLook::default(),
         apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
@@ -2209,6 +2211,9 @@ pub struct App {
     /// Google's mark: its bar sweeps the G away and back on a hover, the G
     /// spins four times on a click (`google_icon`).
     google: google_icon::Motion,
+    /// Chrome's mark as an iris: it opens under the pointer, shuts and
+    /// reopens on a click (`chrome_icon`).
+    chrome: chrome_icon::Motion,
     /// QUICK LOOK: Space on a thing in a file window (`quicklook`).
     peek: quicklook::QuickLook,
     /// The apps button: its pages under the pointer, its squares down while
@@ -5574,6 +5579,10 @@ impl App {
                     }
                     if self.entries.get(entry_idx).is_some_and(|e| e.id == google_icon::GOOGLE_ID) {
                         self.google.click();
+                        self.dirty = true;
+                    }
+                    if self.entries.get(entry_idx).is_some_and(|e| e.id == chrome_icon::CHROME_ID) {
+                        self.chrome.click();
                         self.dirty = true;
                     }
                     // A minimized window's tile: the click asks the PLUGIN to

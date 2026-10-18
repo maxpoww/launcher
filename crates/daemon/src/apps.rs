@@ -457,6 +457,11 @@ pub(crate) fn google_at(p: &crate::google_icon::Pose) -> Option<Vec<u8>> {
     Some(frame_chain(&crate::google_icon::frame(p)?, crate::google_icon::FRAME))
 }
 
+/// Chrome's mark with its lens `s` times its size, ready to upload.
+pub(crate) fn chrome_at(s: f32) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::chrome_icon::frame(s)?, crate::chrome_icon::FRAME))
+}
+
 /// The apps button's stencil (its nine squares), ready to upload.
 pub(crate) fn apps_stencil() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::stencil_svg().as_bytes())?.take()))
@@ -513,6 +518,10 @@ pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     // Google wears its moving mark (`google_icon`).
     if id == crate::google_icon::GOOGLE_ID {
         return Some(with_mips(rasterize_svg(crate::google_icon::rest_svg().as_bytes())?.take()));
+    }
+    // Chrome wears its moving mark (`chrome_icon`).
+    if id == crate::chrome_icon::CHROME_ID {
+        return Some(with_mips(rasterize_svg(crate::chrome_icon::rest_svg().as_bytes())?.take()));
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
