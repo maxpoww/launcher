@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use crate::display::GolemSettings;
-use crate::palette::{filter_rgb, Rgb};
+use crate::palette::Rgb;
 
 type Filter = [[f32; 4]; 7];
 
@@ -39,7 +39,7 @@ const REST: Duration = Duration::from_millis(400);
 const KEEP: usize = 4;
 
 /// The drawing of a copy: a new look makes new files.
-const VERSION: u64 = 1;
+const VERSION: u64 = 2;
 
 /// The most a copy may be asked for in a side.
 const MAX_SIDE: u32 = 8192;
@@ -132,26 +132,144 @@ pub(crate) fn parse_key(key: &str, current: &Filter) -> Option<Result<(Filter, S
     Some(Ok((f, file.to_owned())))
 }
 
-/// `px` (sRGB, three bytes a pixel) through the filter, rows shared out to
-/// the cores.
+/// THE WALLPAPERS' GRADE (Max, 2026-10-18: "the wallpapers are poorly
+/// done"). Not the icons' maths: that one snaps every hue to the nearest of
+/// the palette's — right for an icon's few flat colours — and on a
+/// photograph its smooth hues broke into bands and speckled stripes. Here a
+/// picture keeps its own light, every pixel's lightness as it is; its colour
+/// comes from the palette laid out as a ramp from its darkest colour to its
+/// lightest (a gradient map), mixed with the picture's own by the slider.
+/// Smooth in, smooth out. (A grey palette: the picture in black and white.)
+pub(crate) struct Grade {
+    t: f32,
+    /// The palette's colours as OKLab (L, a, b), darkest first.
+    stops: Vec<(f32, f32, f32)>,
+}
+
+impl Grade {
+    pub(crate) fn of(f: &Filter) -> Grade {
+        let n = (f[0][2].max(0.0) as usize).min(6);
+        let mut stops: Vec<(f32, f32, f32)> = (1..=n)
+            .map(|k| {
+                let [l, c, h, _] = f[k];
+                (l, c * h.cos(), c * h.sin())
+            })
+            .collect();
+        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Grade { t: f[0][0].clamp(0.0, 1.0), stops }
+    }
+
+    /// The ramp's colour (a, b) at lightness `l`.
+    fn ramp(&self, l: f32) -> (f32, f32) {
+        let st = &self.stops;
+        let Some(first) = st.first() else { return (0.0, 0.0) };
+        if l <= first.0 {
+            return (first.1, first.2);
+        }
+        for w in st.windows(2) {
+            if l <= w[1].0 {
+                let u = ((l - w[0].0) / (w[1].0 - w[0].0).max(1e-6)).clamp(0.0, 1.0);
+                return (w[0].1 + (w[1].1 - w[0].1) * u, w[0].2 + (w[1].2 - w[0].2) * u);
+            }
+        }
+        let last = st[st.len() - 1];
+        (last.1, last.2)
+    }
+
+    /// One colour through the grade, as sRGB 0..=255, unrounded (the copy
+    /// dithers it).
+    pub(crate) fn apply(&self, c: Rgb) -> [f32; 3] {
+        if self.t <= 0.0 {
+            return c.map(f32::from);
+        }
+        let [l, a, b] = oklab(c);
+        let (mut ra, mut rb) = self.ramp(l);
+        // (Within what a screen shows at this lightness: near black and near
+        // white there is little colour to have, and asking for more clips.)
+        let room = 0.6 * l.min(1.0 - l).max(0.0);
+        let rc = ra.hypot(rb);
+        if rc > room {
+            ra *= room / rc;
+            rb *= room / rc;
+        }
+        from_oklab(l, a + (ra - a) * self.t, b + (rb - b) * self.t)
+    }
+}
+
+fn srgb_to_linear(v: u8) -> f32 {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let x = i as f32 / 255.0;
+            if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+        })
+    })[usize::from(v)]
+}
+
+fn oklab(c: Rgb) -> [f32; 3] {
+    let [r, g, b] = c.map(srgb_to_linear);
+    let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_99 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+
+fn from_oklab(l: f32, a: f32, b: f32) -> [f32; 3] {
+    let lp = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let mp = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let sp = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    let lin = [
+        4.076_741_7 * lp - 3.307_711_6 * mp + 0.230_969_94 * sp,
+        -1.268_438 * lp + 2.609_757_4 * mp - 0.341_319_38 * sp,
+        -0.004_196_086 * lp - 0.703_418_6 * mp + 1.707_614_7 * sp,
+    ];
+    lin.map(|x| {
+        let x = x.clamp(0.0, 1.0);
+        255.0 * if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+    })
+}
+
+/// A little noise per pixel (-0.5..0.5), the same for the same place: the
+/// 8-bit copy of a smooth grade dithered instead of banded.
+fn noise(i: usize) -> f32 {
+    let mut x = i as u32;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x as f32 / u32::MAX as f32 - 0.5
+}
+
+/// `px` (sRGB, three bytes a pixel) through the grade, rows shared out to
+/// the cores, dithered.
 pub(crate) fn filter_pixels(px: &mut [u8], f: &Filter) {
     if !active(f) {
         return;
     }
+    let grade = Grade::of(f);
+    let grade = &grade;
     let threads = std::thread::available_parallelism().map_or(2, usize::from).min(8);
     let rows = px.len() / 3;
     let chunk = (rows / threads).max(4096) * 3;
     std::thread::scope(|sc| {
-        for part in px.chunks_mut(chunk) {
+        for (n, part) in px.chunks_mut(chunk).enumerate() {
             sc.spawn(move || {
                 // (Runs of one colour — a sky, a flat — are common.)
-                let mut last: (Rgb, Rgb) = ([0, 0, 0], filter_rgb([0, 0, 0], f));
-                for p in part.chunks_exact_mut(3) {
+                let mut last: (Rgb, [f32; 3]) = ([0, 0, 0], grade.apply([0, 0, 0]));
+                for (i, p) in part.chunks_exact_mut(3).enumerate() {
                     let c = [p[0], p[1], p[2]];
                     if c != last.0 {
-                        last = (c, filter_rgb(c, f));
+                        last = (c, grade.apply(c));
                     }
-                    p.copy_from_slice(&last.1);
+                    let d = noise(n * chunk / 3 + i);
+                    for (o, v) in p.iter_mut().zip(last.1) {
+                        *o = (v + d).round().clamp(0.0, 255.0) as u8;
+                    }
                 }
             });
         }
@@ -168,13 +286,14 @@ pub(crate) fn filter_thumb(chain: Vec<u8>, f: &Filter) -> Vec<u8> {
         return chain;
     }
     let mut base = chain[..n * n * 4].to_vec();
+    let grade = Grade::of(f);
     let mut memo: HashMap<u16, Rgb> = HashMap::new();
     for p in base.chunks_exact_mut(4).filter(|p| p[3] > 0) {
         let a = u32::from(p[3]);
         let un = |v: u8| if a == 255 { v } else { ((u32::from(v) * 255 + a / 2) / a).min(255) as u8 };
         let c = [un(p[0]), un(p[1]), un(p[2])];
         let q = (u16::from(c[0] >> 3) << 10) | (u16::from(c[1] >> 3) << 5) | u16::from(c[2] >> 3);
-        let out = *memo.entry(q).or_insert_with(|| filter_rgb([(c[0] & 0xf8) | 4, (c[1] & 0xf8) | 4, (c[2] & 0xf8) | 4], f));
+        let out = *memo.entry(q).or_insert_with(|| grade.apply([(c[0] & 0xf8) | 4, (c[1] & 0xf8) | 4, (c[2] & 0xf8) | 4]).map(|v| v.round() as u8));
         for (d, o) in p[..3].iter_mut().zip(out) {
             *d = if a == 255 { o } else { (u32::from(o) * a / 255) as u8 };
         }
@@ -342,6 +461,7 @@ fn apply() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::filter_rgb;
 
     fn jade() -> Filter {
         crate::palette::filter_for("jade", 100, false)
@@ -363,13 +483,17 @@ mod tests {
     fn at_a_hundred_a_grey_takes_the_palettes_colour() {
         let f = jade();
         assert!(active(&f));
-        let out = filter_rgb([128, 128, 128], &f);
-        let spread = out.iter().max().unwrap() - out.iter().min().unwrap();
-        assert!(spread > 10, "a grey stayed grey: {out:?}");
+        // (Through the wallpapers' grade, not the icons' maths; dithered by ±1.)
+        let out = Grade::of(&f).apply([128, 128, 128]);
+        let spread = out.iter().copied().fold(f32::MIN, f32::max) - out.iter().copied().fold(f32::MAX, f32::min);
+        assert!(spread > 10.0, "a grey stayed grey: {out:?}");
         let mut px = vec![128u8; 3 * 10000];
         filter_pixels(&mut px, &f);
-        assert_eq!(&px[..3], &out);
-        assert_eq!(&px[px.len() - 3..], &out);
+        for p in [&px[..3], &px[px.len() - 3..]] {
+            for k in 0..3 {
+                assert!((f32::from(p[k]) - out[k]).abs() <= 1.0, "{p:?} vs {out:?}");
+            }
+        }
     }
 
     #[test]
@@ -461,6 +585,30 @@ mod tests {
         assert_eq!(copy_size(1920, 1080, 2560, 1600), (1920, 1080));
     }
 
+    #[test]
+    fn the_grade_is_smooth_and_keeps_the_light() {
+        // A hue wheel at one lightness: the icons' maths snapped it to the
+        // palette's hues (bands); the grade moves by small steps all round.
+        let g = Grade::of(&crate::palette::filter_for("monet", 100, false));
+        let wheel: Vec<Rgb> = (0..360).map(|d| crate::palette::tint::from_lch(0.65, 0.12, d as f32)).collect();
+        let out: Vec<[f32; 3]> = wheel.iter().map(|&c| g.apply(c)).collect();
+        for w in out.windows(2) {
+            let step = (0..3).map(|k| (w[0][k] - w[1][k]).abs()).fold(0.0f32, f32::max);
+            assert!(step < 12.0, "a jump of {step}");
+        }
+        // Its lightness is the picture's.
+        for &c in &wheel {
+            let o = g.apply(c).map(|v| v.round().clamp(0.0, 255.0) as u8);
+            assert!((oklab(o)[0] - oklab(c)[0]).abs() < 0.03);
+        }
+        // Off is the picture, exactly.
+        let off = Grade::of(&crate::palette::filter_for("monet", 0, false));
+        assert_eq!(off.apply([12, 200, 99]), [12.0, 200.0, 99.0]);
+        // A grey palette: black and white.
+        let grey = Grade::of(&crate::palette::filter_for("fog", 100, false)).apply([200, 40, 40]);
+        assert!((grey[0] - grey[1]).abs() < 2.0 && (grey[1] - grey[2]).abs() < 2.0, "{grey:?}");
+    }
+
     /// Samples for a human: `cargo test -- --ignored render_samples`.
     #[test]
     #[ignore]
@@ -479,6 +627,15 @@ mod tests {
             let (px, w, h) = render(src.to_str().unwrap(), &crate::palette::filter_for("jade", level, false), (1600, 1)).expect("rendered");
             println!("level {level}: {w}x{h} in {:?}", t.elapsed());
             image::save_buffer(out.join(format!("jade-{level}.png")), &px, w, h, image::ColorType::Rgb8).unwrap();
+        }
+        // (The picture Max set, 2026-10-18, in his palette.)
+        let his = dir.join("pawel-czerwinski-PkiHF-EeT6o-unsplash.jpg");
+        if his.is_file() {
+            for (pal, level) in [("hacker", 60u8), ("hacker", 100), ("monet", 100)] {
+                let (px, w, h) = render(his.to_str().unwrap(), &crate::palette::filter_for(pal, level, false), (1600, 1)).expect("rendered");
+                image::save_buffer(out.join(format!("pawel-{pal}-{level}.png")), &px, w, h, image::ColorType::Rgb8).unwrap();
+            }
+            image::open(&his).unwrap().resize(1600, 1000, image::imageops::FilterType::Triangle).save(out.join("pawel-original.png")).unwrap();
         }
         image::open(&src).unwrap().resize(1600, 1000, image::imageops::FilterType::Triangle).save(out.join("original.png")).unwrap();
     }
