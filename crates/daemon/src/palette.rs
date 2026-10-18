@@ -125,6 +125,11 @@ pub(crate) struct ColorChoice {
     /// (a black wash under the desktop's icons). None = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting_veil: Option<bool>,
+    /// COLOURS ON THE WALLPAPERS (Max, 2026-10-18: "a slider at the top of
+    /// the wallpaper page, that says 'Colours'"): how far the pictures are
+    /// moved toward the palette, 0..100. None / 0 = the pictures as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper_tint: Option<u8>,
     /// Before 2026-10-16 the apps and the web were switches; read once.
     #[serde(default, skip_serializing)]
     pub apps: Option<bool>,
@@ -142,7 +147,7 @@ fn web_off() -> Option<u8> {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, wallpaper_tint: None, apps: None, web: None, dynamic: None }
     }
 }
 
@@ -1382,7 +1387,7 @@ fn tint_svg(svg: &str, f: &[[f32; 4]; 7]) -> String {
 }
 
 /// The icon shader's filter (`icon.wgsl`, `icon_filter`) on one colour.
-fn filter_rgb(rgb: Rgb, f: &[[f32; 4]; 7]) -> Rgb {
+pub(crate) fn filter_rgb(rgb: Rgb, f: &[[f32; 4]; 7]) -> Rgb {
     let (k, dim, n) = (f[0][0], f[0][1] > 0.5, f[0][2] as usize);
     let mut out = rgb;
     if n > 0 && k > 0.0 {
@@ -1601,22 +1606,61 @@ pub(crate) fn shell_plan(picked: &ColorChoice, system_dark: bool) -> ShellPlan {
 }
 
 fn set_icon_filter(t: &Theme) {
+    // Dark icons dim at Off too when their Dark was clicked (Off = no
+    // colour, not no dark).
+    let dim = if t.icons_tint > 0 { t.icons_dark } else { choice().icons_dark == Some(true) };
+    let f = filter_for(&t.id, t.icons_tint, dim);
+    if let Ok(mut g) = ICON_FILTER.lock() {
+        *g = f;
+    }
+}
+
+/// A filter (the icon shader's layout, see [`icon_filter`]) for the palette
+/// `id` at `level` 0..100: the icons' and the wallpapers' alike. Level 0 and
+/// no `dim` is the identity.
+pub(crate) fn filter_for(id: &str, level: u8, dim: bool) -> [[f32; 4]; 7] {
     let mut f = [[0.0f32; 4]; 7];
-    if let Some(p) = palette_of(&t.id) {
+    if let Some(p) = palette_of(id) {
         let soul: Vec<Rgb> = if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() };
         let all: Vec<(f32, f32, f32)> = soul.iter().map(|&c| tint::lch(c)).collect();
         let cmax = all.iter().map(|t| t.1).fold(0.0f32, f32::max);
         let targets: Vec<_> = all.into_iter().filter(|t| t.1 > 0.03 && t.1 >= cmax * 0.55).take(6).collect();
-        // Dark icons dim at Off too when their Dark was clicked (Off = no
-        // colour, not no dark).
-        let dim = if t.icons_tint > 0 { t.icons_dark } else { choice().icons_dark == Some(true) };
-        f[0] = [f32::from(t.icons_tint) / 100.0, if dim { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
+        f[0] = [f32::from(level) / 100.0, if dim { 1.0 } else { 0.0 }, targets.len() as f32, 0.0];
         for (k, (l, c, h)) in targets.into_iter().enumerate() {
             f[k + 1] = [l, c, h.to_radians(), 0.0];
         }
     }
-    if let Ok(mut g) = ICON_FILTER.lock() {
-        *g = f;
+    f
+}
+
+/// THE WALLPAPERS' FILTER now (the palette in use at the Colours slider of
+/// the Wallpaper page), built fresh from the saved choice: for a thread that
+/// may wait. Level 0 is the identity.
+pub(crate) fn wall_filter_now() -> [[f32; 4]; 7] {
+    let c = choice();
+    let level = c.wallpaper_tint.unwrap_or(0).min(100);
+    if level == 0 {
+        return [[0.0; 4]; 7];
+    }
+    filter_for(if previewing() { DRAFT_ID } else { c.palette_id() }, level, false)
+}
+
+/// The wallpapers' filter as `colors_apply` last set it — what the box's
+/// thumbnails are drawn through (a cheap read for every frame).
+static WALL_FILTER: std::sync::Mutex<[[f32; 4]; 7]> = std::sync::Mutex::new([[0.0; 4]; 7]);
+
+pub(crate) fn wall_filter() -> [[f32; 4]; 7] {
+    WALL_FILTER.lock().map(|f| *f).unwrap_or([[0.0; 4]; 7])
+}
+
+/// Put the wallpapers' filter in use; true when it changed.
+fn set_wall_filter(f: [[f32; 4]; 7]) -> bool {
+    match WALL_FILTER.lock() {
+        Ok(mut g) if *g != f => {
+            *g = f;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -2570,6 +2614,12 @@ impl crate::App {
             });
         }
         set_icon_filter(&theme);
+        // The wallpapers' slider: the box's thumbnails and the picture up.
+        let wall = filter_for(&theme.id, picked.wallpaper_tint.unwrap_or(0).min(100), false);
+        let wall = if wall[0][0] > 0.0 { wall } else { [[0.0; 4]; 7] };
+        if set_wall_filter(wall) {
+            crate::wall_tint::refresh();
+        }
         set_shell(&picked, crate::look::dark());
         set_skipped_programs(&self.entries, &choice().skip);
         let changed = set(theme);
@@ -2643,6 +2693,11 @@ impl crate::App {
                         }
                     }
                     _ => return,
+                },
+                // The wallpapers' Colours: 0 = the pictures as they are.
+                "colors-wallpaper" => match value.parse::<u8>() {
+                    Ok(n) => c.wallpaper_tint = (n > 0).then_some(n.min(100)),
+                    Err(_) => return,
                 },
                 "colors-lighting-veil" => match value {
                     "on" => c.lighting_veil = Some(true),

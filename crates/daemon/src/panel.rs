@@ -2657,6 +2657,7 @@ impl Panel {
             // good before"). `dx`: a page of them mid-turn is drawn that far
             // aside, and a tile not wholly in the box is not drawn at all
             // (a picture cannot be cut at the box's edge).
+            let wall_filter = crate::palette::wall_filter();
             let tile_at = |out: &mut PanelDraw, r: Rect, dx: f32, file: String, keyed: bool| {
                 if r.x + dx < 0.0 || r.x + dx + r.w > fw {
                     return;
@@ -2667,7 +2668,8 @@ impl Panel {
                 let wash = crate::options::wash(!paint.bright, layer_wash[2]);
                 out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
                 if resting {
-                    out.images.push((tile, file));
+                    // (The wallpapers wear the Colours slider: `wall_tint`.)
+                    out.images.push((tile, crate::wall_tint::tile_key(&file, &wall_filter)));
                 }
                 if keyed {
                     let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
@@ -3885,7 +3887,7 @@ impl App {
                     *t = None;
                 }
             }
-            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-shell" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" => {
+            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-shell" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-wallpaper" => {
                 self.colors_pick(key, &value);
             }
             "dnd" => {

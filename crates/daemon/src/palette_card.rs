@@ -14,7 +14,7 @@ const W: u32 = 640;
 const H: u32 = 400;
 
 /// The cache the pictures of this module are kept in.
-fn cache_dir() -> Option<PathBuf> {
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     let cache = std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache")))
@@ -375,7 +375,7 @@ pub(crate) fn wall_path(colours: &[Rgb], w: u32, h: u32) -> Option<PathBuf> {
 /// Write `rgb` (three bytes a pixel, `w` × `h`) as a PNG at `p`: whole, to a
 /// file of its own, and then renamed into place — a reader never finds half
 /// a picture.
-fn write_wall(p: &std::path::Path, rgb: &[u8], w: u32, h: u32) -> Option<()> {
+pub(crate) fn write_wall(p: &std::path::Path, rgb: &[u8], w: u32, h: u32) -> Option<()> {
     std::fs::create_dir_all(p.parent()?).ok()?;
     // (A name of its own per writer: two of them at once never share a file.)
     static WRITERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

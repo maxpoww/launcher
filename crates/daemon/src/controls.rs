@@ -366,7 +366,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     matches!(
         key,
-        "open" | "night" | "dnd" | "restart" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
+        "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell" | "colors-shell-look"
     )
 }
@@ -1226,7 +1226,7 @@ pub(crate) fn desktop_handles(text: &str, mime: &str) -> Option<String> {
 
 // -------------------------------------------------------------- wallpaper
 
-fn wallpaper_dir() -> std::path::PathBuf {
+pub(crate) fn wallpaper_dir() -> std::path::PathBuf {
     // (`WAVERUNNER_WALLPAPER_DIR`: another folder, for a test rig.)
     if let Some(dir) = std::env::var_os("WAVERUNNER_WALLPAPER_DIR").filter(|d| !d.is_empty()) {
         return std::path::PathBuf::from(dir);
@@ -1479,7 +1479,14 @@ pub(crate) fn pick_wallpaper(path: String) {
         if !newest() {
             return;
         }
-        let shown = show_wallpaper(&path, true);
+        // (Under the Wallpaper page's Colours slider a still goes up as its
+        // tinted copy; `path`, what is reported back and saved, stays the
+        // original.)
+        let up = crate::wall_tint::for_display(&path);
+        if !newest() {
+            return;
+        }
+        let shown = show_wallpaper(&up, true);
         if !shown {
             warn!("controls: the wallpaper {path:?} could not be put up");
         }
@@ -1904,6 +1911,11 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 tr("The pictures in Pictures/Wallpapers.").to_owned()
             };
             if wallpaper_tool().is_some() {
+                // COLOURS (Max, 2026-10-18: "a slider at the top of the
+                // wallpaper page, that says 'Colours'"): the pictures, and
+                // the one up, through the palette in use. 0 = as they are.
+                let tint = crate::palette::choice().wallpaper_tint.unwrap_or(0).min(100);
+                view.groups.push(Group { caption: Some(format!("{} · {tint}", tr("Colours"))), ..slider("colors-wallpaper", tint) });
                 // THE FIRST TILE: the palette in use, "Follows your colours"
                 // (Max, 2026-10-18). Even with no picture in the folder: the
                 // colours need none.
@@ -2097,6 +2109,10 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         }
         // The wallpaper's own thread reporting back (`pick_wallpaper`).
         "wallpaper-saved" | "wallpaper-failed" => {
+            // (The wallpaper saved is the ORIGINAL, never a tinted copy.)
+            if !crate::wall_tint::saveable(value) {
+                return Applied::Done;
+            }
             let mut want = WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner());
             if want.as_deref() == Some(value) {
                 *want = None;
@@ -2183,10 +2199,14 @@ pub(crate) fn reassert() {
                 }
             }
             if std::path::Path::new(picture).is_file() {
+                // (The Colours slider of the Wallpaper page: a still wears
+                // its tinted copy, made if it is missing. The setting stays
+                // the original.)
+                let up = crate::wall_tint::for_display(picture);
                 let _one = WALLPAPER_ONE.lock().unwrap_or_else(|e| e.into_inner());
                 // (A pick made while this waited has the say.)
                 if WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
-                    show_wallpaper(picture, false);
+                    show_wallpaper(&up, false);
                 }
             }
         }

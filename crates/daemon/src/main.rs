@@ -142,6 +142,7 @@ mod trash;
 mod usage;
 mod visible;
 mod wall_follow;
+mod wall_tint;
 mod webapps;
 mod window_memory;
 mod zoom;
