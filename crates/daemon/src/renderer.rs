@@ -48,6 +48,8 @@ struct Globals {
     light: [f32; 4],
     // THE ICON FILTER (icon.wgsl): see `palette::icon_filter`.
     filt: [[f32; 4]; 7],
+    // THE WALLPAPERS' GRADE (icon.wgsl): see `wall_tint::Grade::uniform`.
+    wall: [[f32; 4]; 7],
 }
 
 /// Physical px of room a label's layout width gets beyond its box (see the
@@ -523,7 +525,7 @@ fn mark_icon(
         ],
         clip,
     );
-    let gen = layer_gen.get((i.layer & !crate::content::PICTURE) as usize).copied().unwrap_or(0);
+    let gen = layer_gen.get((i.layer & !(crate::content::PICTURE | crate::content::WALL)) as usize).copied().unwrap_or(0);
     let h = crate::damage::hash_bytes(deps.icons ^ KIND_ICON, bytemuck::bytes_of(i));
     tiles.mark(b, clip_hash(crate::damage::mix(h, u64::from(gen)), clip));
 }
@@ -2195,6 +2197,8 @@ impl Renderer {
             .unwrap_or(grid_ranges.len())
             .min(grid_ranges.len());
 
+        // The wallpapers' tiles are graded here, at the slider's level now.
+        let wall_uniform = crate::wall_tint::Grade::of(&crate::palette::wall_shown()).uniform();
         // What this frame shows, tile by tile, in draw order — and from it
         // what changed since the frame before (see `crate::damage`).
         // `None`: everything.
@@ -2205,6 +2209,7 @@ impl Renderer {
             let mut tiles = std::mem::take(&mut self.damage_cur);
             tiles.reset(w, h);
             let fade = u64::from(alpha.to_bits());
+            let wall_hash = hash_bytes(fade, bytemuck::bytes_of(&wall_uniform));
             let deps = FrameDeps {
                 fade,
                 lights: hash_bytes(
@@ -2217,8 +2222,11 @@ impl Renderer {
                     .map(|n| hash_bytes(fade, bytemuck::bytes_of(&n))),
                 icons: mix(
                     mix(
-                        hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32])),
-                        hash_bytes(fade, bytemuck::bytes_of(&crate::palette::icon_filter())),
+                        mix(
+                            hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32])),
+                            hash_bytes(fade, bytemuck::bytes_of(&crate::palette::icon_filter())),
+                        ),
+                        wall_hash,
                     ),
                     self.icon_epoch,
                 ),
@@ -2360,6 +2368,7 @@ impl Renderer {
                 neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
                 light: [if crate::look::dark() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 filt: crate::palette::icon_filter(),
+                wall: wall_uniform,
             }),
         );
 

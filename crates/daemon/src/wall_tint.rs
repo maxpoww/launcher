@@ -6,9 +6,11 @@
 //! palette in use through THE ICON FILTER's own maths (`palette::filter_rgb`,
 //! built for a level of its own by `palette::filter_for`). Two places wear it:
 //!
-//! * THE BOX: each picture's tile is asked for under a made-up key
-//!   (`tile_key`) that carries the filter; the thumbnailer reads the key,
-//!   makes the usual preview and puts it through the filter (`filter_thumb`).
+//! * THE BOX: each picture's tile is drawn from its ORIGINAL preview and
+//!   graded by the graphics card (icon.wgsl `wall_grade`, the same maths as
+//!   `Grade::apply`), so the slider moves every tile on every frame, with
+//!   nothing made again (Max, 2026-10-18: "the slider jumps and the images
+//!   actualize jumping, make it smooth"). `Grade::uniform` is what it reads.
 //! * THE WALLPAPER: a copy of the picture at the screen's size, filtered, is
 //!   kept in `~/.cache/waverunner/tinted-walls/` and is what the picture
 //!   program shows (`for_display`). `GolemSettings::wallpaper` is NEVER the
@@ -19,7 +21,6 @@
 //! MOVES (a video, a GIF: played by `mpvpaper`) is graded on the screen by an
 //! mpv shader that does exactly `Grade::apply` (`grade_shader`).
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -32,9 +33,16 @@ use crate::palette::Rgb;
 
 type Filter = [[f32; 4]; 7];
 
-/// How long the slider must rest before the wallpaper is made again (the
-/// icons' own pace).
-const REST: Duration = Duration::from_millis(400);
+/// How long the slider must rest before the wallpaper is made again, when
+/// nothing says it was let go (the keys step it).
+const REST: Duration = Duration::from_millis(600);
+
+/// How soon after the slider is LET GO the wallpaper is made (once).
+const LET_GO: Duration = Duration::from_millis(60);
+
+/// A drag whose release never came is forgotten after this long without a
+/// change, so the wallpaper can never be held back for good.
+const STALE: Duration = Duration::from_secs(5);
 
 /// How many copies are kept (each is megabytes). The one in use stays.
 const KEEP: usize = 4;
@@ -44,10 +52,6 @@ const VERSION: u64 = 2;
 
 /// The most a copy may be asked for in a side.
 const MAX_SIDE: u32 = 8192;
-
-/// The key of a tinted tile starts with this; then the filter's hash, then
-/// the picture's own absolute path (so its name and extension still read).
-const KEY: &str = "/.wall-tint/";
 
 // ------------------------------------------------------------------- pure
 
@@ -72,7 +76,19 @@ pub(crate) fn filter_hash(f: &Filter) -> u64 {
 /// not the colours' own picture nor a tile of the first kind, with a filter
 /// that does something.
 pub(crate) fn tintable(path: &str, f: &Filter) -> bool {
-    active(f) && !crate::wall_follow::is_wall(path) && !crate::wall_follow::is_tile(path) && !is_copy(path)
+    active(f) && gradable(path)
+}
+
+/// Whether the slider may grade `path` whatever its level: not the colours'
+/// own picture, nor its tile, nor one of our copies.
+pub(crate) fn gradable(path: &str) -> bool {
+    !crate::wall_follow::is_wall(path) && !crate::wall_follow::is_tile(path) && !is_copy(path)
+}
+
+/// Whether the box's tile of `file` wears the slider (graded on the card):
+/// a picture of the wallpapers' folder that is not the colours' own.
+pub(crate) fn tile_graded(file: &str) -> bool {
+    Path::new(file).starts_with(crate::controls::wallpaper_dir()) && gradable(file)
 }
 
 /// Whether the slider tints `path` by making a COPY of it: a still. What
@@ -107,40 +123,6 @@ pub(crate) fn cache_name(source: &str, modified: u64, f: &Filter, w: u32, h: u32
     format!("{x:016x}-{w}x{h}.png")
 }
 
-static KEYS: Mutex<Option<HashMap<u64, Filter>>> = Mutex::new(None);
-
-/// The key under which the tile of `file` is drawn: the file itself when the
-/// slider is off or the file is not tinted, else a key that carries the
-/// filter (remembered here for the thumbnailer to read back).
-pub(crate) fn tile_key(file: &str, f: &Filter) -> String {
-    if !Path::new(file).starts_with(crate::controls::wallpaper_dir()) || !tintable(file, f) {
-        return file.to_owned();
-    }
-    let h = filter_hash(f);
-    if let Ok(mut g) = KEYS.lock() {
-        let map = g.get_or_insert_with(HashMap::new);
-        if map.len() > 64 {
-            map.clear();
-        }
-        map.insert(h, *f);
-    }
-    format!("{KEY}{h:016x}{file}")
-}
-
-/// A tinted tile's key taken apart: its filter and the picture. `None` for
-/// any other path, and for a key of a filter that is not the one in use now
-/// (a slider that moved on: its thumbnails are not made).
-pub(crate) fn parse_key(key: &str, current: &Filter) -> Option<Result<(Filter, String), ()>> {
-    let rest = key.strip_prefix(KEY)?;
-    let (hex, file) = rest.split_at(rest.find('/')?);
-    let h = u64::from_str_radix(hex, 16).ok()?;
-    if h != filter_hash(current) {
-        return Some(Err(()));
-    }
-    let f = KEYS.lock().ok()?.as_ref()?.get(&h).copied()?;
-    Some(Ok((f, file.to_owned())))
-}
-
 /// THE WALLPAPERS' GRADE (Max, 2026-10-18: "the wallpapers are poorly
 /// done"). Not the icons' maths: that one snaps every hue to the nearest of
 /// the palette's — right for an icon's few flat colours — and on a
@@ -166,6 +148,17 @@ impl Grade {
             .collect();
         stops.sort_by(|a, b| a.0.total_cmp(&b.0));
         Grade { t: f[0][0].clamp(0.0, 1.0), stops }
+    }
+
+    /// What the card's shader reads (icon.wgsl `wall`): `[0]` = (t, _, how
+    /// many stops, _), then each stop as (L, a, b, _), darkest first.
+    pub(crate) fn uniform(&self) -> Filter {
+        let mut u = [[0.0f32; 4]; 7];
+        u[0] = [self.t, 0.0, self.stops.len() as f32, 0.0];
+        for (k, &(l, a, b)) in self.stops.iter().take(6).enumerate() {
+            u[k + 1] = [l, a, b, 0.0];
+        }
+        u
     }
 
     /// The ramp's colour (a, b) at lightness `l`.
@@ -283,31 +276,6 @@ pub(crate) fn filter_pixels(px: &mut [u8], f: &Filter) {
             });
         }
     });
-}
-
-/// A preview (premultiplied RGBA, `ICON_SIZE`², with its mip chain) through
-/// the filter. Colours are taken to 5 bits for the lookup: a preview this
-/// small shows no difference, and the tile costs a few thousand colours,
-/// not sixty thousand.
-pub(crate) fn filter_thumb(chain: Vec<u8>, f: &Filter) -> Vec<u8> {
-    let n = crate::apps::ICON_SIZE as usize;
-    if !active(f) || chain.len() < n * n * 4 {
-        return chain;
-    }
-    let mut base = chain[..n * n * 4].to_vec();
-    let grade = Grade::of(f);
-    let mut memo: HashMap<u16, Rgb> = HashMap::new();
-    for p in base.chunks_exact_mut(4).filter(|p| p[3] > 0) {
-        let a = u32::from(p[3]);
-        let un = |v: u8| if a == 255 { v } else { ((u32::from(v) * 255 + a / 2) / a).min(255) as u8 };
-        let c = [un(p[0]), un(p[1]), un(p[2])];
-        let q = (u16::from(c[0] >> 3) << 10) | (u16::from(c[1] >> 3) << 5) | u16::from(c[2] >> 3);
-        let out = *memo.entry(q).or_insert_with(|| grade.apply([(c[0] & 0xf8) | 4, (c[1] & 0xf8) | 4, (c[2] & 0xf8) | 4]).map(|v| v.round() as u8));
-        for (d, o) in p[..3].iter_mut().zip(out) {
-            *d = if a == 255 { o } else { (u32::from(o) * a / 255) as u8 };
-        }
-    }
-    crate::apps::with_mips(base)
 }
 
 /// The size a copy of a `sw`×`sh` picture is made at for a `w`×`h` screen:
@@ -436,13 +404,74 @@ pub(crate) fn for_display(path: &str) -> String {
 
 static ASK: AtomicU64 = AtomicU64::new(0);
 
-/// The slider (or the palette) moved: when it rests, the wallpaper is made
-/// again — tinted, or the original back at 0. Cheap to call often; only the
-/// last call of a run acts.
+/// Whether the slider is being dragged, and whether it changed meanwhile:
+/// the wallpaper waits for the drag to end and is made ONCE (Max,
+/// 2026-10-18: "the real wallpaper once").
+#[derive(Default)]
+struct Hold {
+    since: Option<std::time::Instant>,
+    pending: bool,
+}
+
+impl Hold {
+    /// A drag began (or went on).
+    fn begin(&mut self, now: std::time::Instant) {
+        self.since = Some(now);
+    }
+
+    /// The slider or the palette changed: how long to wait before the
+    /// wallpaper is made — `None`: not yet, a drag is on.
+    fn changed(&mut self, now: std::time::Instant) -> Option<Duration> {
+        match self.since {
+            Some(t) if now.duration_since(t) < STALE => {
+                self.pending = true;
+                None
+            }
+            _ => {
+                self.since = None;
+                Some(REST)
+            }
+        }
+    }
+
+    /// The drag ended: the wait for the wallpaper, when it changed.
+    fn end(&mut self) -> Option<Duration> {
+        self.since = None;
+        std::mem::take(&mut self.pending).then_some(LET_GO)
+    }
+}
+
+static HOLD: Mutex<Hold> = Mutex::new(Hold { since: None, pending: false });
+
+/// The slider is being dragged: the wallpaper waits.
+pub(crate) fn drag_begin() {
+    if let Ok(mut h) = HOLD.lock() {
+        h.begin(std::time::Instant::now());
+    }
+}
+
+/// The slider was let go: the wallpaper is made now (once), if it changed.
+pub(crate) fn drag_end() {
+    let wait = HOLD.lock().ok().and_then(|mut h| h.end());
+    if let Some(w) = wait {
+        schedule(w);
+    }
+}
+
+/// The slider (or the palette) moved: when it rests (or is let go), the
+/// wallpaper is made again — tinted, or the original back at 0. Cheap to
+/// call often; only the last call of a run acts, and none during a drag.
 pub(crate) fn refresh() {
+    let wait = HOLD.lock().ok().and_then(|mut h| h.changed(std::time::Instant::now()));
+    if let Some(w) = wait {
+        schedule(w);
+    }
+}
+
+fn schedule(wait: Duration) {
     let mine = ASK.fetch_add(1, Ordering::SeqCst) + 1;
     let spawned = std::thread::Builder::new().name("wall-tint".into()).spawn(move || {
-        std::thread::sleep(REST);
+        std::thread::sleep(wait);
         if ASK.load(Ordering::SeqCst) != mine {
             return;
         }
@@ -689,42 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tiles_key_carries_the_filter_and_reads_back() {
-        let f = jade();
-        let dir = crate::controls::wallpaper_dir();
-        let file = dir.join("a.jpg").to_string_lossy().into_owned();
-        let key = tile_key(&file, &f);
-        assert!(key.starts_with(KEY) && key.ends_with("/a.jpg"), "{key}");
-        let Some(Ok((back, orig))) = parse_key(&key, &f) else { panic!("not read back: {key}") };
-        assert_eq!((back, orig.as_str()), (f, file.as_str()));
-        // A slider that moved on: its tile is stale.
-        assert!(matches!(parse_key(&key, &crate::palette::filter_for("jade", 30, false)), Some(Err(()))));
-        // Off, the first tile: the file as it is.
-        assert_eq!(tile_key(&file, &crate::palette::filter_for("jade", 0, false)), file);
-        let gif = dir.join("a.gif").to_string_lossy().into_owned();
-        assert!(tile_key(&gif, &f).starts_with(KEY), "a GIF's tile is graded too");
-        assert_eq!(tile_key("/elsewhere/a.jpg", &f), "/elsewhere/a.jpg");
-        assert!(parse_key(&file, &f).is_none());
-    }
-
-    #[test]
-    fn a_thumbnail_is_tinted_and_keeps_its_clear_corners() {
-        let n = crate::apps::ICON_SIZE as usize;
-        let mut base = vec![0u8; n * n * 4];
-        for p in base.chunks_exact_mut(4).skip(n) {
-            p.copy_from_slice(&[128, 128, 128, 255]);
-        }
-        let chain = crate::apps::with_mips(base);
-        let len = chain.len();
-        let out = filter_thumb(chain, &jade());
-        assert_eq!(out.len(), len);
-        assert_eq!(&out[..4], &[0, 0, 0, 0], "clear stays clear");
-        let px = &out[(n + 5) * 4..(n + 5) * 4 + 4];
-        assert_eq!(px[3], 255);
-        assert!(px[..3].iter().max() != px[..3].iter().min(), "{px:?}");
-    }
-
-    #[test]
     fn a_copy_covers_the_screen_and_never_grows() {
         assert_eq!(copy_size(6000, 4000, 2560, 1600), (2560, 1707));
         assert_eq!(copy_size(4000, 6000, 2560, 1600), (2560, 3840));
@@ -806,6 +799,133 @@ mod tests {
             }
             assert!(worst < 0.05, "{pal}: worst difference {worst}");
         }
+    }
+
+    /// icon.wgsl `wall_ramp` + `wall_grade`, line by line, over the uniform
+    /// `Grade::uniform` makes, on a LINEAR colour (what the card samples).
+    fn wgsl_port(u: &Filter, rgb: [f32; 3]) -> [f32; 3] {
+        let n = u[0][2] as usize;
+        let t = u[0][0].clamp(0.0, 1.0);
+        if t <= 0.0 || u[0][2] < 1.0 {
+            return rgb;
+        }
+        let to_oklab = |c: [f32; 3]| {
+            let l = 0.412_221_47 * c[0] + 0.536_332_55 * c[1] + 0.051_445_99 * c[2];
+            let m = 0.211_903_5 * c[0] + 0.680_699_5 * c[1] + 0.107_396_96 * c[2];
+            let s = 0.088_302_46 * c[0] + 0.281_718_85 * c[1] + 0.629_978_7 * c[2];
+            let (l_, m_, s_) = (l.max(0.0).cbrt(), m.max(0.0).cbrt(), s.max(0.0).cbrt());
+            [
+                0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
+                1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
+                0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_,
+            ]
+        };
+        let from_oklab = |c: [f32; 3]| {
+            let l_ = c[0] + 0.396_337_78 * c[1] + 0.215_803_76 * c[2];
+            let m_ = c[0] - 0.105_561_346 * c[1] - 0.063_854_17 * c[2];
+            let s_ = c[0] - 0.089_484_18 * c[1] - 1.291_485_5 * c[2];
+            let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+            [
+                4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+                -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+                -0.004_196_086 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+            ]
+        };
+        let ramp = |l: f32| -> [f32; 2] {
+            if l <= u[1][0] {
+                return [u[1][1], u[1][2]];
+            }
+            for i in 1..n {
+                let (p, q) = (u[i], u[i + 1]);
+                if l <= q[0] {
+                    let k = ((l - p[0]) / (q[0] - p[0]).max(1e-6)).clamp(0.0, 1.0);
+                    return [p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k];
+                }
+            }
+            [u[n][1], u[n][2]]
+        };
+        let lab = to_oklab(rgb);
+        let mut r = ramp(lab[0]);
+        let room = 0.6 * lab[0].min(1.0 - lab[0]).max(0.0);
+        let rc = r[0].hypot(r[1]);
+        if rc > room {
+            r = [r[0] * (room / rc), r[1] * (room / rc)];
+        }
+        from_oklab([lab[0], lab[1] + (r[0] - lab[1]) * t, lab[2] + (r[1] - lab[2]) * t]).map(|x| x.clamp(0.0, 1.0))
+    }
+
+    #[test]
+    fn the_cards_wgsl_is_the_photos_grade() {
+        let mut two = [[0.0f32; 4]; 7];
+        two[0] = [0.8, 0.0, 2.0, 0.0];
+        two[1] = [0.9, 0.05, 4.0, 0.0]; // (given out of order: the uniform sorts)
+        two[2] = [0.35, 0.12, 0.9, 0.0];
+        for (pal, f) in [("jade 100", jade()), ("jade 37", crate::palette::filter_for("jade", 37, false)), ("two", two)] {
+            let g = Grade::of(&f);
+            let u = g.uniform();
+            assert!(u[1][0] <= u[2][0], "darkest first");
+            let (s2l, l2s) = (
+                |v: u8| srgb_to_linear(v),
+                |x: f32| 255.0 * if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 },
+            );
+            let mut worst = 0.0f32;
+            for r in (0..=255).step_by(17) {
+                for gr in (0..=255).step_by(17) {
+                    for b in (0..=255).step_by(17) {
+                        let cpu = g.apply([r as u8, gr as u8, b as u8]);
+                        let gpu = wgsl_port(&u, [s2l(r as u8), s2l(gr as u8), s2l(b as u8)]).map(l2s);
+                        for k in 0..3 {
+                            worst = worst.max((cpu[k] - gpu[k]).abs());
+                        }
+                    }
+                }
+            }
+            assert!(worst < 0.05, "{pal}: worst difference {worst}");
+        }
+        // Off, or no palette: the colour as it is.
+        let off = Grade::of(&[[0.0; 4]; 7]).uniform();
+        assert_eq!(wgsl_port(&off, [0.2, 0.4, 0.6]), [0.2, 0.4, 0.6]);
+    }
+
+    #[test]
+    fn the_shader_reads_what_the_uniform_holds() {
+        // The names the Rust side and the shader share.
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/icon.wgsl")).unwrap();
+        for needle in ["wall: array<vec4<f32>, 7>", "fn wall_grade", "fn wall_ramp", "0x40000000u", "0x3fffffffu"] {
+            assert!(text.contains(needle), "{needle}");
+        }
+        assert_eq!(crate::content::WALL, 0x4000_0000);
+    }
+
+    #[test]
+    fn a_drag_makes_the_wallpaper_once() {
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let mut h = Hold::default();
+        h.begin(t0);
+        // Twenty changes in a drag, none acts…
+        for i in 0..20 {
+            assert_eq!(h.changed(t0 + Duration::from_millis(30 * i)), None);
+        }
+        // …the release makes it, once.
+        assert_eq!(h.end(), Some(LET_GO));
+        assert_eq!(h.end(), None);
+        // Nothing changed in a drag: nothing to make.
+        h.begin(t0);
+        assert_eq!(h.end(), None);
+        // The keys (no drag): the rest, then it acts.
+        assert_eq!(h.changed(t0), Some(REST));
+        // A drag whose release never came is forgotten.
+        h.begin(t0);
+        assert_eq!(h.changed(t0 + STALE + Duration::from_millis(1)), Some(REST));
+    }
+
+    #[test]
+    fn only_the_wallpapers_folder_wears_the_slider() {
+        let dir = crate::controls::wallpaper_dir();
+        assert!(tile_graded(&dir.join("a.jpg").to_string_lossy()));
+        assert!(tile_graded(&dir.join("a.gif").to_string_lossy()), "a GIF's tile is graded too");
+        assert!(!tile_graded("/elsewhere/a.jpg"));
     }
 
     /// Writes the shader for jade at 100 and 50 to $SHADER_OUT (for trying in mpv).

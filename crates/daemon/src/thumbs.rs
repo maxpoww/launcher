@@ -187,14 +187,7 @@ pub fn spawn(results: Sender<Event>) -> Thumbs {
         .name("waverunner-thumbs".into())
         .spawn(move || {
             while let Ok(path) = rx.recv() {
-                // A tile of the wallpapers' box under the Colours slider: the
-                // usual preview, through the filter the key carries (a key of
-                // a slider that moved on is not made).
-                let made = match crate::wall_tint::parse_key(&path, &crate::palette::wall_filter()) {
-                    Some(Ok((f, file))) => thumbnail(&file).map(|chain| crate::wall_tint::filter_thumb(chain, &f)),
-                    Some(Err(())) => continue,
-                    None => thumbnail(&path),
-                };
+                let made = thumbnail(&path);
                 let event = match made {
                     Some(pixels) => Event::Thumb { path, pixels },
                     // A "video" that produced no thumbnail is almost always

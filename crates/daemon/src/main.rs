@@ -7702,6 +7702,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         if let Some(from) = app.fast.slide_from.take() {
                             // Let go: the knob stays where it was taken, the box stays up.
                             app.slider_to(from, pos, true);
+                            app.slider_end(true);
                         } else if app.fast.boxed.is_some() {
                             app.quick_click(pos);
                         } else {
@@ -7752,7 +7753,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // slider only sets the knob — let go
                                 // anywhere, nothing closes.
                                 match slide_from {
-                                    Some(from) => app.slider_to(from, pos, false),
+                                    Some(from) => {
+                                        app.slider_to(from, pos, false);
+                                        app.slider_end(false);
+                                    }
                                     None => app.panel_click(pos),
                                 }
                             } else if app.ui.target() == Target::Open {

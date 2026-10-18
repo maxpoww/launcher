@@ -1653,6 +1653,31 @@ pub(crate) fn wall_filter() -> [[f32; 4]; 7] {
     WALL_FILTER.lock().map(|f| *f).unwrap_or([[0.0; 4]; 7])
 }
 
+/// THE LIVE LEVEL (Max, 2026-10-18: "the slider jumps … make it smooth"):
+/// while the Colours slider of the Wallpaper page is dragged, the level under
+/// the pointer, as the filter it makes. The box's tiles are graded with it
+/// every frame; nothing is saved until the slider is let go.
+static WALL_LIVE: std::sync::Mutex<Option<[[f32; 4]; 7]>> = std::sync::Mutex::new(None);
+
+/// Put the dragged level in use (`None`: the saved one is what is shown).
+pub(crate) fn set_wall_live(level: Option<u8>) {
+    let f = level.map(|l| if l == 0 { [[0.0; 4]; 7] } else { filter_for(&current().id, l.min(100), false) });
+    if let Ok(mut g) = WALL_LIVE.lock() {
+        *g = f;
+    }
+}
+
+/// Whether a dragged level is in use.
+pub(crate) fn wall_live() -> bool {
+    WALL_LIVE.lock().is_ok_and(|g| g.is_some())
+}
+
+/// The filter the wallpapers' tiles are drawn through now: the dragged
+/// level's, else the saved one's.
+pub(crate) fn wall_shown() -> [[f32; 4]; 7] {
+    WALL_LIVE.lock().ok().and_then(|g| *g).unwrap_or_else(wall_filter)
+}
+
 /// Put the wallpapers' filter in use; true when it changed.
 fn set_wall_filter(f: [[f32; 4]; 7]) -> bool {
     match WALL_FILTER.lock() {

@@ -16,6 +16,7 @@ struct Globals {
     neck: vec4<f32>,     // (the rect pipeline's; same buffer)
     light: vec4<f32>,    // x = the night light, 1 in the dark look
     filt: array<vec4<f32>, 7>, // THE ICON FILTER: [0] = (strength, dark icons, targets, _), [1..] = OKLCH targets
+    wall: array<vec4<f32>, 7>, // THE WALLPAPERS' GRADE (wall_tint::Grade::uniform): [0] = (t, _, stops, _), [1..] = (L, a, b) darkest first
 };
 
 // ---- the icon filter (palette::icon_filter) ----
@@ -104,6 +105,35 @@ fn icon_filter(rgb: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
+// ---- the wallpapers' grade (wall_tint.rs Grade::apply, line by line) ----
+// The ramp's (a, b) at lightness l: linear between the stops, held at the ends.
+fn wall_ramp(l: f32) -> vec2<f32> {
+    let n = i32(globals.wall[0].z);
+    if (l <= globals.wall[1].x) { return globals.wall[1].yz; }
+    for (var i = 1; i < n; i = i + 1) {
+        let p = globals.wall[i];
+        let q = globals.wall[i + 1];
+        if (l <= q.x) {
+            let u = clamp((l - p.x) / max(q.x - p.x, 1e-6), 0.0, 1.0);
+            return mix(p.yz, q.yz, u);
+        }
+    }
+    return globals.wall[n].yz;
+}
+// One straight (linear) colour through the grade: its lightness kept, its
+// colour moved toward the ramp's by t.
+fn wall_grade(rgb: vec3<f32>) -> vec3<f32> {
+    let t = clamp(globals.wall[0].x, 0.0, 1.0);
+    if (t <= 0.0 || globals.wall[0].z < 1.0) { return rgb; }
+    let lab = to_oklab(rgb);
+    var r = wall_ramp(lab.x);
+    let room = 0.6 * max(min(lab.x, 1.0 - lab.x), 0.0);
+    let rc = length(r);
+    if (rc > room) { r = r * (room / rc); }
+    let o = from_oklab(vec3<f32>(lab.x, lab.y + (r.x - lab.y) * t, lab.z + (r.y - lab.z) * t));
+    return clamp(o, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var icons: texture_2d_array<f32>;
 @group(1) @binding(1) var icon_sampler: sampler;
@@ -185,9 +215,11 @@ fn plate_px(uv: vec2<f32>, plate: vec4<f32>, px: f32) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // (The top bit marks a PICTURE — `content::PICTURE` — the rest is the layer.)
-    let layer = in.layer & 0x7fffffffu;
+    // (The top bit marks a PICTURE — `content::PICTURE` — the next a
+    // WALLPAPER's tile, graded below — `content::WALL` — the rest is the layer.)
+    let layer = in.layer & 0x3fffffffu;
     let picture = (in.layer & 0x80000000u) != 0u;
+    let wall = (in.layer & 0x40000000u) != 0u;
     let texel = textureSample(icons, icon_sampler, in.uv, i32(layer));
     // One pixel in uv units (the quad is square) for the SDF edges below.
     let px = max(fwidth(in.uv.x), 1e-5);
@@ -321,7 +353,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var a = texel.a;
     // The palette's ICON FILTER, on app icons only (thumbnails keep their colours).
     var painted = texel.rgb;
-    if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5) && !is_thumb && a > 0.004) {
+    if (wall && a > 0.004) {
+        // A wallpaper's tile wears the Colours slider, live (not the icon filter).
+        painted = wall_grade(texel.rgb / a) * a;
+    } else if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5) && !is_thumb && a > 0.004) {
         painted = icon_filter(texel.rgb / a) * a;
     }
     var rgb = mix(painted, in.tint.rgb * a, in.tint.a);

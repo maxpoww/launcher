@@ -1491,9 +1491,19 @@ impl App {
             self.panel_reset_due = false;
         }
         // (The same for a setting open on the control panel itself.)
+        // (The wallpapers' tiles carry `content::WALL`: the card grades them.)
         let panel_draw_images = |app: &mut Self, draw: &crate::panel::PanelDraw| -> Vec<(content::Rect, u32, f32)> {
-            draw.images.clone().into_iter().filter_map(|(r, file)| app.picture_layer(&file).map(|(l, a)| (r, l, a))).collect()
+            draw.images
+                .clone()
+                .into_iter()
+                .filter_map(|(r, file)| app.picture_layer(&file).map(|(l, a)| (r, wall_layer(l, &file), a)))
+                .collect()
         };
+        // A dragged level that nothing holds any more (the pointer went up
+        // somewhere unseen) is let go.
+        if crate::palette::wall_live() && self.panel.knob_held().is_none() && self.quick.knob_held().is_none() {
+            crate::palette::set_wall_live(None);
+        }
         let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             if open {
@@ -1567,7 +1577,7 @@ impl App {
                 if self.fast.boxed.is_some() && crate::controls::wallpaper_moves(&file) {
                     self.picture_play(&file);
                 }
-                self.picture_layer(&file).map(|(layer, shape)| (r, layer, shape))
+                self.picture_layer(&file).map(|(layer, shape)| (r, wall_layer(layer, &file), shape))
             })
             .collect();
         // A picture with no preview (yet, or — a video where none can be
@@ -2025,6 +2035,12 @@ impl App {
             None => {}
         }
     }
+}
+
+/// A picture's `layer`, marked [`content::WALL`] when it is the tile of a
+/// wallpaper that wears the Colours slider (the card grades it).
+fn wall_layer(layer: u32, file: &str) -> u32 {
+    if crate::wall_tint::tile_graded(file) { layer | content::WALL } else { layer }
 }
 
 /// The OPTIONS bar's frame request, made by the renderer in the commit that

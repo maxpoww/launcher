@@ -591,6 +591,50 @@ struct Slider {
     track: Rect,
     value: f32,
     stops: std::ops::Range<usize>,
+    /// The choices' group (what a [`Knob`] is of) and how many stops it has.
+    group: u8,
+    count: usize,
+}
+
+/// THE KNOB under the pointer (Max, 2026-10-18: "the slider jumps"): where a
+/// slider was last dragged to, continuous, drawn from here and not from the
+/// stop the setting reports — so it never lags behind the pointer nor
+/// steps. It is drawn only while it names the lit stop (`knob_shown`); a
+/// setting that moved on another road puts the knob on its stop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Knob {
+    pub(crate) group: u8,
+    pub(crate) key: &'static str,
+    /// 0..=1 along the track.
+    pub(crate) v: f32,
+    /// The stop it is nearest.
+    pub(crate) stop: u8,
+    /// The pointer is still down.
+    pub(crate) held: bool,
+}
+
+/// The key of the wallpapers' Colours slider (see `App::slider_to`).
+const WALL_SLIDER: &str = "colors-wallpaper";
+
+/// A knob's place 0..=1 as a level 0..=100.
+fn knob_level(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+/// A pointer at `x` over a track from `track_x`, `track_w` wide (all in one
+/// frame): the knob's place 0..=1, continuous, kept on the track.
+pub(crate) fn knob_value(x: f32, track_x: f32, track_w: f32) -> f32 {
+    ((x - track_x) / track_w.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Where a slider's knob is drawn: the dragged place while it is the lit
+/// stop's (or the pointer is down), else the lit stop's.
+fn knob_shown(lit: f32, count: usize, knob: Option<Knob>) -> f32 {
+    let n = count.max(2) - 1;
+    match knob {
+        Some(k) if k.held || (k.v * n as f32).round() == (lit * n as f32).round() => k.v,
+        _ => lit,
+    }
 }
 
 /// A real setting's content at rest, in field coordinates: what
@@ -784,6 +828,8 @@ pub(crate) struct Panel {
     /// The wall's height as last laid out: the box opens at it, before the
     /// setting has been read again.
     wall_h: Option<f32>,
+    /// The slider last dragged: see [`Knob`].
+    knob: Option<Knob>,
 }
 
 impl Panel {
@@ -1384,7 +1430,7 @@ impl Panel {
     /// A press at `from` that began on a SLIDER, now at `pos`: the stop
     /// under the pointer's x (the slider's own, wherever the pointer went
     /// up or down), when it is not the lit one.
-    pub(crate) fn slide(&self, from: (f32, f32), pos: (f32, f32)) -> Option<(u8, u8)> {
+    pub(crate) fn slide(&mut self, from: (f32, f32), pos: (f32, f32)) -> Option<(u8, u8)> {
         let label = self.open_control_label()?;
         let content = self.open_content(label)?;
         let f = self.field;
@@ -1392,12 +1438,36 @@ impl Panel {
         let sl = content.sliders.iter().find(|sl| content.chips[sl.stops.clone()].iter().any(inside))?;
         let stops = &content.chips[sl.stops.clone()];
         let n = stops.len().max(2) - 1;
-        let k = (((pos.0 - f.x - sl.track.x) / sl.track.w).clamp(0.0, 1.0) * n as f32).round() as usize;
+        let v = knob_value(pos.0 - f.x, sl.track.x, sl.track.w);
+        let k = (v * n as f32).round() as usize;
         let chip = stops.get(k)?;
+        if let PanelAction::Pick { group, index } = chip.action {
+            let key = self.control.as_ref().and_then(|c| c.groups.get(group as usize)).map_or("", |g| g.key);
+            self.knob = Some(Knob { group, key, v, stop: index, held: true });
+        }
         match chip.action {
             PanelAction::Pick { group, index } if !chip.on => Some((group, index)),
             _ => None,
         }
+    }
+
+    /// The pointer went up: the knob stays where it was left. Gives it back
+    /// when it was held.
+    pub(crate) fn knob_let_go(&mut self) -> Option<Knob> {
+        let k = self.knob.as_mut().filter(|k| k.held)?;
+        k.held = false;
+        Some(*k)
+    }
+
+    /// The knob that is of slider `sl` (the same group of the same setting).
+    fn knob_of(&self, sl: &Slider) -> Option<Knob> {
+        let key = self.control.as_ref().and_then(|c| c.groups.get(sl.group as usize)).map(|g| g.key)?;
+        self.knob.filter(|k| k.group == sl.group && k.key == key)
+    }
+
+    /// The dragged knob, while the pointer is down on it.
+    pub(crate) fn knob_held(&self) -> Option<Knob> {
+        self.knob.filter(|k| k.held)
     }
 
     /// Whether a press at `pos` is on a slider (its whole row).
@@ -1627,7 +1697,7 @@ impl Panel {
                 style: Style::Word { big: false },
             });
         }
-        out.sliders.push(Slider { track, value: lit as f32 / (n - 1) as f32, stops: first..out.chips.len() });
+        out.sliders.push(Slider { track, value: lit as f32 / (n - 1) as f32, stops: first..out.chips.len(), group, count: n });
         y + h + 10.0 * s
     }
 
@@ -2274,6 +2344,7 @@ impl Panel {
     /// nothing open. Run out of sight (see `App::panel_reset_due`).
     pub(crate) fn reset(&mut self) {
         self.open = None;
+        self.knob = None;
         self.hot = None;
         self.query.clear();
         if self.pills.is_empty() {
@@ -2657,7 +2728,6 @@ impl Panel {
             // good before"). `dx`: a page of them mid-turn is drawn that far
             // aside, and a tile not wholly in the box is not drawn at all
             // (a picture cannot be cut at the box's edge).
-            let wall_filter = crate::palette::wall_filter();
             let tile_at = |out: &mut PanelDraw, r: Rect, dx: f32, file: String, keyed: bool| {
                 if r.x + dx < 0.0 || r.x + dx + r.w > fw {
                     return;
@@ -2669,7 +2739,7 @@ impl Panel {
                 out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
                 if resting {
                     // (The wallpapers wear the Colours slider: `wall_tint`.)
-                    out.images.push((tile, crate::wall_tint::tile_key(&file, &wall_filter)));
+                    out.images.push((tile, file));
                 }
                 if keyed {
                     let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
@@ -2812,7 +2882,7 @@ impl Panel {
                 let t = sl.track;
                 let ink_c = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], a];
                 rect(out, t.x, t.y, t.w, t.h, t.h / 2.0, ink_c(0.16));
-                let kx = t.x + t.w * sl.value;
+                let kx = t.x + t.w * knob_shown(sl.value, sl.count, self.knob_of(sl));
                 rect(out, t.x, t.y, (kx - t.x).max(t.h), t.h, t.h / 2.0, ink_c(0.9));
                 let knob = 12.0 * s;
                 rect(out, kx - knob / 2.0, t.y + t.h / 2.0 - knob / 2.0, knob, knob, knob / 2.0, ink_c(0.95));
@@ -3630,14 +3700,46 @@ impl App {
     }
 
     /// A press that began on a slider at `from`, now at `pos`: the knob
-    /// goes to the stop under the pointer's x (the control panel's or,
-    /// `quick`, the quick box's).
+    /// goes under the pointer (continuous, drawn at once from the panel's
+    /// own state) and the stop nearest to it is picked (the control panel's
+    /// or, `quick`, the quick box's). The wallpapers' Colours is not picked
+    /// stop by stop: its level is only SHOWN, live, on the card — the tiles
+    /// are graded with it every frame — and kept when the pointer goes up
+    /// (`slider_end`), so the wallpaper itself is made once.
     pub(crate) fn slider_to(&mut self, from: (f32, f32), pos: (f32, f32), quick: bool) {
-        let panel = if quick { &self.quick } else { &self.panel };
-        if let Some((group, index)) = panel.slide(from, pos) {
+        let panel = if quick { &mut self.quick } else { &mut self.panel };
+        let pick = panel.slide(from, pos);
+        let knob = panel.knob_held();
+        if let Some(k) = knob.filter(|k| k.key == WALL_SLIDER) {
+            crate::wall_tint::drag_begin();
+            crate::palette::set_wall_live(Some(knob_level(k.v)));
+        } else if let Some((group, index)) = pick {
             self.control_pick(group, index, quick);
+        }
+        if knob.is_some() {
             self.schedule_frame();
         }
+    }
+
+    /// The pointer went up after a drag on a slider: the knob stays where it
+    /// was left. The wallpapers' Colours is kept now, at the level the knob
+    /// was left at, and the wallpaper is made once.
+    pub(crate) fn slider_end(&mut self, quick: bool) {
+        let panel = if quick { &mut self.quick } else { &mut self.panel };
+        let Some(k) = panel.knob_let_go() else { return };
+        if k.key != WALL_SLIDER {
+            return;
+        }
+        // (The lit stop first, as a pick does, then the exact level.)
+        let label = panel.control_pick(k.group, k.stop).map(|(label, ..)| label);
+        self.colors_pick(WALL_SLIDER, &knob_level(k.v).to_string());
+        crate::palette::set_wall_live(None);
+        crate::wall_tint::drag_end();
+        if let Some(label) = label {
+            let ui = self.ui_facts();
+            self.controls_send(ControlCommand::Read(label, ui));
+        }
+        self.schedule_frame();
     }
 
     pub(crate) fn panel_click(&mut self, pos: (f32, f32)) {
@@ -4610,5 +4712,29 @@ mod tests {
         // The one in use is underlined (the hairline language: no rings).
         assert_eq!(draw.rects.iter().filter(|r| r.border > 0.0).count(), 0);
         assert_eq!(draw.rects.iter().filter(|r| r.rect.h <= 2.0 && r.rect.w > 4.0).count(), 1);
+    }
+
+    #[test]
+    fn the_knob_follows_the_pointer_within_the_track() {
+        // Continuous (not stepped), kept on the track.
+        assert_eq!(knob_value(150.0, 100.0, 200.0), 0.25);
+        assert_eq!(knob_value(101.0, 100.0, 200.0), 0.005);
+        assert_eq!(knob_value(40.0, 100.0, 200.0), 0.0);
+        assert_eq!(knob_value(900.0, 100.0, 200.0), 1.0);
+        assert_eq!(knob_value(5.0, 0.0, 0.0), 1.0, "a track with no width does not divide by zero");
+        assert_eq!(knob_level(0.2749), 27);
+        assert_eq!(knob_level(2.0), 100);
+    }
+
+    #[test]
+    fn the_knob_is_drawn_where_it_was_left_while_it_names_the_lit_stop() {
+        let knob = |v: f32, held: bool| Some(Knob { group: 0, key: "k", v, stop: 0, held });
+        // 21 stops: stop k at k / 20. Held: always the pointer's place.
+        assert_eq!(knob_shown(0.0, 21, knob(0.123, true)), 0.123);
+        // Let go on the lit stop's side of it: kept (no snap at the release).
+        assert_eq!(knob_shown(0.25, 21, knob(0.263, false)), 0.263);
+        // The setting moved on another road (the keys): the lit stop's.
+        assert_eq!(knob_shown(0.5, 21, knob(0.263, false)), 0.5);
+        assert_eq!(knob_shown(0.5, 21, None), 0.5);
     }
 }

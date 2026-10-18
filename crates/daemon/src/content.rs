@@ -100,6 +100,11 @@ pub struct IconInst {
 /// (Files, the desktop: no `thumb_base` block); the shader masks the bit off.
 pub const PICTURE: u32 = 1 << 31;
 
+/// Set on an `IconInst::layer` beside [`PICTURE`]: the picture is a
+/// WALLPAPER's tile, which the shader grades with the Colours slider's live
+/// level (`wall_tint`). The shader masks it off too.
+pub const WALL: u32 = 1 << 30;
+
 /// No plate under this icon quad (image thumbnails, ring/shine overlays).
 pub const NO_PLATE: [f32; 4] = [0.0; 4];
 /// The old baked plate's exact look — translucent white frost (84/255).
