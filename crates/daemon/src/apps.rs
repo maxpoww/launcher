@@ -447,6 +447,11 @@ pub(crate) fn discord_at(p: &crate::discord_icon::Pose) -> Option<Vec<u8>> {
     Some(frame_chain(&crate::discord_icon::frame(p)?, crate::discord_icon::FRAME))
 }
 
+/// Spotify's mark in pose `p`, ready to upload.
+pub(crate) fn spotify_at(p: &crate::spotify_icon::Pose) -> Option<Vec<u8>> {
+    Some(frame_chain(&crate::spotify_icon::frame(p)?, crate::spotify_icon::FRAME))
+}
+
 /// The apps button's stencil (its nine squares), ready to upload.
 pub(crate) fn apps_stencil() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(crate::apps_icon::stencil_svg().as_bytes())?.take()))
@@ -495,6 +500,10 @@ pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     // Discord wears its moving mark (`discord_icon`).
     if id == crate::discord_icon::DISCORD_ID {
         return Some(with_mips(rasterize_svg(crate::discord_icon::rest_svg().as_bytes())?.take()));
+    }
+    // Spotify wears its moving mark (`spotify_icon`).
+    if id == crate::spotify_icon::SPOTIFY_ID {
+        return Some(with_mips(rasterize_svg(crate::spotify_icon::rest_svg().as_bytes())?.take()));
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)

@@ -52,6 +52,7 @@ mod whatsapp_icon;
 mod youtube_icon;
 mod ytmusic_icon;
 mod discord_icon;
+mod spotify_icon;
 mod quicklook;
 mod peek_kinds;
 mod peek_edit;
@@ -924,6 +925,7 @@ fn main() -> anyhow::Result<()> {
         youtube: youtube_icon::Motion::default(),
         ytmusic: ytmusic_icon::Motion::default(),
         discord: discord_icon::Motion::default(),
+        spotify: spotify_icon::Motion::default(),
         peek: quicklook::QuickLook::default(),
         apps_motion: apps_icon::AppsMotion::default(),
         bin_motion: bin_motion::BinMotion::default(),
@@ -2197,6 +2199,9 @@ pub struct App {
     /// Discord's mark: Clyde tips and winks on a hover, drops, wide-eyed, and
     /// blinks on a click (`discord_icon`).
     discord: discord_icon::Motion,
+    /// Spotify's mark: its lines swing round an axis below the disc on a
+    /// hover, press down and jump apart on a click (`spotify_icon`).
+    spotify: spotify_icon::Motion,
     /// QUICK LOOK: Space on a thing in a file window (`quicklook`).
     peek: quicklook::QuickLook,
     /// The apps button: its pages under the pointer, its squares down while
@@ -5554,6 +5559,10 @@ impl App {
                     }
                     if self.entries.get(entry_idx).is_some_and(|e| e.id == discord_icon::DISCORD_ID) {
                         self.discord.click();
+                        self.dirty = true;
+                    }
+                    if self.entries.get(entry_idx).is_some_and(|e| e.id == spotify_icon::SPOTIFY_ID) {
+                        self.spotify.click();
                         self.dirty = true;
                     }
                     // A minimized window's tile: the click asks the PLUGIN to
