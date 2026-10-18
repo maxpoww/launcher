@@ -872,9 +872,11 @@ pub(crate) mod tint {
         for k in 0..4 {
             let (l, cc, h) = lch(c[k]);
             let l2 = if dark {
-                (l + 0.10 * f).clamp(0.0, [0.30, 0.34, 0.39, 0.47][k])
+                (l + 0.14 * f).clamp(0.0, [0.30, 0.34, 0.39, 0.47][k])
             } else {
-                (l + 0.06 * f).clamp([0.80, 0.76, 0.70, 0.62][k], 1.0)
+                // (Wide enough to be SEEN — Max: "it have to be noticeable, like a light
+                // dimming"; ±0.06 moved a light box by 9/255 over a whole fade.)
+                (l + 0.12 * f).clamp([0.72, 0.68, 0.62, 0.55][k], 1.0)
             };
             out[k] = from_lch(l2, cc, h);
         }
@@ -938,7 +940,7 @@ pub(crate) mod tint {
                         let l = lit(&walk_unlit(&p.light, p.light[p.accent_light], false, level), false, v);
                         assert!(contrast(rel_lum(d[5]), rel_lum(d[1])) >= 4.5, "{} dark at lighting {v}", p.id);
                         assert!(contrast(rel_lum(l[5]), rel_lum(l[1])) >= 4.5, "{} light at lighting {v}", p.id);
-                        assert!(lch(d[0]).0 <= 0.306 && lch(l[0]).0 >= 0.794, "{} stays in its band at {v}", p.id);
+                        assert!(lch(d[0]).0 <= 0.306 && lch(l[0]).0 >= 0.714, "{} stays in its band at {v}", p.id);
                     }
                 }
             }
