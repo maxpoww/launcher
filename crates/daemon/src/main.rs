@@ -484,8 +484,11 @@ fn main() -> anyhow::Result<()> {
     // several worker threads; set it before any of them start.
     apps::set_icon_plate(config.theme.icon_plate);
     let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
-    // The look first: every icon loader is built in its tone.
-    look::set_dark(controls::dark_now());
+    // The look first: every icon loader is built in its tone. The dock's look
+    // is the SHELL row's (Max, 2026-10-18: no general Dark toggle; each row
+    // has its own, the shell's Light being what the general Light was).
+    palette::settle_looks();
+    look::set_dark(palette::choice().shell_dark.unwrap_or(true));
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
     // The nix thread owns the nixpkgs package index (Install-section

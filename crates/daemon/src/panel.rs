@@ -3816,10 +3816,6 @@ impl App {
         if key == "wallpaper" {
             self.wallpaper_changing(&value);
         }
-        if key == "dark" {
-            // (The worker writes it for the apps; the dock's own look is here.)
-            self.look_set(value == "on");
-        }
         if !crate::controls::ui_key(key) {
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Set { label, key, value, ui });

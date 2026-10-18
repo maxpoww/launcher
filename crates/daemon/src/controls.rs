@@ -716,12 +716,7 @@ pub(crate) fn assert_dark(dark: bool) {
     if crate::palette::adw_gtk3(dark).is_none() {
         run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", theme]);
     }
-    // Golem's icons in the same tone (Max, 2026-10-14): silver `Golem` in the
-    // light, graphite `Golem-Dark` in the dark — where they are installed.
-    if crate::look::installed("Golem") {
-        let icons = if dark { "'Golem-Dark'" } else { "'Golem'" };
-        run("dconf", &["write", "/org/gnome/desktop/interface/icon-theme", icons]);
-    }
+    // (The icon theme is the Icons row's: `palette::publish_icons` writes it.)
 }
 
 // ------------------------------------------------------------------ power
@@ -1636,10 +1631,10 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             view.groups.push(group(None, "colors-skip", 150.0, apps));
         }
         "Colours" => {
-            let dark = dark_now();
+            // (No general Dark toggle: each row has its own — Max, 2026-10-18.)
+            let dark = true;
             let picked = crate::palette::choice();
             view.subtitle = tr("How everything looks. Some apps need a restart to show changes.").to_owned();
-            view.groups.push(Group { main: true, ..look_pair(None, "dark", dark, "on", "off") });
             // The three sliders (Max, 2026-10-16): 0 = Off (the makers' own
             // colours), the middle = the palette as made, the end = full
             // colour; each with a [Dark][Light] of its own that follows the
@@ -2115,11 +2110,13 @@ pub(crate) fn reassert() {
     // The compositor's own settings: on it now, and in the file it reads at
     // its start (a settings.json the installer seeded has no such file yet).
     s.reassert_input();
-    if s.dark.is_none() && s.language.is_none() && s.time_zone.is_none() && s.wallpaper.is_none() {
+    // The system's look is the Apps row's (no general toggle since 2026-10-18).
+    let apps_dark = s.colors.as_ref().and_then(|c| c.apps_dark).or(s.dark);
+    if apps_dark.is_none() && s.language.is_none() && s.time_zone.is_none() && s.wallpaper.is_none() {
         return;
     }
     let spawned = std::thread::Builder::new().name("controls-reassert".into()).spawn(move || {
-        if let Some(dark) = s.dark {
+        if let Some(dark) = apps_dark {
             assert_dark(dark);
         }
         if s.language.is_some() || s.time_zone.is_some() {

@@ -419,6 +419,27 @@ pub(crate) fn choice() -> ColorChoice {
     GolemSettings::load().colors.unwrap_or_default()
 }
 
+/// The general Dark toggle is gone (Max, 2026-10-18): each row — apps, web,
+/// icons, shell — has its own Dark/Light. A row that used to follow the
+/// general one takes, once, the look it was showing, so an update changes
+/// nothing anyone sees.
+pub(crate) fn settle_looks() {
+    let c = choice();
+    if c.apps_dark.is_some() && c.web_dark.is_some() && c.icons_dark.is_some() && c.shell_dark.is_some() {
+        return;
+    }
+    let was = crate::controls::dark_now();
+    GolemSettings::change(|s| {
+        let mut c = s.colors.clone().unwrap_or_default();
+        for look in [&mut c.apps_dark, &mut c.web_dark, &mut c.icons_dark, &mut c.shell_dark] {
+            look.get_or_insert(was);
+        }
+        s.colors = Some(c);
+        s.store();
+    });
+    info!("palette: each row keeps the look it showed ({})", if was { "dark" } else { "light" });
+}
+
 /// The theme a choice gives in a look.
 /// The palette being MADE in the editor, worn while it is made (Max: "the
 /// desktop shows it as you go"); never saved as the choice.
@@ -997,7 +1018,8 @@ static ICONS_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 fn publish_icons(mine: u64) {
     let f = icon_filter();
     let (k, dim) = (f[0][0], f[0][1] > 0.5);
-    let base = if dim || crate::look::dark() { "Golem-Dark" } else { "Golem" };
+    // (The icons' tone is the Icons row's look: graphite in the dark, silver in the light.)
+    let base = if dim || choice().icons_dark.unwrap_or(true) { "Golem-Dark" } else { "Golem" };
     let home = std::env::var("HOME").unwrap_or_default();
     let data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let icons = std::path::Path::new(&data).join("icons");
@@ -2482,7 +2504,19 @@ impl crate::App {
             s.colors = Some(c);
             s.store();
         });
-        self.colors_apply(false);
+        let c = choice();
+        match key {
+            // The shell's look is the dock's whole look (its glass, figures,
+            // boxes, the desktop) — what the general Light used to be.
+            "colors-shell-look" => self.look_set(c.shell_dark.unwrap_or(true)),
+            // The apps' look is the one the system tells every program.
+            "colors-apps-look" => {
+                let dark = c.apps_dark.unwrap_or(true);
+                let _ = std::thread::Builder::new().name("apps-look".into()).spawn(move || crate::controls::assert_dark(dark));
+                self.colors_apply(true);
+            }
+            _ => self.colors_apply(false),
+        }
     }
 }
 
