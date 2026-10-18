@@ -5585,6 +5585,11 @@ impl App {
                         self.chrome.click();
                         self.dirty = true;
                     }
+                    // Golem Files' folders wave, back one first.
+                    if self.entries.get(entry_idx).is_some_and(|e| e.id == crate::filer::APP_ID) {
+                        self.files_hover.click();
+                        self.dirty = true;
+                    }
                     // A minimized window's tile: the click asks the PLUGIN to
                     // put the window back, and nothing else — the tile leaves
                     // only on the plugin's confirming `min-del`, never here

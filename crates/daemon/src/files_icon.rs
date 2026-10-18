@@ -132,13 +132,41 @@ pub(crate) fn soft(p: f32) -> f32 {
     bez(y1, y2, (lo + hi) / 2.0)
 }
 
+/// The CLICK's wave (Max, 2026-10-18, the App Motion Lab —
+/// https://claude.ai/artifact/BP4E7xwMBtEWNgwqrN11Ta): each folder jumps up
+/// `WAVE_LIFT`, back one first, `WAVE_GAP` apart — a snap up, a drop, a small
+/// bounce below rest — `WAVE_JUMP` each.
+const WAVE_LIFT: f32 = 10.0;
+const WAVE_GAP: f32 = 0.065;
+const WAVE_JUMP: f32 = 0.240;
+const WAVE_SECONDS: f32 = WAVE_JUMP + 2.0 * WAVE_GAP;
+
+/// One folder's jump `t` seconds in (1 = the top, 0 = rest).
+fn jump(t: f32) -> f32 {
+    if t <= 0.0 || t >= WAVE_JUMP {
+        return 0.0;
+    }
+    let x = t / WAVE_JUMP;
+    let bez = crate::youtube_icon::bezier;
+    if x < 0.32 {
+        bez(0.15, 0.8, 0.3, 1.0, x / 0.32)
+    } else if x < 0.72 {
+        1.0 - bez(0.55, 0.0, 0.85, 0.4, (x - 0.32) / 0.4)
+    } else {
+        -0.14 * (std::f32::consts::PI * (x - 0.72) / 0.28).sin()
+    }
+}
+
 /// The hover as CSS runs a transition: from wherever it stood when the
-/// pointer came or went, to the other end, in [`SECONDS`] on the soft curve.
+/// pointer came or went, to the other end, in [`SECONDS`] on the soft curve;
+/// and the click's wave.
 #[derive(Default)]
 pub(crate) struct Hover {
     from: f32,
     to: f32,
     t: f32,
+    /// The wave, seconds in.
+    wave: Option<f32>,
 }
 
 impl Hover {
@@ -147,8 +175,25 @@ impl Hover {
         self.from + (self.to - self.from) * soft(self.t)
     }
 
+    /// A click: the wave.
+    pub(crate) fn click(&mut self) {
+        self.wave = Some(0.0);
+    }
+
+    /// The folders' lifts now (back, middle, front).
+    pub(crate) fn lifts(&self) -> [f32; 3] {
+        let t = self.wave.unwrap_or(-1.0);
+        std::array::from_fn(|i| WAVE_LIFT * jump(t - i as f32 * WAVE_GAP))
+    }
+
     /// Step by `dt` toward `on`; whether it still moves.
     pub(crate) fn step(&mut self, on: bool, dt: f32) -> bool {
+        let waving = self.wave.is_some();
+        self.wave = self.wave.map(|t| t + dt).filter(|t| *t < WAVE_SECONDS);
+        self.slide(on, dt) || waving
+    }
+
+    fn slide(&mut self, on: bool, dt: f32) -> bool {
         let to = if on { 1.0 } else { 0.0 };
         if to != self.to {
             self.from = self.value();
@@ -167,17 +212,17 @@ impl Hover {
 /// front: (layer offset, rect). Each layer is the folder drawn at its rest
 /// place on a full 64 tile, so a pose (top-left `p`, scale `s` of the
 /// folder) is the tile moved by `p − s·REST` and scaled by `s`.
-pub(crate) fn quads(icon: Rect, h: f32) -> [(u32, Rect); 3] {
+pub(crate) fn quads(icon: Rect, h: f32, lifts: [f32; 3]) -> [(u32, Rect); 3] {
     // "Se achica y entra": the front shrinks so the three fit the 64 tile.
     let span = (STEP_X * 2.0, STEP_Y * 2.0);
     let s = 1.0f32.min((56.0 - span.0) / 52.0).min((52.0 - span.1) / 45.0);
     let fx = (64.0 - (52.0 * s + span.0)) / 2.0;
     let fy = (64.0 - (45.0 * s + span.1)) / 2.0 + span.1;
     let u = icon.w / 64.0;
-    let pose = |i: f32| {
+    let pose = |i: f32, lift: f32| {
         let lerp = |a: f32, b: f32| a + (b - a) * h;
         let k = lerp(1.0, s);
-        let (px, py) = (lerp(REST.0, fx + STEP_X * i), lerp(REST.1, fy - STEP_Y * i));
+        let (px, py) = (lerp(REST.0, fx + STEP_X * i), lerp(REST.1, fy - STEP_Y * i) - lift);
         Rect::new(
             icon.x + (px - k * REST.0) * u,
             icon.y + (py - k * REST.1) * u,
@@ -185,7 +230,7 @@ pub(crate) fn quads(icon: Rect, h: f32) -> [(u32, Rect); 3] {
             64.0 * k * u,
         )
     };
-    [(BEHIND + 1, pose(2.0)), (BEHIND, pose(1.0)), (FRONT, pose(0.0))]
+    [(BEHIND + 1, pose(2.0, lifts[0])), (BEHIND, pose(1.0, lifts[1])), (FRONT, pose(0.0, lifts[2]))]
 }
 
 #[cfg(test)]
@@ -195,12 +240,12 @@ mod tests {
     #[test]
     fn at_rest_every_folder_is_the_tile_and_hovered_they_fit() {
         let icon = Rect::new(100.0, 50.0, 64.0, 64.0);
-        for (_, r) in quads(icon, 0.0) {
+        for (_, r) in quads(icon, 0.0, [0.0; 3]) {
             assert_eq!((r.x, r.y, r.w, r.h), (100.0, 50.0, 64.0, 64.0));
         }
         // Hovered: each folder (52 × 45 of its tile, from REST) lies inside
         // the icon, the ones behind up and to the right.
-        let out = quads(icon, 1.0);
+        let out = quads(icon, 1.0, [0.0; 3]);
         for (_, r) in out {
             let k = r.w / 64.0;
             let (x0, y0) = (r.x + REST.0 * k, r.y + REST.1 * k);
@@ -208,6 +253,22 @@ mod tests {
             assert!(y0 >= 50.0 - 0.01 && y0 + 45.0 * k <= 114.01, "{y0}");
         }
         assert!(out[0].1.x > out[2].1.x && out[0].1.y < out[2].1.y);
+    }
+
+    #[test]
+    fn a_click_waves_the_folders_back_first_and_ends_still() {
+        let mut h = Hover::default();
+        h.click();
+        h.step(true, 0.05);
+        let l = h.lifts();
+        assert!(l[0] > 0.0 && l[2] == 0.0, "back first: {l:?}");
+        let mut top = 0.0f32;
+        for _ in 0..40 {
+            h.step(true, 0.01);
+            top = top.max(h.lifts()[2]);
+        }
+        assert!(top > WAVE_LIFT * 0.9, "the front jumps too ({top})");
+        assert_eq!(h.lifts(), [0.0; 3]);
     }
 
     #[test]

@@ -1607,6 +1607,9 @@ pub struct FrameInput<'a> {
     /// Golem Files' launcher: its first figure layer and how far its folders
     /// are out (`files_icon`); `None` draws its theme icon.
     pub files_fig: Option<(u32, f32)>,
+    /// Its folders' lifts in the click's wave (back, middle, front; 64-grid
+    /// units, up).
+    pub files_wave: [f32; 3],
     /// The apps button's beat (1 = rest; `apps_icon`).
     pub apps_beat: f32,
     /// Its stencil layer: its plate cut by its squares while it holds pins.
@@ -1882,6 +1885,7 @@ pub fn scene(
         trash_hover,
         bin,
         files_fig,
+        files_wave,
         apps_beat,
         apps_stencil,
         install_hint,
@@ -2381,7 +2385,7 @@ pub fn scene(
                 ring: -1.0,
                 plate: plate_of(entry_idx),
             });
-            for (layer, rect) in crate::files_icon::quads(icon_rect, out) {
+            for (layer, rect) in crate::files_icon::quads(icon_rect, out, files_wave) {
                 scene.icons.push(IconInst { rect, layer: first + layer, tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
             }
             continue;

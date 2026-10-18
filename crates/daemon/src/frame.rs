@@ -1662,6 +1662,7 @@ impl App {
                 trash_hover: self.trash_hover,
                 bin: self.bin_motion.pose(),
                 files_fig: self.files_layer.map(|l| (l, self.files_hover.value())),
+                files_wave: self.files_hover.lifts(),
                 apps_beat: self.apps_motion.scale(),
                 apps_stencil: self.apps_stencil,
                 install_hint: self.install_hint(),
