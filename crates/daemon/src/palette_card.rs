@@ -157,7 +157,10 @@ fn fan(n: usize) -> (f32, f32) {
 /// The floor's shadow and the capsules, on the board (the first on top:
 /// drawn last). The card draws them as they are; the wallpaper draws them
 /// scaled and moved, inside a group.
-fn capsule_group(soul: &[Rgb]) -> String {
+/// `top_line`: the thin light at each capsule's top — the card's; the
+/// wallpaper goes without (Max, 2026-10-18: at a screen's size it read as "a
+/// line on top of the palette colours that shows the colours behind").
+fn capsule_group(soul: &[Rgb], top_line: bool) -> String {
     let (pw, ph) = CAPSULE;
     let (x0, y) = (fan(soul.len()).0, (BOARD.1 - ph) / 2.0);
     let mut out = format!(
@@ -176,14 +179,18 @@ fn capsule_group(soul: &[Rgb]) -> String {
 <clipPath id="p{k}"><rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}"/></clipPath>
 <rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}" fill="#{c}"/>
 <rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="{r}" fill="url(#sheen)"/>
-<rect x="{x}" y="{y}" width="{pw}" height="1.2" fill="#ffffff" fill-opacity="0.15" clip-path="url(#p{k})"/>
-"##,
+{line}"##,
             sx = x - 7.0 + 4.2,
             sy = y + 4.2,
             sw = pw - 8.4,
             sh = ph - 8.4,
             sr = r - 4.2,
             c = hex(*c),
+            line = if top_line {
+                format!("<rect x=\"{x}\" y=\"{y}\" width=\"{pw}\" height=\"1.2\" fill=\"#ffffff\" fill-opacity=\"0.15\" clip-path=\"url(#p{k})\"/>\n")
+            } else {
+                String::new()
+            },
         ));
     }
     out
@@ -225,7 +232,7 @@ pub(crate) fn svg(colours: &[Rgb]) -> String {
         lift = lift(ground),
         defs = CAPSULE_DEFS,
     );
-    out.push_str(&capsule_group(soul));
+    out.push_str(&capsule_group(soul, true));
     out.push_str("</svg>\n");
     out
 }
@@ -235,7 +242,8 @@ pub(crate) fn svg(colours: &[Rgb]) -> String {
 /// THE WALLPAPER OF YOUR COLOURS (Max, 2026-10-18: a wallpaper that "follows
 /// your colours"): the card's own picture — the ground, its light, the
 /// capsules with their shadows — made for a whole screen. The fan is about
-/// HALF the card's relative size, centred across and a little below the
+/// THREE QUARTERS of the card's relative size (Max, 2026-10-18: half was
+/// small — "50% bigger"), centred across and a little below the
 /// middle, and the ground runs out to the screen's exact shape, whatever it
 /// is (2560 × 1600, 1920 × 1080, 3440 × 1440…).
 ///
@@ -251,8 +259,8 @@ pub(crate) struct Frame {
 }
 
 /// The fan's share of the card's relative size (the card's capsules are 62 %
-/// of its height; here about a third of the screen's).
-const WALL_SCALE: f32 = 0.5;
+/// of its height; here nearly half of the screen's).
+const WALL_SCALE: f32 = 0.75;
 /// How far below the middle the fan's own middle stands, as a share of the height.
 const WALL_DROP: f32 = 0.05;
 
@@ -308,7 +316,7 @@ pub(crate) fn wall_svg(colours: &[Rgb], w: u32, h: u32) -> String {
         gy = f.cy,
         unit = f.unit,
     );
-    out.push_str(&capsule_group(soul));
+    out.push_str(&capsule_group(soul, false));
     out.push_str("</g>\n</svg>\n");
     out
 }
@@ -351,7 +359,7 @@ pub(crate) fn wall_pixels(colours: &[Rgb], w: u32, h: u32) -> Option<Vec<u8>> {
 }
 
 /// The wallpapers' drawing: a new look makes new files.
-const WALL_VERSION: u64 = 1;
+const WALL_VERSION: u64 = 2;
 
 /// The most a wallpaper may be asked for in a side (a screen of 8K).
 const WALL_MAX: u32 = 8192;
@@ -462,13 +470,13 @@ mod tests {
     }
 
     #[test]
-    fn the_wallpaper_fan_is_half_the_cards_relative_size() {
+    fn the_wallpaper_fan_is_three_quarters_of_the_cards_relative_size() {
         // The card's capsules are 62 % of its height; on a 16:10 screen the
-        // wallpaper's are about half of that, and the same shape on every
+        // wallpaper's are three quarters of that, and the same shape on every
         // screen as wide as that.
         let (_, t, _, b) = Frame::of(2560, 1600).fan_box(6);
         let share = (b - t) / 1600.0;
-        assert!((0.29..=0.33).contains(&share), "{share}");
+        assert!((0.44..=0.49).contains(&share), "{share}");
         let (l, _, r, _) = Frame::of(2560, 1600).fan_box(6);
         let (l2, t2, r2, b2) = Frame::of(3440, 1440).fan_box(6);
         // Wider screens do not make it wider: the height is the measure.
@@ -546,7 +554,7 @@ mod tests {
         assert!(a.ends_with("-2560x1600.png"));
         // A new version of the drawing makes new files; so does it for a card.
         assert_ne!(colours_hash(&SAMPLE, WALL_VERSION), colours_hash(&SAMPLE, WALL_VERSION + 1));
-        assert_ne!(colours_hash(&SAMPLE, WALL_VERSION), colours_hash(&SAMPLE, 2));
+        assert_ne!(colours_hash(&SAMPLE, WALL_VERSION), colours_hash(&SAMPLE, 1));
     }
 
     #[test]
