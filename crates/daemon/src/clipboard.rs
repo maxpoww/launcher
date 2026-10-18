@@ -2381,7 +2381,8 @@ impl App {
     fn push_clip_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, bright: bool) {
         let d0 = self.clip_footer_button_d();
         let gpx = d0 * 0.62;
-        let g = self.options_text_color();
+        // (On the box: its ink.)
+        let g = self.clip_box_surface().1;
         // Typing stretches the middle button's seat into the search field; the
         // three circles fade as it takes the footer over.
         let t = self.clip.search_t;
@@ -4049,7 +4050,8 @@ impl App {
         let seat = ((band_h - self.clip_band_h()) / (2.0 * PILL_MARGIN_Y)).clamp(0.0, 1.0);
         let pa = seat * seat * (3.0 - 2.0 * seat) * e;
         if pa > 0.01 {
-            let ink0 = self.options_text_color();
+            // (On the box: its ink.)
+            let ink0 = self.clip_box_surface().1;
             for (hit, prect) in self.clip_detail_pills(rect) {
                 let hv = self.clip.hit == hit;
                 // The left control is a plain "‹ Back" text button, not a pill:

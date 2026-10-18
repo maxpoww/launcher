@@ -1019,7 +1019,9 @@ impl App {
         if a < 0.01 {
             return;
         }
-        let ink = self.options_text_color();
+        // The bar's ink on the bar; the box's as it opens under the row (the
+        // pill's fill makes the same turn — a light box kept the bar's white).
+        let ink = crate::animation::lerp4(self.options_text_color(), self.box_surface_at(rect).1, self.stats_open_t());
         // The couples are laid out one after another from the left margin, each
         // at its own width with `COL_GAP` between — the same arithmetic
         // `stats_full_w` sized the pill with, so the row lands centred by

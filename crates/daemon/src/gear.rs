@@ -2612,8 +2612,11 @@ impl App {
             }
         }
 
-        // The round buttons: bar pills, the way the other boxes' footers are.
-        let glyph_ink = self.options_text_color();
+        // The round buttons: bar pills, the way the other boxes' footers are —
+        // in the BOX's ink: they sit on it, and a shell in its own look (the
+        // palette, or Off in Light) over a wallpaper of the other kind left
+        // them white on a light box (the Acer, 2026-10-17).
+        let glyph_ink = pen.ink;
         let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32| {
             if r.y + r.h > bottom || alpha <= 0.01 {
                 return;

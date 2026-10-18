@@ -2079,7 +2079,8 @@ impl App {
         let cx = br.x + br.w / 2.0;
         let ty = br.y + (br.h - gpx) / 2.0;
         let gclip = Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0);
-        let g = self.options_text_color();
+        // (On the box: its ink.)
+        let g = self.options_box_surface().1;
         scene.labels.push(Label {
             text: GLYPH_TRASH.to_owned(),
             pos: (cx, ty),
