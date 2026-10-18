@@ -1303,8 +1303,13 @@ impl App {
                         m.host.clone()
                     },
                     // "Golem 26.05 (Yarara)": the release's own name is for the
-                    // details view; the row has room for the version.
-                    crate::i18n::fill(tr("{0} · up {on_for}"), &[("0", &(m.os.split(" (").next().unwrap_or(&m.os))), ("on_for", &on_for)]),
+                    // details view; the row has room for the version. (Before
+                    // the first reading — seconds on a slow disk — no "up 0 min".)
+                    if p.live.uptime_secs == 0 {
+                        m.os.split(" (").next().unwrap_or(&m.os).to_owned()
+                    } else {
+                        crate::i18n::fill(tr("{0} · up {on_for}"), &[("0", &(m.os.split(" (").next().unwrap_or(&m.os))), ("on_for", &on_for)])
+                    },
                 ),
                 sys(SysHit::About),
                 Some((sys(SysHit::About), G_MORE)),
