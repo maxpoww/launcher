@@ -1639,6 +1639,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             // colours), the middle = the palette as made, the end = full
             // colour; each with a [Dark][Light] of its own that follows the
             // system's until it is clicked.
+            // LIGHTING first (Max, 2026-10-18): light is the first thing of colour.
+            let lighting = picked.lighting.unwrap_or(50);
+            view.groups.push(Group { caption: Some(format!("{} · {lighting}", tr("Lighting"))), ..slider("colors-lighting", lighting) });
             let apps = picked.apps_level().unwrap_or(MADE);
             let web = picked.web_level().unwrap_or(MADE);
             for (name, key, look_key, level, own) in [

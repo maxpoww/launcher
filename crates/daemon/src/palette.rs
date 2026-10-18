@@ -112,6 +112,10 @@ pub(crate) struct ColorChoice {
     /// the "+" beside Apps, one switch each).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip: Vec<String>,
+    /// LIGHTING (Max, 2026-10-18): how much light the whole system has, 0..100;
+    /// None = 50, as designed. Moves every ground within its look's band.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<u8>,
     /// Before 2026-10-16 the apps and the web were switches; read once.
     #[serde(default, skip_serializing)]
     pub apps: Option<bool>,
@@ -129,7 +133,7 @@ fn web_off() -> Option<u8> {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, apps: None, web: None, dynamic: None }
     }
 }
 
@@ -780,7 +784,9 @@ pub(crate) mod tint {
             }
             if u > 90.0 && ac > 0.03 {
                 let g = (u - 90.0) / 10.0;
-                let lr = if dark { [0.36, 0.40, 0.46, 0.55, 0.82][k] } else { [0.86, 0.80, 0.74, 0.64, 0.36][k] };
+                // (DARK IS DARKER — Max, 2026-10-18: full colour in the dark is a deep
+                // tint, not a lit field: the grounds end near L* 12/16, not 27/31.)
+                let lr = if dark { [0.21, 0.25, 0.31, 0.42, 0.82][k] } else { [0.86, 0.80, 0.74, 0.64, 0.36][k] };
                 l2 += (lr - l2) * g;
                 cc += (0.32 - cc) * g;
                 h = ah;
@@ -813,8 +819,44 @@ pub(crate) mod tint {
         path(c, own, dark).1
     }
 
+    /// THE LIGHTING now (0..100, 50 as designed): set from the choice before a
+    /// theme is made; every walk ends lit by it.
+    static LIGHTING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(50);
+    pub(crate) fn set_lighting(v: u8) {
+        LIGHTING.store(v.min(100), std::sync::atomic::Ordering::Relaxed);
+    }
+    pub(crate) fn lighting() -> u8 {
+        LIGHTING.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The grounds (base00..03) moved by the Lighting `v`, within the look's
+    /// band — the dark from black up to a dim grey, the light from soft paper
+    /// up to white — hue and colour kept; the inks left (they read on every
+    /// ground of the band). 50 changes nothing.
+    pub(crate) fn lit(c: &[Rgb; 16], dark: bool, v: u8) -> [Rgb; 16] {
+        if v == 50 {
+            return *c;
+        }
+        let f = (f32::from(v.min(100)) - 50.0) / 50.0;
+        let mut out = *c;
+        for k in 0..4 {
+            let (l, cc, h) = lch(c[k]);
+            let l2 = if dark {
+                (l + 0.10 * f).clamp(0.0, [0.30, 0.34, 0.39, 0.47][k])
+            } else {
+                (l + 0.06 * f).clamp([0.80, 0.76, 0.70, 0.62][k], 1.0)
+            };
+            out[k] = from_lch(l2, cc, h);
+        }
+        out
+    }
+
     /// The palette at a slider value: `None` as made; 0 (off) is the caller's.
+    /// Lit by the Lighting.
     pub(crate) fn walk(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
+        lit(&walk_unlit(c, own, dark, level), dark, lighting())
+    }
+    fn walk_unlit(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
         let Some(s) = level.filter(|s| *s > 0) else { return *c };
         let (cum, made) = path(c, own, dark);
         if (f32::from(s) - made).abs() <= 1.5 {
@@ -847,13 +889,32 @@ pub(crate) mod tint {
             let made = made_at(&p.dark, own, true).round() as u8;
             assert_eq!(walk(&p.dark, own, true, Some(made)), p.dark, "the as-made point gives the palette as made");
             let full = walk(&p.dark, own, true, Some(100));
-            assert!(lch(full[1]).1 > 0.08, "100 is the colour itself: {:?}", full[1]);
+            // (Dark is darker since 2026-10-18: the colour at depth — deep, but clearly it.)
+            assert!(lch(full[1]).1 > 0.04 && lch(full[1]).0 < 0.3, "100 is the colour itself, deep: {:?}", full[1]);
             for v in [1u8, 25, 50, 75, 90, 100] {
                 for (c, dark) in [(&p.dark, true), (&p.light, false)] {
                     let x = walk(c, own, dark, Some(v));
                     assert!(contrast(rel_lum(x[5]), rel_lum(x[1])) >= 4.5, "text reads at {v} (dark={dark})");
                 }
             }
+        }
+
+        #[test]
+        fn the_lighting_keeps_every_palette_readable_inside_its_band() {
+            for p in crate::palette::all() {
+                for v in [0u8, 25, 75, 100] {
+                    for level in [None, Some(100)] {
+                        let d = lit(&walk_unlit(&p.dark, p.dark[p.accent], true, level), true, v);
+                        let l = lit(&walk_unlit(&p.light, p.light[p.accent_light], false, level), false, v);
+                        assert!(contrast(rel_lum(d[5]), rel_lum(d[1])) >= 4.5, "{} dark at lighting {v}", p.id);
+                        assert!(contrast(rel_lum(l[5]), rel_lum(l[1])) >= 4.5, "{} light at lighting {v}", p.id);
+                        assert!(lch(d[0]).0 <= 0.306 && lch(l[0]).0 >= 0.794, "{} stays in its band at {v}", p.id);
+                    }
+                }
+            }
+            let p = crate::palette::all().into_iter().find(|p| p.id == "jade").unwrap();
+            assert_eq!(lit(&p.dark, true, 50), p.dark, "50 is as designed");
+            assert!(lch(lit(&p.dark, true, 0)[0]).0 < lch(p.dark[0]).0 + 1e-4, "less light: never lighter");
         }
 
         #[test]
@@ -1590,7 +1651,7 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     let pal = palette_of(&shell.id).unwrap_or_else(golem);
     let wv = if shell.web_dark { pal.dark } else { pal.light };
     // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
-    let mut wv = if web_dark_off { tint::at(&wv, pal.dark[pal.accent], 0.0, true) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
+    let mut wv = if web_dark_off { tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, tint::lighting()) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
     if web_dark_off {
         // …and the ink with no colour either (Hacker's is green: ASUS,
         // 2026-10-16, "the text on wikipedia is green").
@@ -2421,6 +2482,7 @@ impl crate::App {
         if previewing() {
             picked.palette = Some(DRAFT_ID.to_owned());
         }
+        tint::set_lighting(picked.lighting.unwrap_or(50));
         let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's
         // stands in, and this comes back when it is ready.
@@ -2476,6 +2538,10 @@ impl crate::App {
                         _ => c.icons_tint = level.unwrap_or(50),
                     }
                 }
+                "colors-lighting" => match value.parse::<u8>() {
+                    Ok(n) => c.lighting = Some(n.min(100)),
+                    Err(_) => return,
+                },
                 // An app in its own colours or the palette's: its id turns it.
                 "colors-skip" => {
                     if let Some(i) = c.skip.iter().position(|s| s == value) {
