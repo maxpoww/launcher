@@ -122,12 +122,20 @@ fn ini_with(old: &str, ours: &[(String, Vec<(String, String)>)]) -> String {
             out.push('\n');
         }
     }
+    // (The blank line before a section is the section's: kept with what came
+    // before, it grew by one at every change — the Acer's kdeglobals.)
+    out.truncate(out.trim_end().len());
     for (name, keys) in ours {
-        out.push_str(&format!("\n[{name}]\n"));
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("[{name}]\n"));
         for (k, v) in keys {
             out.push_str(&format!("{k}={v}\n"));
         }
+        out.truncate(out.trim_end().len());
     }
+    out.push('\n');
     out
 }
 
@@ -717,6 +725,11 @@ mod tests {
         let out = ini_with(old, &ours);
         assert!(out.contains("font=x") && out.contains("SingleClick=false"));
         assert!(out.contains("BackgroundNormal=9,9,9") && !out.contains("1,2,3"));
+        // Written again, the same file: nothing grows at each change.
+        assert_eq!(ini_with(&out, &ours), out);
+        assert_eq!(ini_with(&ini_with("", &ours), &ours), "[Colors:View]\nBackgroundNormal=9,9,9\n");
+        // (A file a reader left with blank lines at the top is tidied once.)
+        assert_eq!(ini_with("\n\n\n", &ours), "[Colors:View]\nBackgroundNormal=9,9,9\n");
     }
 
     #[test]
