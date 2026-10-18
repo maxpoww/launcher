@@ -4438,7 +4438,7 @@ impl App {
                 if place.gap {
                     y += ROW_GAP;
                 }
-                let row = Rect::new(side_box.x + 3.0, y, side_w - 6.0, row_h);
+                let row = Rect::new(side_box.x + RAIL_AIR / 2.0, y, side_w - RAIL_AIR, row_h);
                 // (Scrolled out of the pill: nothing to point at.)
                 if row.y + row.h <= side_box.y + 2.0 || row.y >= side_box.y + side_box.h - 2.0 {
                     hits.places.push(Rect::new(0.0, 0.0, 0.0, 0.0));
@@ -4450,7 +4450,7 @@ impl App {
                 let here = (win.dir == place.path && !up) || win.drop_place == Some(n);
                 let shown = Rect::new(row.x, row.y.max(side_box.y + 3.0), row.w, (row.y + row.h).min(side_box.y + side_box.h - 3.0) - row.y.max(side_box.y + 3.0));
                 // (Its square as square as the pill's corner.)
-                let corner = (win.pill_corner() - 3.0).min(row_h / 2.0);
+                let corner = (win.pill_corner() - RAIL_AIR / 2.0).min(row_h / 2.0);
                 if here {
                     pills.rects.push(rect(shown, corner, sunk));
                 } else if win.hover == Spot::Place(n) {
