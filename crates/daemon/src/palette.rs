@@ -2627,6 +2627,7 @@ impl crate::App {
         let lit_now = crate::lighting::shown().unwrap_or(picked.lighting.unwrap_or(50));
         tint::set_lighting(lit_now);
         let veil_moved = crate::lighting::set_veil(picked.lighting_veil.unwrap_or(false));
+        crate::lighting::tell_overview();
         self.lighting_mirror(picked.lighting_auto.unwrap_or(false));
         let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's

@@ -210,6 +210,18 @@ pub(crate) fn set_veil(on: bool) -> bool {
 }
 
 /// The wash over the wallpaper now (0: none).
+/// The overview (waveview) draws its own backdrop — the wallpaper alone — so
+/// it is told the veil, or the wallpaper there kept its full light (Max,
+/// 2026-10-18: "the darkness on the BG does not apply on overview"). Told only
+/// when it moves; a plugin without `set_veil` answers with an error, ignored.
+pub(crate) fn tell_overview() {
+    static TOLD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+    let v = veil_now();
+    if TOLD.swap(v.to_bits(), Ordering::Relaxed) != v.to_bits() {
+        crate::hypr::eval(&format!("hl.plugin.waveview.set_veil({v:.3})"));
+    }
+}
+
 pub(crate) fn veil_now() -> f32 {
     veil_alpha(palette::tint::lighting(), VEIL.load(Ordering::Relaxed))
 }
@@ -469,6 +481,7 @@ impl App {
             }
             if veil_moved {
                 self.request_desktop_draw();
+                tell_overview();
                 // (The banner lays the veil under its strip too.)
                 if !follows {
                     self.draw_options();
