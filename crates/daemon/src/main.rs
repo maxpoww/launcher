@@ -4082,6 +4082,10 @@ impl App {
         }
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
+        // (The banner's veil is laid only outside the overview.)
+        if crate::lighting::veil_now() > 0.0 {
+            self.draw_options();
+        }
         // A wallpaper that moves holds still while the overview is up.
         self.wallpaper_hold(crate::controls::HOLD_OVERVIEW, active);
         // The card is not shown under the overview.

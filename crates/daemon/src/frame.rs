@@ -1976,11 +1976,24 @@ impl App {
         // bar lays the same wash under its own strip, at full strength (the
         // wallpaper does not fade with the bar). Not over a matched window's
         // colour (opaque, no wallpaper there), and not where the card hangs.
+        // EXACTLY down to the band the bar reserves (where the desktop's veil
+        // begins): a fraction past it darkened a line under the banner, twice
+        // veiled. And not over the overview — it darkens its own backdrop (Max,
+        // 2026-10-18: "the banner looks bad… and even worse on overview").
         let veil = crate::lighting::veil_now();
         let mut rects = rects;
-        if veil > 0.0 && !matched {
-            let veils: Vec<content::RectInst> =
-                rects.iter().map(|r| content::RectInst { color: [0.0, 0.0, 0.0, veil], glass: -1.0, ..*r }).collect();
+        if veil > 0.0 && !matched && !self.overview_active {
+            let zone = self.options_bar_h().round();
+            let veils: Vec<content::RectInst> = rects
+                .iter()
+                .filter(|r| r.rect.y < zone)
+                .map(|r| content::RectInst {
+                    rect: content::Rect::new(r.rect.x, r.rect.y, r.rect.w, (zone - r.rect.y).min(r.rect.h)),
+                    color: [0.0, 0.0, 0.0, veil],
+                    glass: -1.0,
+                    ..*r
+                })
+                .collect();
             rects.splice(0..0, veils);
         }
         let mut scene = content::Scene {
