@@ -103,7 +103,7 @@ pub(crate) type Then = Box<dyn FnOnce(&mut App)>;
 /// changes are simply not dissolved.
 pub(crate) struct Veil {
     layer_shell: LayerShell,
-    viewporter: Option<WpViewporter>,
+    pub(crate) viewporter: Option<WpViewporter>,
     alpha: Option<WpAlphaModifierV1>,
 }
 

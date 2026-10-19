@@ -36,6 +36,7 @@ mod desktop_top;
 mod mounts;
 mod logging;
 mod lighting;
+mod veil;
 mod look;
 mod dict;
 mod display;
@@ -364,6 +365,11 @@ fn main() -> anyhow::Result<()> {
         stage::BAND as u32,
         config.options.render_scale.max(1),
     ));
+
+    // THE VEIL: one wash over the wallpaper on its own surface, created
+    // BEFORE the desktop's so it stacks under the icons (`veil.rs`). Made
+    // whether or not the desktop is on: it darkens the wallpaper, not the icons.
+    let veil_layer = veil_layer_new(&compositor, &layer_shell, &qh, &globals);
 
     // The DESKTOP: `~/Desktop` as icons behind the windows, on its own
     // surface under them. Its renderer and listing arrive on first configure.
@@ -726,6 +732,7 @@ fn main() -> anyhow::Result<()> {
         phone_pill: phone_pill::PhonePill::default(),
         drive_pills: drive_pill::DrivePills::default(),
         desktop_layer,
+        veil_layer,
         desktop_renderer: None,
         desktop_size: (0, 0),
         desktop_fscale,
@@ -1683,6 +1690,8 @@ pub struct App {
     /// The bar's pills of the plugged-in sticks and cards (`drive_pill.rs`).
     drive_pills: drive_pill::DrivePills,
     desktop_layer: Option<LayerSurface>,
+    /// The Lighting's veil over the wallpaper (`veil.rs`).
+    veil_layer: Option<veil::VeilLayer>,
     desktop_renderer: Option<Renderer>,
     /// The desktop surface's logical size.
     desktop_size: (u32, u32),
@@ -4082,10 +4091,6 @@ impl App {
         }
         info!("overview: {}", if active { "open" } else { "closed" });
         self.overview_active = active;
-        // (The banner's veil is laid only outside the overview.)
-        if crate::lighting::veil_now() > 0.0 {
-            self.draw_options();
-        }
         // A wallpaper that moves holds still while the overview is up.
         self.wallpaper_hold(crate::controls::HOLD_OVERVIEW, active);
         // The card is not shown under the overview.
@@ -6902,6 +6907,10 @@ impl LayerShellHandler for App {
             self.dissolve_end();
             return;
         }
+        if self.is_veil_surface(layer.wl_surface()) {
+            self.veil_closed();
+            return;
+        }
         // The desktop's surface closed under us (its output went): let it
         // go. The shell carries on without icons rather than exiting with
         // the dock — they are not what the session depends on.
@@ -6958,6 +6967,10 @@ impl LayerShellHandler for App {
         // dock/card.
         if self.is_dissolve_surface(layer.wl_surface()) {
             self.configure_dissolve(configure);
+            return;
+        }
+        if self.is_veil_surface(layer.wl_surface()) {
+            self.configure_veil(configure);
             return;
         }
         if self
@@ -8240,4 +8253,16 @@ mod tests {
         let foot = entry("org.codeberg.dnkl.foot", "/usr/bin/foot", None);
         assert!(App::app_match_keys(&foot, apps::EntryKind::App).contains(&"foot".to_owned()));
     }
+}
+
+/// The veil's surface, when the compositor offers `wp_viewporter` (without it
+/// there is nothing to stretch the pixel with, and the wallpaper stays as it is).
+fn veil_layer_new(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    globals: &wayland_client::globals::GlobalList,
+) -> Option<veil::VeilLayer> {
+    let viewporter = globals.bind::<wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter, App, _>(qh, 1..=1, ()).ok()?;
+    Some(veil::create(compositor, layer_shell, qh, &viewporter))
 }
