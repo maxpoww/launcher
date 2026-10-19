@@ -1984,6 +1984,11 @@ impl App {
         let mut rects = rects;
         if veil > 0.0 && !matched && !self.overview_active {
             let zone = self.options_bar_h().round();
+            // (Under the compositor's `ignore_alpha` (0.5, hyprland.lua) with the
+            // strip on top: above it the bar's layer is BLURRED behind — the
+            // banner read "like frosted" (Max, 2026-10-18). Veil + strip ≤ 0.49.)
+            let s = color[3].clamp(0.0, 0.48);
+            let veil = veil.min(((0.49 - s) / (1.0 - s)).max(0.0));
             let veils: Vec<content::RectInst> = rects
                 .iter()
                 .filter(|r| r.rect.y < zone)
