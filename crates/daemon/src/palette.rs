@@ -3095,6 +3095,30 @@ mod tests {
     }
 
     #[test]
+    fn what_sits_on_a_selection_reads_on_it() {
+        // (Seam's chosen suggestion: white on India Ink's light accent — Max, 2026-10-20.)
+        let rgb = |s: &str| -> Rgb {
+            let v: Vec<u8> = s.split(',').map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        };
+        for p in all().iter().take(116) {
+            for dark in [true, false] {
+                let t = plain(p, dark);
+                let r = contrast(rel_lum(t.accent_ink()), rel_lum(t.accent()));
+                assert!(r >= 4.5, "{} dark={dark}: text on the accent {r:.2}", p.id);
+                let kde = crate::app_themes::kde_scheme(&t);
+                let sel = &kde.iter().find(|(s, _)| s == "Colors:Selection").unwrap().1;
+                let bg = rgb(&sel.iter().find(|(k, _)| k == "BackgroundNormal").unwrap().1);
+                for (k, v) in sel.iter().filter(|(k, _)| k.starts_with("Foreground")) {
+                    let floor = if k == "ForegroundInactive" { 3.0 } else { 4.5 };
+                    let r = contrast(rel_lum(rgb(v)), rel_lum(bg));
+                    assert!(r >= floor, "{} dark={dark}: KDE Selection {k} {r:.2}", p.id);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_curated_box_is_whole_and_reads() {
         let all = all();
         assert!(all.len() >= 116, "{}", all.len());

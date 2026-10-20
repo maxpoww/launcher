@@ -77,7 +77,7 @@ fn rgb(c: Rgb) -> String {
 }
 
 /// The KDE colour scheme's sections.
-fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
+pub(crate) fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
     let c = &t.c;
     let set = |bg: Rgb, alt: Rgb, fg: Rgb| {
         vec![
@@ -96,6 +96,17 @@ fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
         ]
     };
     let ink = t.ink();
+    // What sits ON a selection reads on the accent: every ink there is the
+    // accent's own (the faint one a step toward it), never the window's — a
+    // light accent wore ink_dim, the links and the accent itself at 1–2:1
+    // (India Ink, 2026-10-20).
+    let on = t.accent_ink();
+    let mut selection = set(t.accent(), mix(t.accent(), c[0], 0.3), on);
+    for (k, v) in &mut selection {
+        if k.starts_with("Foreground") {
+            *v = rgb(if k == "ForegroundInactive" { mix(on, t.accent(), 0.2) } else { on });
+        }
+    }
     vec![
         ("Colors:Window".into(), set(c[1], c[2], ink)),
         ("Colors:View".into(), set(c[0], c[1], ink)),
@@ -103,7 +114,7 @@ fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
         ("Colors:Header".into(), set(c[1], c[2], ink)),
         ("Colors:Tooltip".into(), set(c[2], c[3], ink)),
         ("Colors:Complementary".into(), set(c[0], c[1], ink)),
-        ("Colors:Selection".into(), set(t.accent(), mix(t.accent(), c[0], 0.3), t.accent_ink())),
+        ("Colors:Selection".into(), selection),
     ]
 }
 
