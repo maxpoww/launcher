@@ -163,6 +163,13 @@ const QUICK_FOOT: f32 = 44.0;
 const QUICK_MIN_H: f32 = 170.0;
 /// The share of the screen a setting made of pictures takes.
 const QUICK_WHOLE: f32 = 0.955;
+/// The Colours box called a hidden dock up (`quick_open`): it hides again
+/// when the box is left.
+static DOCK_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Colours box's width: a little less than the wallpapers' (Max,
+/// 2026-10-20: "make the box a little smaller").
+const QUICK_COLOURS: f32 = 0.88;
 /// How far its foot stays off the dock.
 const QUICK_OFF_DOCK: f32 = 16.0;
 
@@ -4443,6 +4450,12 @@ impl App {
         if self.quick.open_solo(label, from) {
             self.settings_panel_mut().note_use(label);
             info!("quick controls: opening {label}");
+            // The colours are set looking at the dock: a hidden one comes up
+            // for as long as the box is open (Max, 2026-10-20).
+            if label == "Colours" && self.ui.target() == Target::Hidden {
+                self.handle_command(Command::Show);
+                DOCK_CALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         self.schedule_frame();
     }
@@ -4483,6 +4496,17 @@ impl App {
         // (Always, cards or none: its three sliders side by side need the
         // width, and switching tabs must not change the box's — rig, 2026-10-20.)
         let wide = self.quick.open_is("Colours");
+        // THE COLOURS BOX stands where the wallpapers' does: under the bar and
+        // clear of the dock, a little narrower (Max, 2026-10-20: "i want to
+        // see the dock when im setting up") — past that room its cards go
+        // four rows to three (`cards_overflow`).
+        if wide {
+            let (top, room) = self.quick_wall_room();
+            let w = (sw * QUICK_COLOURS).max(200.0);
+            let h = (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(room);
+            let cx = g.card.x + g.card.w / 2.0;
+            return Rect::new(cx - w / 2.0, top + (room - h) / 2.0, w, h);
+        }
         let (w, h) = {
             (
                 if wide { (sw * QUICK_WHOLE).max(200.0) } else { (QUICK_W * s).min(sw - 40.0 * s).max(200.0) },
@@ -4533,7 +4557,7 @@ impl App {
         self.quick.tile_room_h = if self.quick.open_is("Wallpaper") {
             self.quick_wall_room().1
         } else if self.quick.open_is("Colours") {
-            self.buffer_size.1 as f32 - 20.0 * self.options_scale() * self.fast_zoom()
+            self.quick_wall_room().1
         } else {
             0.0
         };
@@ -4554,6 +4578,11 @@ impl App {
 
     /// The quick box of `label` was left.
     pub(crate) fn quick_left(&mut self, label: &'static str) {
+        // The dock the Colours box called goes back to hiding (as it does
+        // when the pointer leaves it: unless the pointer is on it).
+        if label == "Colours" && DOCK_CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.schedule_autohide();
+        }
         if label == "Wallpaper" {
             self.pictures_rest();
             let ui = self.ui_facts();

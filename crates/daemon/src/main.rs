@@ -6735,7 +6735,8 @@ impl App {
                     // Enter to have cancelled us (stale focus) — don't hide
                     // out from under it.
                     // Nor from under a box left open over it.
-                    if !app.stack_open() && !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
+                    // (Nor while the Colours box is open: it called the dock up to be seen.)
+                    if !app.stack_open() && app.fast.boxed != Some("Colours") && !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
                         // Fully hide, or just fall back to the parked dock
                         // when the zone is free (intellihide).
                         app.dismiss();
