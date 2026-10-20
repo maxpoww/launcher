@@ -262,6 +262,29 @@ impl Theme {
     pub(crate) fn accent(&self) -> Rgb {
         self.c[self.accent_slot]
     }
+    /// A colour read AS TEXT on these grounds (a link, the accent in a
+    /// label, an error's red): see [`as_text`].
+    pub(crate) fn as_text(&self, x: Rgb) -> Rgb {
+        as_text(&self.c, x)
+    }
+    /// The accent as text; fills (buttons, badges, a selection) keep the
+    /// accent itself — libadwaita's accent_color beside accent_bg_color.
+    pub(crate) fn accent_text(&self) -> Rgb {
+        self.as_text(self.accent())
+    }
+    /// An editor's selection: the accent a third over the ground, less of
+    /// it where the text would not read 4.5:1 on it (Lighting 100 in the
+    /// dark took it to 3.7, 2026-10-20).
+    pub(crate) fn selection(&self) -> Rgb {
+        let mix = |k: f32| -> Rgb {
+            std::array::from_fn(|i| (f32::from(self.accent()[i]) + (f32::from(self.c[0][i]) - f32::from(self.accent()[i])) * k).round() as u8)
+        };
+        let mut k = 0.65;
+        while k < 1.0 && contrast(rel_lum(self.ink()), rel_lum(mix(k))) < 4.5 {
+            k += 0.02;
+        }
+        mix(k.min(1.0))
+    }
     /// The ink that reads ON the accent: the palette's darkest or its
     /// brightest, whichever stands further from it.
     pub(crate) fn accent_ink(&self) -> Rgb {
@@ -884,6 +907,27 @@ pub(crate) mod tint {
                 (l + 0.12 * f).clamp([0.72, 0.68, 0.62, 0.55][k], 1.0)
             };
             out[k] = from_lch(l2, cc, h);
+        }
+        // The inks keep what they read. The grounds moved, so every other
+        // colour walks in lightness (hue and chroma kept), away from them,
+        // until it reads on base00..02 as well as it did unlit (up to 7:1):
+        // the Lighting never makes anything less readable than the palette
+        // made it (2026-10-20: at 0 and 100 the dim ink fell under 3:1 on
+        // buttons in every palette, links and the accent toward 2:1).
+        use super::{contrast, rel_lum};
+        let worst = |x: Rgb, g: &[Rgb; 16]| (0..3).map(|i| contrast(rel_lum(x), rel_lum(g[i]))).fold(f32::MAX, f32::min);
+        for k in 4..16 {
+            let want = worst(c[k], c).min(7.0);
+            let up = rel_lum(c[k]) > rel_lum(out[1]);
+            let (mut l, cc, h) = lch(c[k]);
+            let mut x = c[k];
+            let mut n = 0;
+            while worst(x, &out) < want && n < 100 {
+                l = (l + if up { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
+                x = from_lch(l, cc, h);
+                n += 1;
+            }
+            out[k] = x;
         }
         out
     }
@@ -1709,6 +1753,25 @@ fn readable(c: &mut [Rgb; 16], dark: bool, acc: usize) {
     }
 }
 
+/// `x` as TEXT on the grounds of `c`: walked in lightness, hue and chroma
+/// kept, away from them, until it reads 4.5:1 on base00 and base01 and 3:1
+/// on base02. A light look's accent and links stood at 3–4.4:1 as text, 2:1
+/// in full colour; only the text moves (2026-10-20).
+pub(crate) fn as_text(c: &[Rgb; 16], x: Rgb) -> Rgb {
+    let r = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
+    let reads = |y: Rgb| r(y, c[0]) >= 4.5 && r(y, c[1]) >= 4.5 && r(y, c[2]) >= 3.0;
+    let up = rel_lum(x) > rel_lum(c[1]);
+    let (mut l, ch, h) = tint::lch(x);
+    let mut y = x;
+    let mut n = 0;
+    while !reads(y) && n < 100 {
+        l = (l + if up { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
+        y = tint::from_lch(l, ch, h);
+        n += 1;
+    }
+    y
+}
+
 /// Both looks of what the programs wear: the theme's own pair, else the palette's.
 fn both(t: &Theme, pal: Option<Palette>) -> ([Rgb; 16], usize, [Rgb; 16], usize) {
     if let Some(p) = t.pair {
@@ -1839,7 +1902,7 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
 fn foot_ini(t: &Theme) -> String {
     let pal = palette_of(&t.id);
     let variant = |c: &[Rgb; 16], acc: usize| {
-        let accent = c[acc];
+        let accent = as_text(c, c[acc]); // (the links' colour: text)
         let h = |i: usize| hex(c[i]);
         format!(
             "background={bg}\nforeground={fg}\ncursor={bg} {fg}\nselection-background={sel}\nselection-foreground={fg}\n\
@@ -1901,7 +1964,7 @@ fn gtk4_css(t: &Theme) -> String {
         let vars = [
             ("accent-bg-color", h(th.accent())),
             ("accent-fg-color", h(th.accent_ink())),
-            ("accent-color", h(th.accent())),
+            ("accent-color", h(th.accent_text())),
             ("window-bg-color", h(c[1])),
             ("window-fg-color", h(c[5])),
             ("view-bg-color", h(c[0])),
@@ -1979,7 +2042,7 @@ fn gtk3_theme_css(t: &Theme, base: &Path) -> String {
         ("popover_fg_color", h(c[5])),
         ("thumbnail_bg_color", h(c[2])),
         ("thumbnail_fg_color", h(c[5])),
-        ("accent_color", h(t.accent())),
+        ("accent_color", h(t.accent_text())),
         ("accent_bg_color", h(t.accent())),
         ("accent_fg_color", h(t.accent_ink())),
         // GTK 3 reads its SELECTED colours from these, and adw-gtk3 names them
@@ -2084,8 +2147,8 @@ fn qt_scheme(t: &Theme) -> String {
             "#ff000000".into(),   // Shadow
             a(t.accent()),        // Highlight
             a(t.accent_ink()),    // HighlightedText
-            a(c[0xD]),            // Link
-            a(c[0xE]),            // LinkVisited
+            a(t.as_text(c[0xD])), // Link
+            a(t.as_text(c[0xE])), // LinkVisited
             a(c[1]),              // AlternateBase
             a(c[0]),              // NoRole
             a(c[2]),              // ToolTipBase
@@ -2307,7 +2370,7 @@ fn running(names: &[&str]) -> bool {
 fn btop_theme(t: &Theme) -> String {
     let c = &t.c;
     let h = |i: usize| format!("#{}", hex(c[i]));
-    let a = format!("#{}", hex(t.accent()));
+    let a = format!("#{}", hex(t.accent_text()));
     let mut out = format!("# Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change.\n", t.name);
     let mut put = |k: &str, v: &str| out.push_str(&format!("theme[{k}]=\"{v}\"\n"));
     put("main_bg", &h(0));
@@ -2426,7 +2489,7 @@ fn sourceview_scheme(t: &Theme, id: &str) -> String {
         ("line-numbers", format!(r#"foreground="{}" background="{}""#, h(c[3]), h(c[0]))),
         ("current-line-number", format!(r#"foreground="{}" background="{}""#, h(c[5]), h(c[1]))),
         ("cursor", format!(r#"foreground="{}""#, h(t.accent()))),
-        ("bracket-match", format!(r#"foreground="{}" background="{}" bold="true""#, h(t.accent()), h(c[2]))),
+        ("bracket-match", format!(r#"foreground="{}" background="{}" bold="true""#, h(t.accent_text()), h(c[2]))),
         ("search-match", format!(r#"background="{}""#, h(c[3]))),
         ("def:comment", format!(r#"foreground="{}" italic="true""#, h(c[4]))),
         ("def:keyword", format!(r#"foreground="{}" bold="true""#, h(c[0xE]))),
@@ -2440,8 +2503,8 @@ fn sourceview_scheme(t: &Theme, id: &str) -> String {
         ("def:function", format!(r#"foreground="{}""#, h(c[0xD]))),
         ("def:preprocessor", format!(r#"foreground="{}""#, h(c[0xC]))),
         ("def:error", format!(r#"foreground="{}" underline="error""#, h(c[8]))),
-        ("def:note", format!(r#"foreground="{}" bold="true""#, h(t.accent()))),
-        ("def:heading", format!(r#"foreground="{}" bold="true""#, h(t.accent()))),
+        ("def:note", format!(r#"foreground="{}" bold="true""#, h(t.accent_text()))),
+        ("def:heading", format!(r#"foreground="{}" bold="true""#, h(t.accent_text()))),
         ("def:link-text", format!(r#"foreground="{}" underline="single""#, h(c[0xD]))),
     ];
     let mut out = format!(
@@ -3092,6 +3155,101 @@ mod tests {
         // The apps' own look: light apps on a dark system.
         let light_apps = for_apps(&Theme { apps_dark: false, ..t.clone() });
         assert!(!light_apps.dark && rel_lum(light_apps.bg()) > 0.5);
+    }
+
+    /// THE PAIRS: every secondary pair a program's theme makes (links, the
+    /// accent as text, selections, dim text, buttons), at every Lighting —
+    /// the sweep's cousin for the halves that come from two places. Prints.
+    #[test]
+    #[ignore]
+    fn the_pairs() {
+        use std::collections::BTreeMap;
+        let ratio = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
+        let mut bad: BTreeMap<String, (usize, f32, String, std::collections::BTreeSet<String>)> = BTreeMap::new();
+        let mut n = 0;
+        let ids: Vec<String> = all().into_iter().map(|p| p.id).collect();
+        for lg in [0u8, 50, 100] {
+            tint::set_lighting(lg);
+            for id in &ids {
+                for sys in [true, false] {
+                    for lv in [Some(0u8), None, Some(100)] {
+                        for look in [None, Some(true), Some(false)] {
+                            let c = ColorChoice { palette: Some(id.clone()), apps_tint: lv, apps_dark: look, shell_tint: lv, shell_dark: look, ..Default::default() };
+                            let sh = resolve(&c, sys);
+                            let t = for_apps(&sh);
+                            let k = &t.c;
+                            let tag = format!("{id} sys={} lvl={lv:?} look={look:?} light={lg}", if sys { "dark" } else { "light" });
+                            let mut check = |rule: &str, fg: Rgb, bg: Rgb, floor: f32| {
+                                n += 1;
+                                let r = ratio(fg, bg);
+                                if r < floor {
+                                    let e = bad.entry(format!("{rule} @{lg}{}", if lv == Some(100) { " full" } else if lv == Some(0) { " off" } else { "" })).or_insert((0, 99.0, String::new(), Default::default()));
+                                    e.0 += 1;
+                                    e.3.insert(id.clone());
+                                    if r < e.1 { e.1 = r; e.2 = format!("{tag} #{} on #{}", hex(fg), hex(bg)); }
+                                }
+                            };
+                            for (g, gn) in [(0, "base00"), (1, "base01")] {
+                                check(&format!("P1 accent as text on {gn} <4.5"), t.accent_text(), k[g], 4.5);
+                                check(&format!("P2 link 0D on {gn} <4.5"), t.as_text(k[0xD]), k[g], 4.5);
+                                check(&format!("P2 link 0E on {gn} <4.5"), t.as_text(k[0xE]), k[g], 4.5);
+                                check(&format!("P3 ink_dim on {gn} <3"), t.ink_dim(), k[g], 3.0);
+                                for s in [0x8, 0xA, 0xB] {
+                                    check(&format!("P8 semantic {s:02X} as text on {gn} <4.5"), t.as_text(k[s]), k[g], 4.5);
+                                }
+                            }
+                            check("P3 ink_dim on base02 <3", t.ink_dim(), k[2], 3.0);
+                            check("P4 ink on base02 (buttons, inputs) <4.5", t.ink(), k[2], 4.5);
+                            check("P4 ink on base00 <4.5", t.ink(), k[0], 4.5);
+                            check("P5 ink on the editor selection <4.5", t.ink(), t.selection(), 4.5);
+                            check("P6 base06 on base02 (sourceview selection) <4.5", k[6], k[2], 4.5);
+                            check("P6 base05 on base02 (foot selection, tooltips) <4.5", k[5], k[2], 4.5);
+                            check("P6 base07 on base02 (btop selection) <4.5", k[7], k[2], 4.5);
+                            check("P9 accent as text on base02 <3", t.accent_text(), k[2], 3.0);
+                            check("P10 apps text on the accent <4.5", t.accent_ink(), t.accent(), 4.5);
+                            check("S1 shell ink on its surface <4.5", sh.ink(), sh.surface(), 4.5);
+                            check("S2 shell accent on its surface <3", sh.accent(), sh.surface(), 3.0);
+                            check("S3 shell text on its accent <4.5", sh.accent_ink(), sh.accent(), 4.5);
+                        }
+                    }
+                }
+            }
+        }
+        tint::set_lighting(50);
+        println!("\nTHE PAIRS: {n} checks, {} palettes", ids.len());
+        for (rule, (count, worst, ex, pals)) in &bad {
+            let some: Vec<&String> = pals.iter().take(8).collect();
+            let _ = some; println!("{rule}: {count} / {} pal, worst {worst:.2} ({ex})", pals.len());
+        }
+    }
+
+    #[test]
+    fn text_reads_at_every_lighting() {
+        // (THE PAIRS found the Lighting walking the grounds out from under the
+        // inks, and the accent and links too faint as text — 2026-10-20.)
+        let r = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
+        for p in all().iter().take(116) {
+            for dark in [true, false] {
+                let base = plain(p, dark);
+                for level in [None, Some(100)] {
+                    let made = tint::walk_unlit(&base.c, base.accent(), dark, level);
+                    for v in [0u8, 20, 50, 100] {
+                        let t = Theme { c: tint::lit(&made, dark, v), ..base.clone() };
+                        let tag = format!("{} dark={dark} level={level:?} lighting={v}", p.id);
+                        for g in 0..3 {
+                            assert!(r(t.ink(), t.c[g]) >= 4.5, "{tag}: ink on base0{g}");
+                            assert!(r(t.ink_dim(), t.c[g]) >= 3.0, "{tag}: ink_dim on base0{g}");
+                            let floor = if g == 2 { 3.0 } else { 4.5 };
+                            for x in [t.accent(), t.c[0xD], t.c[0xE], t.c[0x8], t.c[0xA], t.c[0xB]] {
+                                assert!(r(t.as_text(x), t.c[g]) >= floor, "{tag}: #{} as text on base0{g}", hex(x));
+                            }
+                        }
+                        assert!(r(t.accent_ink(), t.accent()) >= 4.5, "{tag}: text on the accent");
+                        assert!(r(t.ink(), t.selection()) >= 4.5, "{tag}: text on an editor's selection");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

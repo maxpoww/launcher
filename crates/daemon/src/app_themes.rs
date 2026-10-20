@@ -85,12 +85,13 @@ pub(crate) fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
             ("BackgroundAlternate".to_owned(), rgb(alt)),
             ("ForegroundNormal".to_owned(), rgb(fg)),
             ("ForegroundInactive".to_owned(), rgb(t.ink_dim())),
-            ("ForegroundActive".to_owned(), rgb(t.accent())),
-            ("ForegroundLink".to_owned(), rgb(c[0xD])),
-            ("ForegroundVisited".to_owned(), rgb(c[0xE])),
-            ("ForegroundNegative".to_owned(), rgb(c[0x8])),
-            ("ForegroundNeutral".to_owned(), rgb(c[0xA])),
-            ("ForegroundPositive".to_owned(), rgb(c[0xB])),
+            // (Text, all of these: the text-safe colour — Theme::as_text.)
+            ("ForegroundActive".to_owned(), rgb(t.accent_text())),
+            ("ForegroundLink".to_owned(), rgb(t.as_text(c[0xD]))),
+            ("ForegroundVisited".to_owned(), rgb(t.as_text(c[0xE]))),
+            ("ForegroundNegative".to_owned(), rgb(t.as_text(c[0x8]))),
+            ("ForegroundNeutral".to_owned(), rgb(t.as_text(c[0xA]))),
+            ("ForegroundPositive".to_owned(), rgb(t.as_text(c[0xB]))),
             ("DecorationFocus".to_owned(), rgb(t.accent())),
             ("DecorationHover".to_owned(), rgb(t.accent())),
         ]
@@ -270,7 +271,7 @@ fn vscode(t: &Theme) {
         ("editor.foreground", ink.clone()),
         ("editorGutter.background", h(c[0])),
         ("editor.lineHighlightBackground", h(c[1])),
-        ("editor.selectionBackground", h(mix(t.accent(), c[0], 0.65))),
+        ("editor.selectionBackground", h(t.selection())),
         ("editorCursor.foreground", h(t.accent())),
         ("editorGroupHeader.tabsBackground", h(c[1])),
         ("tab.activeBackground", h(c[0])),
@@ -297,7 +298,7 @@ fn vscode(t: &Theme) {
         ("list.hoverBackground", h(c[1])),
         ("menu.background", h(c[1])),
         ("progressBar.background", h(t.accent())),
-        ("textLink.foreground", h(t.accent())),
+        ("textLink.foreground", h(t.accent_text())),
         ("badge.background", h(t.accent())),
         ("badge.foreground", h(t.accent_ink())),
     ];
@@ -649,7 +650,7 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
             "Button.default.startBackground": h(t.accent()),
             "Button.default.endBackground": h(t.accent()),
             "Button.default.foreground": h(t.accent_ink()),
-            "Link.activeForeground": h(t.accent()),
+            "Link.activeForeground": h(t.accent_text()),
             "ProgressBar.progressColor": h(t.accent()),
         }
     });
@@ -676,7 +677,7 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
         acc = hx(t.accent()),
         row = hx(c[1]),
         bg = hx(c[0]),
-        sel = hx(mix(t.accent(), c[0], 0.65)),
+        sel = hx(t.selection()),
         fg = hx(t.ink()),
     );
     zip_stored(&[
