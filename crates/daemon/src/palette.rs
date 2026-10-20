@@ -1982,6 +1982,12 @@ fn gtk3_theme_css(t: &Theme, base: &Path) -> String {
         ("accent_color", h(t.accent())),
         ("accent_bg_color", h(t.accent())),
         ("accent_fg_color", h(t.accent_ink())),
+        // GTK 3 reads its SELECTED colours from these, and adw-gtk3 names them
+        // after the accent at its own parse — so they kept its white text over
+        // a palette's light accent (Seam's chosen suggestion white on white —
+        // Max, 2026-10-20, India Ink). Said outright here.
+        ("theme_selected_bg_color", h(t.accent())),
+        ("theme_selected_fg_color", h(t.accent_ink())),
         ("destructive_color", h(c[8])),
         ("destructive_bg_color", h(c[8])),
         ("destructive_fg_color", ink(c[8])),
@@ -3220,7 +3226,9 @@ mod tests {
         let g3 = gtk3_theme_css(&t, Path::new("/x/adw-gtk3-dark/gtk-3.0/gtk.css"));
         assert!(g3.contains("@import url(\"file:///x/adw-gtk3-dark/gtk-3.0/gtk.css\");"));
         assert!(g3.contains("@define-color window_bg_color #1d2026;") && g3.contains("@define-color accent_bg_color #ffbe98;"));
-        assert_eq!(g3.matches("@define-color").count(), 33);
+        assert_eq!(g3.matches("@define-color").count(), 35);
+        // (Selected rows: the accent with its own ink, never adw-gtk3's white.)
+        assert!(g3.contains(&format!("@define-color theme_selected_fg_color #{};", hex(t.accent_ink()))));
         let btop = btop_theme(&t);
         assert!(btop.contains("theme[main_bg]=\"#16171a\"") && btop.contains("theme[title]=\"#ffbe98\""));
         assert_eq!(btop.matches("theme[").count(), 10 + 5 + 27);
