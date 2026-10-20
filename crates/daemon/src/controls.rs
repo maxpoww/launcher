@@ -1087,6 +1087,10 @@ pub(crate) fn session_vars(s: &GolemSettings) -> Vec<(&'static str, String)> {
     let mut vars: Vec<(&'static str, String)> = Vec::new();
     if let Some(z) = &s.time_zone {
         vars.push(("TZ", z.clone()));
+        // A bare zone name is a time only where the zone files can be found.
+        if let Some(d) = zone_dir() {
+            vars.push(("TZDIR", d));
+        }
     }
     if let Some(l) = &s.language {
         vars.push(("LANG", l.clone()));
@@ -2040,12 +2044,29 @@ pub(crate) fn adopt_zone(zone: Option<&str>) {
     else {
         return;
     };
+    if let Some(d) = zone_dir() {
+        std::env::set_var("TZDIR", d);
+    }
     std::env::set_var("TZ", zone);
     extern "C" {
         fn tzset();
     }
     // SAFETY: `tzset` reads `TZ` and sets the C library's zone, under its lock.
     unsafe { tzset() };
+}
+
+/// Where the zone files live: `$TZDIR` when it is a directory, else NixOS's
+/// /etc/zoneinfo, else the FHS place. glibc has no built-in directory on
+/// NixOS, so a session carrying `TZ=America/…` without `TZDIR` read every
+/// clock as UTC (the bar said 19:37 at 16:37 on 2026-10-20).
+pub(crate) fn zone_dir() -> Option<String> {
+    zone_dir_among(std::env::var("TZDIR").ok().as_deref(), &["/etc/zoneinfo", "/usr/share/zoneinfo"])
+}
+
+fn zone_dir_among(env: Option<&str>, candidates: &[&str]) -> Option<String> {
+    env.filter(|d| std::path::Path::new(d).is_dir())
+        .map(str::to_owned)
+        .or_else(|| candidates.iter().find(|d| std::path::Path::new(d).is_dir()).map(|d| (*d).to_owned()))
 }
 
 /// Carry out a pick of `value` in the group `key`.
@@ -2460,5 +2481,42 @@ mod tests {
         assert_eq!(view.groups[0].choices.len(), 1, "a finished step is its one pill");
         let places: Vec<&str> = view.groups[2].choices.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(places, ["Caracas", "La Paz"]);
+    }
+
+    #[test]
+    fn the_zone_files_are_found_where_they_are_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("wr-zone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        assert_eq!(zone_dir_among(Some(d), &["/nowhere"]).as_deref(), Some(d));
+        assert_eq!(zone_dir_among(Some("/nowhere/tz"), &["/nowhere", d]).as_deref(), Some(d));
+        assert_eq!(zone_dir_among(None, &["/nowhere"]), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_zone_is_exported_with_the_place_of_its_files() {
+        let s = GolemSettings { time_zone: Some("America/Argentina/Mendoza".into()), ..Default::default() };
+        let vars = session_vars(&s);
+        assert_eq!(vars[0], ("TZ", "America/Argentina/Mendoza".to_owned()));
+        match zone_dir() {
+            Some(d) => assert!(vars.contains(&("TZDIR", d))),
+            None => assert_eq!(vars.len(), 1),
+        }
+        assert!(session_vars(&GolemSettings::default()).is_empty());
+    }
+
+    #[test]
+    fn adopting_a_zone_moves_this_process_clock() {
+        // Only where zone files exist (a Nix build sandbox has none).
+        if zone_dir().is_none() {
+            return;
+        }
+        adopt_zone(Some("America/Argentina/Mendoza"));
+        let t: libc::time_t = 1_760_000_000;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: both pointers are to live locals; the zone was set above.
+        unsafe { libc::localtime_r(&t, &mut tm) };
+        assert_eq!(tm.tm_gmtoff, -3 * 3600);
     }
 }
