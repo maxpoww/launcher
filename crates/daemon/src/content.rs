@@ -3302,6 +3302,15 @@ pub fn scene(
             l.pos.1 += rise;
             l
         }));
+        // The apps' icons on their cards (Colours' Apps tiles): the dock's
+        // own layers, bare — the card is their plate, as on fast launch.
+        field.icons.extend(pd.icons.iter().map(|&(entry, r)| IconInst {
+            rect: Rect::new(r.x, r.y + rise, r.w, r.h),
+            layer: layer_of(entry),
+            tint: [0.0; 4],
+            ring: -1.0,
+            plate: NO_PLATE,
+        }));
         scene.grids.push(field);
         // Parts that scroll inside their own window (an open module's list).
         for (clip, rects, labels) in &pd.clipped {
@@ -3728,6 +3737,9 @@ pub fn scene(
         // app about to be removed, never a way to dim one).
         if q.a > 0.5 {
             picture_tiles_as(&mut scene, q.images, place);
+            for &(entry, r) in &q.draw.icons {
+                scene.overlay.push(IconInst { rect: place(r), layer: layer_of(entry), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
+            }
             for (tile, name) in q.names {
                 let px = (tile.h * 0.11).clamp(9.0, 14.0);
                 write(

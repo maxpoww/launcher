@@ -41,6 +41,13 @@ pub(crate) struct Choice {
     /// first tile, the palette's card — "Follows your colours"): `text` is
     /// written under the preview, and the one in use is ringed.
     pub caption: bool,
+    /// AN APP ON A CARD (the Colours model, 2026-10-20: the Apps section's
+    /// exceptions as tiles): the app entry (`App::entries`) whose icon the
+    /// tile shows, centred on a palette card's ground, `text` under it.
+    pub icon: Option<usize>,
+    /// A small muted line inside the tile at its foot (an app's exception:
+    /// "Own colours · Light"). Only on a tile.
+    pub hint: Option<String>,
 }
 
 /// A group of choices under an optional caption. A caption with no choices
@@ -72,6 +79,28 @@ pub(crate) struct Group {
     /// The choices are COLOUR CELLS (their `swatch`), this many to a row:
     /// the palette editor's field and hue strip. 0 = not cells.
     pub cells: usize,
+    /// A SLIDER IN A ROW (the Colours model, 2026-10-20: Lighting · Palette ·
+    /// Saturation side by side): consecutive sliders with this are laid on
+    /// one line, a column each, every one as two lines — its name and value
+    /// over the full-width track. A `beside` group after one sits at the
+    /// right end of its label line.
+    pub row: bool,
+    /// A SPLIT TRACK (Lighting: Dark on the left half, Light on the right):
+    /// a gap at the track's middle the knob leaps across — the stop 50 is
+    /// never rested on — a notch at the designed point of each half, and no
+    /// fill. Drawn only for a slider.
+    pub split: bool,
+    /// A NOTCH on the track at this fraction of its length (the point "as
+    /// made" of Palette and Saturation). Drawn only for a slider.
+    pub mark: Option<f32>,
+    /// ON ITS OWN LINE, CENTRED: words centred in the box (a `beside`
+    /// group after them stands at the LEFT end of the same line — the Auto
+    /// switch by the section tabs); a switch (`on`/`off`) as its name and
+    /// the switch together, centred.
+    pub centred: bool,
+    /// A grid of tiles may have fewer rows a page than it would (the Apps
+    /// page's few tiles, the box shrinking to them). None: as many as fit.
+    pub grid_rows: Option<usize>,
 }
 
 /// THE PALETTE EDITOR (Max, 2026-10-16; the mockup's "+" tile): six places
@@ -444,7 +473,7 @@ fn run(program: &str, args: &[&str]) -> bool {
 }
 
 fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice {
-    Choice { text: text.into(), on, value: value.into(), swatch: Vec::new(), caption: false }
+    Choice { text: text.into(), on, value: value.into(), swatch: Vec::new(), caption: false, icon: None, hint: None }
 }
 
 fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: Vec<Choice>) -> Group {
@@ -452,7 +481,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -463,7 +492,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -1737,15 +1766,15 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             // colour; each with a [Dark][Light] of its own that follows the
             // system's until it is clicked.
             // LIGHTING first (Max, 2026-10-18): light is the first thing of colour.
-            let lighting = picked.lighting.unwrap_or(50);
+            let lighting = picked.shell_light.unwrap_or(50);
             view.groups.push(Group { caption: Some(format!("{} · {lighting}", tr("Lighting"))), ..slider("colors-lighting", lighting) });
             // AUTO beside it (Max, 2026-10-18): the light follows the sun, in
             // front of the owner (`lighting.rs`). A word at the row's end, lit
             // while on; a click asks for the other. The slider turns it off.
-            let auto = picked.lighting_auto.unwrap_or(false);
+            let auto = picked.ambient.unwrap_or(false);
             view.groups.push(Group { beside: true, ..group(None, "colors-lighting-auto", 84.0, vec![choice(tr("Auto"), auto, if auto { "off" } else { "on" })]) });
             // …and whether the wallpaper is lit with the rest.
-            view.groups.push(on_off(Some("Include the background"), "colors-lighting-veil", picked.lighting_veil.unwrap_or(false)));
+            view.groups.push(on_off(Some("Include the background"), "colors-lighting-veil", picked.wall_ambient.unwrap_or(false)));
             let apps = picked.apps_level().unwrap_or(MADE);
             let web = picked.web_level().unwrap_or(MADE);
             for (name, key, look_key, level, own) in [
