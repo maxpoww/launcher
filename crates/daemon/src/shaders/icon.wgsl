@@ -63,7 +63,9 @@ fn icon_filter(rgb: vec3<f32>) -> vec3<f32> {
     let f = globals.filt[0];
     let k = f.x;
     let n = i32(f.z);
-    if (k <= 0.0 && f.y < 0.5) { return rgb; }
+    // The Saturation (f.w: a chroma factor; an empty filter's 0 is 1).
+    let sat = select(f.w, 1.0, f.w <= 0.0);
+    if (k <= 0.0 && f.y < 0.5 && sat == 1.0) { return rgb; }
     var out = rgb;
     if (n > 0 && k > 0.0) {
         let lab = to_oklab(rgb);
@@ -102,6 +104,11 @@ fn icon_filter(rgb: vec3<f32>) -> vec3<f32> {
         let l2 = select(lab.x * 0.96, 0.45 + (lab.x - 0.45) * 0.55, lab.x > 0.45);
         out = clamp(from_oklab(vec3<f32>(l2, lab.y * 0.92, lab.z * 0.92)), vec3<f32>(0.0), vec3<f32>(1.0));
     }
+    // The Saturation last: greyer or more vivid, its lightness kept.
+    if (sat != 1.0) {
+        let lab = to_oklab(out);
+        out = clamp(from_oklab(vec3<f32>(lab.x, lab.y * sat, lab.z * sat)), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     return out;
 }
 
@@ -123,14 +130,16 @@ fn wall_ramp(l: f32) -> vec2<f32> {
 // One straight (linear) colour through the grade: its lightness kept, its
 // colour moved toward the ramp's by t.
 fn wall_grade(rgb: vec3<f32>) -> vec3<f32> {
-    let t = clamp(globals.wall[0].x, 0.0, 1.0);
-    if (t <= 0.0 || globals.wall[0].z < 1.0) { return rgb; }
+    let t = select(clamp(globals.wall[0].x, 0.0, 1.0), 0.0, globals.wall[0].z < 1.0);
+    let sat = select(globals.wall[0].w, 1.0, globals.wall[0].w <= 0.0);
+    if (t <= 0.0 && sat == 1.0) { return rgb; }
     let lab = to_oklab(rgb);
-    var r = wall_ramp(lab.x);
+    var r = select(lab.yz, wall_ramp(lab.x), t > 0.0);
     let room = 0.6 * max(min(lab.x, 1.0 - lab.x), 0.0);
     let rc = length(r);
     if (rc > room) { r = r * (room / rc); }
-    let o = from_oklab(vec3<f32>(lab.x, lab.y + (r.x - lab.y) * t, lab.z + (r.y - lab.z) * t));
+    // The Saturation last (wall_tint.rs Grade::apply, line by line).
+    let o = from_oklab(vec3<f32>(lab.x, (lab.y + (r.x - lab.y) * t) * sat, (lab.z + (r.y - lab.z) * t) * sat));
     return clamp(o, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 

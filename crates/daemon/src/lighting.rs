@@ -46,9 +46,20 @@ use wayland_protocols::ext::idle_notify::v1::client::ext_idle_notifier_v1::{self
 use crate::palette::{self, ShellPlan};
 use crate::App;
 
-/// The light in the day (as designed) and at night.
+/// The light in the day (as designed) and at night, within the Dark look;
+/// the LINE (docs/colours-model.md) also has the Light look by day: see [`line`].
 pub(crate) const DAY: u8 = 50;
 pub(crate) const NIGHT: u8 = 20;
+/// The leap over the gap between the looks, in a fade that crosses it.
+const GAP: Duration = Duration::from_secs(2);
+/// The sun is looked at this often (seconds): tiny steps, never a jump
+/// (Max, 2026-10-20: "slow and smooth all the time").
+const SLOT_SECS: i64 = 600;
+/// THE HOLD (Max, 2026-10-20): the apps' look — the one step other
+/// people's programs cannot fade — waits for something already moving on the
+/// screen (a window opening, the space turning) and hides in it; this long at
+/// most, then it goes under a dissolve of the whole screen.
+const HOLD_MAX: Duration = Duration::from_secs(30 * 60);
 /// Away after this long without input; a quiet moment after this long.
 const AWAY_MS: u32 = 120_000;
 const QUIET_MS: u32 = 3_000;
@@ -75,22 +86,78 @@ fn smoothstep(x: f64) -> f64 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// The Lighting the sun asks for, from its elevation in degrees: the day from
-/// +6° up, the night from −12° down (the end of nautical twilight), eased
-/// between.
-pub(crate) fn curve(elevation_deg: f64) -> u8 {
+/// THE SUN'S LINE: the Lighting the sun asks for, as the box's one line
+/// (`palette::line_of`, both looks). The Light look from the horizon up —
+/// soft at dawn and dusk (Light 15 at 0°), as designed from +6°, up to Light
+/// 60 under a high sun — and the Dark look below it: Dark 60 at the horizon
+/// down to Dark 20 past −12° (the end of nautical twilight). The flip is the
+/// horizon (Max, 2026-10-20: "light in the morning, dark when it gets dark,
+/// like the Auto of macOS"); the gap between the halves is what a fade leaps.
+pub(crate) fn line(elevation_deg: f64) -> u8 {
     if !elevation_deg.is_finite() {
-        return DAY;
+        return palette::line_of(true, DAY);
     }
-    let t = smoothstep((6.0 - elevation_deg) / 18.0);
-    (f64::from(DAY) + (f64::from(NIGHT) - f64::from(DAY)) * t).round() as u8
+    let e = elevation_deg;
+    let light = if e >= 6.0 {
+        50.0 + 10.0 * smoothstep((e - 6.0) / 34.0)
+    } else if e >= 0.0 {
+        15.0 + 35.0 * smoothstep(e / 6.0)
+    } else {
+        f64::from(NIGHT) + 40.0 * smoothstep((e + 12.0) / 12.0)
+    };
+    palette::line_of(e < 0.0, light.round() as u8)
+}
+
+/// Eased from `from` to `to` over `span`.
+fn eased(from: u8, to: u8, elapsed: Duration, span: Duration) -> u8 {
+    if span.is_zero() {
+        return to;
+    }
+    let e = smoothstep(elapsed.as_secs_f64() / span.as_secs_f64());
+    let v = f64::from(from) + (f64::from(to) - f64::from(from)) * e;
+    v.round().clamp(0.0, 100.0) as u8
 }
 
 /// Where the fade is after `elapsed`: eased from `from` to `to`.
 pub(crate) fn fade_value(from: u8, to: u8, elapsed: Duration) -> u8 {
-    let e = smoothstep(elapsed.as_secs_f64() / FADE.as_secs_f64());
-    let v = f64::from(from) + (f64::from(to) - f64::from(from)) * e;
-    v.round().clamp(0.0, 100.0) as u8
+    eased(from, to, elapsed, FADE)
+}
+
+/// Where a fade ON THE LINE is after `elapsed`. Within a look, [`fade_value`].
+/// Across the gap, three legs: the old look to its edge, the leap over the
+/// gap ([`GAP`] long: the shell crossfades its two edges), the new look from
+/// its edge — the 20 s shared by the two looks' legs in proportion.
+pub(crate) fn fade_line(from: u8, to: u8, elapsed: Duration) -> u8 {
+    let (fd, _) = palette::line_to(from);
+    let (td, _) = palette::line_to(to);
+    if fd == td {
+        return fade_value(from, to, elapsed);
+    }
+    let (edge_from, edge_to) = if fd { (45u8, 55u8) } else { (55, 45) };
+    let a = f64::from(from.abs_diff(edge_from));
+    let b = f64::from(to.abs_diff(edge_to));
+    let total = (a + b).max(1.0);
+    let ta = FADE.mul_f64(a / total);
+    let tb = FADE.mul_f64(b / total);
+    if elapsed < ta {
+        return eased(from, edge_from, elapsed, ta);
+    }
+    let e2 = elapsed - ta;
+    if e2 < GAP {
+        let k = e2.as_secs_f64() / GAP.as_secs_f64();
+        return (f64::from(edge_from) + (f64::from(edge_to) - f64::from(edge_from)) * k).round() as u8;
+    }
+    eased(edge_to, to, e2 - GAP, tb)
+}
+
+/// How long a fade from `from` to `to` takes: the leap added when it crosses.
+pub(crate) fn fade_len(from: u8, to: u8) -> Duration {
+    if palette::line_to(from).0 == palette::line_to(to).0 { FADE } else { FADE + GAP }
+}
+
+/// Whether a line value is in the gap (the leap between the looks).
+fn in_gap(v: u8) -> bool {
+    (46..=54).contains(&v)
 }
 
 /// The target worth a fade from `current`: a step under [`MIN_STEP`] is none.
@@ -98,13 +165,23 @@ pub(crate) fn decide(current: u8, target: u8) -> Option<u8> {
     (current.abs_diff(target) >= MIN_STEP).then_some(target)
 }
 
-/// The black wash over the wallpaper at a Lighting: none from 50 up, and
-/// 0.45 at 0. Off when the owner did not ask for the background.
-pub(crate) fn veil_alpha(lighting: u8, on: bool) -> f32 {
+/// The black wash over the wallpaper at a point of the LINE: none in the
+/// Light look and from Dark 50 up, 0.45 at Dark 0. (`on`: the wallpaper's
+/// Lighting is on this line at all.)
+pub(crate) fn veil_alpha(line: u8, on: bool) -> f32 {
     if !on {
         return 0.0;
     }
-    f32::from(50u8.saturating_sub(lighting)) / 50.0 * VEIL_MAX
+    let (dark, light) = palette::line_to(line);
+    if !dark {
+        return 0.0;
+    }
+    f32::from(50u8.saturating_sub(light)) / 50.0 * VEIL_MAX
+}
+
+/// The slot of a moment: the sun is looked at once a slot.
+pub(crate) fn slot_key(unix: i64) -> i64 {
+    unix.div_euclid(SLOT_SECS)
 }
 
 /// Whether the computer slept between two ticks: the monotonic clock does
@@ -114,7 +191,9 @@ pub(crate) fn slept(mono: Duration, wall: Duration) -> bool {
 }
 
 /// The clock hour of a moment in this time zone (`gmtoff` seconds east): the
-/// same number all through a wall-clock hour.
+/// same number all through a wall-clock hour. (The sun is looked at by the
+/// slot now, `slot_key`; kept for the day a look wants the wall's hour.)
+#[allow(dead_code)]
 pub(crate) fn hour_key(unix: i64, gmtoff: i64) -> i64 {
     (unix + gmtoff).div_euclid(3600)
 }
@@ -166,6 +245,12 @@ impl Plan {
         true
     }
 
+    /// Whether the next look is the first since the owner settled (a catch-up:
+    /// in front of them, whole — the apps' step with it, not held).
+    pub(crate) fn first_look(&self) -> bool {
+        self.last.is_none()
+    }
+
     /// The owner is gone: the next time they settle, look at once.
     pub(crate) fn absent(&mut self) {
         self.since = None;
@@ -194,9 +279,61 @@ static SHOWN: AtomicU8 = AtomicU8::new(NONE);
 static APPLIED: AtomicU8 = AtomicU8::new(NONE);
 static VEIL: AtomicBool = AtomicBool::new(false);
 
-/// The Lighting a fade in progress shows, else None (the saved one).
+/// The point of the LINE a fade in progress shows, else None (the saved one).
 pub(crate) fn shown() -> Option<u8> {
     Some(SHOWN.load(Ordering::Relaxed)).filter(|v| *v != NONE)
+}
+
+/// The line the sun last asked for (255: not looked at yet).
+static SUN: AtomicU8 = AtomicU8::new(NONE);
+
+/// THE SUN'S LINE now, as the look and the light within it: the step a fade
+/// shows, else the line the sun last asked for. None until the sun was looked
+/// at. (`ColorChoice::levels` takes it for the surfaces whose Ambient is on.)
+pub(crate) fn ambient_line() -> Option<(bool, u8)> {
+    shown().or_else(|| Some(SUN.load(Ordering::Relaxed)).filter(|v| *v != NONE)).map(palette::line_to)
+}
+
+/// THE HELD LOOK: the point of the line the apps and the web stay at after the
+/// sun crossed the looks, until the step is let go (255: none). Read by
+/// `ambient_line_for`, so every theme made meanwhile keeps the old look.
+static HELD_DARK: AtomicU8 = AtomicU8::new(NONE);
+static HELD_LIGHT: AtomicU8 = AtomicU8::new(NONE);
+
+pub(crate) fn held() -> Option<(bool, u8)> {
+    let d = HELD_DARK.load(Ordering::Relaxed);
+    (d != NONE).then(|| (d == 1, HELD_LIGHT.load(Ordering::Relaxed)))
+}
+fn hold(at: Option<(bool, u8)>) {
+    match at {
+        Some((d, l)) => {
+            HELD_LIGHT.store(l, Ordering::Relaxed);
+            HELD_DARK.store(u8::from(d), Ordering::Relaxed);
+        }
+        None => HELD_DARK.store(NONE, Ordering::Relaxed),
+    }
+}
+
+/// [`ambient_line`] as a surface sees it: the programs and the web keep the
+/// held look while there is one; the shell, the icons, the wallpaper (what
+/// Golem paints itself, and can fade) see the sun's.
+pub(crate) fn ambient_line_for(s: palette::Surface) -> Option<(bool, u8)> {
+    match s {
+        palette::Surface::Apps | palette::Surface::Web => held().or_else(ambient_line),
+        _ => ambient_line(),
+    }
+}
+
+/// The wallpaper's point on the line now: the sun's where its Ambient is on
+/// (`set_veil`), else its own Lighting.
+fn wall_line_now() -> u8 {
+    if VEIL.load(Ordering::Relaxed) {
+        if let Some((d, l)) = ambient_line() {
+            return palette::line_of(d, l);
+        }
+    }
+    let lv = palette::choice().levels_now(palette::Surface::Wall);
+    palette::line_of(lv.dark, lv.light)
 }
 
 /// Whether the Lighting moved since the last time everything was made for it.
@@ -204,7 +341,8 @@ pub(crate) fn applied(v: u8) -> bool {
     APPLIED.swap(v, Ordering::Relaxed) != v
 }
 
-/// The background switch, as the choice has it; whether it changed.
+/// Whether the wallpaper's Lighting follows the sun (its tab's Ambient), as
+/// the choice has it; whether that changed.
 pub(crate) fn set_veil(on: bool) -> bool {
     VEIL.swap(on, Ordering::Relaxed) != on
 }
@@ -223,7 +361,7 @@ pub(crate) fn tell_overview() {
 }
 
 pub(crate) fn veil_now() -> f32 {
-    veil_alpha(palette::tint::lighting(), VEIL.load(Ordering::Relaxed))
+    veil_alpha(wall_line_now(), true)
 }
 
 // -------------------------------------------------------- the clock and /proc
@@ -233,6 +371,7 @@ fn unix_now() -> i64 {
 }
 
 /// This zone's offset east of UTC at `unix`, seconds.
+#[allow(dead_code)]
 fn gmtoff_at(unix: i64) -> i64 {
     // SAFETY: `localtime_r` writes only into the `tm` we give it.
     unsafe {
@@ -273,14 +412,42 @@ struct Watch {
 
 /// A fade in progress.
 struct Fade {
+    /// Points of the LINE.
     from: u8,
     to: u8,
     began: Instant,
     /// The step last put on the screen.
     shown: u8,
-    /// How the shell's pair is made at each step (made once, at the start).
-    shell: ShellPlan,
+    /// How the shell's pair is made at each step, in each look (made once,
+    /// at the start): the Dark plan and the Light one.
+    shell: (ShellPlan, ShellPlan),
+    /// Which tabs follow this fade: the Colours' four surfaces; the wallpaper.
+    colours: bool,
+    wall: bool,
     frames: u32,
+}
+
+impl Fade {
+    /// The shell's pair at a point of the line: the look's plan at its
+    /// light; in the gap, the two edges crossfaded (the leap).
+    fn shell_pair(&self, v: u8) -> Option<([f32; 4], [f32; 4])> {
+        if in_gap(v) {
+            let k = f32::from(v - 45) / 10.0;
+            return match (self.shell.0.pair(100), self.shell.1.pair(0)) {
+                (Some(a), Some(b)) => Some((lerp4(a.0, b.0, k), lerp4(a.1, b.1, k))),
+                (a, b) => b.or(a),
+            };
+        }
+        let (dark, light) = palette::line_to(v);
+        if dark { self.shell.0.pair(light) } else { self.shell.1.pair(light) }
+    }
+    fn shell_follows(&self) -> bool {
+        self.colours && (self.shell.0.follows_lighting() || self.shell.1.follows_lighting())
+    }
+}
+
+fn lerp4(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * k)
 }
 
 pub(crate) struct Lighting {
@@ -298,6 +465,10 @@ pub(crate) struct Lighting {
     /// A fade ended: the apps, the web and the files are owed the new step.
     apply_pending: bool,
     last_tick: Option<(Instant, SystemTime)>,
+    /// The apps' look the sun crossed to, held since (see `HOLD_MAX`).
+    owed: Option<(bool, Instant)>,
+    /// The owner came back while a look was owed: it goes with their settling.
+    returned: bool,
 }
 
 impl Lighting {
@@ -314,6 +485,8 @@ impl Lighting {
             frames: false,
             apply_pending: false,
             last_tick: None,
+            owed: None,
+            returned: false,
         }
     }
 
@@ -357,6 +530,10 @@ impl App {
         if self.lighting.on != on {
             self.lighting.on = on;
             self.lighting.plan.absent();
+            if !on {
+                hold(None);
+                self.lighting.owed = None;
+            }
         }
     }
 
@@ -395,43 +572,103 @@ impl App {
         let unix = unix_now();
         let facts = Facts {
             at: self.lighting.since_start(),
-            hour: hour_key(unix, gmtoff_at(unix)),
+            hour: slot_key(unix),
             auto: true,
             present: self.lighting.present(),
             fullscreen: self.options_paused(),
             fading: self.lighting.fade.is_some(),
         };
+        // A look owed to the apps: let go once the owner is back and settled,
+        // or after the hold's longest — under a dissolve, in a quiet moment.
+        if let Some((_, since)) = self.lighting.owed {
+            let settled = facts.present && !self.lighting.plan.first_look();
+            if self.lighting.quiet && self.lighting.fade.is_none() && (since.elapsed() >= HOLD_MAX || (self.lighting.returned && settled)) {
+                self.lighting_release_dissolved();
+            }
+        }
+        let catch_up = self.lighting.plan.first_look();
         if self.lighting.plan.step(&facts) {
-            self.lighting_look();
+            self.lighting_look(catch_up);
+        }
+    }
+
+    /// Something is moving on the screen (a window arrived, the space
+    /// turned): a look owed to the apps goes now, hidden in it.
+    pub(crate) fn lighting_motion(&mut self) {
+        if self.lighting.owed.is_some() && self.lighting.fade.is_none() {
+            debug!("lighting: the apps take the new look under the motion");
+            self.lighting_release();
+        }
+    }
+
+    /// The apps and the web take the look the sun crossed to.
+    fn lighting_release(&mut self) {
+        let Some((dark, _)) = self.lighting.owed.take() else { return };
+        self.lighting.returned = false;
+        hold(None);
+        let _ = std::thread::Builder::new().name("ambient-look".into()).spawn(move || crate::controls::assert_dark(dark));
+        self.colors_apply(true);
+    }
+
+    /// …under a still of the screen dissolving to the result (the scale
+    /// change's own dissolve; without the means, the plain step).
+    fn lighting_release_dissolved(&mut self) {
+        match crate::display::focused_screen() {
+            Some((name, scale)) => {
+                debug!("lighting: the apps take the new look under a dissolve");
+                self.dissolve(&name, scale, Box::new(|app: &mut App| app.lighting_release()));
+            }
+            None => self.lighting_release(),
         }
     }
 
     /// Auto was just turned on, by the owner: the light goes to the sun's now.
     pub(crate) fn lighting_auto_on(&mut self) {
-        let unix = unix_now();
-        self.lighting.plan.looked(hour_key(unix, gmtoff_at(unix)));
-        self.lighting_look();
+        self.lighting.plan.looked(slot_key(unix_now()));
+        self.lighting_look(true);
     }
 
-    /// Look at the sun: a fade to its light if that is far enough from this.
-    fn lighting_look(&mut self) {
+    /// Look at the sun: a fade to its line if that is far enough from this.
+    /// `catch_up`: the owner is plainly there for it (just back, or their own
+    /// hand), so the apps' step goes with the fade, not held.
+    fn lighting_look(&mut self, catch_up: bool) {
         let Some(elevation) = options_engine::sun_elevation_deg(unix_now() as f64) else {
-            debug!("lighting: no place on the planet from the time zone; Auto has nothing to follow");
+            debug!("lighting: no place on the planet from the time zone; Ambient has nothing to follow");
             return;
         };
-        let target = curve(elevation);
-        let from = self.lighting.fade.as_ref().map_or_else(palette::tint::lighting, |f| f.shown);
+        let target = line(elevation);
+        // (From what is shown: the fade's step, else the shell's line — which,
+        // under Ambient, is the sun's last — read before the new one is kept.)
+        let from = self.lighting.fade.as_ref().map_or_else(
+            || {
+                let lv = palette::choice().levels_now(palette::Surface::Shell);
+                palette::line_of(lv.dark, lv.light)
+            },
+            |f| f.shown,
+        );
+        SUN.store(target, Ordering::Relaxed);
         match decide(from, target) {
-            Some(to) => self.lighting_fade(from, to),
+            Some(to) => self.lighting_fade(from, to, catch_up),
             None => debug!("lighting: sun at {elevation:.1}° asks {target}, shown {from}: close enough"),
         }
     }
 
-    fn lighting_fade(&mut self, from: u8, to: u8) {
-        info!("lighting: {from} -> {to} over {} s", FADE.as_secs());
-        let shell = palette::shell_plan(&palette::choice(), crate::look::dark());
+    fn lighting_fade(&mut self, from: u8, to: u8, catch_up: bool) {
+        let picked = palette::choice();
+        let (colours, wall) = (picked.ambient_of(palette::Surface::Shell), picked.ambient_of(palette::Surface::Wall));
+        if !colours && !wall {
+            return;
+        }
+        // Crossing the looks: the programs keep the old one from here until
+        // the step is let go (`lighting_motion`), unless the owner is plainly
+        // there for the whole change.
+        if colours && palette::line_to(from).0 != palette::line_to(to).0 && !catch_up && held().is_none() {
+            hold(Some(palette::line_to(from)));
+        }
+        info!("lighting: {from} -> {to} over {} s{}", fade_len(from, to).as_secs(), if palette::line_to(from).0 != palette::line_to(to).0 { ", across the looks" } else { "" });
+        let shell = (palette::shell_plan_look(&picked, true), palette::shell_plan_look(&picked, false));
         SHOWN.store(from, Ordering::Relaxed);
-        self.lighting.fade = Some(Fade { from, to, began: Instant::now(), shown: from, shell, frames: 0 });
+        self.lighting.fade = Some(Fade { from, to, began: Instant::now(), shown: from, shell, colours, wall, frames: 0 });
         self.lighting.apply_pending = false;
         if self.lighting.frames {
             return;
@@ -461,20 +698,20 @@ impl App {
         };
         f.frames += 1;
         let elapsed = f.began.elapsed();
-        let v = fade_value(f.from, f.to, elapsed);
+        let v = fade_line(f.from, f.to, elapsed);
         let (to, before, frames) = (f.to, f.shown, f.frames);
-        let done = elapsed >= FADE;
+        let done = elapsed >= fade_len(f.from, f.to);
         if v != before {
             f.shown = v;
-            palette::tint::set_lighting(v);
+            palette::tint::set_lighting(palette::line_to(v).1);
             SHOWN.store(v, Ordering::Relaxed);
             // Only the shell changes, and only when the step did: ~30 steps
             // in all, not 300 frames. (The apps are made for it afterwards.)
-            let follows = f.shell.follows_lighting();
+            let follows = f.shell_follows();
             if follows {
-                palette::store_shell(f.shell.pair(v));
+                palette::store_shell(f.shell_pair(v));
             }
-            let veil_moved = veil_alpha(before, VEIL.load(Ordering::Relaxed)) != veil_alpha(v, VEIL.load(Ordering::Relaxed));
+            let veil_moved = f.wall && veil_alpha(before, true) != veil_alpha(v, true);
             if follows {
                 self.draw_options();
                 self.draw();
@@ -504,18 +741,36 @@ impl App {
     /// The fade reached `to`: that is what the owner last saw, so it is what
     /// is kept; the apps, the web and the files take it at a quiet moment.
     fn lighting_finish(&mut self, to: u8) {
+        let colours = self.lighting.fade.as_ref().is_some_and(|f| f.colours);
         self.lighting.fade = None;
         SHOWN.store(NONE, Ordering::Relaxed);
-        palette::tint::set_lighting(to);
+        SUN.store(to, Ordering::Relaxed);
+        let (dark, light) = palette::line_to(to);
+        palette::tint::set_lighting(light);
         store(to);
+        // The look crossed: the dock's whole look turns now, at the END of
+        // its own fade. The programs' step is held for a moment already
+        // moving on the screen (`lighting_motion`), or goes with the fade
+        // when the owner is plainly there (no hold was taken).
+        if colours && crate::look::dark() != dark {
+            if held().is_some() {
+                self.lighting.owed = Some((dark, Instant::now()));
+            } else {
+                let _ = std::thread::Builder::new().name("ambient-look".into()).spawn(move || crate::controls::assert_dark(dark));
+            }
+            self.look_set(dark);
+        }
         self.lighting.apply_pending = true;
         self.lighting_apply_if_due();
     }
 
     /// The fade ended where it stands (the owner left): keep what they saw.
+    /// (A stop in the gap lands on its near edge.)
     fn lighting_stop(&mut self) {
         if let Some(v) = self.lighting_cancel() {
-            palette::tint::set_lighting(v);
+            let v = if in_gap(v) { if v < 50 { 45 } else { 55 } } else { v };
+            palette::tint::set_lighting(palette::line_to(v).1);
+            SUN.store(v, Ordering::Relaxed);
             store(v);
             self.lighting.apply_pending = true;
             self.lighting_apply_if_due();
@@ -527,6 +782,8 @@ impl App {
     pub(crate) fn lighting_cancel(&mut self) -> Option<u8> {
         self.lighting.apply_pending = false;
         SHOWN.store(NONE, Ordering::Relaxed);
+        hold(None);
+        self.lighting.owed = None;
         self.lighting.fade.take().map(|f| f.shown)
     }
 
@@ -549,6 +806,7 @@ impl App {
         } else {
             let at = self.lighting.since_start();
             self.lighting.plan.back(at);
+            self.lighting.returned = self.lighting.owed.is_some();
         }
         debug!("lighting: owner {}", if away { "away" } else { "back" });
     }
@@ -562,27 +820,32 @@ impl App {
     }
 }
 
-/// Keep `v` as the light the owner last saw: every surface's (the four of
-/// the Colours tab; the wallpaper's where its Ambient is on).
+/// Keep the point `v` of the line as the look and the light the owner last
+/// saw, in every surface whose Ambient is on (so Ambient turned off, or a
+/// restart, starts from it: nothing jumps).
 fn store(v: u8) {
+    use palette::Surface;
+    let (dark, light) = palette::line_to(v);
     crate::display::GolemSettings::change(|s| {
         let mut c = s.colors.clone().unwrap_or_default();
-        for own in [&mut c.shell_light, &mut c.apps_light, &mut c.icons_light, &mut c.web_light] {
-            *own = Some(v);
+        let (colours, wall) = (c.ambient_of(Surface::Shell), c.ambient_of(Surface::Wall));
+        let mut own: Vec<(&mut Option<bool>, &mut Option<u8>)> = Vec::new();
+        if colours {
+            own.push((&mut c.shell_dark, &mut c.shell_light));
+            own.push((&mut c.apps_dark, &mut c.apps_light));
+            own.push((&mut c.icons_dark, &mut c.icons_light));
+            own.push((&mut c.web_dark, &mut c.web_light));
         }
-        if c.ambient_of(crate::palette::Surface::Wall) {
-            c.wall_light = Some(v);
+        if wall {
+            own.push((&mut c.wall_dark, &mut c.wall_light));
+        }
+        for (d, l) in own {
+            *d = Some(dark);
+            *l = Some(light);
         }
         s.colors = Some(c);
         s.store();
     });
-}
-
-/// THE SUN'S LINE now: the look and the light Ambient gives — while a fade
-/// shows a step, that step in the shell's look. (The line across both looks,
-/// light by day and dark at dusk, comes with Ambient's next round.)
-pub(crate) fn ambient_line() -> Option<(bool, u8)> {
-    shown().map(|v| (crate::look::dark(), v))
 }
 
 // ---------------------------------------------------------------- Wayland
@@ -618,22 +881,57 @@ mod tests {
     }
 
     #[test]
-    fn the_sun_sets_the_light_day_to_night() {
-        assert_eq!(curve(20.0), 50, "high sun: as designed");
-        assert_eq!(curve(6.0), 50, "the day starts at +6°");
-        assert_eq!(curve(0.0), 42, "the horizon: a third of the way down, eased");
-        assert_eq!(curve(-6.0), 28);
-        assert_eq!(curve(-12.0), 20, "the night starts at -12°");
-        assert_eq!(curve(-20.0), 20);
-        assert_eq!(curve(f64::NAN), 50, "no reading: the day");
-        // The sun sinking from +20° to -20° never raises the light.
-        let mut prev = DAY;
-        for tenth in (-200..=200).rev() {
-            let v = curve(f64::from(tenth) / 10.0);
-            assert!(v <= prev, "the light never rises as the sun sinks");
-            assert!((NIGHT..=DAY).contains(&v));
+    fn the_sun_draws_the_line_light_by_day_dark_by_night() {
+        use crate::palette::line_to;
+        // (The line has 45 steps a half: a light reads back within one.)
+        let near = |e: f64, want: (bool, u8), why: &str| {
+            let (d, l) = line_to(line(e));
+            assert!(d == want.0 && l.abs_diff(want.1) <= 1, "{why}: {e}° -> ({d}, {l}), wanted {want:?}");
+        };
+        near(40.0, (false, 60), "a high sun: Light 60");
+        near(6.0, (false, 50), "the day as designed from +6°");
+        near(0.0, (false, 15), "the horizon, still Light: soft");
+        near(-0.1, (true, 60), "under the horizon: Dark 60 — the flip");
+        near(-6.0, (true, 40), "dusk");
+        near(-12.0, (true, 20), "the night from -12°");
+        near(-20.0, (true, 20), "night");
+        near(f64::NAN, (true, DAY), "no reading: Dark as designed");
+        // The sun sinking from +45° to -20° never raises the line.
+        let mut prev = 100;
+        for tenth in (-200..=450).rev() {
+            let v = line(f64::from(tenth) / 10.0);
+            assert!(v <= prev, "the line never rises as the sun sinks ({tenth})");
+            assert!(!in_gap(v), "the sun never asks for the gap");
             prev = v;
         }
+    }
+
+    #[test]
+    fn a_fade_across_the_looks_leaps_the_gap_in_two_seconds() {
+        use crate::palette::{line_of, line_to};
+        let (from, to) = (line_of(false, 15), line_of(true, 60)); // dusk: Light 15 -> Dark 60
+        assert_eq!(fade_line(from, to, secs(0)), from);
+        assert_eq!(fade_line(from, to, fade_len(from, to)), to);
+        assert_eq!(fade_len(from, to), FADE + GAP);
+        // The legs share the 20 s by their length; the gap takes GAP.
+        let mut was_light = true;
+        let mut gap_ms = 0;
+        let mut prev = from;
+        for ms in (0..=22_000).step_by(66) {
+            let v = fade_line(from, to, Duration::from_millis(ms));
+            assert!(v <= prev, "monotone");
+            if in_gap(v) {
+                gap_ms += 66;
+            }
+            if was_light && line_to(v).0 && !in_gap(v) {
+                was_light = false;
+            }
+            prev = v;
+        }
+        assert!(!was_light, "it ends Dark");
+        assert!((1_500..=2_600).contains(&gap_ms), "the leap is about {}: {gap_ms} ms", GAP.as_millis());
+        // Within one look it is the plain fade.
+        assert_eq!(fade_line(line_of(true, 50), line_of(true, 20), secs(10)), fade_value(line_of(true, 50), line_of(true, 20), secs(10)));
     }
 
     #[test]
@@ -665,11 +963,13 @@ mod tests {
 
     #[test]
     fn the_veil_is_a_wash_below_fifty_and_only_when_asked() {
-        assert_eq!(veil_alpha(80, true), 0.0);
-        assert_eq!(veil_alpha(50, true), 0.0);
-        assert!((veil_alpha(0, true) - 0.45).abs() < 1e-6);
-        assert!((veil_alpha(25, true) - 0.225).abs() < 1e-6);
-        assert_eq!(veil_alpha(0, false), 0.0, "the switch off draws nothing");
+        use crate::palette::line_of;
+        assert_eq!(veil_alpha(line_of(true, 80), true), 0.0);
+        assert_eq!(veil_alpha(line_of(true, 50), true), 0.0);
+        assert!((veil_alpha(line_of(true, 0), true) - 0.45).abs() < 1e-6);
+        assert!((veil_alpha(line_of(true, 25), true) - 0.225).abs() < 0.012, "(within the line's step)");
+        assert_eq!(veil_alpha(line_of(false, 0), true), 0.0, "the Light look has no wash");
+        assert_eq!(veil_alpha(line_of(true, 0), false), 0.0, "the switch off draws nothing");
     }
 
     #[test]

@@ -57,7 +57,13 @@ const MAX_SIDE: u32 = 8192;
 
 /// Whether a filter does anything.
 pub(crate) fn active(f: &Filter) -> bool {
-    f[0][0] > 0.0 && f[0][2] >= 1.0
+    f[0][0] > 0.0 && f[0][2] >= 1.0 || sat_of(f) != 1.0
+}
+
+/// THE SATURATION of a filter (`palette::filter_for`: row 0's last slot, a
+/// chroma factor — 0 grey, 1 as made, 2 vivid); an empty filter's 0 is 1.
+pub(crate) fn sat_of(f: &Filter) -> f32 {
+    if f[0][3] <= 0.0 { 1.0 } else { f[0][3] }
 }
 
 /// A hash of a filter, stable between runs (it names files).
@@ -133,6 +139,8 @@ pub(crate) fn cache_name(source: &str, modified: u64, f: &Filter, w: u32, h: u32
 /// Smooth in, smooth out. (A grey palette: the picture in black and white.)
 pub(crate) struct Grade {
     t: f32,
+    /// The Saturation: the graded colour's chroma scaled by this (1: as it is).
+    k: f32,
     /// The palette's colours as OKLab (L, a, b), darkest first.
     stops: Vec<(f32, f32, f32)>,
 }
@@ -147,14 +155,14 @@ impl Grade {
             })
             .collect();
         stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Grade { t: f[0][0].clamp(0.0, 1.0), stops }
+        Grade { t: f[0][0].clamp(0.0, 1.0), k: sat_of(f), stops }
     }
 
     /// What the card's shader reads (icon.wgsl `wall`): `[0]` = (t, _, how
     /// many stops, _), then each stop as (L, a, b, _), darkest first.
     pub(crate) fn uniform(&self) -> Filter {
         let mut u = [[0.0f32; 4]; 7];
-        u[0] = [self.t, 0.0, self.stops.len() as f32, 0.0];
+        u[0] = [self.t, 0.0, self.stops.len() as f32, self.k];
         for (k, &(l, a, b)) in self.stops.iter().take(6).enumerate() {
             u[k + 1] = [l, a, b, 0.0];
         }
@@ -181,11 +189,11 @@ impl Grade {
     /// One colour through the grade, as sRGB 0..=255, unrounded (the copy
     /// dithers it).
     pub(crate) fn apply(&self, c: Rgb) -> [f32; 3] {
-        if self.t <= 0.0 {
+        if self.t <= 0.0 && self.k == 1.0 {
             return c.map(f32::from);
         }
         let [l, a, b] = oklab(c);
-        let (mut ra, mut rb) = self.ramp(l);
+        let (mut ra, mut rb) = if self.t > 0.0 { self.ramp(l) } else { (a, b) };
         // (Within what a screen shows at this lightness: near black and near
         // white there is little colour to have, and asking for more clips.)
         let room = 0.6 * l.min(1.0 - l).max(0.0);
@@ -194,7 +202,8 @@ impl Grade {
             ra *= room / rc;
             rb *= room / rc;
         }
-        from_oklab(l, a + (ra - a) * self.t, b + (rb - b) * self.t)
+        // The Saturation last: the colour it has, greyer or more vivid.
+        from_oklab(l, (a + (ra - a) * self.t) * self.k, (b + (rb - b) * self.t) * self.k)
     }
 }
 
@@ -511,7 +520,7 @@ fn apply() {
 // ----------------------------------------------------------------- shader
 
 /// The shader's drawing: a new look makes new files.
-const SHADER_VERSION: u64 = 1;
+const SHADER_VERSION: u64 = 2; // 2: the Saturation (K)
 
 /// The most shaders kept.
 const SHADERS_KEPT: usize = 8;
@@ -553,6 +562,7 @@ pub(crate) fn grade_glsl(f: &Filter) -> Option<String> {
 //!DESC golem wallpaper grade
 // Written by Golem: the wallpapers' grade (wall_tint.rs Grade::apply) on the GPU.
 const float T = {t};
+const float K = {k};
 
 float s2l(float x) {{ return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }}
 float l2s(float x) {{ x = clamp(x, 0.0, 1.0); return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }}
@@ -570,12 +580,12 @@ vec4 hook() {{
     float L = 0.21045426 * l_ + 0.7936178 * m_ - 0.004072047 * s_;
     float A = 1.9779985 * l_ - 2.4285922 * m_ + 0.4505937 * s_;
     float B = 0.025904037 * l_ + 0.78277177 * m_ - 0.80867577 * s_;
-    vec2 r = ramp(L);
+    vec2 r = T > 0.0 ? ramp(L) : vec2(A, B);
     float room = 0.6 * max(min(L, 1.0 - L), 0.0);
     float rc = length(r);
     if (rc > room) r *= room / rc;
-    A += (r.x - A) * T;
-    B += (r.y - B) * T;
+    A = (A + (r.x - A) * T) * K;
+    B = (B + (r.y - B) * T) * K;
     float lp = pow(L + 0.39633778 * A + 0.21580376 * B, 3.0);
     float mp = pow(L - 0.105561346 * A - 0.06385417 * B, 3.0);
     float sp = pow(L - 0.08948418 * A - 1.2914855 * B, 3.0);
@@ -586,6 +596,7 @@ vec4 hook() {{
 }}
 "#,
         t = glsl_f(g.t),
+        k = glsl_f(g.k),
         ramp = ramp,
     ))
 }

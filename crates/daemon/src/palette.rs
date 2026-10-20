@@ -275,7 +275,7 @@ impl ColorChoice {
     /// and the shell's look.
     pub(crate) fn levels_now(&self, s: Surface) -> Levels {
         let follows = s == Surface::Wall && crate::display::GolemSettings::load().wallpaper_follows;
-        self.levels(s, crate::lighting::ambient_line(), follows, crate::look::dark())
+        self.levels(s, crate::lighting::ambient_line_for(s), follows, crate::look::dark())
     }
 }
 
@@ -725,11 +725,11 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         all().into_iter().find(|p| p.id == want)
     }
     .unwrap_or_else(golem);
-    // Each surface through its levels: Auto's defaults and Ambient's sun apply here.
-    let sun = crate::lighting::ambient_line();
-    let apps = choice.levels(Surface::Apps, sun, false, dark);
-    let web = choice.levels(Surface::Web, sun, false, dark);
-    let icons = choice.levels(Surface::Icons, sun, false, dark);
+    // Each surface through its levels: Auto's defaults and Ambient's sun apply
+    // here (the programs and the web through the held look, if one).
+    let apps = choice.levels(Surface::Apps, crate::lighting::ambient_line_for(Surface::Apps), false, dark);
+    let web = choice.levels(Surface::Web, crate::lighting::ambient_line_for(Surface::Web), false, dark);
+    let icons = choice.levels(Surface::Icons, crate::lighting::ambient_line_for(Surface::Icons), false, dark);
     let apps_tint = apps.tint;
     let web_tint = web.tint;
     // (The shell's own hues kept readable too: Fluor's and Golem's light
@@ -1086,6 +1086,7 @@ pub(crate) mod tint {
     pub(crate) fn set_lighting(v: u8) {
         LIGHTING.store(v.min(100), std::sync::atomic::Ordering::Relaxed);
     }
+    #[allow(dead_code)]
     pub(crate) fn lighting() -> u8 {
         LIGHTING.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1808,7 +1809,7 @@ fn set_shell(picked: &ColorChoice, system_dark: bool) {
     let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark);
     SHELL_COLOURED.store(lv.tint != Some(0), Ordering::Relaxed);
     SHELL_IS_DARK.store(lv.dark, Ordering::Relaxed);
-    store_shell(shell_plan(picked, system_dark).pair(crate::lighting::shown().unwrap_or(lv.light)));
+    store_shell(shell_plan(picked, system_dark).pair(lv.light));
 }
 
 /// Put the shell's pair in use (None: it reads the screen).
@@ -1853,8 +1854,13 @@ impl ShellPlan {
 }
 
 pub(crate) fn shell_plan(picked: &ColorChoice, system_dark: bool) -> ShellPlan {
+    shell_plan_look(picked, picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark).dark)
+}
+
+/// [`shell_plan`] in a look given: a fade across the looks keeps one of each.
+pub(crate) fn shell_plan_look(picked: &ColorChoice, dark: bool) -> ShellPlan {
     let want = picked.palette_id();
-    let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark);
+    let lv = Levels { dark, ..picked.levels(Surface::Shell, None, false, dark) };
     if lv.tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
         // boxes "have a reddish ground" — they sampled a desert wallpaper):
@@ -2923,11 +2929,11 @@ impl crate::App {
         }
         // (A fade of the Lighting in progress is what is shown: whatever else
         // asks for a re-apply must not jump it back — `lighting.rs`.)
-        let lit_now = crate::lighting::shown().unwrap_or(picked.levels_now(Surface::Shell).light);
+        let lit_now = picked.levels_now(Surface::Shell).light;
         tint::set_lighting(lit_now);
         let veil_moved = crate::lighting::set_veil(picked.ambient_of(Surface::Wall));
         crate::lighting::tell_overview();
-        self.lighting_mirror(picked.ambient_of(Surface::Shell));
+        self.lighting_mirror(picked.ambient_of(Surface::Shell) || picked.ambient_of(Surface::Wall));
         let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's
         // stands in, and this comes back when it is ready.
@@ -2974,9 +2980,10 @@ impl crate::App {
         // The slider is the owner's own hand, and Auto turned off keeps the
         // light it was showing: a fade in progress ends here (`lighting.rs`).
         let frozen = if matches!(key, "colors-lighting" | "colors-lighting-auto" | "colors-ambient" | "colors-wall-ambient" | "colors-auto" | "colors-wall-auto") { self.lighting_cancel() } else { None };
-        // (What the sun gave while Ambient was on: the look and the light the
-        // sliders take over from, so nothing jumps.)
-        let frozen = crate::lighting::ambient_line().map(|(d, l)| (d, frozen.unwrap_or(l)));
+        // (What the sun gave while Ambient was on — the fade's step, else its
+        // last line: the look and the light the sliders take over from, so
+        // nothing jumps.)
+        let frozen = frozen.map(line_to).or_else(crate::lighting::ambient_line);
         GolemSettings::change(|s| {
             let mut c = s.colors.clone().unwrap_or_default();
             match key {
@@ -3185,7 +3192,7 @@ impl crate::App {
                 self.colors_apply(true);
                 self.lighting_auto_on();
             }
-            "colors-auto" | "colors-ambient" => {
+            "colors-auto" | "colors-ambient" | "colors-lighting-auto" => {
                 self.look_set(c.levels_now(Surface::Shell).dark);
                 self.colors_apply(true);
             }
