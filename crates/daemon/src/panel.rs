@@ -4554,9 +4554,7 @@ impl App {
         // what it took.)
         // (Colours' cards: the box may grow to the screen less a margin,
         // `quick_rect`'s cap, and four rows give way to three past that.)
-        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") {
-            self.quick_wall_room().1
-        } else if self.quick.open_is("Colours") {
+        self.quick.tile_room_h = if self.quick.open_is("Wallpaper") || self.quick.open_is("Colours") {
             self.quick_wall_room().1
         } else {
             0.0
