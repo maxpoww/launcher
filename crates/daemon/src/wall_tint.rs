@@ -636,12 +636,12 @@ mod tests {
     use crate::palette::filter_rgb;
 
     fn jade() -> Filter {
-        crate::palette::filter_for("jade", 100, false)
+        crate::palette::filter_for("jade", 100, false, 50)
     }
 
     #[test]
     fn at_zero_the_filter_is_the_identity() {
-        let f = crate::palette::filter_for("jade", 0, false);
+        let f = crate::palette::filter_for("jade", 0, false, 50);
         assert!(!active(&f));
         let mut px = vec![10u8, 200, 30, 128, 128, 128, 255, 0, 9];
         let before = px.clone();
@@ -671,24 +671,24 @@ mod tests {
     #[test]
     fn the_icons_filter_is_unchanged() {
         // The icons' row: 50 %, its own dark flag, through the shared maker.
-        let a = crate::palette::filter_for("jade", 50, true);
+        let a = crate::palette::filter_for("jade", 50, true, 50);
         assert_eq!((a[0][0], a[0][1]), (0.5, 1.0));
         assert!(a[0][2] >= 1.0 && a[0][2] <= 6.0);
-        let b = crate::palette::filter_for("jade", 50, false);
+        let b = crate::palette::filter_for("jade", 50, false, 50);
         assert_eq!(a[1..], b[1..]);
         // Dim alone (level 0) still dims, as the icons' Off + Dark does.
-        let off = crate::palette::filter_for("jade", 0, true);
+        let off = crate::palette::filter_for("jade", 0, true, 50);
         assert_eq!((off[0][0], off[0][1]), (0.0, 1.0));
-        assert_eq!(filter_rgb([200, 200, 200], &crate::palette::filter_for("jade", 0, false)), [200, 200, 200]);
+        assert_eq!(filter_rgb([200, 200, 200], &crate::palette::filter_for("jade", 0, false, 50)), [200, 200, 200]);
     }
 
     #[test]
     fn the_copys_name_follows_level_palette_source_and_size() {
-        let j = crate::palette::filter_for("jade", 60, false);
+        let j = crate::palette::filter_for("jade", 60, false, 50);
         let base = cache_name("/w/a.jpg", 100, &j, 2560, 1600);
         assert_eq!(base, cache_name("/w/a.jpg", 100, &j, 2560, 1600));
-        assert_ne!(base, cache_name("/w/a.jpg", 100, &crate::palette::filter_for("jade", 61, false), 2560, 1600));
-        assert_ne!(base, cache_name("/w/a.jpg", 100, &crate::palette::filter_for("golem", 60, false), 2560, 1600));
+        assert_ne!(base, cache_name("/w/a.jpg", 100, &crate::palette::filter_for("jade", 61, false, 50), 2560, 1600));
+        assert_ne!(base, cache_name("/w/a.jpg", 100, &crate::palette::filter_for("golem", 60, false, 50), 2560, 1600));
         assert_ne!(base, cache_name("/w/b.jpg", 100, &j, 2560, 1600));
         assert_ne!(base, cache_name("/w/a.jpg", 101, &j, 2560, 1600));
         assert_ne!(base, cache_name("/w/a.jpg", 100, &j, 1920, 1080));
@@ -703,7 +703,7 @@ mod tests {
         assert!(copyable("/home/x/Pictures/Wallpapers/a.jpg", &f));
         assert!(!copyable("/home/x/Pictures/Wallpapers/a.mp4", &f), "what moves gets a shader, not a copy");
         assert!(!copyable("/home/x/Pictures/Wallpapers/a.gif", &f));
-        assert!(!tintable("/home/x/Pictures/Wallpapers/a.jpg", &crate::palette::filter_for("jade", 0, false)));
+        assert!(!tintable("/home/x/Pictures/Wallpapers/a.jpg", &crate::palette::filter_for("jade", 0, false, 50)));
         std::env::set_var("XDG_CACHE_HOME", "/tmp/wt-cache");
         assert!(!tintable("/tmp/wt-cache/waverunner/palette-walls/a-1x1.png", &f), "the colours' own picture");
         assert!(!tintable("/tmp/wt-cache/waverunner/palette-cards/a.png", &f), "the first tile");
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn the_shader_carries_the_palette_and_the_slider() {
-        let f = crate::palette::filter_for("jade", 60, false);
+        let f = crate::palette::filter_for("jade", 60, false, 50);
         let g = Grade::of(&f);
         let text = grade_glsl(&f).unwrap();
         assert!(text.starts_with("//!HOOK OUTPUT\n//!BIND HOOKED\n"));
@@ -770,7 +770,7 @@ mod tests {
             assert!(text.contains(&glsl_f(*l)) && text.contains(&glsl_f(*a)) && text.contains(&glsl_f(*b)), "stop {l} {a} {b}");
         }
         assert_eq!(text.matches("if (l <=").count(), g.stops.len(), "one branch per stop");
-        assert!(grade_glsl(&crate::palette::filter_for("jade", 0, false)).is_none(), "level 0 has no shader");
+        assert!(grade_glsl(&crate::palette::filter_for("jade", 0, false, 50)).is_none(), "level 0 has no shader");
         assert_ne!(shader_path(&f), shader_path(&jade()));
         assert_eq!(glsl_f(1.0), "1.0");
         assert_eq!(glsl_f(-0.25), "-0.25");
@@ -783,7 +783,7 @@ mod tests {
         two[0] = [0.8, 0.0, 2.0, 0.0];
         two[1] = [0.35, 0.12, 0.9, 0.0];
         two[2] = [0.9, 0.05, 4.0, 0.0];
-        for (pal, f) in [("jade 100", jade()), ("jade 55", crate::palette::filter_for("jade", 55, false)), ("two", two)] {
+        for (pal, f) in [("jade 100", jade()), ("jade 55", crate::palette::filter_for("jade", 55, false, 50)), ("two", two)] {
             let g = Grade::of(&f);
             let mut worst = 0.0f32;
             for r in (0..=255).step_by(17) {
@@ -860,7 +860,7 @@ mod tests {
         two[0] = [0.8, 0.0, 2.0, 0.0];
         two[1] = [0.9, 0.05, 4.0, 0.0]; // (given out of order: the uniform sorts)
         two[2] = [0.35, 0.12, 0.9, 0.0];
-        for (pal, f) in [("jade 100", jade()), ("jade 37", crate::palette::filter_for("jade", 37, false)), ("two", two)] {
+        for (pal, f) in [("jade 100", jade()), ("jade 37", crate::palette::filter_for("jade", 37, false, 50)), ("two", two)] {
             let g = Grade::of(&f);
             let u = g.uniform();
             assert!(u[1][0] <= u[2][0], "darkest first");
@@ -934,7 +934,7 @@ mod tests {
     fn write_shaders() {
         let out = std::env::var("SHADER_OUT").unwrap();
         for level in [100u8, 50] {
-            let f = crate::palette::filter_for("jade", level, false);
+            let f = crate::palette::filter_for("jade", level, false, 50);
             std::fs::write(format!("{out}/grade{level}.glsl"), grade_glsl(&f).unwrap()).unwrap();
         }
     }
@@ -950,7 +950,7 @@ mod tests {
         let points = [(100u32, 300u32), (300, 300), (600, 300), (850, 300), (1100, 400), (1350, 300), (850, 850), (100, 850), (600, 850), (1100, 850)];
         for (name, level) in [("g100", 100u8), ("g50", 50), ("cleared", 0)] {
             let shot = open(name);
-            let g = Grade::of(&crate::palette::filter_for("jade", level, false));
+            let g = Grade::of(&crate::palette::filter_for("jade", level, false, 50));
             let mut worst = 0.0f32;
             let mut sum = 0.0f32;
             for &(x, y) in &points {
@@ -970,7 +970,7 @@ mod tests {
     fn the_grade_is_smooth_and_keeps_the_light() {
         // A hue wheel at one lightness: the icons' maths snapped it to the
         // palette's hues (bands); the grade moves by small steps all round.
-        let g = Grade::of(&crate::palette::filter_for("monet", 100, false));
+        let g = Grade::of(&crate::palette::filter_for("monet", 100, false, 50));
         let wheel: Vec<Rgb> = (0..360).map(|d| crate::palette::tint::from_lch(0.65, 0.12, d as f32)).collect();
         let out: Vec<[f32; 3]> = wheel.iter().map(|&c| g.apply(c)).collect();
         for w in out.windows(2) {
@@ -983,10 +983,10 @@ mod tests {
             assert!((oklab(o)[0] - oklab(c)[0]).abs() < 0.03);
         }
         // Off is the picture, exactly.
-        let off = Grade::of(&crate::palette::filter_for("monet", 0, false));
+        let off = Grade::of(&crate::palette::filter_for("monet", 0, false, 50));
         assert_eq!(off.apply([12, 200, 99]), [12.0, 200.0, 99.0]);
         // A grey palette: black and white.
-        let grey = Grade::of(&crate::palette::filter_for("fog", 100, false)).apply([200, 40, 40]);
+        let grey = Grade::of(&crate::palette::filter_for("fog", 100, false, 50)).apply([200, 40, 40]);
         assert!((grey[0] - grey[1]).abs() < 2.0 && (grey[1] - grey[2]).abs() < 2.0, "{grey:?}");
     }
 
@@ -1005,7 +1005,7 @@ mod tests {
         std::fs::create_dir_all(out).unwrap();
         for level in [30u8, 60, 100] {
             let t = std::time::Instant::now();
-            let (px, w, h) = render(src.to_str().unwrap(), &crate::palette::filter_for("jade", level, false), (1600, 1)).expect("rendered");
+            let (px, w, h) = render(src.to_str().unwrap(), &crate::palette::filter_for("jade", level, false, 50), (1600, 1)).expect("rendered");
             println!("level {level}: {w}x{h} in {:?}", t.elapsed());
             image::save_buffer(out.join(format!("jade-{level}.png")), &px, w, h, image::ColorType::Rgb8).unwrap();
         }
@@ -1013,7 +1013,7 @@ mod tests {
         let his = dir.join("pawel-czerwinski-PkiHF-EeT6o-unsplash.jpg");
         if his.is_file() {
             for (pal, level) in [("hacker", 60u8), ("hacker", 100), ("monet", 100)] {
-                let (px, w, h) = render(his.to_str().unwrap(), &crate::palette::filter_for(pal, level, false), (1600, 1)).expect("rendered");
+                let (px, w, h) = render(his.to_str().unwrap(), &crate::palette::filter_for(pal, level, false, 50), (1600, 1)).expect("rendered");
                 image::save_buffer(out.join(format!("pawel-{pal}-{level}.png")), &px, w, h, image::ColorType::Rgb8).unwrap();
             }
             image::open(&his).unwrap().resize(1600, 1000, image::imageops::FilterType::Triangle).save(out.join("pawel-original.png")).unwrap();

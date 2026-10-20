@@ -497,7 +497,8 @@ fn main() -> anyhow::Result<()> {
     // is the SHELL row's (Max, 2026-10-18: no general Dark toggle; each row
     // has its own, the shell's Light being what the general Light was).
     palette::settle_looks();
-    look::set_dark(palette::choice().shell_dark.unwrap_or(true));
+    palette::settle_lines();
+    look::set_dark(palette::shell_dark());
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
     // The nix thread owns the nixpkgs package index (Install-section

@@ -562,14 +562,27 @@ impl App {
     }
 }
 
-/// Keep `v` as the Lighting the owner last saw.
+/// Keep `v` as the light the owner last saw: every surface's (the four of
+/// the Colours tab; the wallpaper's where its Ambient is on).
 fn store(v: u8) {
     crate::display::GolemSettings::change(|s| {
         let mut c = s.colors.clone().unwrap_or_default();
-        c.lighting = Some(v);
+        for own in [&mut c.shell_light, &mut c.apps_light, &mut c.icons_light, &mut c.web_light] {
+            *own = Some(v);
+        }
+        if c.ambient_of(crate::palette::Surface::Wall) {
+            c.wall_light = Some(v);
+        }
         s.colors = Some(c);
         s.store();
     });
+}
+
+/// THE SUN'S LINE now: the look and the light Ambient gives — while a fade
+/// shows a step, that step in the shell's look. (The line across both looks,
+/// light by day and dark at dusk, comes with Ambient's next round.)
+pub(crate) fn ambient_line() -> Option<(bool, u8)> {
+    shown().map(|v| (crate::look::dark(), v))
 }
 
 // ---------------------------------------------------------------- Wayland

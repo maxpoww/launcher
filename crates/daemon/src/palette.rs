@@ -130,6 +130,50 @@ pub(crate) struct ColorChoice {
     /// moved toward the palette, 0..100. None / 0 = the pictures as they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper_tint: Option<u8>,
+    // THE COLOURS MODEL (Max, 2026-10-20; docs/colours-model.md): each surface
+    // its Lighting within its look (None = 50, as designed) and its Saturation
+    // (None = 50, as made); the wallpaper its own look; Auto and Ambient per
+    // tab; each app's own look. `lighting`/`lighting_auto`/`lighting_veil`
+    // above are the old general ones, carried into these once (`settle_lines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_light: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_light: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons_light: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_light: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_light: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_sat: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_sat: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons_sat: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_sat: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_sat: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_dark: Option<bool>,
+    /// AUTO of the Colours tab: Golem's defaults for the four surfaces, Ambient
+    /// with them (None = off; a fresh install is set on by `settle_lines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_auto: Option<bool>,
+    /// AMBIENT of the Colours tab: the light of the four surfaces follows the sun.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambient: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ambient: Option<bool>,
+    /// An app's own look, by desktop id: "dark" or "light" (absent: the Apps').
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub app_look: std::collections::BTreeMap<String, String>,
+    /// Set once the general Lighting was carried into the surfaces' own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<bool>,
     /// Before 2026-10-16 the apps and the web were switches; read once.
     #[serde(default, skip_serializing)]
     pub apps: Option<bool>,
@@ -147,7 +191,7 @@ fn web_off() -> Option<u8> {
 
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, wallpaper_tint: None, apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, wallpaper_tint: None, shell_light: None, apps_light: None, icons_light: None, web_light: None, wall_light: None, shell_sat: None, apps_sat: None, icons_sat: None, web_sat: None, wall_sat: None, wall_dark: None, auto: None, wall_auto: None, ambient: None, wall_ambient: None, app_look: Default::default(), lines: None, apps: None, web: None, dynamic: None }
     }
 }
 
@@ -177,6 +221,114 @@ impl ColorChoice {
         self.web = None;
         self
     }
+
+    /// Whether a surface's tab is in Auto (Golem's defaults).
+    pub(crate) fn auto_of(&self, s: Surface) -> bool {
+        match s {
+            Surface::Wall => self.wall_auto,
+            _ => self.auto,
+        }
+        .unwrap_or(false)
+    }
+    /// Whether a surface's light follows the sun (Auto has it on too).
+    pub(crate) fn ambient_of(&self, s: Surface) -> bool {
+        self.auto_of(s)
+            || match s {
+                Surface::Wall => self.wall_ambient,
+                _ => self.ambient,
+            }
+            .unwrap_or(false)
+    }
+
+    /// What a surface wears: its own levels; under Ambient the sun's look and
+    /// light (`sun`); under Auto Golem's defaults besides (the palette as made,
+    /// icons untinted, the palette's own wallpaper whole and a picture as it
+    /// is, saturation as made). `system_dark` stands in for a look never chosen.
+    pub(crate) fn levels(&self, s: Surface, sun: Option<(bool, u8)>, wall_follows: bool, system_dark: bool) -> Levels {
+        let auto = self.auto_of(s);
+        let (own_dark, own_light, own_tint, own_sat) = match s {
+            Surface::Shell => (self.shell_dark, self.shell_light, self.shell_tint, self.shell_sat),
+            Surface::Apps => (self.apps_dark, self.apps_light, self.apps_level(), self.apps_sat),
+            Surface::Icons => (self.icons_dark, self.icons_light, Some(self.icons_tint), self.icons_sat),
+            Surface::Web => (self.web_dark, self.web_light, self.web_level(), self.web_sat),
+            Surface::Wall => (self.wall_dark, self.wall_light, Some(self.wallpaper_tint.unwrap_or(0)), self.wall_sat),
+        };
+        let (dark, light) = match (self.ambient_of(s), sun) {
+            (true, Some((d, l))) => (d, l.min(100)),
+            _ => (own_dark.unwrap_or(system_dark), own_light.unwrap_or(50).min(100)),
+        };
+        let (tint, sat) = if auto {
+            let tint = match s {
+                Surface::Icons => Some(0),
+                Surface::Wall => Some(if wall_follows { 100 } else { 0 }),
+                _ => None,
+            };
+            (tint, 50)
+        } else {
+            (own_tint, own_sat.unwrap_or(50).min(100))
+        };
+        Levels { dark, light, tint, sat }
+    }
+
+    /// [`levels`] with what is true now: the sun's line while a fade shows it,
+    /// whether the wallpaper follows the colours (read only for the wallpaper),
+    /// and the shell's look.
+    pub(crate) fn levels_now(&self, s: Surface) -> Levels {
+        let follows = s == Surface::Wall && crate::display::GolemSettings::load().wallpaper_follows;
+        self.levels(s, crate::lighting::ambient_line(), follows, crate::look::dark())
+    }
+}
+
+/// A surface the colours dress; each has its own three (docs/colours-model.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Surface {
+    Shell,
+    Apps,
+    Icons,
+    Web,
+    Wall,
+}
+
+/// What a surface wears now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Levels {
+    pub dark: bool,
+    /// Its Lighting within the look: 0..100, 50 as designed.
+    pub light: u8,
+    /// Its Palette slider: None = as made, Some(0) = none (the makers' own
+    /// colours; a picture as it is), else how far toward full colour.
+    pub tint: Option<u8>,
+    /// Its Saturation: 0 grey, 50 as made, 100 vivid.
+    pub sat: u8,
+}
+
+/// ONE LINE for a surface's Lighting (the box's slider): 0..45 the Dark look,
+/// 55..100 the Light look, 46..54 the gap the knob leaps over; 50 of each half
+/// is as designed.
+#[allow(dead_code)]
+pub(crate) fn line_of(dark: bool, light: u8) -> u8 {
+    let w = f32::from(light.min(100)) / 100.0 * 45.0;
+    if dark { w.round() as u8 } else { 55 + w.round() as u8 }
+}
+/// Ambient or Auto turned off: each surface's sliders take the look and the
+/// light the sun was giving (`sun`), so nothing jumps.
+fn freeze(c: &mut ColorChoice, surfaces: &[Surface], sun: Option<(bool, u8)>) {
+    let Some((dark, light)) = sun else { return };
+    for s in surfaces {
+        let (d, l) = match s {
+            Surface::Shell => (&mut c.shell_dark, &mut c.shell_light),
+            Surface::Apps => (&mut c.apps_dark, &mut c.apps_light),
+            Surface::Icons => (&mut c.icons_dark, &mut c.icons_light),
+            Surface::Web => (&mut c.web_dark, &mut c.web_light),
+            Surface::Wall => (&mut c.wall_dark, &mut c.wall_light),
+        };
+        *d = Some(dark);
+        *l = Some(light);
+    }
+}
+pub(crate) fn line_to(v: u8) -> (bool, u8) {
+    let v = v.min(100);
+    if v < 50 { (true, (f32::from(v.min(45)) / 45.0 * 100.0).round() as u8) } else { (false, (f32::from(v.max(55) - 55) / 45.0 * 100.0).round() as u8) }
 }
 
 /// A palette file.
@@ -235,6 +387,12 @@ pub(crate) struct Theme {
     pub apps_dark: bool,
     pub web_dark: bool,
     pub icons_dark: bool,
+    /// Each surface's Lighting within its look and its Saturation (see [`Levels`]).
+    pub apps_light: u8,
+    pub apps_sat: u8,
+    pub web_light: u8,
+    pub web_sat: u8,
+    pub icons_sat: u8,
     /// Both looks as the programs wear them (tinted, or the makers' own with
     /// the palette's accent): what writes both at once (foot, GTK 4) reads.
     pub pair: Option<([Rgb; 16], usize, [Rgb; 16], usize)>,
@@ -478,7 +636,7 @@ pub(crate) fn swatch_in_use() -> Option<Vec<Rgb>> {
     if id == DYNAMIC_ID {
         return None;
     }
-    palette_of(id).map(|p| swatch(&p, c.shell_dark.unwrap_or_else(crate::look::dark)))
+    palette_of(id).map(|p| swatch(&p, c.levels_now(Surface::Wall).dark))
 }
 
 /// The general Dark toggle is gone (Max, 2026-10-18): each row — apps, web,
@@ -500,6 +658,41 @@ pub(crate) fn settle_looks() {
         s.store();
     });
     info!("palette: each row keeps the look it showed ({})", if was { "dark" } else { "light" });
+}
+
+/// THE LINES (2026-10-20): once, the general Lighting becomes each surface's
+/// own, Auto lighting becomes Ambient and "Include the background" the
+/// wallpaper's Ambient; a machine with colours of its own stays manual, a
+/// fresh one starts in Auto (Golem's defaults, the light with the sun).
+pub(crate) fn settle_lines() {
+    let had = GolemSettings::load().colors;
+    if had.as_ref().is_some_and(|c| c.lines == Some(true)) {
+        return;
+    }
+    let fresh = had.is_none();
+    GolemSettings::change(|s| {
+        let mut c = s.colors.clone().unwrap_or_default();
+        if fresh {
+            c.auto = Some(true);
+            c.wall_auto = Some(true);
+        } else {
+            let l = c.lighting;
+            for own in [&mut c.shell_light, &mut c.apps_light, &mut c.icons_light, &mut c.web_light] {
+                if own.is_none() {
+                    *own = l;
+                }
+            }
+            c.ambient = c.lighting_auto.filter(|a| *a);
+            c.wall_ambient = (c.lighting_auto == Some(true) && c.lighting_veil == Some(true)).then_some(true);
+            c.wall_dark = c.wall_dark.or(c.shell_dark);
+            c.auto = Some(false);
+            c.wall_auto = Some(false);
+        }
+        c.lines = Some(true);
+        s.colors = Some(c);
+        s.store();
+    });
+    info!("palette: the lighting is each surface's own ({})", if fresh { "a fresh start: Auto" } else { "carried over" });
 }
 
 /// The theme a choice gives in a look.
@@ -532,8 +725,13 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         all().into_iter().find(|p| p.id == want)
     }
     .unwrap_or_else(golem);
-    let apps_tint = choice.apps_level();
-    let web_tint = choice.web_level();
+    // Each surface through its levels: Auto's defaults and Ambient's sun apply here.
+    let sun = crate::lighting::ambient_line();
+    let apps = choice.levels(Surface::Apps, sun, false, dark);
+    let web = choice.levels(Surface::Web, sun, false, dark);
+    let icons = choice.levels(Surface::Icons, sun, false, dark);
+    let apps_tint = apps.tint;
+    let web_tint = web.tint;
     // (The shell's own hues kept readable too: Fluor's and Golem's light
     // accents stood at 2.5:1 on their surface.)
     let (mut c, acc) = if dark { (p.dark, p.accent) } else { (p.light, p.accent_light) };
@@ -549,10 +747,15 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         accent_slot: acc,
         apps_tint,
         web_tint,
-        icons_tint: choice.icons_tint,
-        apps_dark: choice.apps_dark.unwrap_or(dark),
-        web_dark: choice.web_dark.unwrap_or(dark),
-        icons_dark: choice.icons_dark.unwrap_or(dark),
+        icons_tint: icons.tint.unwrap_or(0),
+        apps_dark: apps.dark,
+        web_dark: web.dark,
+        icons_dark: icons.dark,
+        apps_light: apps.light,
+        apps_sat: apps.sat,
+        web_light: web.light,
+        web_sat: web.sat,
+        icons_sat: icons.sat,
         pair: None,
     }
 }
@@ -932,10 +1135,27 @@ pub(crate) mod tint {
         out
     }
 
+    /// SATURATION: every colour's chroma scaled — 0 grey, 50 as made, 100
+    /// twice as vivid (kept in gamut by `from_lch`). Lightness is kept, so
+    /// what read on what still reads; the hues' floors are the caller's
+    /// (`readable`, `as_text`).
+    pub(crate) fn saturate(c: &[Rgb; 16], sat: u8) -> [Rgb; 16] {
+        if sat == 50 {
+            return *c;
+        }
+        let k = f32::from(sat.min(100)) / 50.0;
+        let mut out = *c;
+        for (i, x) in c.iter().enumerate() {
+            let (l, ch, h) = lch(*x);
+            out[i] = from_lch(l, ch * k, h);
+        }
+        out
+    }
+
     /// The palette at a slider value: `None` as made; 0 (off) is the caller's.
-    /// Lit by the Lighting.
-    pub(crate) fn walk(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
-        lit(&walk_unlit(c, own, dark, level), dark, lighting())
+    /// Lit by the surface's `light` and saturated by its `sat`.
+    pub(crate) fn walk(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>, light: u8, sat: u8) -> [Rgb; 16] {
+        saturate(&lit(&walk_unlit(c, own, dark, level), dark, light), sat)
     }
     pub(crate) fn walk_unlit(c: &[Rgb; 16], own: Rgb, dark: bool, level: Option<u8>) -> [Rgb; 16] {
         let Some(s) = level.filter(|s| *s > 0) else { return *c };
@@ -964,17 +1184,17 @@ pub(crate) mod tint {
         fn the_path_goes_grey_made_full_and_stays_readable() {
             let p = crate::palette::all().into_iter().find(|p| p.id == "jade").expect("jade is in the box");
             let own = p.dark[p.accent];
-            let grey = walk(&p.dark, own, true, Some(1));
+            let grey = walk(&p.dark, own, true, Some(1), 50, 50);
             assert!(lch(grey[1]).1 < 0.004, "1 is neutral grey: {:?}", grey[1]);
-            assert_eq!(walk(&p.dark, own, true, None), p.dark, "None is the palette as made");
+            assert_eq!(walk(&p.dark, own, true, None, 50, 50), p.dark, "None is the palette as made");
             let made = made_at(&p.dark, own, true).round() as u8;
-            assert_eq!(walk(&p.dark, own, true, Some(made)), p.dark, "the as-made point gives the palette as made");
-            let full = walk(&p.dark, own, true, Some(100));
+            assert_eq!(walk(&p.dark, own, true, Some(made), 50, 50), p.dark, "the as-made point gives the palette as made");
+            let full = walk(&p.dark, own, true, Some(100), 50, 50);
             // (Dark is darker since 2026-10-18: the colour at depth — deep, but clearly it.)
             assert!(lch(full[1]).1 > 0.04 && lch(full[1]).0 < 0.3, "100 is the colour itself, deep: {:?}", full[1]);
             for v in [1u8, 25, 50, 75, 90, 100] {
                 for (c, dark) in [(&p.dark, true), (&p.light, false)] {
-                    let x = walk(c, own, dark, Some(v));
+                    let x = walk(c, own, dark, Some(v), 50, 50);
                     assert!(contrast(rel_lum(x[5]), rel_lum(x[1])) >= 4.5, "text reads at {v} (dark={dark})");
                 }
             }
@@ -1001,7 +1221,7 @@ pub(crate) mod tint {
         #[test]
         fn a_grey_palette_stays_grey() {
             let p = crate::palette::all().into_iter().find(|p| p.id == "charcoal").expect("charcoal is in the box");
-            let x = walk(&p.dark, p.dark[p.accent], true, Some(100));
+            let x = walk(&p.dark, p.dark[p.accent], true, Some(100), 50, 50);
             assert!(lch(x[1]).1 < 0.01, "{:?}", x[1]);
         }
     }
@@ -1504,7 +1724,7 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
                 ..t.clone()
             };
         }
-        level => (tint::walk(&pal.dark, own, true, level), tint::walk(&pal.light, own, false, level)),
+        level => (tint::walk(&pal.dark, own, true, level, t.apps_light, t.apps_sat), tint::walk(&pal.light, own, false, level, t.apps_light, t.apps_sat)),
     };
     let (mut dark_v, mut light_v) = (dark_v, light_v);
     readable(&mut dark_v, true, pal.accent);
@@ -1575,9 +1795,9 @@ pub(crate) fn icon_filter() -> [[f32; 4]; 7] {
 /// the slider above Off); at Off, Golem's own neutral ground.
 static SHELL: std::sync::Mutex<Option<([f32; 4], [f32; 4])>> = std::sync::Mutex::new(None);
 
-/// The shell's own look: its Dark/Light, else the system's.
+/// The shell's own look: its Dark/Light (the sun's under Ambient), else the system's.
 pub(crate) fn shell_dark() -> bool {
-    choice().shell_dark.unwrap_or_else(crate::look::dark)
+    choice().levels_now(Surface::Shell).dark
 }
 
 pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
@@ -1585,9 +1805,10 @@ pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
 }
 
 fn set_shell(picked: &ColorChoice, system_dark: bool) {
-    SHELL_COLOURED.store(picked.shell_tint != Some(0), Ordering::Relaxed);
-    SHELL_IS_DARK.store(picked.shell_dark.unwrap_or(system_dark), Ordering::Relaxed);
-    store_shell(shell_plan(picked, system_dark).pair(tint::lighting()));
+    let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark);
+    SHELL_COLOURED.store(lv.tint != Some(0), Ordering::Relaxed);
+    SHELL_IS_DARK.store(lv.dark, Ordering::Relaxed);
+    store_shell(shell_plan(picked, system_dark).pair(crate::lighting::shown().unwrap_or(lv.light)));
 }
 
 /// Put the shell's pair in use (None: it reads the screen).
@@ -1606,8 +1827,8 @@ pub(crate) enum ShellPlan {
     Screen,
     /// A pair the Lighting does not move (Off: Golem's own neutral ground).
     Fixed(([f32; 4], [f32; 4])),
-    /// The palette's variant walked to the Shell slider, not yet lit.
-    Walked { unlit: [Rgb; 16], dark: bool },
+    /// The palette's variant walked to the Shell slider, not yet lit; its Saturation.
+    Walked { unlit: [Rgb; 16], dark: bool, sat: u8 },
 }
 
 impl ShellPlan {
@@ -1618,8 +1839,8 @@ impl ShellPlan {
             Self::Fixed(p) => Some(*p),
             // (`readable` moves only the hues, slots 8..16: neither the
             // surface nor the ink, so it is not run for every frame.)
-            Self::Walked { unlit, dark } => {
-                let c = tint::lit(unlit, *dark, v);
+            Self::Walked { unlit, dark, sat } => {
+                let c = tint::saturate(&tint::lit(unlit, *dark, v), *sat);
                 Some((linear(c[0x01]), linear(c[0x05])))
             }
         }
@@ -1633,27 +1854,28 @@ impl ShellPlan {
 
 pub(crate) fn shell_plan(picked: &ColorChoice, system_dark: bool) -> ShellPlan {
     let want = picked.palette_id();
-    if picked.shell_tint == Some(0) {
+    let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark);
+    if lv.tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
         // boxes "have a reddish ground" — they sampled a desert wallpaper):
         // Golem's own ground and ink, in the shell's Dark/Light.
-        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, picked.shell_dark.unwrap_or(system_dark));
+        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, lv.dark);
         ShellPlan::Fixed((linear(t.surface()), linear(t.ink())))
     } else if want == DYNAMIC_ID {
         ShellPlan::Screen
     } else {
         let p = if want == DRAFT_ID { preview() } else { all().into_iter().find(|p| p.id == want) }.unwrap_or_else(golem);
-        let dark = picked.shell_dark.unwrap_or(system_dark);
-        let base = if dark { p.dark } else { p.light };
-        ShellPlan::Walked { unlit: tint::walk_unlit(&base, p.dark[p.accent], dark, picked.shell_tint), dark }
+        let base = if lv.dark { p.dark } else { p.light };
+        ShellPlan::Walked { unlit: tint::walk_unlit(&base, p.dark[p.accent], lv.dark, lv.tint), dark: lv.dark, sat: lv.sat }
     }
 }
 
 fn set_icon_filter(t: &Theme) {
     // Dark icons dim at Off too when their Dark was clicked (Off = no
     // colour, not no dark).
-    let dim = if t.icons_tint > 0 { t.icons_dark } else { choice().icons_dark == Some(true) };
-    let f = filter_for(&t.id, t.icons_tint, dim);
+    let c = choice();
+    let dim = if t.icons_tint > 0 { t.icons_dark } else { t.icons_dark && (c.icons_dark.is_some() || c.ambient_of(Surface::Icons)) };
+    let f = filter_for(&t.id, t.icons_tint, dim, t.icons_sat);
     if let Ok(mut g) = ICON_FILTER.lock() {
         *g = f;
     }
@@ -1661,9 +1883,11 @@ fn set_icon_filter(t: &Theme) {
 
 /// A filter (the icon shader's layout, see [`icon_filter`]) for the palette
 /// `id` at `level` 0..100: the icons' and the wallpapers' alike. Level 0 and
-/// no `dim` is the identity.
-pub(crate) fn filter_for(id: &str, level: u8, dim: bool) -> [[f32; 4]; 7] {
+/// no `dim` is the identity. `sat` (0 grey, 50 as made, 100 vivid) rides in
+/// row 0's last slot as a chroma factor for the shaders.
+pub(crate) fn filter_for(id: &str, level: u8, dim: bool, sat: u8) -> [[f32; 4]; 7] {
     let mut f = [[0.0f32; 4]; 7];
+    f[0][3] = f32::from(sat.min(100)) / 50.0;
     if let Some(p) = palette_of(id) {
         let soul: Vec<Rgb> = if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() };
         let all: Vec<(f32, f32, f32)> = soul.iter().map(|&c| tint::lch(c)).collect();
@@ -1682,11 +1906,12 @@ pub(crate) fn filter_for(id: &str, level: u8, dim: bool) -> [[f32; 4]; 7] {
 /// may wait. Level 0 is the identity.
 pub(crate) fn wall_filter_now() -> [[f32; 4]; 7] {
     let c = choice();
-    let level = c.wallpaper_tint.unwrap_or(0).min(100);
-    if level == 0 {
+    let lw = c.levels_now(Surface::Wall);
+    let level = lw.tint.unwrap_or(0).min(100);
+    if level == 0 && lw.sat == 50 {
         return [[0.0; 4]; 7];
     }
-    filter_for(if previewing() { DRAFT_ID } else { c.palette_id() }, level, false)
+    filter_for(if previewing() { DRAFT_ID } else { c.palette_id() }, level, false, lw.sat)
 }
 
 /// The wallpapers' filter as `colors_apply` last set it — what the box's
@@ -1705,7 +1930,8 @@ static WALL_LIVE: std::sync::Mutex<Option<[[f32; 4]; 7]>> = std::sync::Mutex::ne
 
 /// Put the dragged level in use (`None`: the saved one is what is shown).
 pub(crate) fn set_wall_live(level: Option<u8>) {
-    let f = level.map(|l| if l == 0 { [[0.0; 4]; 7] } else { filter_for(&current().id, l.min(100), false) });
+    let sat = choice().levels_now(Surface::Wall).sat;
+    let f = level.map(|l| if l == 0 && sat == 50 { [[0.0; 4]; 7] } else { filter_for(&current().id, l.min(100), false, sat) });
     if let Ok(mut g) = WALL_LIVE.lock() {
         *g = f;
     }
@@ -1854,7 +2080,11 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     let pal = palette_of(&shell.id).unwrap_or_else(golem);
     let wv = if shell.web_dark { pal.dark } else { pal.light };
     // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
-    let mut wv = if web_dark_off { tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, tint::lighting()) } else { tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint) };
+    let mut wv = if web_dark_off {
+        tint::saturate(&tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, shell.web_light), shell.web_sat)
+    } else {
+        tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint, shell.web_light, shell.web_sat)
+    };
     if web_dark_off {
         // …and the ink with no colour either (Hacker's is green: ASUS,
         // 2026-10-16, "the text on wikipedia is green").
@@ -2693,11 +2923,11 @@ impl crate::App {
         }
         // (A fade of the Lighting in progress is what is shown: whatever else
         // asks for a re-apply must not jump it back — `lighting.rs`.)
-        let lit_now = crate::lighting::shown().unwrap_or(picked.lighting.unwrap_or(50));
+        let lit_now = crate::lighting::shown().unwrap_or(picked.levels_now(Surface::Shell).light);
         tint::set_lighting(lit_now);
-        let veil_moved = crate::lighting::set_veil(picked.lighting_veil.unwrap_or(false));
+        let veil_moved = crate::lighting::set_veil(picked.ambient_of(Surface::Wall));
         crate::lighting::tell_overview();
-        self.lighting_mirror(picked.lighting_auto.unwrap_or(false));
+        self.lighting_mirror(picked.ambient_of(Surface::Shell));
         let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's
         // stands in, and this comes back when it is ready.
@@ -2710,8 +2940,9 @@ impl crate::App {
         }
         set_icon_filter(&theme);
         // The wallpapers' slider: the box's thumbnails and the picture up.
-        let wall = filter_for(&theme.id, picked.wallpaper_tint.unwrap_or(0).min(100), false);
-        let wall = if wall[0][0] > 0.0 { wall } else { [[0.0; 4]; 7] };
+        let lw = picked.levels_now(Surface::Wall);
+        let wall = filter_for(&theme.id, lw.tint.unwrap_or(0).min(100), false, lw.sat);
+        let wall = if wall[0][0] > 0.0 || lw.sat != 50 { wall } else { [[0.0; 4]; 7] };
         if set_wall_filter(wall) {
             crate::wall_tint::refresh();
         }
@@ -2742,7 +2973,10 @@ impl crate::App {
     pub(crate) fn colors_pick(&mut self, key: &str, value: &str) {
         // The slider is the owner's own hand, and Auto turned off keeps the
         // light it was showing: a fade in progress ends here (`lighting.rs`).
-        let frozen = if matches!(key, "colors-lighting" | "colors-lighting-auto") { self.lighting_cancel() } else { None };
+        let frozen = if matches!(key, "colors-lighting" | "colors-lighting-auto" | "colors-ambient" | "colors-wall-ambient" | "colors-auto" | "colors-wall-auto") { self.lighting_cancel() } else { None };
+        // (What the sun gave while Ambient was on: the look and the light the
+        // sliders take over from, so nothing jumps.)
+        let frozen = crate::lighting::ambient_line().map(|(d, l)| (d, frozen.unwrap_or(l)));
         GolemSettings::change(|s| {
             let mut c = s.colors.clone().unwrap_or_default();
             match key {
@@ -2771,32 +3005,133 @@ impl crate::App {
                         _ => c.icons_tint = level.unwrap_or(50),
                     }
                 }
-                // One kills the other: the slider is manual (Max, 2026-10-18).
+                // The old general Lighting: every surface's; manual from then on.
                 "colors-lighting" => match value.parse::<u8>() {
                     Ok(n) => {
-                        c.lighting = Some(n.min(100));
-                        c.lighting_auto = None;
+                        for own in [&mut c.shell_light, &mut c.apps_light, &mut c.icons_light, &mut c.web_light] {
+                            *own = Some(n.min(100));
+                        }
+                        c.ambient = None;
                     }
                     Err(_) => return,
                 },
-                "colors-lighting-auto" => match value {
-                    "on" => c.lighting_auto = Some(true),
+                // Ambient (the old Auto lighting): off keeps the light it showed.
+                "colors-lighting-auto" | "colors-ambient" => match value {
+                    "on" => c.ambient = Some(true),
                     "off" => {
-                        c.lighting_auto = None;
-                        if let Some(v) = frozen {
-                            c.lighting = Some(v);
-                        }
+                        c.ambient = None;
+                        freeze(&mut c, &[Surface::Shell, Surface::Apps, Surface::Icons, Surface::Web], frozen);
                     }
                     _ => return,
                 },
+                "colors-wall-ambient" => match value {
+                    "on" => c.wall_ambient = Some(true),
+                    "off" => {
+                        c.wall_ambient = None;
+                        freeze(&mut c, &[Surface::Wall], frozen);
+                    }
+                    _ => return,
+                },
+                // AUTO per tab: Golem's defaults + Ambient; off leaves the sliders
+                // where Auto had them (nothing jumps).
+                "colors-auto" | "colors-wall-auto" => {
+                    let wall = key == "colors-wall-auto";
+                    let on = match value {
+                        "on" => true,
+                        "off" => false,
+                        _ => return,
+                    };
+                    if wall {
+                        c.wall_auto = on.then_some(true);
+                        c.wall_ambient = on.then_some(true);
+                    } else {
+                        c.auto = on.then_some(true);
+                        c.ambient = on.then_some(true);
+                    }
+                    if !on {
+                        let follows = s.wallpaper_follows;
+                        let surfaces: &[Surface] = if wall { &[Surface::Wall] } else { &[Surface::Shell, Surface::Apps, Surface::Icons, Surface::Web] };
+                        let defaults = ColorChoice { auto: Some(true), wall_auto: Some(true), ..Default::default() };
+                        for &sf in surfaces {
+                            let d = defaults.levels(sf, None, follows, true);
+                            match sf {
+                                Surface::Shell => {
+                                    c.shell_tint = d.tint;
+                                    c.shell_sat = None;
+                                }
+                                Surface::Apps => {
+                                    c.apps_tint = d.tint;
+                                    c.apps_sat = None;
+                                }
+                                Surface::Icons => {
+                                    c.icons_tint = d.tint.unwrap_or(0);
+                                    c.icons_sat = None;
+                                }
+                                Surface::Web => {
+                                    c.web_tint = d.tint;
+                                    c.web_sat = None;
+                                }
+                                Surface::Wall => {
+                                    c.wallpaper_tint = d.tint.filter(|t| *t > 0);
+                                    c.wall_sat = None;
+                                }
+                            }
+                        }
+                        freeze(&mut c, surfaces, frozen);
+                    }
+                }
+                // A surface's Lighting as ONE LINE (0..100, the gap at 46..54).
+                "colors-shell-line" | "colors-apps-line" | "colors-icons-line" | "colors-web-line" | "colors-wall-line" => match value.parse::<u8>() {
+                    Ok(n) => {
+                        let (dark, light) = line_to(n);
+                        let (d, l) = match key {
+                            "colors-shell-line" => (&mut c.shell_dark, &mut c.shell_light),
+                            "colors-apps-line" => (&mut c.apps_dark, &mut c.apps_light),
+                            "colors-icons-line" => (&mut c.icons_dark, &mut c.icons_light),
+                            "colors-web-line" => (&mut c.web_dark, &mut c.web_light),
+                            _ => (&mut c.wall_dark, &mut c.wall_light),
+                        };
+                        *d = Some(dark);
+                        *l = Some(light);
+                    }
+                    Err(_) => return,
+                },
+                // A surface's Saturation.
+                "colors-shell-sat" | "colors-apps-sat" | "colors-icons-sat" | "colors-web-sat" | "colors-wall-sat" => match value.parse::<u8>() {
+                    Ok(n) => {
+                        let v = (n.min(100) != 50).then_some(n.min(100));
+                        match key {
+                            "colors-shell-sat" => c.shell_sat = v,
+                            "colors-apps-sat" => c.apps_sat = v,
+                            "colors-icons-sat" => c.icons_sat = v,
+                            "colors-web-sat" => c.web_sat = v,
+                            _ => c.wall_sat = v,
+                        }
+                    }
+                    Err(_) => return,
+                },
+                // An app's own look: "<desktop id>:dark|light|follow".
+                "colors-app-look" => {
+                    let Some((id, look)) = value.rsplit_once(':') else { return };
+                    match look {
+                        "dark" | "light" => {
+                            c.app_look.insert(id.to_owned(), look.to_owned());
+                        }
+                        "follow" => {
+                            c.app_look.remove(id);
+                        }
+                        _ => return,
+                    }
+                }
                 // The wallpapers' Colours: 0 = the pictures as they are.
-                "colors-wallpaper" => match value.parse::<u8>() {
+                "colors-wallpaper" | "colors-wall-tint" => match value.parse::<u8>() {
                     Ok(n) => c.wallpaper_tint = (n > 0).then_some(n.min(100)),
                     Err(_) => return,
                 },
+                // "Include the background" of the old box: the wallpaper's Ambient.
                 "colors-lighting-veil" => match value {
-                    "on" => c.lighting_veil = Some(true),
-                    "off" => c.lighting_veil = None,
+                    "on" => c.wall_ambient = Some(true),
+                    "off" => c.wall_ambient = None,
                     _ => return,
                 },
                 // An app in its own colours or the palette's: its id turns it.
@@ -2830,24 +3165,29 @@ impl crate::App {
         let c = choice();
         // A wallpaper that follows the colours is made again for the palette
         // or the look just chosen (it does nothing for any other key).
-        if matches!(key, "colors-palette" | "colors-shell-look") {
+        if matches!(key, "colors-palette" | "colors-shell-look" | "colors-wall-line" | "colors-wall-auto" | "colors-wall-ambient") {
             crate::wall_follow::refresh();
         }
         match key {
             // The shell's look is the dock's whole look (its glass, figures,
             // boxes, the desktop) — what the general Light used to be.
-            "colors-shell-look" => self.look_set(c.shell_dark.unwrap_or(true)),
+            "colors-shell-look" | "colors-shell-line" => self.look_set(c.levels_now(Surface::Shell).dark),
             // The apps' look is the one the system tells every program.
-            "colors-apps-look" => {
-                let dark = c.apps_dark.unwrap_or(true);
+            "colors-apps-look" | "colors-apps-line" => {
+                let dark = c.levels_now(Surface::Apps).dark;
                 let _ = std::thread::Builder::new().name("apps-look".into()).spawn(move || crate::controls::assert_dark(dark));
                 self.colors_apply(true);
             }
-            // Auto turned ON is the owner's own act, and they are plainly
-            // there: the light goes to the sun's at once, in front of them.
-            "colors-lighting-auto" if value == "on" => {
-                self.colors_apply(false);
+            // Auto or Ambient turned ON is the owner's own act, and they are
+            // plainly there: the light goes to the sun's at once, in front of them.
+            "colors-lighting-auto" | "colors-ambient" | "colors-wall-ambient" | "colors-auto" | "colors-wall-auto" if value == "on" => {
+                self.look_set(c.levels_now(Surface::Shell).dark);
+                self.colors_apply(true);
                 self.lighting_auto_on();
+            }
+            "colors-auto" | "colors-ambient" => {
+                self.look_set(c.levels_now(Surface::Shell).dark);
+                self.colors_apply(true);
             }
             _ => self.colors_apply(false),
         }
@@ -2912,6 +3252,11 @@ mod tests {
             apps_dark: dark,
             web_dark: dark,
             icons_dark: dark,
+            apps_light: 50,
+            apps_sat: 50,
+            web_light: 50,
+            web_sat: 50,
+            icons_sat: 50,
             pair: None,
         }
     }
@@ -3248,6 +3593,78 @@ mod tests {
                         assert!(r(t.ink(), t.selection()) >= 4.5, "{tag}: text on an editor's selection");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_line_round_trips_through_both_looks() {
+        // (The box's one Lighting slider: 0..45 Dark, 55..100 Light, the gap between.)
+        for light in [0u8, 25, 50, 75, 100] {
+            for dark in [true, false] {
+                let v = line_of(dark, light);
+                let (d, l) = line_to(v);
+                assert_eq!(d, dark, "{dark} {light} -> {v}");
+                assert!((i16::from(l) - i16::from(light)).abs() <= 1, "{dark} {light} -> {v} -> {l}");
+                if dark { assert!(v <= 45) } else { assert!(v >= 55) }
+            }
+        }
+        assert_eq!(line_to(47), (true, 100), "the gap's dark side is Dark 100");
+        assert_eq!(line_to(53), (false, 0), "the gap's light side is Light 0");
+        assert_eq!(line_of(true, 50), 23);
+        assert_eq!(line_of(false, 50), 78);
+    }
+
+    #[test]
+    fn the_levels_are_the_owners_the_suns_or_golems() {
+        let own = ColorChoice { apps_tint: Some(80), apps_sat: Some(20), apps_dark: Some(false), apps_light: Some(70), ..Default::default() };
+        let l = own.levels(Surface::Apps, Some((true, 10)), false, true);
+        assert_eq!(l, Levels { dark: false, light: 70, tint: Some(80), sat: 20 }, "manual: the owner's, the sun ignored");
+        let amb = ColorChoice { ambient: Some(true), ..own.clone() };
+        let l = amb.levels(Surface::Apps, Some((true, 10)), false, true);
+        assert_eq!(l, Levels { dark: true, light: 10, tint: Some(80), sat: 20 }, "Ambient: the sun's look and light, the owner's colours");
+        let l = amb.levels(Surface::Apps, None, false, true);
+        assert_eq!(l.light, 70, "no sun yet: the owner's");
+        let auto = ColorChoice { auto: Some(true), ..own.clone() };
+        let l = auto.levels(Surface::Apps, Some((false, 60)), false, true);
+        assert_eq!(l, Levels { dark: false, light: 60, tint: None, sat: 50 }, "Auto: Golem's defaults, the sun's light");
+        assert_eq!(auto.levels(Surface::Icons, None, false, true).tint, Some(0), "Auto: icons untinted");
+        assert_eq!(auto.levels(Surface::Wall, None, true, true).tint, Some(0), "the wallpaper's Auto is its own tab's");
+        let wall = ColorChoice { wall_auto: Some(true), ..Default::default() };
+        assert_eq!(wall.levels(Surface::Wall, None, true, true).tint, Some(100), "Auto: the palette's own wallpaper whole");
+        assert_eq!(wall.levels(Surface::Wall, None, false, true).tint, Some(0), "Auto: a picture as it is");
+        assert!(wall.ambient_of(Surface::Wall) && !wall.ambient_of(Surface::Shell), "each tab's Auto brings its own Ambient");
+        // A fresh ColorChoice is manual (a fresh INSTALL is set to Auto by settle_lines).
+        assert!(!ColorChoice::default().auto_of(Surface::Apps));
+    }
+
+    #[test]
+    fn saturation_keeps_what_reads() {
+        // (THE SATURATION axis, 2026-10-20: grey or vivid, the inks still read
+        // on the grounds and the accent still shows on the surface.)
+        let r = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
+        for p in all().iter().take(116) {
+            for dark in [true, false] {
+                let (base, acc) = if dark { (p.dark, p.accent) } else { (p.light, p.accent_light) };
+                for sat in [0u8, 25, 75, 100] {
+                    for level in [None, Some(100)] {
+                        let mut c = tint::walk(&base, p.dark[p.accent], dark, level, 50, sat);
+                        readable(&mut c, dark, acc);
+                        let tag = format!("{} dark={dark} sat={sat} level={level:?}", p.id);
+                        for g in 0..3 {
+                            assert!(r(c[5], c[g]) >= 4.5, "{tag}: ink on base0{g} {:.2}", r(c[5], c[g]));
+                            assert!(r(c[4], c[g]) >= 3.0, "{tag}: ink_dim on base0{g}");
+                        }
+                        assert!(r(c[acc], c[1]) >= 3.0, "{tag}: the accent on the surface");
+                        // (Saturation alone moves no lightness: the walk may, the chroma change may not.)
+                        let unsat = tint::walk(&base, p.dark[p.accent], dark, level, 50, 50);
+                        let (l0, _, _) = tint::lch(unsat[1]);
+                        let (l1, _, _) = tint::lch(tint::saturate(&unsat, sat)[1]);
+                        assert!((l0 - l1).abs() < 0.02, "{tag}: the surface keeps its lightness ({l0:.3} -> {l1:.3})");
+                    }
+                }
+                let grey = tint::saturate(&base, 0);
+                assert!(grey.iter().all(|x| tint::lch(*x).1 < 0.01), "{} dark={dark}: 0 is grey", p.id);
             }
         }
     }
