@@ -290,8 +290,9 @@ pub(crate) struct UiFacts {
     /// The gear box has these pages on this machine.
     pub has_bt: bool,
     pub has_battery: bool,
-    /// The apps in the grid, most used first: (desktop id, name).
-    pub apps: Vec<(String, String)>,
+    /// The apps in the grid, most used first: (desktop id, name, the app
+    /// entry — its icon on the Apps page's cards).
+    pub apps: Vec<(String, String, usize)>,
 }
 
 /// The Colours page shows its APPS LIST (the "+" beside Apps) instead.
@@ -299,6 +300,144 @@ pub(crate) static APPS_LIST: std::sync::atomic::AtomicBool = std::sync::atomic::
 
 /// How many apps the list shows (the most used): the panel does not scroll.
 const APPS_SHOWN: usize = 36;
+
+/// THE COLOURS BOX'S PLACE (the Colours model, 2026-10-20): the tab under the
+/// cards (0 Colours, 1 Backgrounds), the section of the Colours tab (an index
+/// of [`SECTIONS`]), and on the Apps page the app chosen (its desktop id). A
+/// box opened afresh starts on Colours, Shell (`panel.rs` `control_due`).
+pub(crate) static COLOURS_TAB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub(crate) static COLOURS_SECTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub(crate) static APP_CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The Colours tab's sections: the surface, its name, and what it reaches.
+/// (Shell first: it is the one the box itself wears — Max, 2026-10-20.)
+const SECTIONS: [(crate::palette::Surface, &str, &str); 4] = [
+    (crate::palette::Surface::Shell, "Shell", "The colours on the bar, the dock and these boxes."),
+    (crate::palette::Surface::Apps, "Apps", "The colours on your apps' windows."),
+    (crate::palette::Surface::Icons, "Icons", "The colours on the icons."),
+    (crate::palette::Surface::Web, "Web", "The colours on websites in Seam."),
+];
+
+/// A surface's three keys: its Lighting (the one line), its Palette, its Saturation.
+fn colour_keys(s: crate::palette::Surface) -> (&'static str, &'static str, &'static str) {
+    use crate::palette::Surface;
+    match s {
+        Surface::Shell => ("colors-shell-line", "colors-shell", "colors-shell-sat"),
+        Surface::Apps => ("colors-apps-line", "colors-apps", "colors-apps-sat"),
+        Surface::Icons => ("colors-icons-line", "colors-icons", "colors-icons-sat"),
+        Surface::Web => ("colors-web-line", "colors-web", "colors-web-sat"),
+        Surface::Wall => ("colors-wall-line", "colors-wallpaper", "colors-wall-sat"),
+    }
+}
+
+/// A Lighting's words: its look alone at the point as designed, else how
+/// far off it, signed ("Dark −20", "Light +15").
+fn light_text(dark: bool, light: u8) -> String {
+    let look = if dark { tr("Dark") } else { tr("Light") };
+    match i16::from(light) - 50 {
+        0 => look.to_owned(),
+        d if d > 0 => format!("{look} +{d}"),
+        d => format!("{look} −{}", -d),
+    }
+}
+
+/// A Palette slider's words: never "Off" — 0% is the makers' own colours,
+/// one end of the line like any other (Max, 2026-10-20).
+fn palette_text(level: u8) -> String {
+    match level {
+        MADE => tr("as made").to_owned(),
+        100 => tr("full colour").to_owned(),
+        n => format!("{n}%"),
+    }
+}
+
+/// A Saturation's words: grey, as made, vivid, or its number.
+fn sat_text(sat: u8) -> String {
+    match sat {
+        0 => tr("Grey").to_owned(),
+        MADE => tr("as made").to_owned(),
+        100 => tr("Vivid").to_owned(),
+        n => format!("{n}%"),
+    }
+}
+
+/// A surface's three sliders, in a row: Lighting (with Ambient's switch
+/// beside it — not there at all while Ambient has the light), Palette,
+/// Saturation.
+fn colour_row(groups: &mut Vec<Group>, picked: &crate::palette::ColorChoice, s: crate::palette::Surface) {
+    let lv = picked.levels_now(s);
+    let (line_key, tint_key, sat_key) = colour_keys(s);
+    let wall = s == crate::palette::Surface::Wall;
+    if !picked.ambient_of(s) {
+        let at = crate::palette::line_of(lv.dark, lv.light);
+        groups.push(Group { row: true, split: true, caption: Some(format!("{} · {}", tr("Lighting"), light_text(lv.dark, lv.light))), ..slider(line_key, at) });
+        groups.push(Group { beside: true, ..on_off(Some("Ambient"), if wall { "colors-wall-ambient" } else { "colors-ambient" }, false) });
+    }
+    // (The palette as made sits in the middle; a wallpaper's starts at 0, a picture as it is.)
+    let tint = lv.tint.unwrap_or(MADE);
+    groups.push(Group { row: true, mark: (!wall).then_some(0.5), caption: Some(format!("{} · {}", tr("Palette"), palette_text(tint))), ..slider(tint_key, tint) });
+    groups.push(Group { row: true, mark: Some(0.5), caption: Some(format!("{} · {}", tr("Saturation"), sat_text(lv.sat))), ..slider(sat_key, lv.sat) });
+}
+
+/// The palettes as cards: Dynamic first, every palette, and "+" to make one.
+fn palette_cards(groups: &mut Vec<Group>, picked: &crate::palette::ColorChoice) {
+    let now = picked.palette_id().to_owned();
+    // (The cards sit in the shell: they wear its look.)
+    let card_dark = picked.levels_now(crate::palette::Surface::Shell).dark;
+    let mut choices = vec![Choice { swatch: Vec::new(), ..choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID) }];
+    choices.extend(crate::palette::all().into_iter().map(|p| {
+        let swatch = crate::palette::swatch(&p, card_dark);
+        Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
+    }));
+    // Each card as a picture (drawn once, here on the worker).
+    crate::palette_card::wheel(card_dark);
+    for c in &choices {
+        if !c.swatch.is_empty() {
+            crate::palette_card::ensure(&c.swatch);
+        }
+    }
+    // The "+" tile at the end: make one's own.
+    choices.push(choice("+", false, "new"));
+    groups.push(Group { tiles: true, ..group(None, "colors-palette", 110.0, choices) });
+}
+
+/// The wallpapers as cards (the Backgrounds tab: the Wallpaper page's own
+/// tiles, in the cards' grid): the palette's own first, then the pictures.
+fn wall_cards(groups: &mut Vec<Group>) {
+    let found = pictures();
+    if wallpaper_tool().is_none() {
+        groups.push(line(tr("This computer cannot change its wallpaper yet.").to_owned()));
+        return;
+    }
+    let want = WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let settings = GolemSettings::load();
+    let following = want.as_deref().map_or(settings.wallpaper_follows, crate::wall_follow::is_wall);
+    let now = want.or(settings.wallpaper);
+    let mut choices: Vec<Choice> = follow_tile(following).into_iter().collect();
+    choices.extend(found.iter().take(MAX_PICTURES).map(|p| {
+        let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let path = p.to_string_lossy().into_owned();
+        choice(short(&name.replace(['-', '_'], " "), 18), now.as_deref() == Some(path.as_str()), path)
+    }));
+    if choices.is_empty() {
+        groups.push(line(tr("Put pictures in Pictures/Wallpapers to choose one here.").to_owned()));
+    } else {
+        groups.push(Group { tiles: true, grid_rows: Some(4), ..group(None, "wallpaper", 170.0, choices) });
+    }
+}
+
+/// What an app does that the Apps section does not, for its card's foot.
+fn app_exception(picked: &crate::palette::ColorChoice, id: &str) -> Option<String> {
+    let own = picked.skip.iter().any(|s| s == id).then(|| tr("Own colours"));
+    let look = match picked.app_look.get(id).map(String::as_str) {
+        Some("dark") => Some(tr("Dark")),
+        Some("light") => Some(tr("Light")),
+        _ => None,
+    };
+    let words: Vec<&str> = own.into_iter().chain(look).collect();
+    (!words.is_empty()).then(|| words.join(" · "))
+}
+
 
 #[derive(Debug)]
 pub(crate) enum ControlCommand {
@@ -393,7 +532,9 @@ pub(crate) fn is_control(label: &str) -> bool {
 
 /// The keys `App` carries out itself (see the module docs).
 pub(crate) fn ui_key(key: &str) -> bool {
-    matches!(
+    // (Every key of the Colours box is the UI thread's: the palette is applied there.)
+    key.starts_with("colors-")
+        || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
             | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell" | "colors-shell-look"
@@ -507,6 +648,7 @@ fn slider(key: &'static str, level: u8) -> Group {
 }
 
 /// What a slider's level is called: Off, as made, full, or its number.
+#[allow(dead_code)] // (the old box's; the ctl and tests still read it)
 fn level_text(level: u8) -> String {
     match level {
         0 => tr("Off").to_owned(),
@@ -517,6 +659,7 @@ fn level_text(level: u8) -> String {
 }
 
 /// [Dark][Light], with the values each sends.
+#[allow(dead_code)] // (the old box's; the ctl and tests still read it)
 fn look_pair(caption: Option<&'static str>, key: &'static str, dark: bool, dark_value: &'static str, light_value: &'static str) -> Group {
     group(caption, key, 84.0, vec![choice(tr("Dark"), dark, dark_value), choice(tr("Light"), !dark, light_value)])
 }
@@ -1741,75 +1884,94 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             view.groups.push(Group { field: true, ..group(None, "colors-edit-text", 240.0, both) });
             view.groups.push(Group { buttons: true, ..group(None, "colors-edit", 120.0, vec![choice(tr("Cancel"), false, "cancel"), choice(tr("Save"), false, "save")]) });
         }
+        // THE APPS PAGE (the Colours model, 2026-10-20): the exceptions. The
+        // apps as cards with their own icons where the palettes are; under
+        // them the chosen one's two choices — the palette or its own colours
+        // (a switch), and its look: Dark, Light, or Follow the Apps section.
         "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
             let picked = crate::palette::choice();
-            view.subtitle = tr("Lit: the app wears your colours. Off: its own. Most used first.").to_owned();
-            view.groups.push(group(None, "colors-apps-list", 120.0, vec![choice(tr("‹  Back"), false, "back")]));
+            view.subtitle = tr("How everything looks.").to_owned();
             let find = APPS_FIND.lock().map(|f| f.to_lowercase()).unwrap_or_default();
-            view.groups.push(field("colors-apps-find", &find, tr("Search (click to type)"), 320.0));
-            let apps = ui
+            if ui.apps.len() > APPS_SHOWN || !find.is_empty() {
+                view.groups.push(field("colors-apps-find", &find, tr("Search (click to type)"), 320.0));
+            }
+            let chosen = APP_CHOSEN.lock().ok().and_then(|g| g.clone());
+            let tiles = ui
                 .apps
                 .iter()
-                .filter(|(_, name)| find.is_empty() || name.to_lowercase().contains(&find))
+                .filter(|(_, name, _)| find.is_empty() || name.to_lowercase().contains(&find))
                 .take(APPS_SHOWN)
-                .map(|(id, name)| choice(name.clone(), !picked.skip.contains(id), id.clone()))
+                .map(|(id, name, entry)| Choice { icon: Some(*entry), hint: app_exception(&picked, id), ..choice(name.clone(), chosen.as_deref() == Some(id.as_str()), id.clone()) })
                 .collect();
-            view.groups.push(group(None, "colors-skip", 150.0, apps));
+            view.groups.push(Group { tiles: true, grid_rows: Some(4), ..group(None, "colors-app", 110.0, tiles) });
+            match chosen.as_deref().and_then(|id| ui.apps.iter().find(|a| a.0 == id)) {
+                Some((id, name, _)) => {
+                    let own = picked.skip.contains(id);
+                    let look = picked.app_look.get(id).map_or("", String::as_str);
+                    view.groups.push(Group { centred: true, ..line(name.clone()) });
+                    let about = format!(
+                        "{}, {}.",
+                        if own { tr("Its own colours") } else { tr("The palette") },
+                        match look {
+                            "dark" => tr("always dark"),
+                            "light" => tr("always light"),
+                            _ => tr("the Apps' look"),
+                        }
+                    );
+                    view.groups.push(Group { centred: true, ..line(about) });
+                    // One line: the look's three words in the middle, the
+                    // Colours switch at its left (on: the palette).
+                    let looks = vec![
+                        choice(tr("Dark"), look == "dark", format!("{id}:dark")),
+                        choice(tr("Light"), look == "light", format!("{id}:light")),
+                        choice(tr("Follow"), look.is_empty(), format!("{id}:follow")),
+                    ];
+                    view.groups.push(Group { centred: true, ..group(None, "colors-app-look", 0.0, looks) });
+                    view.groups.push(Group { beside: true, ..on_off(Some("Colours"), "colors-app-colours", !own) });
+                }
+                None => view.groups.push(Group { centred: true, ..line(tr("Every app follows the Apps section. Pick one to make an exception.").to_owned()) }),
+            }
+            view.groups.push(Group { centred: true, ..group(None, "colors-apps-list", 0.0, vec![choice(tr("Back"), false, "back")]) });
         }
+        // THE COLOURS BOX (the Colours model, 2026-10-20; docs/colours-model.md):
+        // the cards first (the palettes, or on Backgrounds the wallpapers), the
+        // two tabs under them, this tab's Auto — alone while on, nothing under
+        // it — else the sections with Auto (and Ambient while on) at their
+        // left, what the section reaches, and its three sliders in a row.
         "Colours" => {
-            // (No general Dark toggle: each row has its own — Max, 2026-10-18.)
-            let dark = true;
+            use crate::palette::Surface;
             let picked = crate::palette::choice();
-            view.subtitle = tr("How everything looks. Some apps need a restart to show changes.").to_owned();
-            // The three sliders (Max, 2026-10-16): 0 = Off (the makers' own
-            // colours), the middle = the palette as made, the end = full
-            // colour; each with a [Dark][Light] of its own that follows the
-            // system's until it is clicked.
-            // LIGHTING first (Max, 2026-10-18): light is the first thing of colour.
-            let lighting = picked.shell_light.unwrap_or(50);
-            view.groups.push(Group { caption: Some(format!("{} · {lighting}", tr("Lighting"))), ..slider("colors-lighting", lighting) });
-            // AUTO beside it (Max, 2026-10-18): the light follows the sun, in
-            // front of the owner (`lighting.rs`). A word at the row's end, lit
-            // while on; a click asks for the other. The slider turns it off.
-            let auto = picked.ambient.unwrap_or(false);
-            view.groups.push(Group { beside: true, ..group(None, "colors-lighting-auto", 84.0, vec![choice(tr("Auto"), auto, if auto { "off" } else { "on" })]) });
-            // …and whether the wallpaper is lit with the rest.
-            view.groups.push(on_off(Some("Include the background"), "colors-lighting-veil", picked.wall_ambient.unwrap_or(false)));
-            let apps = picked.apps_level().unwrap_or(MADE);
-            let web = picked.web_level().unwrap_or(MADE);
-            for (name, key, look_key, level, own) in [
-                ("Apps", "colors-apps", "colors-apps-look", apps, picked.apps_dark),
-                ("Web", "colors-web", "colors-web-look", web, picked.web_dark),
-                ("Icons", "colors-icons", "colors-icons-look", picked.icons_tint, picked.icons_dark),
-                ("Shell", "colors-shell", "colors-shell-look", picked.shell_tint.unwrap_or(MADE), picked.shell_dark),
-            ] {
-                let caption = format!("{} · {}", tr(name), level_text(level));
-                view.groups.push(Group { caption: Some(caption), ..slider(key, level) });
-                let mut pair = look_pair(None, look_key, own.unwrap_or(dark), "dark", "light");
-                if key == "colors-apps" {
-                    // The small round "+": the apps, one switch each.
-                    pair.choices.push(choice("+", false, "list"));
-                }
-                view.groups.push(Group { beside: true, ..pair });
+            view.subtitle = tr("How everything looks.").to_owned();
+            let backgrounds = COLOURS_TAB.load(std::sync::atomic::Ordering::Relaxed) == 1;
+            let sec = usize::from(COLOURS_SECTION.load(std::sync::atomic::Ordering::Relaxed)).min(SECTIONS.len() - 1);
+            if backgrounds {
+                wall_cards(&mut view.groups);
+            } else {
+                palette_cards(&mut view.groups, &picked);
             }
-            let now = picked.palette_id().to_owned();
-            // (The cards sit in the shell: they wear its look.)
-            let card_dark = picked.shell_dark.unwrap_or(dark);
-            let mut choices = vec![Choice { swatch: Vec::new(), ..choice(tr("Dynamic"), now == crate::palette::DYNAMIC_ID, crate::palette::DYNAMIC_ID) }];
-            choices.extend(crate::palette::all().into_iter().map(|p| {
-                let swatch = crate::palette::swatch(&p, card_dark);
-                Choice { swatch, ..choice(p.name.clone(), p.id == now, p.id.clone()) }
-            }));
-            // Each card as a picture (drawn once, here on the worker).
-            crate::palette_card::wheel(card_dark);
-            for c in &choices {
-                if !c.swatch.is_empty() {
-                    crate::palette_card::ensure(&c.swatch);
+            let tabs = vec![choice(tr("Backgrounds"), backgrounds, "backgrounds"), choice(tr("Colours"), !backgrounds, "colours")];
+            view.groups.push(Group { centred: true, ..group(None, "colors-tab", 0.0, tabs) });
+            let (s, auto_key, amb_key, about) = if backgrounds {
+                (Surface::Wall, "colors-wall-auto", "colors-wall-ambient", "The colours on the wallpaper.")
+            } else {
+                (SECTIONS[sec].0, "colors-auto", "colors-ambient", SECTIONS[sec].2)
+            };
+            if picked.auto_of(s) {
+                view.groups.push(Group { centred: true, ..on_off(Some("Auto"), auto_key, true) });
+            } else {
+                let sections = if backgrounds { Vec::new() } else { SECTIONS.iter().enumerate().map(|(i, (_, name, _))| choice(tr(name), i == sec, i.to_string())).collect() };
+                view.groups.push(Group { centred: true, ..group(None, "colors-section", 0.0, sections) });
+                view.groups.push(Group { beside: true, ..on_off(Some("Auto"), auto_key, false) });
+                if picked.ambient_of(s) {
+                    view.groups.push(Group { beside: true, ..on_off(Some("Ambient"), amb_key, true) });
+                }
+                view.groups.push(Group { centred: true, ..line(tr(about).to_owned()) });
+                colour_row(&mut view.groups, &picked, s);
+                // The way to the apps' exceptions: under the Apps section's sliders.
+                if s == Surface::Apps {
+                    view.groups.push(Group { centred: true, ..group(None, "colors-apps-list", 0.0, vec![choice(tr("Apps"), false, "list")]) });
                 }
             }
-            // The "+" tile at the end: make one's own.
-            choices.push(choice("+", false, "new"));
-            view.groups.push(Group { tiles: true, ..group(None, "colors-palette", 110.0, choices) });
         }
         "Brightness" => match brightness() {
             Some(now) => {
@@ -2330,6 +2492,48 @@ pub(crate) fn reassert() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_colours_row_is_three_sliders_or_two_under_ambient() {
+        use crate::palette::{ColorChoice, Surface};
+        let manual = ColorChoice { apps_dark: Some(true), apps_light: Some(30), apps_tint: Some(70), apps_sat: Some(20), ..Default::default() };
+        let mut g = Vec::new();
+        colour_row(&mut g, &manual, Surface::Apps);
+        let keys: Vec<&str> = g.iter().map(|g| g.key).collect();
+        assert_eq!(keys, ["colors-apps-line", "colors-ambient", "colors-apps", "colors-apps-sat"]);
+        assert!(g[0].row && g[0].split && g[1].beside && g[2].row && g[3].row);
+        assert_eq!((g[2].mark, g[3].mark), (Some(0.5), Some(0.5)));
+        assert_eq!(g[0].caption.as_deref(), Some("Lighting · Dark −20"));
+        assert_eq!(g[2].caption.as_deref(), Some("Palette · 70%"));
+        assert_eq!(g[3].caption.as_deref(), Some("Saturation · 20%"));
+        // Under Ambient the light is the sun's: no Lighting at all, the two left.
+        let amb = ColorChoice { ambient: Some(true), ..manual.clone() };
+        let mut g = Vec::new();
+        colour_row(&mut g, &amb, Surface::Apps);
+        assert_eq!(g.iter().map(|g| g.key).collect::<Vec<_>>(), ["colors-apps", "colors-apps-sat"]);
+        // The wallpaper: its own keys, and no notch on its Palette (its 0 is a picture as it is).
+        let mut g = Vec::new();
+        colour_row(&mut g, &ColorChoice::default(), Surface::Wall);
+        assert_eq!(g.iter().map(|g| g.key).collect::<Vec<_>>(), ["colors-wall-line", "colors-wall-ambient", "colors-wallpaper", "colors-wall-sat"]);
+        assert_eq!(g[2].mark, None);
+    }
+
+    #[test]
+    fn the_colours_words() {
+        assert_eq!(light_text(true, 50), "Dark");
+        assert_eq!(light_text(false, 65), "Light +15");
+        assert_eq!(light_text(true, 0), "Dark −50");
+        assert_eq!(palette_text(0), "0%", "never Off: 0% is the makers' own colours");
+        assert_eq!(palette_text(50), "as made");
+        assert_eq!(palette_text(100), "full colour");
+        assert_eq!((sat_text(0).as_str(), sat_text(50).as_str(), sat_text(100).as_str(), sat_text(70).as_str()), ("Grey", "as made", "Vivid", "70%"));
+        let mut c = crate::palette::ColorChoice { skip: vec!["vlc".into()], ..Default::default() };
+        c.app_look.insert("vlc".into(), "light".into());
+        c.app_look.insert("gimp".into(), "dark".into());
+        assert_eq!(app_exception(&c, "vlc").as_deref(), Some("Own colours · Light"));
+        assert_eq!(app_exception(&c, "gimp").as_deref(), Some("Dark"));
+        assert_eq!(app_exception(&c, "foot"), None, "an app that follows says nothing");
+    }
+
     use super::*;
 
     #[test]

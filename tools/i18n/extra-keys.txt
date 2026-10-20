@@ -35,3 +35,15 @@ Science & Data
 Accessibility
 Windows Apps
 Coming soon
+Auto
+Ambient
+Colours
+Shell
+Apps
+Icons
+Web
+The colours on the bar, the dock and these boxes.
+The colours on your apps' windows.
+The colours on the icons.
+The colours on websites in Seam.
+The colours on the wallpaper.

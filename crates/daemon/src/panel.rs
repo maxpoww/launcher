@@ -1464,8 +1464,14 @@ impl Panel {
         if !std::mem::take(&mut self.control_ask) {
             return None;
         }
-        // A setting opened afresh starts on its own page (Colours: not its apps list).
+        // A setting opened afresh starts on its own page (Colours: the
+        // Colours tab, Shell, not its apps page).
         crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::controls::COLOURS_TAB.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::controls::COLOURS_SECTION.store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut a) = crate::controls::APP_CHOSEN.lock() {
+            *a = None;
+        }
         if let Ok(mut e) = crate::controls::EDITOR.lock() {
             *e = None;
         }
@@ -1941,8 +1947,11 @@ impl Panel {
         // and under no other (a wallpaper has no words on it).
         let swatches = choices.iter().any(|c| !c.swatch.is_empty());
         let icons = choices.iter().any(|c| c.icon.is_some());
+        // (Pictures asked for as CARDS — the Colours box's Backgrounds, rows
+        // given — stand in the cards' grid, a name under each.)
+        let cards = rows.is_some();
         // (A palette's card and an app's: a name under every row.)
-        let named = swatches || icons;
+        let named = swatches || icons || cards;
         let captioned = !named && choices.first().is_some_and(|c| c.caption);
         let nh = if named || captioned { 20.0 * s } else { 0.0 };
         let cap_h = if captioned { nh } else { 0.0 };
@@ -1978,7 +1987,7 @@ impl Panel {
         // `PALETTE_TILE_MIN`, four to seven — a 960 field falls to four —
         // and four rows a page, or fewer when asked (`open_content` asks
         // for three when four run the box past its height).
-        let best = if icons || (swatches && self.wall_tile > 0.0) {
+        let best = if icons || cards || (swatches && self.wall_tile > 0.0) {
             let room = fw - 4.0 * MARGIN * s;
             let cols = (((room + gap) / (PALETTE_TILE_MIN * s + gap)).floor() as usize).clamp(PALETTE_COLS.0, PALETTE_COLS.1);
             let w = (room - (cols - 1) as f32 * gap) / cols as f32;
@@ -2103,7 +2112,7 @@ impl Panel {
     /// under the content.
     fn cards_overflow(&self, view: &ControlView, content: &OpenContent) -> bool {
         let four = view.groups.iter().any(|g| {
-            g.tiles && g.grid_rows.is_none_or(|r| r > PALETTE_ROWS_FEWER) && g.choices.iter().any(|c| !c.swatch.is_empty() || c.icon.is_some())
+            g.tiles && g.grid_rows.is_none_or(|r| r > PALETTE_ROWS_FEWER) && (g.grid_rows.is_some() || g.choices.iter().any(|c| !c.swatch.is_empty() || c.icon.is_some()))
         });
         let whole = if self.tile_room_h > 0.0 { self.tile_room_h } else { self.field.h.max(self.key.1) };
         four && content.foot_y + QUICK_FOOT * self.scale > whole
@@ -2166,6 +2175,14 @@ impl Panel {
                 y = self.switch_row(&mut out, y, gi as u8, &name, on);
                 continue;
             }
+            // A CENTRED LINE TO READ (a section's reach, the chosen app's name):
+            // muted words in the middle.
+            if g.centred && g.choices.is_empty() && !g.slider && g.caption.is_some() {
+                let text = g.caption.clone().unwrap_or_default();
+                out.texts.push(Text { text, x: self.key.0 / 2.0, y, px: 13.0, alpha: 0.6, centered: true });
+                y += 24.0 * s;
+                continue;
+            }
             if let Some(c) = &g.caption {
                 y = self.caption(&mut out, y, c.clone());
             }
@@ -2178,7 +2195,7 @@ impl Panel {
                 y = self.flow_tiles(&mut out, y, gi as u8, &g.choices, rows);
                 continue;
             }
-            let chips = g
+            let chips: Vec<(String, bool, PanelAction)> = g
                 .choices
                 .iter()
                 .enumerate()
@@ -2191,10 +2208,17 @@ impl Panel {
             // section tabs).
             if g.centred && !g.buttons && !g.field && !coloured {
                 let line = y;
-                y = self.flow_words(&mut out, y, chips, false);
-                if let Some((pg, b)) = pair {
-                    self.inline(&mut out, 2.0 * MARGIN * s, line, 26.0 * s, pg, b);
+                // (No words — the Backgrounds tab's line — is still a line, for what sits on it.)
+                y = if chips.is_empty() { y + 40.0 * s } else { self.flow_words(&mut out, y, chips, false) };
+                // Every group beside it, left to right (Auto, then Ambient while on).
+                let mut x = 2.0 * MARGIN * s;
+                let mut j = gi + 1;
+                while let Some(b) = view.groups.get(j).filter(|b| b.beside) {
+                    self.inline(&mut out, x, line, 26.0 * s, j as u8, b);
+                    x += self.inline_w(b) + 28.0 * s;
+                    j += 1;
                 }
+                let _ = pair;
                 continue;
             }
             // (Pills stay for what is not a word: a coloured place, an
@@ -4209,22 +4233,21 @@ impl App {
 
     /// The grid's apps for the Colours list, most used first (a webapp only
     /// once it is installed).
-    fn colours_apps(&self) -> Vec<(String, String)> {
-        let mut apps: Vec<(u32, String, String)> = self
+    fn colours_apps(&self) -> Vec<(String, String, usize)> {
+        let mut apps: Vec<(u32, String, String, usize)> = self
             .entries
             .iter()
             .enumerate()
             // Real apps only: a .desktop of its own (not a home folder, an
             // icon asset or the shell's own tiles), with a name.
             .filter(|(i, e)| self.kinds.get(*i) == Some(&crate::apps::EntryKind::App) && e.path.is_some() && !e.name.trim().is_empty())
-            .map(|(_, e)| e)
-            .filter(|e| !e.id.starts_with("golem-") && !e.id.starts_with("waverunner"))
-            .filter(|e| !e.id.starts_with("webapp-") || self.managed_webapps.contains(&e.id["webapp-".len()..]))
-            .map(|e| (self.usage.count(&e.id), e.id.clone(), e.name.clone()))
+            .filter(|(_, e)| !e.id.starts_with("golem-") && !e.id.starts_with("waverunner"))
+            .filter(|(_, e)| !e.id.starts_with("webapp-") || self.managed_webapps.contains(&e.id["webapp-".len()..]))
+            .map(|(i, e)| (self.usage.count(&e.id), e.id.clone(), e.name.clone(), i))
             .collect();
         apps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
         apps.dedup_by(|a, b| a.1 == b.1);
-        apps.into_iter().map(|(_, id, name)| (id, name)).collect()
+        apps.into_iter().map(|(_, id, name, i)| (id, name, i)).collect()
     }
 
     fn on_control_event(&mut self, ev: ControlEvent) {
@@ -4328,20 +4351,43 @@ impl App {
                     self.colors_apply(false);
                 }
             }
-            // The "+" beside Apps, and the list's Back.
-            "colors-apps-look" if value == "list" => {
-                crate::controls::APPS_LIST.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            "colors-apps-list" => {
+            // THE COLOURS BOX'S PLACE (the Colours model, 2026-10-20): its
+            // tab, its section, the Apps page and the app chosen there.
+            "colors-tab" => {
+                crate::controls::COLOURS_TAB.store(u8::from(value == "backgrounds"), std::sync::atomic::Ordering::Relaxed);
                 crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            "colors-section" => {
+                if let Ok(i) = value.parse::<u8>() {
+                    crate::controls::COLOURS_SECTION.store(i, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            // The Apps page: "list" in, "back" out (the old "+" beside Apps too).
+            "colors-apps-list" | "colors-apps-look" if value == "list" || key == "colors-apps-list" => {
+                crate::controls::APPS_LIST.store(value == "list", std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut a) = crate::controls::APP_CHOSEN.lock() {
+                    *a = None;
+                }
                 crate::controls::field_typed("colors-apps-find", "", false);
                 if let Ok(mut t) = crate::controls::TYPING.lock() {
                     *t = None;
                 }
             }
-            "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons" | "colors-shell" | "colors-apps-look" | "colors-web-look" | "colors-icons-look" | "colors-shell-look" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-wallpaper" => {
-                self.colors_pick(key, &value);
+            "colors-app" => {
+                if let Ok(mut a) = crate::controls::APP_CHOSEN.lock() {
+                    *a = Some(value.clone());
+                }
             }
+            // The chosen app's Colours switch: on, the palette; off, its own.
+            "colors-app-colours" => {
+                if let Some(id) = crate::controls::APP_CHOSEN.lock().ok().and_then(|a| a.clone()) {
+                    let own = crate::palette::choice().skip.contains(&id);
+                    if own == (value == "on") {
+                        self.colors_pick("colors-skip", &id);
+                    }
+                }
+            }
+            k if k.starts_with("colors-") => self.colors_pick(key, &value),
             "dnd" => {
                 if self.notif_muted() != (value == "on") {
                     self.toggle_notif_mute();
