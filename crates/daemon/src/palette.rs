@@ -1750,9 +1750,31 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
 /// environment ([`skip_vars`]).
 static SKIPPED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// The programs with a look of their own (the Apps page's Dark or Light —
+/// the Colours model, 2026-10-20): program -> dark.
+static LOOKED: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// The two GTK themes a program pinned to a look starts with: the palette in
+/// that look, always there under fixed names (`gtk3_live` keeps them with
+/// the one in use).
+const GTK3_PINNED: [&str; 2] = ["Golem-Dark", "Golem-Light"];
+
 fn program_of(exec: &str) -> String {
     let first = exec.split_whitespace().find(|w| !w.contains('=') && *w != "env").unwrap_or("");
     first.rsplit('/').next().unwrap_or("").to_owned()
+}
+
+/// An app's own look (`ColorChoice::app_look`, by desktop id) as programs.
+pub(crate) fn set_looked_programs(entries: &[waverunner_core::index::AppEntry], looks: &std::collections::BTreeMap<String, String>) {
+    let progs: Vec<(String, bool)> = entries
+        .iter()
+        .filter(|e| !e.id.starts_with("webapp-"))
+        .filter_map(|e| looks.get(&e.id).map(|l| (program_of(&e.exec), l == "dark")))
+        .filter(|(p, _)| !p.is_empty())
+        .collect();
+    if let Ok(mut g) = LOOKED.lock() {
+        *g = progs;
+    }
 }
 
 pub(crate) fn set_skipped_programs(entries: &[waverunner_core::index::AppEntry], skip: &[String]) {
@@ -1771,12 +1793,20 @@ pub(crate) fn set_skipped_programs(entries: &[waverunner_core::index::AppEntry],
 /// Adwaita (in the apps' look) over our theme, Qt without qt5ct/qt6ct.
 pub(crate) fn skip_vars(exec: &str) -> Vec<(&'static str, String)> {
     let p = program_of(exec);
-    let hit = SKIPPED.lock().map(|g| g.contains(&p)).unwrap_or(false);
-    if !hit {
+    let own = SKIPPED.lock().map(|g| g.contains(&p)).unwrap_or(false);
+    let looked = LOOKED.lock().ok().and_then(|g| g.iter().find(|(q, _)| *q == p).map(|(_, d)| *d));
+    if !own && looked.is_none() {
         return Vec::new();
     }
-    let dark = current().apps_dark;
-    vec![("GTK_THEME", if dark { "Adwaita:dark" } else { "Adwaita" }.to_owned()), ("QT_QPA_PLATFORMTHEME", String::new())]
+    let dark = looked.unwrap_or_else(|| current().apps_dark);
+    if own {
+        return vec![("GTK_THEME", if dark { "Adwaita:dark" } else { "Adwaita" }.to_owned()), ("QT_QPA_PLATFORMTHEME", String::new())];
+    }
+    // The palette in a look of its own (GTK: the pinned theme of that look;
+    // libadwaita takes the scheme from GTK_THEME's ":dark" too). Qt keeps the
+    // Apps' look: its colours are one file for every program.
+    let name = GTK3_PINNED[usize::from(!dark)];
+    vec![("GTK_THEME", if dark { format!("{name}:dark") } else { name.to_owned() })]
 }
 
 /// THE ICON FILTER (Max, 2026-10-16: "more aggressive"), for the icon
@@ -2342,7 +2372,7 @@ fn gtk3_live(t: &Theme) {
     let next = if now == GTK3_NAMES[0] { GTK3_NAMES[1] } else { GTK3_NAMES[0] };
     let home = std::env::var("HOME").unwrap_or_default();
     let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
-    let dir = PathBuf::from(data_home).join("themes").join(next);
+    let dir = PathBuf::from(&data_home).join("themes").join(next);
     crate::persist::write_text("theme", &dir.join("gtk-3.0").join("gtk.css"), &gtk3_theme_css(t, &base));
     // The theme's GTK 4 half: GTK 4 apps take the theme NAME from the same
     // setting (at their start, and live), and a theme without a gtk-4.0
@@ -2358,6 +2388,18 @@ fn gtk3_live(t: &Theme) {
         &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={next}\nComment=Golem's palette over adw-gtk3, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={next}\n"),
     );
     run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", &format!("'{next}'")]);
+    // THE PINNED ONES (an app's own Dark or Light): the palette in each look
+    // under a fixed name, written with the one in use, read at an app's start.
+    if let Some((dc, da, lc, la)) = t.pair {
+        for (name, dark, c, acc) in [(GTK3_PINNED[0], true, dc, da), (GTK3_PINNED[1], false, lc, la)] {
+            let Some(base) = adw_gtk3(dark) else { continue };
+            let v = Theme { c, accent_slot: acc, dark, ..t.clone() };
+            let dir = PathBuf::from(&data_home).join("themes").join(name);
+            crate::persist::write_text("theme", &dir.join("gtk-3.0").join("gtk.css"), &gtk3_theme_css(&v, &base));
+            crate::persist::write_text("theme", &dir.join("gtk-4.0").join("gtk.css"), &gtk4_css(&v));
+            crate::persist::write_text("theme", &dir.join("index.theme"), &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={name}\nComment=Golem's palette, pinned to a look, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={name}\n"));
+        }
+    }
 }
 
 /// Qt (through qt5ct/qt6ct): a colour scheme, one colour per palette role
@@ -2974,7 +3016,9 @@ impl crate::App {
             crate::wall_tint::refresh();
         }
         set_shell(&picked, crate::look::dark());
-        set_skipped_programs(&self.entries, &choice().skip);
+        let c = choice();
+        set_skipped_programs(&self.entries, &c.skip);
+        set_looked_programs(&self.entries, &c.app_look);
         let changed = set(theme);
         // A move of the Lighting alone leaves the theme as it was, yet the
         // shell, the apps and the web all wear it.
@@ -3150,6 +3194,7 @@ impl crate::App {
                         }
                         _ => return,
                     }
+                    set_looked_programs(&self.entries, &c.app_look);
                 }
                 // The wallpapers' Colours: 0 = the pictures as they are.
                 "colors-wallpaper" | "colors-wall-tint" => match value.parse::<u8>() {
@@ -3623,6 +3668,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_app_starts_in_its_own_colours_or_its_own_look() {
+        // (One test owns the two tables: tests run side by side.)
+        *SKIPPED.lock().unwrap() = vec!["vlc".into()];
+        *LOOKED.lock().unwrap() = vec![("vlc".into(), false), ("gimp".into(), true), ("blender".into(), false)];
+        assert_eq!(skip_vars("/usr/bin/foot -e x"), Vec::new(), "an app that follows: nothing");
+        let vlc = skip_vars("vlc %U");
+        assert!(vlc.contains(&("GTK_THEME", "Adwaita".to_owned())) && vlc.iter().any(|(k, _)| *k == "QT_QPA_PLATFORMTHEME"), "own colours, in its own Light: {vlc:?}");
+        assert_eq!(skip_vars("env FOO=1 gimp"), vec![("GTK_THEME", "Golem-Dark:dark".to_owned())], "the palette, pinned Dark");
+        assert_eq!(skip_vars("blender"), vec![("GTK_THEME", "Golem-Light".to_owned())], "the palette, pinned Light");
+        SKIPPED.lock().unwrap().clear();
+        LOOKED.lock().unwrap().clear();
     }
 
     #[test]
