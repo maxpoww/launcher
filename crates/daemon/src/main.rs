@@ -267,6 +267,14 @@ fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .with_writer(logging::Tee::open())
         .init();
+    // A panic is written to the log too: on its own it goes only to that
+    // unread stderr (2026-10-20, a shell gone with no word of why).
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        error!("panic in thread {}: {info}", thread.name().unwrap_or("?"));
+        default_panic(info);
+    }));
 
     if had_workspace_ticket {
         info!("dropped the compositor's initial-workspace ticket: launched apps open on the workspace that is showing");
@@ -1420,9 +1428,13 @@ fn main() -> anyhow::Result<()> {
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
     hypr::snapshot_enable();
     while !app.exit {
-        event_loop
-            .dispatch(None, &mut app)
-            .context("event loop dispatch")?;
+        // (The error is written to the log before it ends the dock: started
+        // by the compositor, its stderr goes nowhere — the shell vanished
+        // with no word of why, Max, 2026-10-20.)
+        if let Err(e) = event_loop.dispatch(None, &mut app) {
+            error!("event loop: {e:#}; the dock ends");
+            return Err(e).context("event loop dispatch");
+        }
         hypr::snapshot_reset();
     }
     info!("layer surface closed, exiting");

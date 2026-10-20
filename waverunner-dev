@@ -109,4 +109,19 @@ if [ ! -x "$BIN" ]; then
   echo "waverunner-dev: no $PROFILE build at $BIN; run: nix develop -c cargo build$FLAG" >&2
   exit 1
 fi
-exec "$BIN" "$@"
+# The shell comes back if it dies. On 2026-10-20 the dock ended on a GPU
+# error and the dev box sat without a shell until Max saw it. An installed
+# Golem gets the same from its systemd unit (Restart=on-failure, 2 s). Only a
+# failure restarts it: a clean exit (the compositor closed our surface), a
+# kill from outside (a restart: INT, KILL, TERM), or a compositor that is gone
+# ends here. The log is truncated at every start, so the dead run's is kept.
+LOG="${WAVERUNNER_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/waverunner/daemon.log}"
+while :; do
+  "$BIN" "$@"
+  CODE=$?
+  case $CODE in 0|130|137|143) exit $CODE ;; esac
+  [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-1}" ] || exit $CODE
+  cp -f "$LOG" "$LOG.crashed" 2>/dev/null
+  echo "waverunner-dev: the daemon ended ($CODE); starting it again in 2 s" >&2
+  sleep 2
+done

@@ -115,6 +115,17 @@ struct BoxBackdropInstance {
     _pad: f32,
 }
 
+/// A wgpu error nobody asked to catch: logged, never fatal (see
+/// `on_uncaptured_error`). The first few in full, then one in a thousand, so
+/// an error repeated every frame cannot fill the log.
+fn gpu_error(e: wgpu::Error) {
+    static SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n < 20 || n.is_multiple_of(1000) {
+        tracing::error!("wgpu error #{} (not fatal): {e}", n + 1);
+    }
+}
+
 /// The GPU the whole shell draws on: one wgpu instance, adapter, device and
 /// queue, opened by the first [`Renderer`] and cloned (they are handles) by
 /// every later one.
@@ -839,6 +850,13 @@ impl Renderer {
                 None,
             ))
             .context("wgpu device request failed")?;
+            // wgpu's answer to an error nobody asked to catch is a panic, and
+            // a panic ends the shell. On 2026-10-20 the dev box lost its dock
+            // right after "swapchain acquire timed out; recreating it", as
+            // Hyprland's overview took the screen ("i have no shell now"),
+            // with the reason on a stderr nobody reads. Logged instead: that
+            // frame is lost, the next acquire recreates the swapchain.
+            device.on_uncaptured_error(Box::new(gpu_error));
             let live_instance =
                 _live_instance.ok_or_else(|| anyhow!("the chosen adapter has no instance"))?;
             let shared = SHARED_GPU.with(|g| {
@@ -2333,13 +2351,19 @@ impl Renderer {
             // loop is wedged at ~70% of a core, IPC stops answering, install
             // tiles freeze on "Installing…". Reconfiguring drops the stranded
             // images, so the next acquire gets a new one.
+            //
+            // `Other` is what an acquire answers once an error was logged
+            // instead of fatal (`gpu_error`), such as a reconfigure that
+            // failed: the surface is left unconfigured, and only configuring
+            // it again brings it back.
             Err(
                 e @ (wgpu::SurfaceError::Lost
                 | wgpu::SurfaceError::Outdated
-                | wgpu::SurfaceError::Timeout),
+                | wgpu::SurfaceError::Timeout
+                | wgpu::SurfaceError::Other),
             ) => {
-                if matches!(e, wgpu::SurfaceError::Timeout) {
-                    tracing::warn!("swapchain acquire timed out; recreating it");
+                if matches!(e, wgpu::SurfaceError::Timeout | wgpu::SurfaceError::Other) {
+                    tracing::warn!("swapchain acquire: {e}; recreating it");
                 }
                 self.surface.configure(&self.device, &self.config);
                 // A new swapchain: its first image is new as a whole.
