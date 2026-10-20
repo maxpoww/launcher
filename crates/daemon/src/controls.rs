@@ -101,6 +101,10 @@ pub(crate) struct Group {
     /// A grid of tiles may have fewer rows a page than it would (the Apps
     /// page's few tiles, the box shrinking to them). None: as many as fit.
     pub grid_rows: Option<usize>,
+    /// A CENTRED LINE THAT HUGS what is beside it: the switches stand just
+    /// left of the words and the whole is centred (the chosen app's
+    /// `Colours ●  Dark · Light · Follow`), not at the box's left edge.
+    pub hug: bool,
 }
 
 /// THE PALETTE EDITOR (Max, 2026-10-16; the mockup's "+" tile): six places
@@ -622,7 +626,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -633,7 +637,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -884,6 +888,10 @@ pub(crate) fn dark_now() -> bool {
 /// found in the desktop VM, 2026-10-13), and dconf, where the values live,
 /// needs none.
 pub(crate) fn assert_dark(dark: bool) {
+    // (A nested test dock tells the owner's session nothing: `palette::rig`.)
+    if crate::palette::rig() {
+        return;
+    }
     let scheme = if dark { "'prefer-dark'" } else { "'prefer-light'" };
     let theme = if dark { "'Adwaita-dark'" } else { "'Adwaita'" };
     run("dconf", &["write", "/org/gnome/desktop/interface/color-scheme", scheme]);
@@ -1926,7 +1934,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                         choice(tr("Light"), look == "light", format!("{id}:light")),
                         choice(tr("Follow"), look.is_empty(), format!("{id}:follow")),
                     ];
-                    view.groups.push(Group { centred: true, ..group(None, "colors-app-look", 0.0, looks) });
+                    view.groups.push(Group { centred: true, hug: true, ..group(None, "colors-app-look", 0.0, looks) });
                     view.groups.push(Group { beside: true, ..on_off(Some("Colours"), "colors-app-colours", !own) });
                 }
                 None => view.groups.push(Group { centred: true, ..line(tr("Every app follows the Apps section. Pick one to make an exception.").to_owned()) }),

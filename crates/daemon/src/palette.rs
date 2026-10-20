@@ -2756,6 +2756,9 @@ fn sourceview_scheme(t: &Theme, id: &str) -> String {
 
 /// Send `sig` to every process of ours named `comm`.
 fn signal_all(comm: &str, sig: libc::c_int) {
+    if rig() {
+        return;
+    }
     // SAFETY: getuid has no preconditions.
     let me = unsafe { libc::getuid() };
     for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
@@ -2798,6 +2801,9 @@ fn foot_osc(t: &Theme) -> String {
 }
 
 fn foot_live(t: &Theme) {
+    if rig() {
+        return;
+    }
     let seq = foot_osc(t);
     for pty in foot_ptys() {
         use std::io::Write;
@@ -2851,9 +2857,21 @@ fn foot_ptys() -> Vec<PathBuf> {
 /// never answers must not hold the palette thread, and with it every later
 /// change, for good).
 fn run(program: &str, args: &[&str]) {
+    if rig() {
+        debug!("palette: a nested test dock leaves {program} alone");
+        return;
+    }
     if out(program, args).is_none() {
         debug!("palette: {program} {args:?} did not succeed");
     }
+}
+
+/// A NESTED TEST DOCK (`GOLEM_RIG`, the rig's: ~/.cache/golem-nested): it
+/// runs as the owner, so it must not tell the owner's live session anything
+/// — no dconf, no terminal's colours, no signal, no systemd environment. It
+/// writes its files in its own XDG dirs and draws; nothing else.
+pub(crate) fn rig() -> bool {
+    std::env::var_os("GOLEM_RIG").is_some()
 }
 
 /// A program's standard output, or `None` when it is missing, failed, or
@@ -2919,7 +2937,10 @@ impl crate::App {
                 return;
             }
             let _ = std::thread::Builder::new().name("qt-env".into()).spawn(move || {
-                let _ = std::process::Command::new("systemctl").args(["--user", "set-environment"]).args(&pairs).status();
+                if rig() {
+                return;
+            }
+            let _ = std::process::Command::new("systemctl").args(["--user", "set-environment"]).args(&pairs).status();
                 let _ = std::process::Command::new("dbus-update-activation-environment").arg("--systemd").args(&pairs).status();
             });
         });

@@ -1737,7 +1737,9 @@ impl Panel {
         let h = 34.0 * s;
         let w = self.inline_w(g);
         self.inline(out, (self.key.0 - w) / 2.0, y, h, group, g);
-        y + h + 10.0 * s
+        // (A group's air under it: alone under the tabs — Auto on — the
+        // closing hint touched the switch; rig, 2026-10-20.)
+        y + h + GROUP_GAP * s
     }
 
     /// Lay COLOUR CELLS out from `y` down, `cols` to a row, square, across
@@ -1919,7 +1921,9 @@ impl Panel {
             let stops = self.slider_stops(out, *group, &g.choices, track, (left - 14.0 * s, right + 14.0 * s), (y - 4.0 * s, y + lh + th + 4.0 * s), g.split);
             out.sliders.push(Slider { track, value: lit as f32 / (count - 1) as f32, stops, group: *group, count, split: g.split, mark: g.mark });
         }
-        y + lh + th + 10.0 * s
+        // (A group's air under it, like every other group: the closing hint
+        // sat on the tracks — rig, 2026-10-20.)
+        y + lh + th + GROUP_GAP * s
     }
 
     /// Lay PICTURES out as a grid of previews from `y` down: as many columns
@@ -2210,13 +2214,24 @@ impl Panel {
                 let line = y;
                 // (No words — the Backgrounds tab's line — is still a line, for what sits on it.)
                 y = if chips.is_empty() { y + 40.0 * s } else { self.flow_words(&mut out, y, chips, false) };
-                // Every group beside it, left to right (Auto, then Ambient while on).
+                // Every group beside it, left to right (Auto, then Ambient while on):
+                // at the box's left, or — hugging — just left of the words,
+                // the whole centred.
+                let besides: Vec<(usize, &crate::controls::Group)> = (gi + 1..).map_while(|j| view.groups.get(j).filter(|b| b.beside).map(|b| (j, b))).collect();
+                let air = 28.0 * s;
                 let mut x = 2.0 * MARGIN * s;
-                let mut j = gi + 1;
-                while let Some(b) = view.groups.get(j).filter(|b| b.beside) {
+                if g.hug && !besides.is_empty() && out.chips.len() > first {
+                    let bw: f32 = besides.iter().map(|(_, b)| self.inline_w(b) + air).sum();
+                    let shift = bw / 2.0;
+                    for c in &mut out.chips[first..] {
+                        c.rect.x += shift;
+                    }
+                    let left = out.chips[first..].iter().map(|c| c.rect.x).fold(f32::MAX, f32::min);
+                    x = left - bw;
+                }
+                for (j, b) in besides {
                     self.inline(&mut out, x, line, 26.0 * s, j as u8, b);
-                    x += self.inline_w(b) + 28.0 * s;
-                    j += 1;
+                    x += self.inline_w(b) + air;
                 }
                 let _ = pair;
                 continue;
@@ -4465,7 +4480,9 @@ impl App {
         // of four by three), as tall as its content and never taller than
         // the screen less a margin — past that its cards go four rows to
         // three (`cards_overflow`).
-        let wide = self.quick.open_is("Colours") && self.quick.open_has_tiles();
+        // (Always, cards or none: its three sliders side by side need the
+        // width, and switching tabs must not change the box's — rig, 2026-10-20.)
+        let wide = self.quick.open_is("Colours");
         let (w, h) = {
             (
                 if wide { (sw * QUICK_WHOLE).max(200.0) } else { (QUICK_W * s).min(sw - 40.0 * s).max(200.0) },
@@ -4998,6 +5015,7 @@ mod tests {
             mark: None,
             centred: false,
             grid_rows: None,
+            hug: false,
         }
     }
 
