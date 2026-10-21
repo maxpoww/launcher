@@ -545,6 +545,8 @@ impl App {
 
     /// Start the 30 s tick (once, at the dock's start).
     pub(crate) fn lighting_start(&mut self) {
+        // The dock has just started: the owner is taken to be here.
+        mark_away(false);
         if self.lighting.notifier.is_none() {
             debug!("lighting: no idle-notify; Auto will not move the light by itself");
         }
@@ -851,6 +853,7 @@ impl App {
     /// The 120 s notification: the owner went, or came back.
     fn lighting_away(&mut self, away: bool) {
         self.lighting.away = away;
+        mark_away(away);
         if away {
             self.lighting.plan.absent();
             self.lighting_stop();
@@ -869,6 +872,27 @@ impl App {
         if quiet {
             self.lighting_apply_if_due();
         }
+    }
+}
+
+/// THE OWNER AWAY, for the rest of the system: `$XDG_RUNTIME_DIR/golem/away`
+/// is there exactly while they are (Golem's golem-autobrightness holds the
+/// screen still meanwhile — it dimmed it to "off" behind Max's back,
+/// 2026-10-21). In the runtime dir, so a login never starts away.
+fn mark_away(away: bool) {
+    let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") else { return };
+    let dir = std::path::Path::new(&run).join("golem");
+    let file = dir.join("away");
+    let done = if away {
+        std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&file, b""))
+    } else {
+        match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    };
+    if let Err(e) = done {
+        warn!("lighting: cannot mark the owner {}: {e}", if away { "away" } else { "back" });
     }
 }
 
