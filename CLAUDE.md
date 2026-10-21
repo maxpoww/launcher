@@ -1046,6 +1046,15 @@ The big daemon files are cohesive but long — go straight to the function:
   list|icons`, `sort name|size|date [up]`, `find <words>|-`. SHIFT with a click or an
   arrow selects from where the selection began (`Win::anchor`, `select_to`, `span`). A drag HELD
   on a folder `SPRING` opens it under the drag (`Win::spring`, a timer from `filer_drag_over`).
+  SPRING-LOADED SIDEBAR (Max, 2026-10-21: "the dirs open when i drag something on top"): a drag over
+  the rested sidebar opens it AT ONCE (no `SIDE_WAIT`; `side_follow` folds it when the drag leaves it,
+  unless pinned, and `filer_dnd_leave` when it leaves the window); held `SPRING` on a folder place
+  (`Win::place_spring`) the place BLINKS (`place_blink`, its box gone 110 ms) and opens in this tab
+  (`filer_place_spring`) — the drag goes on over its files and their own spring; a drop on a place
+  still goes straight into it. Not Recents, not the bin, not the folder shown; `..` climbs as ever
+  (`up_hold`). As the files' spring, `sprung_from` takes the window back if the drag leaves without
+  being let go. Rig: `files over <x> <y>` is a drag the springs believe (`Filer::rig_drag`), `files
+  over` alone ends it.
   THE SESSION: the open windows' folders are noted in the runtime dir (`session_path`,
   `filer_note_session`) and a dock started again within the login opens them again
   (`filer_restore_session`, from `main` just before the loop) — where each stood is the
