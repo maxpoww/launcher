@@ -1415,6 +1415,15 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                             app.reassert_window_border();
                             crate::card::declare_layer_rule();
                         }
+                        // `focusedmon>>MONNAME,WORKSPACE` — the focus moved to
+                        // that screen: the pointer crossing over is one, which
+                        // tells a touch on the dock's edge apart there
+                        // (`dock_screen.rs`).
+                        if name == "focusedmon" {
+                            if let Some(mon) = line.split(">>").nth(1).and_then(|d| d.split(',').next()) {
+                                app.screen_focused(mon.trim());
+                            }
+                        }
                         // A screen plugged in gets the wallpaper too.
                         if name.starts_with("monitoradded") {
                             crate::controls::reassert_wallpaper();

@@ -6258,24 +6258,6 @@ impl App {
         let surface_w = self.buffer_size.0 as f32;
         let inset = (((surface_w - plate_w) / 2.0).max(0.0).round() as u32)
             .min((self.buffer_size.0 / 2).saturating_sub(1)); // keep a positive-width region
-        // HIDDEN, the strip is all the dock takes — and not where another
-        // screen goes on across its edge (`dock_screen.rs`: the pointer
-        // crosses there, it never pushes).
-        if self.ui.target() == Target::Hidden && !self.dock_screens.shared.is_empty() && !self.stack_open() && !self.fast.open {
-            let h = self.buffer_size.1 as i32;
-            let rects: Vec<(i32, i32, i32, i32)> = dock_screen::minus((f64::from(inset), f64::from(surface_w) - f64::from(inset)), &self.dock_screens.shared)
-                .into_iter()
-                .map(|(a, b)| (a.round() as i32, h - extent as i32, (b - a).round() as i32, extent as i32))
-                .collect();
-            if self.dock_screens.strip_sent.as_ref() != Some(&rects) {
-                surface::set_input_rects(&self.compositor, &self.layer, &rects);
-                self.dock_screens.strip_sent = Some(rects);
-                // (Shown again, the region is sent whole.)
-                self.input_extent = None;
-            }
-            return;
-        }
-        self.dock_screens.strip_sent = None;
         if self.input_extent != Some(extent) || self.input_inset != Some(inset) {
             match surface::set_input_extent(&self.compositor, &self.layer, self.buffer_size, extent, inset) {
                 Ok(()) => {
@@ -6534,14 +6516,6 @@ impl App {
         if !self.config.input.edge_reveal {
             return false;
         }
-        // (Not where another screen goes on across the edge.)
-        let along = match self.dock_side() {
-            launcher_prefs::Side::Bottom => self.pointer_pos.map(|(x, _)| f64::from(x)),
-            _ => self.pointer_pos.map(|(_, y)| f64::from(y)),
-        };
-        if along.is_some_and(|a| self.dock_screens.shared.iter().any(|&(lo, hi)| a >= lo && a < hi)) {
-            return false;
-        }
         // Beside a side dock: the strip down its edge.
         let strip = self.config.input.edge_reveal_px as f32;
         match self.dock_side() {
@@ -6554,6 +6528,17 @@ impl App {
         }
         let strip_top = self.buffer_size.1 as f32 - self.config.input.edge_reveal_px as f32;
         self.pointer_pos.is_some_and(|(_, y)| y >= strip_top)
+    }
+
+    /// Whether the pointer is over a stretch of the dock's edge another
+    /// screen goes on across (`dock_screen.rs`: a touch there is told apart
+    /// before it calls).
+    fn pointer_on_shared(&self) -> bool {
+        let along = match self.dock_side() {
+            launcher_prefs::Side::Bottom => self.pointer_pos.map(|(x, _)| f64::from(x)),
+            _ => self.pointer_pos.map(|(_, y)| f64::from(y)),
+        };
+        along.is_some_and(|a| self.dock_screens.shared.iter().any(|&(lo, hi)| a >= lo && a < hi))
     }
 
     /// Horizontal scroll: pages the section under the pointer.
@@ -7701,8 +7686,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         }
         // An edge on another screen: touched, the dock comes over.
         if app.pointer_surface == options::PointerSurface::Edge {
-            if let wl_pointer::Event::Enter { surface, .. } = &event {
-                app.dock_edge_touched(surface);
+            match &event {
+                wl_pointer::Event::Enter { surface, surface_x, surface_y, .. } => {
+                    app.dock_edge_touched(surface, (*surface_x, *surface_y));
+                }
+                wl_pointer::Event::Leave { .. } => app.dock_edge_left(),
+                _ => {}
             }
             return;
         }
@@ -7766,7 +7755,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     && app.config.input.edge_reveal
                     && (!app.fast.open || app.pointer_on_reveal_strip())
                 {
-                    app.handle_command(Command::Show);
+                    // Where another screen goes on across the edge, the
+                    // touch is told apart first (`dock_screen.rs`).
+                    if app.pointer_on_shared() {
+                        app.dock_touch_shared(dock_screen::Touch::Dock);
+                    } else {
+                        app.handle_command(Command::Show);
+                    }
                 }
                 app.update_hover();
             }
@@ -7832,12 +7827,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // sends motion, never a fresh Enter, so a pointer wandering
                 // back onto the sliding dock would otherwise be ignored and
                 // it would vanish out from under the cursor.
-                if app.ui.target() == Target::Hidden
-                    && (app.pointer_on_reveal_strip()
-                        || (!app.fast.open && matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_)))))
-                {
-                    app.hide_deadline = None;
-                    app.handle_command(Command::Show);
+                if app.ui.target() == Target::Hidden {
+                    let on_icon = !app.fast.open && matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_)));
+                    if !on_icon && app.pointer_on_reveal_strip() && app.pointer_on_shared() {
+                        app.dock_touch_shared(dock_screen::Touch::Dock);
+                    } else if on_icon || app.pointer_on_reveal_strip() {
+                        app.hide_deadline = None;
+                        app.handle_command(Command::Show);
+                    }
                 }
                 // Detect drag start: press armed and pointer moved beyond
                 // the 6-px threshold (distinguishes drag from sloppy click).
@@ -7916,6 +7913,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.apply_cursor();
             }
             wl_pointer::Event::Leave { .. } => {
+                app.dock_touch_left(dock_screen::Touch::Dock);
                 app.scroll.accum = 0.0;
                 app.pointer_pos = None;
                 // Leaving the surface leaves the dock: names go cold.

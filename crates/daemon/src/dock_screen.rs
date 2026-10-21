@@ -21,10 +21,15 @@
 //!
 //! NOT FROM THE OUTSIDE (Max, 2026-10-21, the TV on top of the laptop: "the
 //! dock must not show when I'm coming from the outside — from under, here,
-//! or from the left when it is on the left"): where another screen goes on
-//! across the dock's edge, the pointer passes on to it there and never
-//! pushes against that edge — so no strip stands there, the dock's own
-//! (`shared`) nor an edge's: the dock comes only at a real border.
+//! or from the left when it is on the left"; then "now I can't call the dock
+//! from the TV"): where another screen goes on across the dock's edge
+//! (`shared`, an edge's own `shared`) a touch is TOLD APART before it calls.
+//! The pointer coming over from that screen moves the compositor's focus to
+//! this one (`focusedmon`) the moment it crosses; one already on this screen
+//! going down to the edge does not. So a touch there waits `CROSS_WAIT` for
+//! that news: the screen just focused (`CROSSED`) = it came over, passing —
+//! no call until it leaves the strip; else it is a call, if the pointer is
+//! still there (one going on through to the other screen has left).
 
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -33,6 +38,7 @@ use smithay_client_toolkit::shell::wlr_layer::{
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::raw::RawPool;
 use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use wayland_client::globals::GlobalList;
 use wayland_client::protocol::wl_output::WlOutput;
@@ -99,10 +105,35 @@ struct Edge {
     size: Option<(u32, u32)>,
     /// Shown for a beat when it is painted (a screen just turned on).
     glow: bool,
+    /// The stretches of its screen's edge another screen goes on across (px
+    /// along the edge from the screen's start).
+    shared: Vec<(f64, f64)>,
 }
 
 /// How long a screen just turned on shows its edge.
 const GLOW: std::time::Duration = std::time::Duration::from_millis(1400);
+
+/// How long a touch where another screen goes on across waits for the
+/// compositor's news that the pointer just came over from it.
+const CROSS_WAIT: Duration = Duration::from_millis(80);
+/// A screen focused this recently, at the end of that wait, was just come
+/// into: the touch was the pointer coming over.
+const CROSSED: Duration = Duration::from_millis(400);
+
+/// A touch waiting to be told apart: on the dock's own strip, or on the edge
+/// of another screen.
+#[derive(Clone, PartialEq)]
+pub(crate) enum Touch {
+    Dock,
+    Edge(WlOutput),
+}
+
+/// Whether the pointer came over to `screen` just now: the compositor's
+/// focus moved there (`focused`: the screen and how long ago) `CROSSED` ago
+/// or less.
+fn came_over(focused: Option<(&str, Duration)>, screen: Option<&str>) -> bool {
+    matches!((focused, screen), (Some((name, ago)), Some(screen)) if name == screen && ago < CROSSED)
+}
 
 /// The edge's pixels (`wl_shm` ARGB8888, little-endian, premultiplied): clear,
 /// or lit — a soft white fading inward from the screen's edge.
@@ -116,10 +147,17 @@ pub(crate) struct DockScreens {
     /// The screen the dock is on (its surface's enter; set on a move).
     output: Option<WlOutput>,
     /// The stretches of that screen's edge on the dock's side another screen
-    /// goes on across (px along the edge from its start): no strip there.
+    /// goes on across (px along the edge from its start): a touch there is
+    /// told apart before it calls.
     pub(crate) shared: Vec<(f64, f64)>,
-    /// The hidden dock's strip as last sent with those taken out.
-    pub(crate) strip_sent: Option<Vec<(i32, i32, i32, i32)>>,
+    /// The screen the compositor last moved its focus to, and when
+    /// (`focusedmon`: the pointer crossing over is one).
+    focused: Option<(String, Instant)>,
+    /// A touch waiting `CROSS_WAIT` to be told apart.
+    touch: Option<Touch>,
+    /// The pointer came over from another screen and is still on the strip
+    /// or the edge: not a call until it leaves.
+    passing: bool,
 }
 
 /// The stretches of screen `name`'s edge on `side` another screen goes on
@@ -141,24 +179,6 @@ pub(crate) fn shared_stretches(all: &[crate::hypr::MonitorInfo], name: &str, sid
         }
     }
     out
-}
-
-/// `span` with `holes` taken out (what is left, in order).
-pub(crate) fn minus(span: (f64, f64), holes: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    let mut left = vec![span];
-    for &(h0, h1) in holes {
-        left = left
-            .into_iter()
-            .flat_map(|(a, b)| {
-                if h1 <= a || h0 >= b {
-                    vec![(a, b)]
-                } else {
-                    [(a, h0), (h1, b)].into_iter().filter(|(x, y)| y - x > 0.5).collect()
-                }
-            })
-            .collect();
-    }
-    left
 }
 
 /// Whether the screen at `i` has the launcher: the main one always, the
@@ -628,20 +648,113 @@ impl App {
         }
     }
 
-    /// The pointer touched an edge: the dock comes over to that screen.
-    pub(crate) fn dock_edge_touched(&mut self, surface: &WlSurface) {
+    /// The pointer touched an edge at `at` (on its surface): the dock comes
+    /// over to that screen — where another screen goes on across, once the
+    /// touch is told apart.
+    pub(crate) fn dock_edge_touched(&mut self, surface: &WlSurface, at: (f64, f64)) {
         let Some(edge) = self.dock_screens.edges.iter().find(|e| e.layer.wl_surface() == surface) else {
             return;
         };
+        let output = edge.output.clone();
+        // (The edge stands centred on its screen's edge.)
+        let screen_len = self.output_state.info(&output).and_then(|i| i.logical_size).map(|(w, h)| match edge.side {
+            Side::Bottom => f64::from(w),
+            Side::Left | Side::Right => f64::from(h),
+        });
+        let start = screen_len.map_or(0.0, |l| (l - f64::from(edge.len)) / 2.0);
+        let along = start
+            + match edge.side {
+                Side::Bottom => at.0,
+                Side::Left | Side::Right => at.1,
+            };
+        if edge.shared.iter().any(|&(lo, hi)| along >= lo && along < hi) {
+            self.dock_touch_shared(Touch::Edge(output));
+        } else {
+            self.dock_edge_called(output);
+        }
+    }
+
+    /// The pointer left an edge.
+    pub(crate) fn dock_edge_left(&mut self) {
+        if matches!(self.dock_screens.touch, Some(Touch::Edge(_))) {
+            self.dock_screens.touch = None;
+        }
+        self.dock_screens.passing = false;
+    }
+
+    /// An edge called the dock: it comes over to that screen.
+    fn dock_edge_called(&mut self, output: WlOutput) {
         if self.dock_suppressed() || self.dock_screens.moving.is_some() {
             return;
         }
-        let output = edge.output.clone();
         info!(
             "dock: the pointer at the edge of {}: made again there",
             self.output_state.info(&output).and_then(|i| i.name).unwrap_or_default()
         );
         self.move_dock_to(Some(output), vec![Command::Show], false);
+    }
+
+    /// The compositor moved its focus to screen `name` (`focusedmon`: the
+    /// pointer crossed over, or something there took the focus).
+    pub(crate) fn screen_focused(&mut self, name: &str) {
+        self.dock_screens.focused = Some((name.to_owned(), Instant::now()));
+    }
+
+    /// The pointer touched a stretch another screen goes on across: told
+    /// apart once the news of a crossing has had `CROSS_WAIT` to come.
+    pub(crate) fn dock_touch_shared(&mut self, touch: Touch) {
+        if self.dock_screens.passing || self.dock_screens.touch.is_some() {
+            return;
+        }
+        self.dock_screens.touch = Some(touch.clone());
+        let armed = self.loop_handle.insert_source(Timer::from_duration(CROSS_WAIT), move |_, _, app: &mut App| {
+            if app.dock_screens.touch.as_ref() == Some(&touch) {
+                app.dock_screens.touch = None;
+                app.dock_touch_judged(touch.clone());
+            }
+            TimeoutAction::Drop
+        });
+        if let Err(e) = armed {
+            // (No wait to be had: a touch is a call, as on a lone screen.)
+            warn!("dock: no timer to tell a touch apart ({e})");
+            if let Some(touch) = self.dock_screens.touch.take() {
+                self.dock_touch_judged(touch);
+            }
+        }
+    }
+
+    /// The pointer left the dock's surface: a touch waiting there passed on
+    /// through, and the next one is told apart afresh.
+    pub(crate) fn dock_touch_left(&mut self, touch: Touch) {
+        if self.dock_screens.touch.as_ref() == Some(&touch) {
+            self.dock_screens.touch = None;
+        }
+        self.dock_screens.passing = false;
+    }
+
+    /// A touch told apart: the pointer came over from the other screen
+    /// (passing), or it went to the edge on this one (a call).
+    fn dock_touch_judged(&mut self, touch: Touch) {
+        let screen = match &touch {
+            Touch::Dock => self.dock_screen_name(),
+            Touch::Edge(output) => self.output_state.info(output).and_then(|i| i.name),
+        };
+        let focused = self.dock_screens.focused.as_ref().map(|(name, at)| (name.as_str(), at.elapsed()));
+        if came_over(focused, screen.as_deref()) {
+            info!("dock: the pointer came over to {} from another screen: not a call", screen.unwrap_or_default());
+            self.dock_screens.passing = true;
+            return;
+        }
+        match touch {
+            // (Still on the strip and still hidden: else it was let be.)
+            Touch::Dock => {
+                if self.ui.target() == Target::Hidden && self.pointer_on_reveal_strip() {
+                    self.hide_deadline = None;
+                    self.handle_command(Command::Show);
+                }
+            }
+            Touch::Edge(output) => self.dock_edge_called(output),
+        }
     }
 
     /// Keep an edge on every chosen screen the dock is not on, along the
@@ -654,12 +767,7 @@ impl App {
         // Where the screens go on across the dock's edge (none with one).
         let all = if two { crate::hypr::all_monitors() } else { Vec::new() };
         let side_now = self.dock_side();
-        let shared = self.dock_screen_name().map_or_else(Vec::new, |name| shared_stretches(&all, &name, side_now));
-        if shared != self.dock_screens.shared {
-            self.dock_screens.shared = shared;
-            self.input_extent = None;
-            self.sync_input_region();
-        }
+        self.dock_screens.shared = self.dock_screen_name().map_or_else(Vec::new, |name| shared_stretches(&all, &name, side_now));
         let off = &self.settings.launcher_screens_off;
         let chosen: Vec<WlOutput> = (0..screens.len())
             .filter(|&i| has_launcher(&screens, i, off))
@@ -692,22 +800,6 @@ impl App {
         } else {
             Vec::new()
         };
-        // (A screen whose whole edge another goes on across has no edge: the
-        // pointer can never push against it there.)
-        let edge_holes = |o: &WlOutput| -> Vec<(f64, f64)> {
-            let name = self.output_state.info(o).and_then(|i| i.name).unwrap_or_default();
-            shared_stretches(&all, &name, side)
-        };
-        let want: Vec<WlOutput> = want
-            .into_iter()
-            .filter(|o| {
-                let len = self.output_state.info(o).and_then(|i| i.logical_size).map(|(w, h)| match side {
-                    Side::Bottom => f64::from(w),
-                    Side::Left | Side::Right => f64::from(h),
-                });
-                len.is_none_or(|len| !minus((0.0, len), &edge_holes(o)).is_empty())
-            })
-            .collect();
         self.dock_screens.edges.retain(|e| e.side == side && want.contains(&e.output));
         let Some(kit) = self.screen_kit.as_ref() else {
             return;
@@ -719,34 +811,14 @@ impl App {
             }
             let len = self.edge_len(&output, side);
             let layer = edge_new(&self.compositor, &kit.shell, &self.qh, &output, side, depth, len);
-            self.dock_screens.edges.push(Edge { layer, output, side, len, size: None, glow: false });
+            self.dock_screens.edges.push(Edge { layer, output, side, len, size: None, glow: false, shared: Vec::new() });
         }
         // (A screen turned or resized: the edges kept are as long as it lets them.)
         self.resize_edges();
-        // Each edge takes the pointer only where no screen goes on across it.
-        for e in &self.dock_screens.edges {
-            let name = self.output_state.info(&e.output).and_then(|i| i.name).unwrap_or_default();
-            let holes = shared_stretches(&all, &name, e.side);
-            let Some(along) = self.output_state.info(&e.output).and_then(|i| i.logical_size).map(|(w, h)| match e.side {
-                Side::Bottom => f64::from(w),
-                Side::Left | Side::Right => f64::from(h),
-            }) else {
-                continue;
-            };
-            // (The edge stands centred on the screen's edge.)
-            let start = (along - f64::from(e.len)) / 2.0;
-            let depth = self.config.input.edge_reveal_px.max(1) as i32;
-            let rects: Vec<(i32, i32, i32, i32)> = minus((start, start + f64::from(e.len)), &holes)
-                .into_iter()
-                .map(|(a, b)| {
-                    let (a, len) = ((a - start).round() as i32, (b - a).round() as i32);
-                    match e.side {
-                        Side::Bottom => (a, 0, len, depth),
-                        Side::Left | Side::Right => (0, a, depth, len),
-                    }
-                })
-                .collect();
-            crate::surface::set_input_rects(&self.compositor, &e.layer, &rects);
+        // Where another screen goes on across each edge.
+        for i in 0..self.dock_screens.edges.len() {
+            let name = self.output_state.info(&self.dock_screens.edges[i].output).and_then(|i| i.name).unwrap_or_default();
+            self.dock_screens.edges[i].shared = shared_stretches(&all, &name, side);
         }
     }
 }
@@ -878,12 +950,11 @@ mod tests {
     }
 
     #[test]
-    fn where_another_screen_goes_on_across_the_docks_edge_no_strip_stands() {
+    fn where_another_screen_goes_on_across_the_docks_edge_is_found() {
         // Max's (2026-10-21): the TV over the laptop, a little wider.
         let all = [mon("eDP-1", 0.0, 0.0, 2000.0, 1250.0), mon("HDMI-A-1", -24.0, -1080.0, 2048.0, 1080.0)];
         // The TV's bottom edge: the laptop goes on across 24..2024 of it.
         assert_eq!(shared_stretches(&all, "HDMI-A-1", Side::Bottom), vec![(24.0, 2024.0)]);
-        assert_eq!(minus((0.0, 2048.0), &[(24.0, 2024.0)]), vec![(0.0, 24.0), (2024.0, 2048.0)], "only its ends");
         // The laptop's bottom: nothing under it — a strip all along.
         assert!(shared_stretches(&all, "eDP-1", Side::Bottom).is_empty());
         // A screen on the laptop's left: its left edge is the laptop's
@@ -892,8 +963,20 @@ mod tests {
         assert_eq!(shared_stretches(&side, "eDP-1", Side::Left), vec![(200.0, 1250.0)]);
         assert!(shared_stretches(&side, "eDP-1", Side::Right).is_empty());
         assert_eq!(shared_stretches(&side, "DP-1", Side::Right), vec![(0.0, 1050.0)]);
-        // A whole edge shared: nothing left of it.
-        assert!(minus((0.0, 2000.0), &[(0.0, 2000.0)]).is_empty());
+    }
+
+    #[test]
+    fn a_touch_right_after_the_focus_came_to_its_screen_is_the_pointer_coming_over() {
+        let ms = Duration::from_millis;
+        // Up from the laptop into the TV: the focus came to the TV as it crossed.
+        assert!(came_over(Some(("HDMI-A-1", ms(85))), Some("HDMI-A-1")));
+        // Down to the TV's edge from on the TV: the focus came there long ago.
+        assert!(!came_over(Some(("HDMI-A-1", ms(5000))), Some("HDMI-A-1")));
+        // The focus went to the other screen: this touch is not its crossing.
+        assert!(!came_over(Some(("eDP-1", ms(85))), Some("HDMI-A-1")));
+        // Nothing known: a call, as on a lone screen.
+        assert!(!came_over(None, Some("HDMI-A-1")));
+        assert!(!came_over(Some(("HDMI-A-1", ms(85))), None));
     }
 
     #[test]
