@@ -4228,52 +4228,58 @@ pub fn scene(
                 plate: NO_PLATE, // the card is its plate
             });
         }
-        // QUICK CONTROLS: the control panel's pills — a stadium in a wash of
-        // the ink with the setting's name; the front one in the near layer's
-        // wash, ringed as a lit choice is, its name dimmed with what was
-        // typed bright (the launcher's word, inside the pill).
-        let bright_card = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+        // QUICK CONTROLS: the settings as WORDS (Max, 2026-10-21: "change the
+        // fast launch pills for those underlined sections"), as the Colours
+        // box's tabs are: the front one bright and underlined — what was
+        // typed bright, the rest of its name dimmed — the ones beside it
+        // dimmed. Through the clear card they wear the launcher word's halo.
+        let light_ink = dock_ink[0] + dock_ink[1] + dock_ink[2] > 1.5;
+        let halo_rgb = if light_ink { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
         for p in f.pills {
-            let (wash, ink_a) = crate::panel::pill_look(bright_card, if p.front { 0 } else { 1 });
             let r = p.rect;
             let show = p.show * a;
-            scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: [wash[0], wash[1], wash[2], wash[3] * show], glass: 0.0, border: 0.0 });
-            if p.front {
-                scene.rects.push(RectInst {
-                    rect: r,
-                    radius: r.h / 2.0,
-                    color: [dock_ink[0], dock_ink[1], dock_ink[2], 0.5 * show],
-                    glass: 0.0,
-                    border: 1.4,
-                });
-            }
             let line = p.font_px * 1.2;
+            let top = r.y + (r.h - line) / 2.0;
             let left = r.x + (r.w - (p.typed_w + p.rest_w)) / 2.0;
+            let halo_r = (p.font_px * 0.07).max(1.0);
+            let ink = |k: f32| [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * show];
+            let halo = |k: f32| [halo_rgb[0], halo_rgb[1], halo_rgb[2], 0.28 * k * show];
             let mut part = |text: &str, x: f32, k: f32| {
                 if text.is_empty() {
                     return;
                 }
-                scene.labels.push(Label {
-                    text: text.to_owned(),
-                    pos: (x, r.y + (r.h - line) / 2.0),
-                    max_w: r.w + p.font_px,
-                    font_px: p.font_px,
-                    line_px: line,
-                    centered: false,
-                    dim: false,
-                    cache: false,
-                    family: crate::options::TEXT_FONT,
-                    color: Some([dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * k * show]),
-                    clip: None,
-                });
+                let d = halo_r * std::f32::consts::FRAC_1_SQRT_2;
+                let rings = [(halo_r, 0.0), (-halo_r, 0.0), (0.0, halo_r), (0.0, -halo_r), (d, d), (-d, d), (d, -d), (-d, -d)];
+                let copies = rings.iter().map(|&o| (o, halo(k))).chain(std::iter::once(((0.0, 0.0), ink(k))));
+                for ((dx, dy), color) in copies {
+                    scene.labels.push(Label {
+                        text: text.to_owned(),
+                        pos: (x + dx, top + dy),
+                        max_w: r.w + p.font_px,
+                        font_px: p.font_px,
+                        line_px: line,
+                        centered: false,
+                        dim: false,
+                        cache: false,
+                        family: crate::options::TEXT_FONT,
+                        color: Some(color),
+                        clip: None,
+                    });
+                }
             };
             if p.front {
                 // Nothing typed: the whole name bright, as on the panel.
                 let rest_k = if p.typed.is_empty() { 1.0 } else { 0.45 };
                 part(&p.typed, left, 1.0);
                 part(&p.rest, left + p.typed_w, rest_k);
+                // The underline: the tabs' hairline (1 px at their 13 px),
+                // under the whole name.
+                let (uw, th) = (p.typed_w + p.rest_w, (p.font_px / 13.0).max(1.0));
+                let uy = top + line + p.font_px * 0.12;
+                scene.rects.push(RectInst { rect: Rect::new(left - halo_r, uy - halo_r, uw + 2.0 * halo_r, th + 2.0 * halo_r), radius: 0.0, color: halo(1.0), glass: 0.0, border: 0.0 });
+                scene.rects.push(RectInst { rect: Rect::new(left, uy, uw, th), radius: 0.0, color: ink(1.0), glass: 0.0, border: 0.0 });
             } else {
-                part(&p.rest, left, ink_a);
+                part(&p.rest, left, 0.55);
             }
         }
         if !f.pills.is_empty() {

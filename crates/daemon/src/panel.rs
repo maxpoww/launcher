@@ -113,14 +113,6 @@ pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
     SETTINGS.iter().map(|s| s.0).find(|label| flat(label) == flat(name))
 }
 
-/// A pill's look on layer `layer` (0 near, 1 middle, 2 far) of a card that
-/// reads bright or dark: its wash, and how strong its name is. For the
-/// settings drawn as pills elsewhere (the quick controls' card).
-pub(crate) fn pill_look(bright: bool, layer: usize) -> ([f32; 4], f32) {
-    let wash = if bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
-    (crate::options::wash(!bright, wash[layer.min(2)]), LAYER_INK[layer.min(2)])
-}
-
 /// A picture's preview in a setting (the wallpapers): its height for its
 /// width, the gap between two, its corner, and the widest one gets.
 const TILE_ASPECT: f32 = 0.625;
