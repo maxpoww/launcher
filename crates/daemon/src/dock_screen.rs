@@ -27,9 +27,11 @@
 //! The pointer coming over from that screen moves the compositor's focus to
 //! this one (`focusedmon`) the moment it crosses; one already on this screen
 //! going down to the edge does not. So a touch there waits `CROSS_WAIT` for
-//! that news: the screen just focused (`CROSSED`) = it came over, passing —
-//! no call until it leaves the strip; else it is a call, if the pointer is
-//! still there (one going on through to the other screen has left).
+//! that news: this screen just focused (`CROSSED`) = it came over, passing —
+//! no call until it leaves the strip; else it is a call — even when the
+//! pointer has gone on across meanwhile (it does not stop at a shared edge:
+//! it grazes the strip and falls through, and calling the dock is what it
+//! went down there for; then "I can't call the dock from the TV").
 
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -120,6 +122,10 @@ const CROSS_WAIT: Duration = Duration::from_millis(80);
 /// into: the touch was the pointer coming over.
 const CROSSED: Duration = Duration::from_millis(400);
 
+/// How long the dock, called by a pointer that fell on through to the other
+/// screen, waits for it to come back up onto it.
+const COME_BACK: Duration = Duration::from_millis(1000);
+
 /// A touch waiting to be told apart: on the dock's own strip, or on the edge
 /// of another screen.
 #[derive(Clone, PartialEq)]
@@ -128,11 +134,10 @@ pub(crate) enum Touch {
     Edge(WlOutput),
 }
 
-/// Whether the pointer came over to `screen` just now: the compositor's
-/// focus moved there (`focused`: the screen and how long ago) `CROSSED` ago
-/// or less.
-fn came_over(focused: Option<(&str, Duration)>, screen: Option<&str>) -> bool {
-    matches!((focused, screen), (Some((name, ago)), Some(screen)) if name == screen && ago < CROSSED)
+/// Whether the pointer came over to a screen just now: the compositor's
+/// focus last moved there `ago` (none: not since the dock started).
+fn came_over(ago: Option<Duration>) -> bool {
+    ago.is_some_and(|ago| ago < CROSSED)
 }
 
 /// The edge's pixels (`wl_shm` ARGB8888, little-endian, premultiplied): clear,
@@ -150,14 +155,18 @@ pub(crate) struct DockScreens {
     /// goes on across (px along the edge from its start): a touch there is
     /// told apart before it calls.
     pub(crate) shared: Vec<(f64, f64)>,
-    /// The screen the compositor last moved its focus to, and when
+    /// When the compositor last moved its focus to each screen
     /// (`focusedmon`: the pointer crossing over is one).
-    focused: Option<(String, Instant)>,
-    /// A touch waiting `CROSS_WAIT` to be told apart.
-    touch: Option<Touch>,
+    focused: Vec<(String, Instant)>,
+    /// A touch waiting `CROSS_WAIT` to be told apart, and the visit it was
+    /// made in.
+    touch: Option<(Touch, u64)>,
     /// The pointer came over from another screen and is still on the strip
     /// or the edge: not a call until it leaves.
     passing: bool,
+    /// Counts the pointer's leaving the strip or an edge: a touch told apart
+    /// after its visit ended marks nothing as passing.
+    visit: u64,
 }
 
 /// The stretches of screen `name`'s edge on `side` another screen goes on
@@ -674,12 +683,11 @@ impl App {
         }
     }
 
-    /// The pointer left an edge.
+    /// The pointer left an edge: the next touch is told apart afresh (one
+    /// waiting goes on — see the module's note).
     pub(crate) fn dock_edge_left(&mut self) {
-        if matches!(self.dock_screens.touch, Some(Touch::Edge(_))) {
-            self.dock_screens.touch = None;
-        }
         self.dock_screens.passing = false;
+        self.dock_screens.visit += 1;
     }
 
     /// An edge called the dock: it comes over to that screen.
@@ -697,7 +705,9 @@ impl App {
     /// The compositor moved its focus to screen `name` (`focusedmon`: the
     /// pointer crossed over, or something there took the focus).
     pub(crate) fn screen_focused(&mut self, name: &str) {
-        self.dock_screens.focused = Some((name.to_owned(), Instant::now()));
+        let focused = &mut self.dock_screens.focused;
+        focused.retain(|(n, _)| n != name);
+        focused.push((name.to_owned(), Instant::now()));
     }
 
     /// The pointer touched a stretch another screen goes on across: told
@@ -706,54 +716,59 @@ impl App {
         if self.dock_screens.passing || self.dock_screens.touch.is_some() {
             return;
         }
-        self.dock_screens.touch = Some(touch.clone());
+        let waiting = (touch, self.dock_screens.visit);
+        self.dock_screens.touch = Some(waiting.clone());
         let armed = self.loop_handle.insert_source(Timer::from_duration(CROSS_WAIT), move |_, _, app: &mut App| {
-            if app.dock_screens.touch.as_ref() == Some(&touch) {
+            if app.dock_screens.touch.as_ref() == Some(&waiting) {
                 app.dock_screens.touch = None;
-                app.dock_touch_judged(touch.clone());
+                app.dock_touch_judged(waiting.clone());
             }
             TimeoutAction::Drop
         });
         if let Err(e) = armed {
             // (No wait to be had: a touch is a call, as on a lone screen.)
             warn!("dock: no timer to tell a touch apart ({e})");
-            if let Some(touch) = self.dock_screens.touch.take() {
-                self.dock_touch_judged(touch);
+            if let Some(waiting) = self.dock_screens.touch.take() {
+                self.dock_touch_judged(waiting);
             }
         }
     }
 
-    /// The pointer left the dock's surface: a touch waiting there passed on
-    /// through, and the next one is told apart afresh.
-    pub(crate) fn dock_touch_left(&mut self, touch: Touch) {
-        if self.dock_screens.touch.as_ref() == Some(&touch) {
-            self.dock_screens.touch = None;
-        }
+    /// The pointer left the dock's surface: the next touch is told apart
+    /// afresh (one waiting goes on — see the module's note).
+    pub(crate) fn dock_touch_left(&mut self) {
         self.dock_screens.passing = false;
+        self.dock_screens.visit += 1;
     }
 
     /// A touch told apart: the pointer came over from the other screen
     /// (passing), or it went to the edge on this one (a call).
-    fn dock_touch_judged(&mut self, touch: Touch) {
+    fn dock_touch_judged(&mut self, (touch, visit): (Touch, u64)) {
         let screen = match &touch {
             Touch::Dock => self.dock_screen_name(),
             Touch::Edge(output) => self.output_state.info(output).and_then(|i| i.name),
         };
-        let focused = self.dock_screens.focused.as_ref().map(|(name, at)| (name.as_str(), at.elapsed()));
-        if came_over(focused, screen.as_deref()) {
+        let ago = self.dock_screens.focused.iter().find(|(name, _)| Some(name) == screen.as_ref()).map(|(_, at)| at.elapsed());
+        if came_over(ago) {
             info!("dock: the pointer came over to {} from another screen: not a call", screen.unwrap_or_default());
-            self.dock_screens.passing = true;
+            // (Until it leaves — if it has not already.)
+            self.dock_screens.passing = visit == self.dock_screens.visit;
             return;
         }
         match touch {
-            // (Still on the strip and still hidden: else it was let be.)
             Touch::Dock => {
-                if self.ui.target() == Target::Hidden && self.pointer_on_reveal_strip() {
-                    self.hide_deadline = None;
-                    self.handle_command(Command::Show);
+                if self.ui.target() != Target::Hidden {
+                    return;
                 }
+                self.hide_deadline = None;
+                self.handle_command(Command::Show);
             }
             Touch::Edge(output) => self.dock_edge_called(output),
+        }
+        // Gone on across already: it goes again unless the pointer comes
+        // back up onto it (its enter keeps it).
+        if visit != self.dock_screens.visit && self.config.input.autohide {
+            self.schedule_hide_after(COME_BACK);
         }
     }
 
@@ -969,14 +984,12 @@ mod tests {
     fn a_touch_right_after_the_focus_came_to_its_screen_is_the_pointer_coming_over() {
         let ms = Duration::from_millis;
         // Up from the laptop into the TV: the focus came to the TV as it crossed.
-        assert!(came_over(Some(("HDMI-A-1", ms(85))), Some("HDMI-A-1")));
-        // Down to the TV's edge from on the TV: the focus came there long ago.
-        assert!(!came_over(Some(("HDMI-A-1", ms(5000))), Some("HDMI-A-1")));
-        // The focus went to the other screen: this touch is not its crossing.
-        assert!(!came_over(Some(("eDP-1", ms(85))), Some("HDMI-A-1")));
+        assert!(came_over(Some(ms(85))));
+        // Down to the TV's edge from on the TV: the focus came there long ago
+        // (and on to the laptop just now, as the pointer fell through).
+        assert!(!came_over(Some(ms(5000))));
         // Nothing known: a call, as on a lone screen.
-        assert!(!came_over(None, Some("HDMI-A-1")));
-        assert!(!came_over(Some(("HDMI-A-1", ms(85))), None));
+        assert!(!came_over(None));
     }
 
     #[test]

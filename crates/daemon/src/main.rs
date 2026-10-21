@@ -7913,7 +7913,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 app.apply_cursor();
             }
             wl_pointer::Event::Leave { .. } => {
-                app.dock_touch_left(dock_screen::Touch::Dock);
+                app.dock_touch_left();
                 app.scroll.accum = 0.0;
                 app.pointer_pos = None;
                 // Leaving the surface leaves the dock: names go cold.
