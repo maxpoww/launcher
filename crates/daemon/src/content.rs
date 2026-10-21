@@ -393,6 +393,11 @@ pub(crate) const BOX_CORNER_RADIUS: f32 = 24.0;
 /// with the frost arriving as the fill crosses the threshold mid-open.
 pub(crate) const DOCK_REST_FILL: f32 = 0.65;
 
+/// FAST LAUNCH's card: the theme's card translucency it keeps — more than
+/// the resting dock (0.65): the theme's 0.502 → 0.45, still under the
+/// `ignore_alpha` threshold: clear glass, no blur.
+const FAST_FILL: f32 = 0.9;
+
 /// Dock drop shadow. One continuous soft shadow wraps the whole rounded
 /// dock; `BLUR` is how far the penumbra reaches out from every edge, and the
 /// four `ALPHA`s set per-edge darkness (corners blend the two neighbours, so
@@ -4208,13 +4213,14 @@ pub fn scene(
     if let Some(f) = fast.filter(|f| f.a > 0.0) {
         let a = f.a;
         let dock_ink = f.ink;
-        // The resting dock's own material (Max, 2026-10-02: "more
-        // transparent" → "i want that"): its colour at the resting veil —
-        // under the compositor's blur threshold, so CLEAR glass, no blur —
-        // the full glass material, and the rim the plates and the dock wear.
+        // The resting dock's material, denser (Max, 2026-10-02: "more
+        // transparent" → "i want that"; 2026-10-21: "make less transparent
+        // the plate on fast launcher"): still under the compositor's blur
+        // threshold, so CLEAR glass, no blur — the full glass material, and
+        // the rim the plates and the dock wear.
         let mut fill = dock_bg;
         if !config.accessibility.reduce_transparency {
-            fill[3] *= DOCK_REST_FILL;
+            fill[3] *= FAST_FILL;
         }
         fill[3] *= a;
         scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 1.0, border: 0.0 });
