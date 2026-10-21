@@ -3091,7 +3091,9 @@ impl App {
             | Action::OpenWith
             | Action::AddPlace
             | Action::RemovePlace
-            | Action::ToggleHidden => {}
+            | Action::ToggleHidden
+            | Action::SortBy(_)
+            | Action::SortDir(_) => {}
             Action::Camera => self.desktop_camera_use(item),
             // (Pages of the bar's phone pill's box.)
             Action::CameraSettings | Action::HelpDebugging | Action::HelpFiles => self.phone_pill_show(action),

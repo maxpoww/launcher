@@ -137,7 +137,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let w = in.rect_max.x - in.rect_min.x;
         let h = in.rect_max.y - in.rect_min.y;
         let whole = w >= globals.screen.x - 2.0 && h >= globals.screen.y - 2.0;
-        if globals.light.x > 0.0 && in.border <= 0.0 && in.glass > -0.5 && h >= 80.0 && w >= 120.0 && !whole {
+        // (glass in (-0.5, -0.1): a solid fill the light leaves alone — a
+        // window's own ground, as Golem Files' sidebar and i card: `UNLIT`.)
+        if globals.light.x > 0.0 && in.border <= 0.0 && in.glass > -0.1 && h >= 80.0 && w >= 120.0 && !whole {
             let from_top = in.px.y - in.rect_min.y;
             let edge = max(-sd, 0.0);
             let top = 0.10 * exp(-from_top * from_top / 4.0) * clamp(1.0 - edge / 3.0, 0.0, 1.0);

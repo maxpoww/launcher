@@ -86,7 +86,7 @@ pub(crate) fn date_text(time: Option<SystemTime>) -> Option<String> {
 }
 
 /// What kind of thing a file is, in a word or two, by its name.
-fn file_kind(name: &str) -> String {
+pub(crate) fn file_kind(name: &str) -> String {
     let what = match crate::files::file_asset_name(name) {
         "asset-audio" => tr("Audio"),
         "asset-video" => tr("Video"),

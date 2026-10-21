@@ -62,6 +62,9 @@ pub(crate) struct Settings {
     /// The file manager's windows show a folder as a LIST (name, size,
     /// date) and not as icons.
     pub(crate) files_list: bool,
+    /// …and keep their sidebar PINNED open beside the files (Max,
+    /// 2026-10-21) instead of opening it over them on hover.
+    pub(crate) files_pinned: bool,
     /// THE LAUNCHER PAGE (Max, 2026-10-20; `launcher_prefs.rs`). STAY AWAY:
     /// the dock is always off the screen and comes only when called —
     /// Super, or the pointer at its edge (no parking while nothing covers it).

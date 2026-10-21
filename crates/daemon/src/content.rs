@@ -112,6 +112,11 @@ pub const WALL: u32 = 1 << 30;
 
 /// No plate under this icon quad (image thumbnails, ring/shine overlays).
 pub const NO_PLATE: [f32; 4] = [0.0; 4];
+
+/// A `RectInst::glass` for a solid fill the night light leaves alone (no
+/// line of light along its top, no shade toward its bottom): a window's own
+/// ground, as Golem Files' sidebar and i card (`rounded_rect.wgsl`).
+pub const UNLIT: f32 = -0.3;
 /// The old baked plate's exact look — translucent white frost (84/255).
 /// Static surfaces that don't colour-match keep this.
 pub const PLATE_STATIC: [f32; 4] = [1.0, 1.0, 1.0, 0.33];

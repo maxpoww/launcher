@@ -1063,5 +1063,19 @@
   "below": "abajo",
   "left": "izquierda",
   "right": "derecha",
-  "Press Ctrl + or Ctrl − while the launcher is open to change the icon size.": "Con el lanzador abierto, Ctrl + o Ctrl − cambian el tamaño de los íconos."
+  "Press Ctrl + or Ctrl − while the launcher is open to change the icon size.": "Con el lanzador abierto, Ctrl + o Ctrl − cambian el tamaño de los íconos.",
+  "Favourites": "Favoritos",
+  "Locations": "Ubicaciones",
+  "Search {folder}": "Buscar en {folder}",
+  "{n} items, {free} available": "{n} elementos, {free} disponibles",
+  "{n} items": "{n} elementos",
+  "{k} of {n} selected, {free} available": "{k} de {n} seleccionados, {free} disponibles",
+  "{k} of {n} selected": "{k} de {n} seleccionados",
+  "Date Modified": "Fecha de modificación",
+  "Ascending": "Ascendente",
+  "Descending": "Descendente",
+  "Opens with": "Se abre con",
+  "1 item": "1 elemento",
+  "{size} ({bytes} bytes)": "{size} ({bytes} bytes)",
+  "Bin": "Papelera"
 }

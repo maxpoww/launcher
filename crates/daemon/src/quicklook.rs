@@ -413,7 +413,7 @@ fn kind_word(name: &str) -> String {
 
 /// The app that opens a kind — asked once a kind (`xdg-mime` is a shell
 /// script: a tenth of a second and more each time).
-fn default_app(mime: &str) -> Option<String> {
+pub(crate) fn default_app(mime: &str) -> Option<String> {
     thread_local! {
         static KNOWN: std::cell::RefCell<HashMap<String, Option<String>>> = std::cell::RefCell::new(HashMap::new());
     }

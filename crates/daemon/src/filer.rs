@@ -61,6 +61,8 @@ use crate::fractional::SurfaceKind;
 use crate::i18n::{fill, tr};
 use crate::{launch, App};
 
+mod chrome;
+
 /// The windows' class: what the compositor, the dock and window memory
 /// know them by.
 pub(crate) const APP_ID: &str = "golem-files";
@@ -70,31 +72,30 @@ pub(crate) const APP_ID: &str = "golem-files";
 const DEFAULT_SIZE: (u32, u32) = (920, 600);
 const MIN_SIZE: (u32, u32) = (380, 260);
 
-/// The strip along the top: back, forward, the way here.
-const HEAD_H: f32 = 46.0;
-/// The places' column, and the window width under which it is left out.
-/// (The tests' places: the rail, as the pill stands at rest.)
+/// THE TOP LINE (Max, 2026-10-21, "A · Unified"): the tabs and the way here
+/// on its left, sort · i · grid/list · search at its right end, on the
+/// page's own colour with no line under it (`filer/chrome.rs`).
+const HEAD_H: f32 = 32.0;
+/// The places' column at rest (the tests' places).
 #[cfg(test)]
 const SIDE_W: f32 = PLACE_ICON + 2.0 * RAIL_AIR;
-/// The places at rest: a RAIL of their icons only, the field beside it; the
-/// pointer on it opens them OVER the field (Max, 2026-10-14: "make the
-/// sidebar auto hide (only see the icons) and open on hover"). The rail is
-/// an icon with `RAIL_AIR` on either side (Max: "less air on the small panel,
-/// and the same air to each side"); the icon is `PLACE_ICON` times the
-/// panel's zoom — which is of the places' ICONS alone, not their words
-/// (Max: "zoom more on the panel icons (not the text)").
-const PLACE_ICON: f32 = 28.0;
-const RAIL_AIR: f32 = 10.0;
-/// How far the words of an open place reach past the rail.
-const SIDE_WORDS: f32 = 140.0;
+/// THE SIDEBAR at rest is a column of the places' SYMBOLS, 48 px; the
+/// pointer on it opens it to 200 with their names, OVER the files (or it
+/// is pinned open beside them). Its icon is `PLACE_ICON` times the panel's
+/// zoom, with `RAIL_AIR` on either side — the zoom is of the icons alone,
+/// not their words (Max, 2026-10-14).
+const PLACE_ICON: f32 = 16.0;
+const RAIL_AIR: f32 = 16.0;
+/// How far the words of an open place reach past the rail (200 in all).
+const SIDE_WORDS: f32 = 152.0;
 /// A place's icon this small or smaller is drawn as its symbol alone.
-const SYMBOL_FROM: f32 = 30.0; // (Max, 2026-10-14: the size he had set, 1× = 28 px, is the biggest of the symbols)
-/// How fast the places open and close (the menus' ease).
+const SYMBOL_FROM: f32 = 30.0;
+/// How fast the sidebar opens and closes, and how narrow a window is left
+/// without one.
 const SIDE_RATE: f32 = 18.0;
 const SIDE_FROM: f32 = 560.0;
-/// One place's row, its icon, and the space over the plugged-in ones.
-const ROW_H: f32 = 30.0;
-const ROW_GAP: f32 = 12.0;
+/// One place's row.
+const ROW_H: f32 = 28.0;
 /// Space around the icons' field.
 const PAD: f32 = 10.0;
 /// A cell is the desktop's with a second line of name: here a name is read
@@ -131,7 +132,7 @@ const FLING_CARRY: f32 = 0.32;
 const RATE_NOTCH: f32 = 24.0;
 const RATE_GLIDE: f32 = 4.5;
 
-/// THE LIST: a row a thing, the window's width, every other one a stripe.
+/// THE LIST: a row a thing, every other one a stripe.
 const LIST_ROW: f32 = 32.0;
 const LIST_ICON: f32 = 20.0;
 /// Where a row's name begins, and its columns' widths (each left out of a
@@ -139,45 +140,11 @@ const LIST_ICON: f32 = 20.0;
 const LIST_NAME_X: f32 = 38.0;
 const LIST_SIZE_W: f32 = 84.0;
 const LIST_DATE_W: f32 = 150.0;
-
-// THE PILLS (Max, 2026-10-17, the approved mockup
-// https://claude.ai/artifact/Ei5kCq1PFvnH1DowocvYzj): the places, the path,
-// the scroll and the mode FLOAT over a field as wide as the window, each a
-// pill of the places' colour with a soft shadow and a hairline rim.
-/// The pills' distance from the window's side.
-const PILL_EDGE: f32 = 8.0;
-/// The air the grid leaves on either side (the pills stand in it).
-const FIELD_AIR: f32 = 52.0;
-/// A list's rows run the window's width; their words begin this far in.
-const LIST_AIR: f32 = 52.0 + 34.0;
-/// Where a list's first row begins.
-const LIST_TOP: f32 = 56.0;
-/// The path's pill: its top, height and the air at its ends.
-const PATH_TOP: f32 = 10.0;
-const PATH_H: f32 = 30.0;
-const PATH_PAD: f32 = 16.0;
-/// The search field the path turns into: its words' room.
-const SEEK_W: f32 = 340.0;
-/// Search and list, out from behind the path: round, `PATH_H` wide, this
-/// far apart.
-const TOOL_GAP: f32 = 6.0;
-/// The scroll's pill: its size and the top of its travel.
-const BAR_W: f32 = 44.0;
-const BAR_H: f32 = 140.0;
-const BAR_TOP: f32 = 56.0;
-/// The mode's circle above the places, and how wide it opens.
-const MODE_D: f32 = 44.0;
-const MODE_OPEN: f32 = 96.0;
-const MODE_GAP: f32 = 10.0;
-/// The rail at the places' own zoom (1×): the size the pills are round at.
-const SIDE_REST: f32 = PLACE_ICON + 2.0 * RAIL_AIR;
-/// The air inside the places' pill above the first place and under the last.
-const PLACES_PAD: f32 = 6.0;
-/// The pills' symbols are the bar's font (`options::NERD`).
-const GLYPH_FIND: &str = "\u{f002}";
-const GLYPH_LIST: &str = "\u{f03a}";
-const GLYPH_FILES: &str = "\u{f07b}";
-const GLYPH_MEDIA: &str = "\u{f03e}";
+/// The air beside the grid (inside `PAD`) and beside a list's rows, and
+/// where a list's first row begins.
+const GRID_AIR: f32 = 10.0;
+const LIST_AIR: f32 = 8.0;
+const LIST_TOP: f32 = HEAD_H + 4.0;
 
 /// The things of a folder whose names hold `find` (whatever the case);
 /// all of them for no search.
@@ -249,6 +216,8 @@ pub(crate) enum SortKey {
     Name,
     Size,
     Modified,
+    /// By kind: the ending, then the name.
+    Kind,
 }
 
 /// What the list says of a thing beside its name.
@@ -276,16 +245,26 @@ fn meta_of(items: &[Item]) -> HashMap<String, Meta> {
         .collect()
 }
 
-/// `items` by size or date (folders first, as ever), biggest or newest
-/// first when `desc`. By name they stay as they are: the folder's own order.
+/// `items` by size, date or kind (folders first, as ever), biggest, newest
+/// or last first when `desc`. By name they stay in the folder's own order
+/// (by name, or as arranged by hand) — turned round when `desc`.
 pub(crate) fn sorted(mut items: Vec<Item>, meta: &HashMap<String, Meta>, key: SortKey, desc: bool) -> Vec<Item> {
     if key == SortKey::Name {
+        // (The folder's own order — by name, or as arranged by hand — and
+        // turned round, folders still first.)
+        if desc {
+            let split = items.iter().position(|it| it.kind != Kind::Folder).unwrap_or(items.len());
+            items[..split].reverse();
+            items[split..].reverse();
+        }
         return items;
     }
     let of = |it: &Item| meta.get(&it.path).copied().unwrap_or_default();
+    let ending = |it: &Item| it.name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     items.sort_by(|a, b| {
         let by = match key {
             SortKey::Size => of(a).size.cmp(&of(b).size),
+            SortKey::Kind => ending(a).cmp(&ending(b)).then_with(|| by_name(&a.name, &b.name)),
             _ => of(a).modified.cmp(&of(b).modified),
         };
         (b.kind == Kind::Folder)
@@ -386,14 +365,25 @@ enum Spot {
     Crumb(usize),
     /// The head's `..` (only where the places, and theirs, are left out).
     Up,
-    /// The mode's circles: 0 the one in use, 1 the other (out on hover).
+    /// The sidebar's two modes at its top: 0 Files, 1 Media.
     Mode(usize),
-    /// The scroll's pill.
-    Bar,
-    /// The button that turns the folder between icons and a list.
-    View,
-    /// The magnifier: it opens the search.
+    /// The pin in the sidebar's corner.
+    Pin,
+    /// A tab of the top line that is not the current one, a tab's ×, the +.
+    Tab(usize),
+    TabX(usize),
+    TabAdd,
+    /// The current tab's pencil: its path as a field to type in.
+    Pencil,
+    /// The top line's right end: the sort menu, the i, the view (a list?),
+    /// the magnifier.
+    Sort,
+    Info,
+    View(bool),
     Find,
+    /// A part of the chrome that takes the pointer and does nothing (the
+    /// sidebar's ground, the search field, the i card).
+    Chrome,
     /// A column's name in the list's strip (0 name, 1 size, 2 date).
     Col(usize),
 }
@@ -427,24 +417,20 @@ impl Layout {
     }
 
     /// A window of `w`×`h`; its field at `zoom`, beside places `rail` wide.
-    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool, zoom: f32, rail: f32) -> Self {
+    pub fn of((w, h): (f32, f32), icon_scale: f32, list: bool, zoom: f32, left: f32) -> Self {
         let zoom = zoom.max(0.1);
-        let side_w = if w >= SIDE_FROM { rail } else { 0.0 };
-        // The field is the whole window: the places and the scroll FLOAT
-        // over it, in the air it leaves at either side (the pills, Max
-        // 2026-10-17). (Its own size, as it is laid out: the room between
-        // that air, `zoom` times smaller.)
-        // (The air is never narrower than the places' rail: zoomed, the
-        // pill grows and the field steps in.)
-        let rim = FIELD_AIR.max(PILL_EDGE + rail - 4.0);
-        let air = if list { rim + LIST_AIR - FIELD_AIR } else { rim } - PAD;
-        let (w, h) = (2.0 * air + (w - 2.0 * air) / zoom, h);
+        // The field begins where the sidebar ends (at rest, or pinned
+        // open), under the top line. (Its own size, as it is laid out: the
+        // room it has, `zoom` times smaller.)
+        let side_w = left;
+        let air = if list { LIST_AIR } else { GRID_AIR };
+        let room_w = ((w - left - 2.0 * air) / zoom).max(1.0);
         if list {
             // One column as wide as the field: a row is a cell, so all that
             // knows cells (the pointer, the keys, a band, a drag's room)
-            // knows rows. (Drawn the window's width: `filer_draw`.)
+            // knows rows.
             let top = LIST_TOP;
-            let body = Rect::new(air, top, (w - 2.0 * air).max(1.0), ((h - top) / zoom).max(1.0));
+            let body = Rect::new(left + air, top, room_w, ((h - top) / zoom).max(1.0));
             let room = (body.w - 2.0 * PAD).max(1.0);
             return Self {
                 side_w,
@@ -457,9 +443,9 @@ impl Layout {
                 zoom,
             };
         }
-        // As many columns as fit between the air, the room left shared
-        // between them: the same air on both sides.
-        let body = Rect::new(air, HEAD_H, (w - 2.0 * air).max(1.0), ((h - HEAD_H) / zoom).max(1.0));
+        // As many columns as fit, the room left shared between them: the
+        // same air on both sides.
+        let body = Rect::new(left + air, HEAD_H, room_w, ((h - HEAD_H) / zoom).max(1.0));
         let (cw, ch) = (FILES_CELL_W * icon_scale, CELL_H * icon_scale);
         let room = (body.w - 2.0 * PAD).max(cw);
         let cols = ((room / cw).floor() as usize).max(1);
@@ -1382,16 +1368,27 @@ struct Hits {
     up: Rect,
     crumbs: Vec<(Rect, PathBuf)>,
     places: Vec<Rect>,
-    view: Rect,
     find: Rect,
     /// The list's column names.
     cols: Vec<Rect>,
-    /// The pills as drawn: the path, the places, the scroll, and the mode's
-    /// two circles (the second while it is out).
-    path: Rect,
+    /// THE CHROME as drawn (`filer/chrome.rs`): the sidebar, its pin and
+    /// its two modes; the tabs (the others, each ×, the +), the current
+    /// one and its pencil; the right end's buttons and the search field;
+    /// the i card.
     side: Rect,
-    bar: Rect,
+    pin: Rect,
     mode: [Rect; 2],
+    tabs: Vec<(Rect, usize)>,
+    tab_x: Vec<(Rect, usize)>,
+    tab_add: Rect,
+    cur_tab: Rect,
+    pencil: Rect,
+    sort: Rect,
+    info: Rect,
+    grid: Rect,
+    list: Rect,
+    seek: Rect,
+    card: Rect,
 }
 
 /// One window.
@@ -1414,25 +1411,39 @@ struct Win {
     /// The pointer as it is in the laid-out window (not brought into the
     /// field): what opens the places.
     at_win: Option<(f32, f32)>,
-    /// The places: open (wanted), how open they are (0 = the rail, 1 =
-    /// open; eased), and how wide that drew them.
+    /// The sidebar: open over the files (wanted), and how open it is
+    /// (0 = the rail, 1 = open; eased).
     side_open: bool,
     side_t: f32,
-    side_now: f32,
     /// The places scrolled (Max, 2026-10-14: "add scroll to the sidebar"):
     /// where they are and where the wheel sent them.
     side_scroll: f32,
     side_scroll_to: f32,
-    /// Search and list out from behind the path (wanted, how far: eased).
-    tools_open: bool,
-    tools_t: f32,
-    /// The mode's circle open (wanted, how far), and the mode: MEDIA shows
-    /// only pictures and videos.
-    mode_open: bool,
-    mode_t: f32,
+    /// The pointer came onto the sidebar at rest: it opens after a breath
+    /// (`chrome::SIDE_WAIT`) if it stays. Pinned, it stays open beside the
+    /// files (`settings.files_pinned`, one choice for every window).
+    side_wait: Option<Instant>,
+    pinned: bool,
+    /// The mode: MEDIA shows only pictures and videos.
     media: bool,
-    /// The scroll's pill held: where the pointer took it and the scroll then.
-    bar_hold: Option<(f32, f32)>,
+    /// THE TABS (Max, 2026-10-21): each its own folder and its own way back
+    /// and forward. The current one's live in `dir`, `back` and `forward`;
+    /// its entry here is brought up to date when another is taken.
+    tabs: Vec<chrome::Tab>,
+    tab: usize,
+    tab_seq: u64,
+    /// Each tab's width as drawn, easing to its own (a tab folds into its
+    /// name and unfolds into its path).
+    tab_w: HashMap<u64, f32>,
+    /// The current tab's width when its pencil was taken: the field's.
+    edit_w: f32,
+    /// The search field out (eased to `find.is_some()`).
+    find_t: f32,
+    /// The i card is up, and what it says (asked for off the loop when the
+    /// selection changes).
+    info_on: bool,
+    info: Option<chrome::Info>,
+    info_asked: Option<String>,
     /// Shown as a list (`settings.files_list`, one choice for every window).
     list: bool,
     /// What the things are ordered by here, biggest or newest first when
@@ -1623,7 +1634,7 @@ impl Win {
     }
 
     fn layout(&self, icon_scale: f32) -> Layout {
-        Layout::of(self.virt(), icon_scale, self.list, self.zoom, self.rail())
+        Layout::of(self.virt(), icon_scale, self.list, self.zoom, self.field_left())
     }
 
     /// The window's size (the field has a zoom of its own: `Layout::zoom`).
@@ -1665,112 +1676,92 @@ impl Win {
         }
     }
 
+    /// Whether the window is wide enough for a sidebar.
+    fn has_side(&self) -> bool {
+        self.virt().0 >= SIDE_FROM
+    }
+
+    /// Where the files begin: beside the sidebar at rest, or pinned open.
+    fn field_left(&self) -> f32 {
+        match (self.has_side(), self.pinned) {
+            (false, _) => 0.0,
+            (true, false) => self.rail(),
+            (true, true) => self.side_open_w(),
+        }
+    }
+
+    /// How wide the sidebar is drawn now (open over the files, or not).
+    fn side_now(&self) -> f32 {
+        if !self.has_side() {
+            return 0.0;
+        }
+        if self.pinned {
+            return self.side_open_w();
+        }
+        let t = self.side_t;
+        let ease = t * t * (3.0 - 2.0 * t);
+        self.rail() + (self.side_open_w() - self.rail()) * ease
+    }
+
     /// How far the places can be scrolled: what they need past what the
     /// window shows of them.
     fn side_max(&self) -> f32 {
-        (self.places_tall() - self.places_box(0.0).h).max(0.0)
+        (chrome::PLACES_TOP + self.places_tall() + 10.0 - self.virt().1).max(0.0)
     }
 
-    /// How tall the places' pill would be with all of them in it.
+    /// How tall the places are (their sections' headings counted in).
     fn places_tall(&self) -> f32 {
-        let rows = self.places.len() as f32 * self.place_row()
-            + self.places.iter().filter(|p| p.gap).count() as f32 * ROW_GAP;
-        rows + 2.0 * PLACES_PAD
-    }
-
-    /// The places' pill, `width` wide: at the window's left, centred in the
-    /// field's height, as tall as its places (and the window allow — then
-    /// it scrolls), the mode's circle kept room above it. None in a window
-    /// too narrow for the places.
-    fn places_box(&self, width: f32) -> Rect {
-        let (_, h) = self.virt();
-        let top_min = PATH_TOP + self.rail() + MODE_GAP;
-        let tall = self.places_tall().min((h - PILL_EDGE - top_min).max(0.0));
-        let y = (HEAD_H + (h - HEAD_H - tall) / 2.0).max(top_min);
-        Rect::new(PILL_EDGE, y, width, tall)
-    }
-
-    /// The mode's circle above the places (`open`: as wide as it opens), and
-    /// the other one at its right.
-    fn mode_boxes(&self, open: f32) -> [Rect; 2] {
-        // (As wide as the places' pill and grown with it: Max, 2026-10-17.)
-        let (side, d) = (self.places_box(0.0), self.rail());
-        let main = Rect::new(PILL_EDGE, side.y - MODE_GAP - d, d + (MODE_OPEN - MODE_D) * open, d);
-        [main, Rect::new(main.x + main.w + TOOL_GAP, main.y, d, d)]
-    }
-
-    /// The corner of the places' pill and the mode's circle: round at the
-    /// rail's own size, more SQUARE as they grow (Max, 2026-10-17: "less
-    /// and less rounded") — half the width at rest, toward 30 % of it.
-    fn pill_corner(&self) -> f32 {
-        let d = self.rail();
-        let f = ((d - SIDE_REST) / 40.0).clamp(0.0, 1.0);
-        d * (0.5 - 0.2 * f)
-    }
-
-    /// Search and list, out at the path's right end.
-    fn tool_boxes(&self) -> [Rect; 2] {
-        let path = self.hits.path;
-        let at = |k: f32| Rect::new(path.x + path.w + TOOL_GAP + k * (PATH_H + TOOL_GAP), path.y, PATH_H, PATH_H);
-        [at(0.0), at(1.0)]
-    }
-
-    /// Whether a point of the window is on one of the pills (they stand over
-    /// the field and take what is pointed at them).
-    fn on_pill(&self, at: (f32, f32)) -> bool {
-        let h = &self.hits;
-        let tools = self.tools_t > 0.5 && self.tool_boxes().iter().any(|r| r.contains(at));
-        let mode = h.mode[0].contains(at) || (self.mode_t > 0.5 && h.mode[1].contains(at));
-        self.in_side(at) || h.path.contains(at) || h.bar.contains(at) || tools || mode
+        let heads = self.places.iter().filter(|p| p.gap).count() + 1;
+        self.places.len() as f32 * self.place_row() + heads as f32 * chrome::SEC_H
     }
 
     /// A place's row: tall enough for its icon.
     fn place_row(&self) -> f32 {
-        ROW_H.max(self.place_icon() + 10.0)
+        ROW_H.max(self.place_icon() + 12.0)
     }
 
     /// Where the pointer is, for what it is over: brought into the laid-out
     /// window, then into the field's own space over the field
     /// (`Layout::inward`) — except while a menu or a box is up, which stand
-    /// in the window's.
+    /// in the window's, and over the chrome.
     fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
         let at = raw;
-        if self.menu.is_some() || self.props.is_some() || self.on_pill(at) {
+        if self.menu.is_some() || self.props.is_some() || self.on_chrome(at) {
             return at;
         }
         self.layout(icon_scale).inward(at)
     }
 
-    /// Whether a point of the laid-out window is on the places as they are
-    /// drawn now (open over the field, or the rail).
+    /// Whether a point of the window is on the sidebar as it is drawn now.
     fn in_side(&self, at: (f32, f32)) -> bool {
-        self.side_now > 0.0 && self.hits.side.contains(at)
+        self.has_side() && at.0 < self.side_now()
+    }
+
+    /// Whether a point of the window is on the chrome: the sidebar, the top
+    /// line, the i card.
+    fn on_chrome(&self, at: (f32, f32)) -> bool {
+        self.in_side(at) || at.1 < HEAD_H || (self.info_on && self.hits.card.contains(at))
     }
 
     /// Whether a point the pointer gave is over the field.
     fn on_field(&self, raw: (f32, f32), icon_scale: f32) -> bool {
-        !self.on_pill(raw) && self.layout(icon_scale).shown_body().contains(raw)
+        !self.on_chrome(raw) && self.layout(icon_scale).shown_body().contains(raw)
     }
 
-    /// Open the places while the pointer is on them (the rail, or what they
-    /// cover once open); whether that changed.
-    /// The same for the path's tools (on the path, or on them while they
-    /// are out) and the mode's circles.
-    fn side_follow(&mut self, rail: f32) -> bool {
-        let reach = self.places_box(if self.side_open { self.side_open_w() } else { rail });
-        let at = self.at_win;
-        let want = rail > 0.0 && at.is_some_and(|p| reach.contains(p));
-        let mut changed = std::mem::replace(&mut self.side_open, want) != want;
-        let tools = self.tool_boxes();
-        let want = at.is_some_and(|p| {
-            self.hits.path.contains(p) || (self.tools_open && (tools[0].contains(p) || tools[1].contains(p)))
-        });
-        changed |= std::mem::replace(&mut self.tools_open, want) != want;
-        let mode = self.mode_boxes(if self.mode_open { 1.0 } else { 0.0 });
-        let want = rail > 0.0
-            && at.is_some_and(|p| mode[0].contains(p) || (self.mode_open && (mode[1].contains(p) || between(mode, p))));
-        changed |= std::mem::replace(&mut self.mode_open, want) != want;
-        changed
+    /// Open the sidebar while the pointer is on it — after a breath
+    /// (`side_wait`, the caller's timer); leaving closes it at once. Whether
+    /// that changed what is drawn.
+    fn side_follow(&mut self) -> bool {
+        let reach = if self.side_open { self.side_open_w() } else { self.rail() };
+        let want = self.has_side() && !self.pinned && self.at_win.is_some_and(|p| p.0 < reach);
+        if !want {
+            self.side_wait = None;
+            return std::mem::replace(&mut self.side_open, false);
+        }
+        if !self.side_open && self.side_wait.is_none() {
+            self.side_wait = Some(Instant::now());
+        }
+        false
     }
 
     /// What Ctrl +/−/0 zoom now: the field, or the panel under the pointer.
@@ -1791,37 +1782,53 @@ impl Win {
     }
 
     fn spot(&self, pos: (f32, f32), layout: &Layout) -> Spot {
-        if self.hits.up.contains(pos) {
+        let h = &self.hits;
+        if h.up.contains(pos) {
             return Spot::Up;
         }
-        if self.tools_t > 0.5 {
-            let [find, view] = self.tool_boxes();
-            if find.contains(pos) {
-                return Spot::Find;
+        // (The card stands over the files: what is under it is not pointed at.)
+        if self.info_on && h.card.contains(pos) {
+            return Spot::Chrome;
+        }
+        if self.in_side(pos) {
+            if h.pin.contains(pos) {
+                return Spot::Pin;
             }
-            if view.contains(pos) {
-                return Spot::View;
+            if let Some(n) = h.mode.iter().position(|r| r.w > 0.0 && r.contains(pos)) {
+                return Spot::Mode(n);
             }
+            if let Some(i) = h.places.iter().position(|r| r.contains(pos)) {
+                return Spot::Place(i);
+            }
+            return Spot::Chrome;
         }
-        if self.hits.mode[0].contains(pos) {
-            return Spot::Mode(0);
+        if pos.1 < HEAD_H {
+            let at = |list: &[(Rect, usize)]| list.iter().find(|(r, _)| r.contains(pos)).map(|(_, n)| *n);
+            if let Some(n) = at(&h.tab_x) {
+                return Spot::TabX(n);
+            }
+            if let Some(n) = at(&h.tabs) {
+                return Spot::Tab(n);
+            }
+            for (r, spot) in [
+                (h.tab_add, Spot::TabAdd),
+                (h.pencil, Spot::Pencil),
+                (h.sort, Spot::Sort),
+                (h.info, Spot::Info),
+                (h.grid, Spot::View(false)),
+                (h.list, Spot::View(true)),
+                (h.find, Spot::Find),
+            ] {
+                if r.contains(pos) {
+                    return spot;
+                }
+            }
+            if let Some(i) = h.crumbs.iter().position(|(r, _)| r.contains(pos)) {
+                return Spot::Crumb(i);
+            }
+            return Spot::Chrome;
         }
-        if self.mode_t > 0.5 && self.hits.mode[1].contains(pos) {
-            return Spot::Mode(1);
-        }
-        if self.hits.bar.contains(pos) {
-            return Spot::Bar;
-        }
-        if let Some(i) = self.hits.crumbs.iter().position(|(r, _)| r.contains(pos)) {
-            return Spot::Crumb(i);
-        }
-        if let Some(i) = self.hits.places.iter().position(|r| r.contains(pos)) {
-            return Spot::Place(i);
-        }
-        if self.on_pill(pos) {
-            return Spot::Nothing;
-        }
-        if let Some(i) = self.hits.cols.iter().position(|r| r.contains(pos)) {
+        if let Some(i) = h.cols.iter().position(|r| r.contains(pos)) {
             return Spot::Col(i);
         }
         layout
@@ -2001,9 +2008,12 @@ fn file_name(path: &Path) -> String {
         .map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
 }
 
-/// The places down the side: Home, the owner's folders that exist (under
-/// the names they have on disk), the phones' folder, then what is plugged
-/// in and open.
+/// The sidebar's places in its two sections (Max, 2026-10-21, "A ·
+/// Unified"): FAVOURITES — Home, under the owner's name as the way here
+/// starts with it, the owner's folders from `user-dirs.dirs`, `~/Phones`,
+/// then the owner's own (GTK's bookmarks) — and LOCATIONS: the owner's other
+/// disks, what is plugged in, the bin. `gap` marks the first of Locations
+/// (its heading stands over it).
 pub(crate) fn places(
     home: &Path,
     user_dirs: &str,
@@ -2012,7 +2022,7 @@ pub(crate) fn places(
     volumes: &[crate::mounts::Mounted],
 ) -> Vec<Place> {
     let mut out = vec![Place {
-        name: tr("Home").to_owned(),
+        name: file_name(home),
         path: home.to_path_buf(),
         icon: "asset:user-home".to_owned(),
         gap: false,
@@ -2047,48 +2057,46 @@ pub(crate) fn places(
             start: false,
         });
     }
-    out.push(Place {
-        name: tr("Recycle Bin").to_owned(),
-        path: bin.to_path_buf(),
-        icon: "asset:user-trash".to_owned(),
-        gap: false,
-        start: true,
-    });
     // The owner's own, where they still are (and are not up there already).
-    let mut first = true;
     for (name, path) in marks {
         if path.is_dir() && !out.iter().any(|p| p.path == *path) {
             out.push(Place {
                 name: name.clone(),
                 path: path.clone(),
                 icon: "asset:folder".to_owned(),
-                gap: first,
+                gap: false,
                 start: false,
             });
-            first = false;
         }
     }
-    let mut first = true;
+    // LOCATIONS.
+    let first = out.len();
     for disk in crate::mounts::own_disks() {
         out.push(Place {
             name: file_name(&disk),
             path: disk,
             icon: "asset:drive-harddisk".to_owned(),
-            gap: first,
+            gap: false,
             start: true,
         });
-        first = false;
     }
     for v in volumes.iter().filter(|v| !v.closed) {
         out.push(Place {
             name: v.name.clone(),
             path: v.path.clone(),
             icon: format!("asset:{}", crate::mounts::volume_icon(v)),
-            gap: first,
+            gap: false,
             start: true,
         });
-        first = false;
     }
+    out.push(Place {
+        name: tr("Bin").to_owned(),
+        path: bin.to_path_buf(),
+        icon: "asset:user-trash".to_owned(),
+        gap: false,
+        start: true,
+    });
+    out[first].gap = true;
     out
 }
 
@@ -2111,29 +2119,6 @@ pub(crate) fn floor<'a>(dir: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
 /// 2026-10-14): a click goes up, and it is where things are dragged OUT of
 /// a folder to.
 pub(crate) const UP: &str = "..";
-
-/// `places` for a window on `dir`: `..` first, a FOLDER like the others
-/// (Max, 2026-10-14: "tiene que ser otra carpeta arriba de Home" — not an
-/// arrow, not set apart), then the rest. At the root there is nowhere up:
-/// no `..` at all (Max: hidden, not grey).
-/// Nothing is above a root either (`floor`).
-pub(crate) fn with_up(places: &[Place], dir: &Path, roots: Option<&[PathBuf]>) -> Vec<Place> {
-    let Some(parent) = dir.parent() else {
-        return places.to_vec();
-    };
-    if roots.is_some_and(|roots| floor(dir, roots).is_none_or(|f| f == dir)) {
-        return places.to_vec();
-    }
-    let mut out = vec![Place {
-        name: UP.to_owned(),
-        path: parent.to_path_buf(),
-        icon: "asset:folder-up".to_owned(),
-        gap: false,
-        start: false,
-    }];
-    out.extend(places.iter().cloned());
-    out
-}
 
 /// The way to `dir` as steps to click: from the place it is deepest under
 /// (Home, a stick, a phone), else from the root.
@@ -2270,10 +2255,12 @@ pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
 /// #eae7e0, ink base05 #27251f), dark washes — the same weights, turned
 /// over. Colours here are LINEAR light.
 pub(crate) struct Palette {
+    /// The dark look (the chrome's symbols follow it: `chrome::tones`).
+    pub dark: bool,
+    pub accent: [f32; 4],
     pub ground: [f32; 4],
     pub side: [f32; 4],
     pub ink: [f32; 4],
-    pub hover: [f32; 4],
     pub selected: [f32; 4],
     pub band_fill: [f32; 4],
     pub band_line: [f32; 4],
@@ -2290,10 +2277,11 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
     if dark {
         let (dock, dock_ink) = if theme.dynamic { (dock, dock_ink) } else { (lin(theme.surface()), lin(theme.ink())) };
         return Palette {
+            dark: true,
+            accent: lin(theme.accent()),
             ground: lift(dock, 0.0),
             side: lift(dock, 0.012),
             ink: dock_ink,
-            hover: [1.0, 1.0, 1.0, 0.07],
             selected: [1.0, 1.0, 1.0, 0.16],
             band_fill: [1.0, 1.0, 1.0, 0.07],
             band_line: [1.0, 1.0, 1.0, 0.38],
@@ -2306,6 +2294,8 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
         };
     }
     Palette {
+        dark: false,
+        accent: lin(theme.accent()),
         // A BRIGHT GREY, a touch warm — not white, and not blue (Max,
         // 2026-10-14: "too white… reduce a little the blue light", then
         // "make it warmer", "little darker and warmer", "too warm" — half of
@@ -2313,7 +2303,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
         ground: lin(theme.surface()),
         side: lin(theme.raised()),
         ink: lin(theme.ink()),
-        hover: [0.0, 0.0, 0.0, 0.05],
         selected: [0.0, 0.0, 0.0, 0.11],
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
@@ -2374,13 +2363,6 @@ fn lift(c: [f32; 4], k: f32) -> [f32; 4] {
     [c[0] + (1.0 - c[0]) * k, c[1] + (1.0 - c[1]) * k, c[2] + (1.0 - c[2]) * k, 1.0]
 }
 
-/// Whether `p` is in the air between the mode's two circles (the pointer
-/// crossing from one to the other keeps them out).
-fn between(mode: [Rect; 2], p: (f32, f32)) -> bool {
-    let (a, b) = (mode[0], mode[1]);
-    p.0 >= a.x + a.w && p.0 <= b.x && p.1 >= a.y && p.1 <= a.y + a.h
-}
-
 /// Whether a file of this name is a picture or a video (what MEDIA shows).
 fn is_media(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -2391,25 +2373,6 @@ fn is_media(name: &str) -> bool {
     .iter()
     .any(|e| lower.ends_with(e))
         || crate::thumb_more::mime_of(&lower).is_some_and(|m| m.starts_with("image/") || m.starts_with("video/"))
-}
-
-/// A pill: a soft shadow under it, its fill, a hairline rim (the places',
-/// the path's, the scroll's — Max's mockup: `0 6px 18px rgba(0,0,0,.28)`
-/// and a 1 px white rim at 6 %). `alpha` fades all of it.
-/// `radius` is its corner (a pill that opens wider keeps the one it had).
-fn pill(rects: &mut Vec<RectInst>, r: Rect, radius: f32, fill: [f32; 4], alpha: f32) {
-    // (The shadow: rings growing outward, each fainter, a little low.)
-    for k in 1..=6 {
-        let k = k as f32;
-        let grow = 2.6 * k;
-        let s = Rect::new(r.x - grow, r.y - grow + 5.0, r.w + 2.0 * grow, r.h + 2.0 * grow);
-        rects.push(rect(s, radius + grow, [0.0, 0.0, 0.0, 0.05 * (1.0 - k / 7.0) * alpha]));
-    }
-    rects.push(rect(r, radius, [fill[0], fill[1], fill[2], fill[3] * alpha]));
-    rects.push(RectInst {
-        border: 1.0,
-        ..rect(r, radius, [1.0, 1.0, 1.0, 0.06 * alpha])
-    });
 }
 
 fn rect(rect: Rect, radius: f32, color: [f32; 4]) -> RectInst {
@@ -2442,6 +2405,9 @@ impl App {
     /// Open a window on `dir` (Home when it is not a folder).
     pub(crate) fn filer_open(&mut self, dir: PathBuf) {
         let dir = if dir.is_dir() { dir } else { home() };
+        // (The chrome's symbols, written where the icon loader reads them.)
+        static GLYPHS: std::sync::Once = std::sync::Once::new();
+        GLYPHS.call_once(chrome::write_glyphs);
         // Asked for from outside, under none of the roots (another app's
         // "show in folder"): this window's own root, down from there only.
         let root = floor(&dir, &self.filer_roots(None)).is_none().then(|| dir.clone());
@@ -2509,15 +2475,20 @@ impl App {
             at_win: None,
             side_open: false,
             side_t: 0.0,
-            side_now: 0.0,
             side_scroll: 0.0,
             side_scroll_to: 0.0,
-            tools_open: false,
-            tools_t: 0.0,
-            mode_open: false,
-            mode_t: 0.0,
+            side_wait: None,
+            pinned: self.settings.files_pinned,
             media: false,
-            bar_hold: None,
+            tabs: vec![chrome::Tab::new(0, dir.clone())],
+            tab: 0,
+            tab_seq: 1,
+            tab_w: HashMap::new(),
+            edit_w: 0.0,
+            find_t: 0.0,
+            info_on: false,
+            info: None,
+            info_asked: None,
             list: self.settings.files_list,
             sort: (SortKey::Name, false),
             meta: HashMap::new(),
@@ -2634,17 +2605,14 @@ impl App {
         let marks = parse_marks(&std::fs::read_to_string(marks_path()).unwrap_or_default());
         let list = places(&home, &user_dirs, &bin_root(), &marks, &self.desktop.volumes);
         let marked: Vec<PathBuf> = marks.into_iter().map(|(_, p)| p).collect();
-        let base = self.filer_roots(None);
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        // (No `..` among them since the sidebar of 2026-10-21: the way here
+        // and the title bar's arrows go up and back.)
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
                 win.marks = marked.clone();
-                // (Each window's own: `..` is the folder ITS folder is in.)
-                let mut roots = base.clone();
-                roots.extend(win.root.clone());
-                let list = with_up(&list, &win.dir, Some(&roots));
                 if win.places != list {
-                    win.places = list;
+                    win.places = list.clone();
                     // (A drag over them held a place by its number.)
                     win.drop_place = None;
                     self.filer_request_draw(id);
@@ -3181,6 +3149,10 @@ impl App {
     /// A row of the menu was chosen (or its key pressed): on the thing it
     /// was opened on, else on what is selected.
     fn filer_act(&mut self, id: u32, action: Action, item: Option<usize>, at: (f32, f32)) {
+        // (The sort menu's rows.)
+        if matches!(action, Action::SortBy(_) | Action::SortDir(_)) {
+            return self.filer_sort_pick(id, action);
+        }
         let selected = self.filer_selected(id);
         let Some(win) = self.filer.win(id) else {
             return;
@@ -4057,7 +4029,9 @@ impl App {
             }
         }
         // (The places as they are drawn: a folder, or its symbol alone.)
-        let place_keys: Vec<String> = win.places.iter().map(|p| win.place_key(p)).collect();
+        let mut place_keys: Vec<String> = win.places.iter().map(|p| win.place_key(p)).collect();
+        // (And the chrome's own: its symbols, the tabs', the i card's picture.)
+        place_keys.extend(chrome::icon_keys(win));
         let mut worn: Vec<&str> = Vec::new();
         for key in place_keys
             .iter()
@@ -4254,16 +4228,10 @@ impl App {
             props.t = t;
             moving |= m;
         }
-        // The places opening or closing, and scrolling.
-        let (t, m) = crate::animation::ease_toward(win.side_t, if win.side_open { 1.0 } else { 0.0 }, dt, SIDE_RATE, 0.004);
+        // The sidebar opening or closing, and its places scrolling.
+        let open = win.side_open || win.pinned;
+        let (t, m) = crate::animation::ease_toward(win.side_t, if open { 1.0 } else { 0.0 }, dt, SIDE_RATE, 0.004);
         win.side_t = t;
-        moving |= m;
-        // (The path's tools and the mode's circles, at the same rate.)
-        let (t, m) = crate::animation::ease_toward(win.tools_t, if win.tools_open { 1.0 } else { 0.0 }, dt, SIDE_RATE, 0.004);
-        win.tools_t = t;
-        moving |= m;
-        let (t, m) = crate::animation::ease_toward(win.mode_t, if win.mode_open { 1.0 } else { 0.0 }, dt, SIDE_RATE, 0.004);
-        win.mode_t = t;
         moving |= m;
         win.side_scroll_to = win.side_scroll_to.min(win.side_max());
         let (y, m) = crate::animation::ease_toward(win.side_scroll, win.side_scroll_to, dt, RATE_NOTCH, 0.4);
@@ -4278,290 +4246,22 @@ impl App {
             ..Default::default()
         };
         scene.rects.push(rect(Rect::new(0.0, 0.0, w, h), 0.0, ground));
-        // (The places' ground is drawn with them, over the field: below.)
         let _ = side_ground;
         let mut hits = Hits::default();
 
-        // ── THE PILLS (Max, 2026-10-17; the mockup
-        // https://claude.ai/artifact/Ei5kCq1PFvnH1DowocvYzj) ──
-        // The path, the places, the scroll and the mode float over the field,
-        // each a pill of the places' colour; their symbols are CARVED (the
-        // pill's colour pressed in), what is lit is a SUNKEN square.
-        let mut pills = GridContent {
-            clip: Rect::new(0.0, 0.0, w, h),
-            ..Default::default()
-        };
-        let (carved, sunk, carved_lit) = (carve(side_ground, 0.42), carve(side_ground, 0.16), carve(side_ground, 0.55));
-        let glyph = |text: &str, r: Rect, color: [f32; 4]| {
-            // (The bar's font draws its symbols small: a size up from the words.)
-            let px = (r.h * 0.5).clamp(15.0, 22.0);
-            Label {
-                font_px: px,
-                line_px: px * 1.25,
-                family: Some(crate::options::NERD),
-                color: Some(color),
-                ..label(text, (r.x + r.w / 2.0, r.y + (r.h - px * 1.25) / 2.0), r.w, true, false)
-            }
-        };
-        let smooth = |t: f32| {
-            let t = t.clamp(0.0, 1.0);
-            t * t * (3.0 - 2.0 * t)
-        };
-        let mid = PATH_TOP + PATH_H / 2.0;
-
-        // The path: the steps here, centred at the top — or, while a search
-        // is open, the search field; or a path being typed.
-        let mut starts = win.places.clone();
-        if let Some(root) = &win.root {
-            starts.push(Place { name: file_name(root), path: root.clone(), icon: String::new(), gap: false, start: true });
+        // ── the chrome: the sidebar, the top line, the i card ──
+        // (`filer/chrome.rs`; drawn after the files, over them.)
+        let (chrome, m) = self.filer_chrome(&mut win, &pal, &mut hits, dt);
+        if m {
+            moving = true;
+            win.last_frame = Some(now);
         }
-        let steps = crumbs(&win.dir, &starts);
-        const STEP_GAP: f32 = 22.0;
-        // (The room it may take: the window less the tools and some air.)
-        let room = (w - 2.0 * (2.0 * (PATH_H + TOOL_GAP) + 3.0 * PILL_EDGE)).max(80.0) - 2.0 * PATH_PAD;
-        let widths: Vec<f32> = match win.renderer.as_mut() {
-            Some(r) => steps.iter().map(|(name, _)| r.measure_text(name, TEXT_PX, None)).collect(),
-            None => vec![0.0; steps.len()],
-        };
-        let mut from = steps.len().saturating_sub(1);
-        let mut used = widths.last().copied().unwrap_or(0.0).min(room);
-        while from > 0 && used + STEP_GAP + widths[from - 1] <= room {
-            from -= 1;
-            used += STEP_GAP + widths[from];
-        }
-        let typed = win.go_to.clone();
-        let seeking = win.find.clone();
-        let inner = if typed.is_some() || seeking.is_some() { SEEK_W.min(room) + 20.0 } else { used };
-        let path_box = Rect::new(((w - inner) / 2.0 - PATH_PAD).round(), PATH_TOP, inner + 2.0 * PATH_PAD, PATH_H);
-        hits.path = path_box;
-        win.hits.path = path_box;
-        // Search and list come out from behind the path while it is pointed
-        // at, the list a beat after the search (the bar's task pill's way).
-        let tools = win.tool_boxes();
-        let lit = [win.find.is_some(), win.list];
-        for (k, glyph_text) in [GLYPH_FIND, GLYPH_LIST].into_iter().enumerate() {
-            let t = smooth(win.tools_t * 1.15 - 0.15 * k as f32);
-            if t <= 0.0 {
-                continue;
-            }
-            let slide = (1.0 - t) * (k as f32 + 1.0) * (PATH_H + TOOL_GAP);
-            let s = 0.85 + 0.15 * t;
-            let r = tools[k];
-            let r = Rect::new(r.x - slide + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s);
-            let hovered = win.hover == if k == 0 { Spot::Find } else { Spot::View };
-            pill(&mut pills.rects, r, r.h / 2.0, if lit[k] { sunk } else if hovered { lift(side_ground, 0.04) } else { side_ground }, t);
-            let mut sign = glyph(glyph_text, r, if lit[k] { carved_lit } else { carved });
-            sign.color = sign.color.map(|c| [c[0], c[1], c[2], t]);
-            // (Behind the path while it slides out: not through it.)
-            sign.clip = Some(Rect::new(path_box.x + path_box.w, 0.0, w, h));
-            pills.labels.push(sign);
-        }
-        hits.find = tools[0];
-        hits.view = tools[1];
-        pill(&mut pills.rects, path_box, PATH_H / 2.0, side_ground, 1.0);
-        let y = mid - TEXT_LINE / 2.0;
-        let left = path_box.x + PATH_PAD;
-        if let Some(text) = typed.as_ref() {
-            // A path being typed, in the pill (its rim red while it is
-            // nothing there).
-            if win.go_bad {
-                pills.rects.push(RectInst {
-                    border: 1.5,
-                    ..rect(path_box, PATH_H / 2.0, [0.86, 0.18, 0.15, 0.95])
-                });
-            }
-            let tw = win.renderer.as_mut().map_or(0.0, |r| r.measure_text(text, TEXT_PX, None));
-            let x = left.min(path_box.x + path_box.w - PATH_PAD - tw);
-            pills.labels.push(Label {
-                cache: false,
-                clip: Some(path_box),
-                ..label(text, (x, y), tw + 4.0, false, false)
-            });
-            pills.rects.push(rect(Rect::new(x + tw + 1.0, y + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
-        } else if let Some(find) = seeking.as_ref() {
-            // The search FIELD: the magnifier, then what is typed — or what
-            // it searches.
-            pills.labels.push(glyph(GLYPH_FIND, Rect::new(left - 4.0, PATH_TOP, 20.0, PATH_H), carved));
-            let x = left + 22.0;
-            let tw = win.renderer.as_mut().map_or(0.0, |r| r.measure_text(find, TEXT_PX, None));
-            let room = path_box.x + path_box.w - PATH_PAD - x;
-            if find.is_empty() {
-                let folder = steps.last().map_or_else(|| file_name(&win.dir), |(n, _)| n.clone());
-                let words = fill(tr("Search in {folder}"), &[("folder", &folder)]);
-                pills.labels.push(Label {
-                    clip: Some(path_box),
-                    ..label(&words, (x, y), room, false, true)
-                });
-            } else {
-                pills.labels.push(Label {
-                    cache: false,
-                    clip: Some(path_box),
-                    ..label(find, (x.min(x + room - tw - 2.0), y), tw + 4.0, false, false)
-                });
-            }
-            let cx = (x + tw).min(x + room - 2.0);
-            pills.rects.push(rect(Rect::new(cx + 1.0, y + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
-        } else {
-            // The steps: dim, the folder shown in ink; a click goes there.
-            let mut x = left;
-            for (n, ((name, path), tw)) in steps.iter().zip(&widths).enumerate().skip(from) {
-                if n > from {
-                    pills.labels.push(label("›", (x - STEP_GAP / 2.0, y), STEP_GAP, true, true));
-                }
-                let last = n + 1 == steps.len();
-                let tw = tw.min(room);
-                let hit = Rect::new(x - 7.0, PATH_TOP + 2.0, tw + 14.0, PATH_H - 4.0);
-                if !last && win.hover == Spot::Crumb(hits.crumbs.len()) {
-                    pills.rects.push(rect(hit, (PATH_H - 4.0) / 2.0, pal.hover));
-                }
-                pills.labels.push(Label {
-                    clip: Some(path_box),
-                    ..label(name, (x, y), tw + 2.0, false, !last)
-                });
-                hits.crumbs.push((hit, path.clone()));
-                x += tw + STEP_GAP;
-            }
-        }
-
-        // The places: a tall pill at the left, the rail at rest, open over
-        // the field with their names while pointed at.
-        if layout.side_w > 0.0 {
-            let ease = smooth(win.side_t);
-            let (icon, row_h) = (win.place_icon(), win.place_row());
-            let side_w = layout.side_w + (win.side_open_w() - layout.side_w) * ease;
-            win.side_now = side_w;
-            let side_box = win.places_box(side_w);
-            hits.side = side_box;
-            pill(&mut pills.rects, side_box, win.pill_corner(), side_ground, 1.0);
-            let mut y = side_box.y + PLACES_PAD - win.side_scroll;
-            for (n, place) in win.places.iter().enumerate() {
-                if place.gap {
-                    y += ROW_GAP;
-                }
-                let row = Rect::new(side_box.x + RAIL_AIR / 2.0, y, side_w - RAIL_AIR, row_h);
-                // (Scrolled out of the pill: nothing to point at.)
-                if row.y + row.h <= side_box.y + 2.0 || row.y >= side_box.y + side_box.h - 2.0 {
-                    hits.places.push(Rect::new(0.0, 0.0, 0.0, 0.0));
-                    y += row_h;
-                    continue;
-                }
-                // (`..` is never "here".)
-                let up = place.name == UP;
-                let here = (win.dir == place.path && !up) || win.drop_place == Some(n);
-                let shown = Rect::new(row.x, row.y.max(side_box.y + 3.0), row.w, (row.y + row.h).min(side_box.y + side_box.h - 3.0) - row.y.max(side_box.y + 3.0));
-                // (Its square as square as the pill's corner.)
-                let corner = (win.pill_corner() - RAIL_AIR / 2.0).min(row_h / 2.0);
-                if here {
-                    pills.rects.push(rect(shown, corner, sunk));
-                } else if win.hover == Spot::Place(n) {
-                    pills.rects.push(rect(shown, corner, pal.hover));
-                }
-                let key = win.place_key(place);
-                // (Only a SYMBOL is carved; a folder icon carries its own
-                // symbol pressed in, and a wash would flatten it away.)
-                let symbol = key.ends_with("-symbolic");
-                if let Some(layer) = win.layer_of(&key) {
-                    let at = Rect::new(side_box.x + (layout.side_w - icon) / 2.0, y + (row_h - icon) / 2.0, icon, icon);
-                    if at.y >= side_box.y && at.y + at.h <= side_box.y + side_box.h {
-                        pills.icons.push(IconInst {
-                            rect: at,
-                            layer,
-                            // CARVED: the symbol in the pill's colour pressed in.
-                            tint: match (symbol, here) {
-                                (false, _) => [0.0; 4],
-                                (true, true) => carved_lit,
-                                (true, false) => carved,
-                            },
-                            ring: if symbol { -1.3 } else { -1.0 },
-                            plate: NO_PLATE,
-                        });
-                    }
-                }
-                if ease > 0.0 {
-                    pills.labels.push(Label {
-                        clip: Some(shown),
-                        color: Some([ink[0], ink[1], ink[2], ease]),
-                        ..label(
-                            &place.name,
-                            (side_box.x + layout.side_w + 2.0, y + (row_h - TEXT_LINE) / 2.0),
-                            SIDE_WORDS - 12.0,
-                            false,
-                            false,
-                        )
-                    });
-                }
-                hits.places.push(shown);
-                y += row_h;
-            }
-
-            // The mode: a circle above the places; pointed at, it says what
-            // it is and the other one comes out at its right — a click on that
-            // one swaps them (Files ↔ Media).
-            let t = smooth(win.mode_t);
-            let boxes = win.mode_boxes(t);
-            let (now_sign, now_words, other_sign, other_words) = if win.media {
-                (GLYPH_MEDIA, tr("Media"), GLYPH_FILES, tr("Files"))
-            } else {
-                (GLYPH_FILES, tr("Files"), GLYPH_MEDIA, tr("Media"))
-            };
-            let _ = other_words;
-            let t2 = smooth(win.mode_t * 1.15 - 0.15);
-            if t2 > 0.0 {
-                let r = boxes[1];
-                let s = 0.85 + 0.15 * t2;
-                let slide = (1.0 - t2) * (r.w + TOOL_GAP);
-                let r = Rect::new(r.x - slide + r.w * (1.0 - s) / 2.0, r.y + r.h * (1.0 - s) / 2.0, r.w * s, r.h * s);
-                let hovered = win.hover == Spot::Mode(1);
-                pill(&mut pills.rects, r, win.pill_corner() * r.h / boxes[1].h, if hovered { lift(side_ground, 0.04) } else { side_ground }, t2);
-                let mut sign = glyph(other_sign, r, carved);
-                sign.color = sign.color.map(|c| [c[0], c[1], c[2], t2]);
-                sign.clip = Some(Rect::new(boxes[0].x + boxes[0].w, 0.0, w, h));
-                pills.labels.push(sign);
-            }
-            let main = boxes[0];
-            let d = main.h;
-            pill(&mut pills.rects, main, win.pill_corner(), side_ground, 1.0);
-            pills.labels.push(glyph(now_sign, Rect::new(main.x, main.y, d, d), carved));
-            if t > 0.0 {
-                pills.labels.push(Label {
-                    clip: Some(main),
-                    color: Some([ink[0], ink[1], ink[2], t]),
-                    ..label(now_words, (main.x + d - 6.0, main.y + (d - TEXT_LINE) / 2.0), MODE_OPEN, false, false)
-                });
-            }
-            hits.mode = [main, boxes[1]];
-        } else {
-            win.side_now = 0.0;
-            hits.side = Rect::default();
-            hits.mode = [Rect::default(); 2];
-        }
-
-        // The scroll: the places' twin at the right, the pill itself
-        // travelling down as the folder scrolls; held, it scrolls the folder.
-        let most = layout.max_scroll(win.items.len());
-        let travel = (h - PILL_EDGE - BAR_TOP - BAR_H).max(0.0);
-        let frac = if most > 0.0 { (win.scroll / most).clamp(0.0, 1.0) } else { 0.0 };
-        let bar = Rect::new(w - PILL_EDGE - BAR_W, BAR_TOP + travel * frac, BAR_W, BAR_H.min(h - BAR_TOP - PILL_EDGE).max(0.0));
-        // (Nothing to scroll: it stands at the top, faint, and answers nothing.)
-        let alive = most > 0.0;
-        let fill = if alive && (win.hover == Spot::Bar || win.bar_hold.is_some()) { lift(side_ground, 0.04) } else { side_ground };
-        pill(&mut pills.rects, bar, BAR_W / 2.0, fill, if alive { 1.0 } else { 0.55 });
-        hits.bar = if alive { bar } else { Rect::default() };
 
         // ── the icons ──
         let mut grid = GridContent {
             clip: layout.body,
             ..Default::default()
         };
-        // (The pills over the field: a name under one is left out — the
-        // renderer paints every grid's words in one late pass.)
-        let mut over = vec![hits.path, hits.side, hits.bar, hits.mode[0]];
-        if win.mode_t > 0.0 {
-            over.push(hits.mode[1]);
-        }
-        if win.tools_t > 0.0 {
-            over.extend(win.tool_boxes());
-        }
         let view = layout.in_view(win.scroll, win.items.len());
         // (A name has the whole column's width, not only its cell's: the
         // cells are narrow — Max wants the things close — and a word should
@@ -4573,6 +4273,16 @@ impl App {
         // Names are painted last of all: one under the menu or the box is
         // left out, or it would show through (the desktop's lesson).
         let cover = win.menu.as_ref().map(|m| m.rect).or(win.props.as_ref().map(|p| p.rect));
+        // (What covers the files is in the window's space; the files are
+        // laid out in their own, `zoom` times smaller from the body's corner.)
+        let into_field = |r: Rect| {
+            let z = layout.zoom;
+            let (bx, by) = (layout.body.x, layout.body.y);
+            Rect::new(bx + (r.x - bx) / z, by + (r.y - by) / z, r.w / z, r.h / z)
+        };
+        let cover = cover.map(into_field);
+        // (The i card over the files: a name under it is left out too.)
+        let over = [into_field(hits.card)];
         let meets = |c: &Rect, r: &Rect| r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h;
         let covered = |r: Rect| cover.is_some_and(|c| meets(&c, &r)) || over.iter().any(|c| c.w > 0.0 && meets(c, &r));
         // MAKE ROOM: what is in hand leaves its place, and while a drag is
@@ -4626,13 +4336,13 @@ impl App {
             let mut cell = layout.cell_at(win.slide[i]);
             cell.y -= win.scroll;
             if layout.list {
-                // A row runs the window's width, under the pills: every
-                // other one a zebra stripe, a selected one lit across.
-                let across = Rect::new(-w, cell.y, 3.0 * w, cell.h);
+                // A row: every other one a zebra stripe, a selected one lit
+                // across.
+                let across = Rect::new(cell.x - PAD, cell.y, cell.w + 2.0 * PAD, cell.h);
                 if win.selected.contains(&item.path) || win.drop_on == Some(i) {
-                    grid.rects.push(rect(across, 0.0, pal.selected));
+                    grid.rects.push(rect(across, 5.0, pal.selected));
                 } else if i % 2 == 1 {
-                    grid.rects.push(rect(across, 0.0, pal.zebra));
+                    grid.rects.push(rect(across, 5.0, pal.zebra));
                 }
             } else if win.selected.contains(&item.path) || win.drop_on == Some(i) {
                 grid.rects.push(rect(
@@ -4831,10 +4541,12 @@ impl App {
         }
         // (No scroll bars: Max, 2026-10-15, "get rid of the scrollbars".)
         zoom_grid(&mut grid, (layout.body.x, layout.body.y), layout.zoom);
-        // (The field is the whole window: it scrolls on under the pills.)
-        grid.clip = Rect::new(0.0, 0.0, w, h);
+        // (The files under the top line, beside the sidebar — as it is drawn
+        // now: open over them, nothing of them shows through it.)
+        let left = win.field_left().max(win.side_now());
+        grid.clip = Rect::new(left, HEAD_H, (w - left).max(0.0), (h - HEAD_H).max(0.0));
         scene.grids.push(grid);
-        scene.grids.push(pills);
+        scene.grids.extend(chrome);
         win.hits = hits;
         // The menu and the box, over everything.
         if let Some(menu) = win.menu.as_ref() {
@@ -4880,6 +4592,9 @@ impl App {
             }
         }
         self.filer.put(win);
+        // (The i card follows the selection: what it says is read anew when
+        // that changed.)
+        self.filer_info_due(id);
     }
 
     // ── the pointer ─────────────────────────────────────────────────────
@@ -4898,8 +4613,10 @@ impl App {
                 .is_some_and(|it| matches!(it.kind, Kind::Folder | Kind::Volume)),
             Spot::Up => win.dir.parent().is_some(),
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
-            Spot::Place(_) | Spot::View | Spot::Find | Spot::Col(_) | Spot::Mode(1) | Spot::Bar => true,
-            Spot::Mode(_) => false,
+            Spot::Place(_) | Spot::View(_) | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
+            Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
+            Spot::Mode(n) => (n == 1) != win.media,
+            Spot::Chrome => false,
         };
         let shape = if goes { Shape::Pointer } else { Shape::Default };
         if self.cursor_now != Some(shape) {
@@ -4951,10 +4668,15 @@ impl App {
             return;
         }
         let layout = win.layout(icon_scale);
-        let side = win.side_follow(layout.side_w);
+        let waiting = win.side_wait.is_some();
+        let side = win.side_follow();
+        let wait = !waiting && win.side_wait.is_some();
         let spot = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
         let changed = spot != win.hover || side;
         win.hover = spot;
+        if wait {
+            self.filer_side_wait(id);
+        }
         self.filer_cursor(id);
         // (An icon under the pointer looks no different: only the head's
         // and the places' rows answer it.)
@@ -5022,7 +4744,6 @@ impl App {
                     win.at_win = None;
                     // (A drag of ours takes the pointer away like this.)
                     win.press = None;
-                    win.bar_hold = None;
                     win.band = None;
                 }
                 self.filer_hover(id);
@@ -5214,7 +4935,6 @@ impl App {
             // ends where it is; a click on one of a group leaves that one.
             if button == 0x110 {
                 if let Some(win) = self.filer.win_mut(id) {
-                    win.bar_hold = None;
                     let press = win.press.take();
                     let banded = win.band.take().is_some();
                     if let Some(i) = press
@@ -5243,7 +4963,14 @@ impl App {
             self.filer_end_rename(id, true);
         }
         if let Some(win) = self.filer.win_mut(id) {
-            win.go_to = None;
+            // A path being typed lets go at a press anywhere but on its own
+            // tab (the field; the pencil's click decides for itself).
+            let at = win.ptr.unwrap_or_default();
+            if win.go_to.is_some() && !win.hits.cur_tab.contains(at) {
+                win.go_to = None;
+                win.go_bad = false;
+                self.filer_request_draw(id);
+            }
         }
         match button {
             0x110 => self.filer_click(id, serial),
@@ -5255,7 +4982,7 @@ impl App {
                 let layout = win.layout(icon_scale);
                 // The menu belongs to the icons' field; of the places only
                 // the owner's own have one (to be taken out again).
-                if at.1 >= HEAD_H && !win.on_pill(at) {
+                if !win.on_chrome(at) {
                     let item = layout.index_at(at, win.scroll, win.items.len());
                     self.filer_open_menu(id, at, item);
                 } else if let Some(path) = win
@@ -5284,6 +5011,22 @@ impl App {
                     self.filer_request_draw(id);
                 }
             }
+            // The middle button closes the tab it is on.
+            0x112 => {
+                let Some(win) = self.filer.win(id) else {
+                    return;
+                };
+                let tab = win
+                    .hits
+                    .tabs
+                    .iter()
+                    .find(|(r, _)| r.contains(at))
+                    .map(|(_, n)| *n)
+                    .or_else(|| win.hits.cur_tab.contains(at).then_some(win.tab));
+                if let Some(n) = tab {
+                    self.filer_tab_close(id, n);
+                }
+            }
             // The mouse's side buttons.
             0x113 => self.filer_back(id),
             0x114 => self.filer_forward(id),
@@ -5304,18 +5047,6 @@ impl App {
             return false;
         };
         let layout = win.layout(icon_scale);
-        // The scroll's pill held: the folder follows it, the pill's travel
-        // being the whole folder.
-        if let Some((y0, s0)) = win.bar_hold {
-            let at_y = win.at_win.map_or(at.1, |p| p.1);
-            let travel = (win.virt().1 - PILL_EDGE - BAR_TOP - BAR_H).max(1.0);
-            let most = layout.max_scroll(win.items.len());
-            win.scroll_to = (s0 + (at_y - y0) * most / travel).clamp(0.0, most);
-            win.scroll = win.scroll_to;
-            win.gliding = false;
-            self.filer_request_draw(id);
-            return true;
-        }
         if let Some((_, to, kept)) = win.band.as_mut() {
             *to = (at.0, at.1 + win.scroll);
             let kept = kept.clone();
@@ -5560,9 +5291,16 @@ impl App {
         let layout = win.layout(icon_scale);
         let at_win = (x, y);
         win.at_win = Some(at_win);
-        if win.side_follow(layout.side_w) {
+        let waiting = win.side_wait.is_some();
+        if win.side_follow() {
             win.dirty = true;
         }
+        if !waiting && win.side_wait.is_some() {
+            self.filer_side_wait(id);
+        }
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
         let at = if win.in_side(at_win) { at_win } else { layout.inward(at_win) };
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
@@ -6027,24 +5765,53 @@ impl App {
         let layout = win.layout(icon_scale);
         win.hover = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
         // (An empty search field is put away by a click elsewhere.)
-        if win.find.as_deref() == Some("") && win.hover != Spot::Find && !win.hits.path.contains(at) {
+        if win.find.as_deref() == Some("") && win.hover != Spot::Find && !win.hits.seek.contains(at) {
             self.filer_find(id, None);
             return;
         }
         match win.hover {
             Spot::Up => self.filer_up(id),
-            Spot::Mode(1) => {
-                // The other mode: the circles swap, the folder shows anew.
-                win.media = !win.media;
-                win.mode_open = false;
-                info!("files: window {id} in {} mode", if win.media { "media" } else { "files" });
-                self.filer_remode(id);
+            Spot::Mode(n) => {
+                // The other mode: the folder shows anew.
+                if (n == 1) != win.media {
+                    win.media = n == 1;
+                    info!("files: window {id} in {} mode", if win.media { "media" } else { "files" });
+                    self.filer_remode(id);
+                }
             }
-            Spot::Mode(_) => {}
-            Spot::Bar => {
-                win.bar_hold = Some((at.1, win.scroll));
+            Spot::Pin => {
+                let pinned = !win.pinned;
+                self.filer_pin(pinned);
+            }
+            Spot::Tab(n) => self.filer_tab_take(id, n),
+            Spot::TabX(n) => self.filer_tab_close(id, n),
+            Spot::TabAdd => self.filer_tab_new(id),
+            Spot::Pencil => {
+                // The way here as a path to type in, the tab's width; the
+                // pencil again puts it back.
+                if win.go_to.take().is_none() {
+                    win.edit_w = win.hits.cur_tab.w;
+                    win.go_to = Some(win.dir.to_string_lossy().into_owned());
+                }
+                win.go_bad = false;
                 self.filer_request_draw(id);
             }
+            Spot::Sort => {
+                if win.menu.is_some() {
+                    win.menu = None;
+                    win.menu_path = None;
+                    self.filer_request_draw(id);
+                } else {
+                    self.filer_sort_menu(id);
+                }
+            }
+            Spot::Info => {
+                win.info_on = !win.info_on;
+                self.filer_info_due(id);
+                self.filer_hover(id);
+                self.filer_request_draw(id);
+            }
+            Spot::Chrome => win.click = None,
             Spot::Crumb(n) => {
                 if let Some((_, path)) = win.hits.crumbs.get(n).cloned() {
                     self.filer_go(id, path);
@@ -6094,10 +5861,7 @@ impl App {
                 });
                 self.filer_request_draw(id);
             }
-            Spot::View => {
-                let list = !win.list;
-                self.filer_set_list(list);
-            }
+            Spot::View(list) => self.filer_set_list(list),
             Spot::Find => {
                 let open = win.find.is_none();
                 self.filer_find(id, open.then(String::new));
@@ -6115,7 +5879,7 @@ impl App {
             Spot::Nothing => {
                 win.click = None;
                 // Bare ground in the field: a band may start here.
-                if at.1 > layout_top && !win.on_pill(at) {
+                if at.1 > layout_top && !win.on_chrome(at) {
                     win.press = Some(Press {
                         path: None,
                         at,
@@ -6390,11 +6154,12 @@ impl App {
             Keysym::F5 => self.filer_list(id),
             Keysym::z | Keysym::Z if ctrl => self.filer_undo(),
             Keysym::l | Keysym::L if ctrl => {
-                // The way here, as a path to be typed over.
+                // The way here, as a path to be typed over (the pencil's).
                 let mut text = win.dir.to_string_lossy().into_owned();
                 if !text.ends_with('/') {
                     text.push('/');
                 }
+                win.edit_w = win.hits.cur_tab.w;
                 win.go_to = Some(text);
                 self.filer_request_draw(id);
             }
@@ -6437,7 +6202,19 @@ impl App {
                 let dir = win.dir.clone();
                 self.filer_open(dir);
             }
+            // (A tab, while there are others; the window with the last.)
+            Keysym::w if ctrl && win.tabs.len() > 1 => {
+                let n = win.tab;
+                self.filer_tab_close(id, n);
+            }
             Keysym::w if ctrl => self.filer_close(id),
+            Keysym::t if ctrl => self.filer_tab_new(id),
+            Keysym::Tab | Keysym::ISO_Left_Tab if ctrl && win.tabs.len() > 1 => {
+                let n = win.tabs.len();
+                let back = keysym == Keysym::ISO_Left_Tab || self.modifiers.shift;
+                let to = if back { (win.tab + n - 1) % n } else { (win.tab + 1) % n };
+                self.filer_tab_take(id, to);
+            }
             // QUICK LOOK (Max, 2026-10-16: "press space on a file").
             Keysym::space if !ctrl && !alt => self.filer_peek_open(id),
             _ => {
@@ -6452,6 +6229,7 @@ impl App {
                 }
                 // (A `/` or a `~` begins a path, not a name.)
                 if text == "/" || text == "~" {
+                    win.edit_w = win.hits.cur_tab.w;
                     win.go_to = Some(text.to_owned());
                     return self.filer_request_draw(id);
                 }
@@ -6640,11 +6418,21 @@ impl App {
                     "place" => win.hits.places.get(n).copied().map(mid),
                     "crumb" => win.hits.crumbs.get(n).map(|(r, _)| mid(*r)),
                     "up" => Some(mid(win.hits.up)),
-                    "view" => Some(mid(win.hits.view)),
+                    "grid" => Some(mid(win.hits.grid)),
+                    "list" => Some(mid(win.hits.list)),
                     "find" => Some(mid(win.hits.find)),
-                    "path" => Some(mid(win.hits.path)),
-                    "bar" => Some(mid(win.hits.bar)),
+                    "seek" => Some(mid(win.hits.seek)),
+                    "sort" => Some(mid(win.hits.sort)),
+                    "info" => Some(mid(win.hits.info)),
+                    "card" => Some(mid(win.hits.card)),
+                    "pin" => Some(mid(win.hits.pin)),
+                    "pencil" => Some(mid(win.hits.pencil)),
+                    "add" => Some(mid(win.hits.tab_add)),
+                    "current" => Some(mid(win.hits.cur_tab)),
+                    "tab" => win.hits.tabs.iter().find(|(_, i)| *i == n).map(|(r, _)| mid(*r)),
+                    "tabx" => win.hits.tab_x.iter().find(|(_, i)| *i == n).map(|(r, _)| mid(*r)),
                     "mode" => win.hits.mode.get(n).copied().map(mid),
+                    "side" => Some((win.rail() / 2.0, win.virt().1 / 2.0)),
                     // Bare ground in the field, past the last thing.
                     "field" => Some((layout.body.x + layout.body.w - 20.0, layout.body.y + layout.body.h - 20.0)),
                     _ => None,
@@ -6674,20 +6462,48 @@ impl App {
                 }
                 self.filer_remode(id);
             }
-            "tools" | "side" | "modes" => {
-                // `tools|side|modes open|close`: the path's tools, the places,
-                // the mode's circles out, as on hover (until the pointer moves).
+            "side" => {
+                // `side open|close`: the sidebar open over the files, as on
+                // hover (until the pointer moves).
                 if let Some(win) = self.filer.win_mut(id) {
-                    let open = rest == "open";
-                    match verb {
-                        "tools" => win.tools_open = open,
-                        "side" => win.side_open = open,
-                        _ => win.mode_open = open,
-                    }
+                    win.side_open = rest == "open";
                     win.dirty = true;
                 }
                 self.filer_request_draw(id);
             }
+            "pin" => self.filer_pin(rest != "off"),
+            "info" => {
+                // `info on|off`: the i card.
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.info_on = rest != "off";
+                }
+                self.filer_info_due(id);
+                self.filer_request_draw(id);
+            }
+            "tab" => {
+                // `tab new|close [n]|take <n>`: as the +, a tab's ×, a click.
+                let mut words = rest.split_whitespace();
+                let what = words.next().unwrap_or("");
+                let n = words.next().and_then(|w| w.parse::<usize>().ok());
+                let current = self.filer.win(id).map_or(0, |w| w.tab);
+                match what {
+                    "new" => self.filer_tab_new(id),
+                    "close" => self.filer_tab_close(id, n.unwrap_or(current)),
+                    "take" => self.filer_tab_take(id, n.unwrap_or(0)),
+                    _ => return "tab new|close [n]|take <n>".to_owned(),
+                }
+            }
+            "pencil" => {
+                // `pencil`: as a click on the current tab's pencil.
+                if let Some(win) = self.filer.win_mut(id) {
+                    if win.go_to.take().is_none() {
+                        win.edit_w = win.hits.cur_tab.w;
+                        win.go_to = Some(win.dir.to_string_lossy().into_owned());
+                    }
+                }
+                self.filer_request_draw(id);
+            }
+            "sortmenu" => self.filer_sort_menu(id),
             "find" => self.filer_find(id, (rest != "-").then(|| rest.to_owned())),
             "sort" => {
                 // `sort name|size|date [up]`
@@ -6833,7 +6649,7 @@ mod tests {
     fn cells_flow_row_by_row_and_share_the_spare_width() {
         let l = Layout::new((920, 600), 1.0);
         assert_eq!(l.side_w, SIDE_W);
-        assert_eq!(l.cols, 10); // (920 − 2·52) / 80 = 10.2: the places float over the air
+        assert_eq!(l.cols, 10); // (920 − 48 − 2·20) / 80 = 10.4
         let (a, b, next_row) = (l.cell(0), l.cell(1), l.cell(l.cols));
         assert!((b.x - a.x - l.pitch).abs() < 0.01 && l.pitch > l.cw);
         assert!((next_row.x - a.x).abs() < 0.01 && (next_row.y - a.y - l.ch).abs() < 0.01);
@@ -6845,9 +6661,10 @@ mod tests {
 
     #[test]
     fn a_narrow_window_has_no_places_and_never_zero_columns() {
-        let l = Layout::new((400, 300), 1.0);
+        // (Too narrow for a sidebar: the window lays its field from 0.)
+        let l = Layout::of((400.0, 300.0), 1.0, false, 1.0, 0.0);
         assert_eq!(l.side_w, 0.0);
-        assert_eq!(l.cols, 3); // (400 − 2·52) / 80 = 3.7
+        assert_eq!(l.cols, 4); // (400 − 2·20) / 80 = 4.5
         assert_eq!(Layout::new((60, 60), 2.0).cols, 1);
     }
 
@@ -6896,30 +6713,13 @@ mod tests {
     }
 
     #[test]
-    fn two_dots_lead_to_the_folder_this_one_is_in() {
-        let home = Place {
-            name: "Home".to_owned(),
-            path: PathBuf::from("/home/max"),
-            icon: String::new(),
-            gap: false,
-            start: true,
-        };
-        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"), None);
-        assert_eq!((places[0].name.as_str(), places[0].path.as_path()), (UP, Path::new("/home/max/Documents")));
-        // Home follows, right under it; the way here still starts at Home.
-        assert!(!places[1].gap && places[1].path == home.path);
-        let names: Vec<String> = crumbs(Path::new("/home/max/Documents/Work"), &places).into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["Home", "Documents", "Work"]);
-        // At the root there is nowhere up: no `..`.
-        let at_root = with_up(std::slice::from_ref(&home), Path::new("/"), None);
-        // The floor: at Home no `..`; under it, `..`; the system's, no root.
+    fn the_floor_is_the_deepest_root_a_folder_is_under() {
+        // The floor: Home, a stick; the system's has none.
         let roots = [PathBuf::from("/home/max"), PathBuf::from("/run/media/max/STICK")];
-        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max"), Some(&roots)).iter().all(|p| p.name != UP));
-        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents"), Some(&roots)).iter().any(|p| p.name == UP));
         assert_eq!(floor(Path::new("/run/media/max/STICK/photos"), &roots), Some(Path::new("/run/media/max/STICK")));
+        assert_eq!(floor(Path::new("/home/max/Documents"), &roots), Some(Path::new("/home/max")));
         assert_eq!(floor(Path::new("/etc"), &roots), None);
         assert_eq!(floor(Path::new("/home"), &roots), None);
-        assert_eq!(at_root, [home]);
     }
 
     #[test]
@@ -7165,12 +6965,12 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_stands_in_the_middle_between_the_pills() {
+    fn the_grid_stands_in_the_middle_beside_the_sidebar() {
         let l = Layout::of((920.0, 600.0), 1.0, false, 1.0, SIDE_W);
         let first = l.cell(0);
         let last = l.cell(l.cols - 1);
-        let (left, right) = (first.x, 920.0 - (last.x + last.w));
-        assert!((left - right).abs() < 0.01 && left >= FIELD_AIR);
+        let (left, right) = (first.x - SIDE_W, 920.0 - (last.x + last.w));
+        assert!((left - right).abs() < 0.01 && left >= GRID_AIR + PAD);
     }
 
     #[test]
@@ -7184,8 +6984,9 @@ mod tests {
         let l = Layout::of((920.0, 600.0), 1.0, true, 1.0, SIDE_W);
         assert_eq!((l.cols, l.ch), (1, LIST_ROW));
         assert_eq!(l.body.y, LIST_TOP);
-        // (Its words begin as far in from either side.)
-        assert!((l.cell(0).x - LIST_AIR).abs() < 0.01 && (920.0 - (l.cell(0).x + l.cell(0).w) - LIST_AIR).abs() < 0.01);
+        // (Its rows as far in from the sidebar as from the window's edge.)
+        let c = l.cell(0);
+        assert!((c.x - (SIDE_W + LIST_AIR + PAD)).abs() < 0.01 && (920.0 - (c.x + c.w) - (LIST_AIR + PAD)).abs() < 0.01);
         let (a, b) = (l.cell(0), l.cell(1));
         assert!((b.y - a.y - LIST_ROW).abs() < 0.01 && (a.w - (l.body.w - 2.0 * PAD)).abs() < 0.01);
         // The row under a point, and how far DOWN it the pointer is.
@@ -7219,7 +7020,7 @@ mod tests {
     }
 
     #[test]
-    fn by_size_or_date_folders_stay_first_and_by_name_nothing_moves() {
+    fn by_size_date_or_kind_folders_stay_first_and_by_name_the_own_order() {
         let mut folder = item("zdir");
         folder.kind = Kind::Folder;
         let items = vec![item("small"), folder, item("big")];
@@ -7232,7 +7033,19 @@ mod tests {
         };
         assert_eq!(names(SortKey::Size, true), ["zdir", "big", "small"]);
         assert_eq!(names(SortKey::Size, false), ["zdir", "small", "big"]);
-        assert_eq!(names(SortKey::Name, true), ["small", "zdir", "big"]);
+        // By name: the folder's own order, turned round when descending.
+        assert_eq!(names(SortKey::Name, false), ["small", "zdir", "big"]);
+        let own = vec![items[1].clone(), items[2].clone(), items[0].clone()];
+        let back: Vec<String> = sorted(own, &meta, SortKey::Name, true).into_iter().map(|it| it.name).collect();
+        assert_eq!(back, ["zdir", "small", "big"]);
+        // By kind: the ending, then the name; folders first.
+        let mut a = item("b.txt");
+        a.path = "/x/b.txt".to_owned();
+        let kinds: Vec<String> = sorted(vec![item("z.png"), a, items[1].clone(), item("a.txt")], &meta, SortKey::Kind, false)
+            .into_iter()
+            .map(|it| it.name)
+            .collect();
+        assert_eq!(kinds, ["zdir", "z.png", "a.txt", "b.txt"]);
     }
 
     #[test]

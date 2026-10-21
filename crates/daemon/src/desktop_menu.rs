@@ -92,6 +92,10 @@ pub(crate) enum Action {
     AddPlace,
     RemovePlace,
     ToggleHidden,
+    /// A file manager window's sort menu: order by the `n`th key (name,
+    /// date modified, size, kind), and which way (descending?).
+    SortBy(u8),
+    SortDir(bool),
 }
 
 /// One row: an action, or a rule between groups.
