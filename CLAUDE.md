@@ -993,7 +993,7 @@ The big daemon files are cohesive but long — go straight to the function:
   desktop's `Menu` with this window's rows (`menu_rows`, `Menu::with_rows`), drawn IN the window
   (names under it are left out — `covered`; it cannot hang past the window's edge; UNLIT, as the
   Properties box, the sort menu and the History — `MenuPaint::glass` from `filer_panel_paint`: the
-  dark look's night light sank their lower rows toward black; the desktop's menus keep 0.0): its rows are THE
+  dark look's night light sank their lower rows toward black; the desktop's menus too, `desktop_panel_paint`): its rows are THE
   ONE MENU's (`desktop_menu::rows_for`, from `filer_open_menu`'s `Ctx`; a place of the sidebar has its own —
   `filer_place_menu`, a stick's or a phone's rows going to its desktop icon's handlers: `desktop_volume_act`);
   a row acts on RELEASE (`filer_menu_row`: a page turns, what cannot be undone asks once, Get info opens the i
@@ -1141,7 +1141,21 @@ The big daemon files are cohesive but long — go straight to the function:
   away (a right press opens that menu instead); the wheel scrolls its rows (`hist_first`); words of
   the files under it are left out by their drawn width (a list's names beside it stay). What was
   taken back is said QUIETLY (a transient, low notice for 2.5 s). Not undone, not listed: a hand
-  arrangement, an emptied bin, a delete for good, what the dock's bin took. Rig: `files undo`,
+  arrangement, an emptied bin, a delete for good, what the dock's bin took. THE SELECTION PILL (Max,
+  2026-10-21, mockups v48–v49, `chrome::filer_pill`): floating 14 px above the foot of the files, centred on
+  them, in the menus' paint with a hairline and a soft shadow; it RISES and fades in (`Win::pill_t`, the view
+  kept while it goes — `pill_view`), and the files get room under their last row while it is up
+  (`Layout::foot`, `PILL_ROOM`). What it shows (`filer_pill_view`): a line SAID a moment (`filer_flash`,
+  `FLASH` 2.6 s: "Copied 3 items to KINGSTON", "Sent … to Pixel 8"); else the SELECTION — "“name” 2.6 MB" /
+  "5 selected · 2 folders · 3.4 MB", then Copy · Move · Rename (one) · Open with (one file; the ⋯'s menu on its
+  Open with page) · New folder (two or more: "New folder with items") · Copy to <stick> — five with words at
+  most — the bin, ⋯ (THE ONE MENU for the selection, hanging UP from over the pill: `Menu::up`,
+  `filer_pill_menu`) and × (`PillAct`); in the bin only what it is and ×; else the FILES ON THE CLIPBOARD:
+  Copy / Move (the button, the menu, Ctrl+C/X) let go of the selection and they wait there — "3 items copied
+  · Copy here · ×", "“x” to move · Move here · ×" (greyed where nothing can be put: Recents, the bin, Media —
+  `Win::put_here`); what waits to be moved is drawn at 45 %; × forgets them (`Filer::clip_forgot`), a move
+  pasted is spent. Its symbols are the chrome's own (always in the window's layers). Rig: `files pill <n>`
+  (its nth button), `files flash <words>`. Rig: `files undo`,
   `files hist [open|close|undo <row>]` (rows from the top; the reply/log is the history),
   `files where undo|histrow <n>|histundo <n>`, `files rclick <x> <y>`. A PATH CAN BE TYPED (Ctrl+L, or a `/` or `~` typed —
   `Win::go_to`, drawn in the steps' place): Enter goes (`typed_place`; a file's folder comes up
