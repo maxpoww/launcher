@@ -10,10 +10,11 @@
 //! from the file ([`crate::controls::read`]), a pick is made here on the UI
 //! thread ([`App::launcher_pick`]), saved, and the page read again.
 //!
-//! THE PAGE FIRST, THE FEATURES LATER (Max, 2026-10-20: "we will work on the
-//! features later, first do the controls box"): every choice is saved and
-//! shown, and none acts on the dock yet. A first cut of Stay away, Animated
-//! icons and Arrange apps waits on the branch `launcher-features-wip`.
+//! THE PAGE FIRST, THE FEATURES ONE BY ONE (Max, 2026-10-20: "we will work
+//! on the features later, first do the controls box"). In: Position (the
+//! side dock, `content::layout_side`) and Stay away (`intellihide`). Still
+//! only saved: Animated icons, Arrange apps, Other monitors (a first cut of
+//! the first two waits on the branch `launcher-features-wip`).
 //!
 //! THE BUILT-IN SCREEN ALWAYS HAS THE LAUNCHER, and the MAIN one when the
 //! built-in is off (a closed lid, a desktop with none). That is done, not
@@ -151,13 +152,38 @@ impl App {
         self.settings.launcher_side
     }
 
+    /// Whether the dock parks itself in view while nothing covers its place
+    /// (intellihide): the config's, unless the owner asked it to STAY AWAY —
+    /// then it is off the screen always and comes only when called (Super,
+    /// or the pointer at its edge), leaving again as the pointer does.
+    pub(crate) fn intellihide(&self) -> bool {
+        self.config.input.intellihide && !self.settings.launcher_away
+    }
+
+    /// STAY AWAY turned on: a dock parked in view because nothing covered
+    /// it goes (unless the pointer is on it — it leaves when the pointer
+    /// does); turned off, its place is judged again and a free one brings
+    /// the dock back to park.
+    fn stay_away_changed(&mut self) {
+        self.zone_free = false;
+        if self.settings.launcher_away {
+            if self.ui.target() == crate::state::Target::Dock && self.pointer_pos.is_none() {
+                self.hide_deadline = None;
+                self.handle_command(waverunner_proto::Command::Hide);
+            }
+        } else {
+            self.on_layout_changed();
+        }
+    }
+
     /// A pick on the Launcher page (`launcher-*` keys, see `controls::read`):
-    /// saved, nothing more yet.
+    /// saved, and Position and Stay away take effect at once.
     pub(crate) fn launcher_pick(&mut self, key: &str, value: &str) {
         match key {
             "launcher-away" => {
                 self.settings.launcher_away = value == "on";
                 self.settings.save();
+                self.stay_away_changed();
             }
             "launcher-motion" => {
                 self.settings.launcher_still = value == "off";

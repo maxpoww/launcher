@@ -3635,7 +3635,7 @@ impl App {
         self.refresh_options_content();
         self.reeval_options_bar();
         self.reeval_dock_bar();
-        if !self.config.input.intellihide {
+        if !self.intellihide() {
             return;
         }
         // A window that has just opened alone on a space is about to be
