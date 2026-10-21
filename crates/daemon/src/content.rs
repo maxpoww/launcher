@@ -1392,9 +1392,9 @@ const SIDE_BOTTOM: f32 = 12.0;
 /// tall, the icons closer across (Max, 2026-10-21: "the horizontal gaps
 /// between the icons should be less — but not the gap between sections").
 pub const SIDE_CELL_W: f32 = GRID_CELL_H;
-/// How far past its section's edge a side box's page dots stand (their
-/// centres): by their own column, as a bottom section's sit just under it.
-const SIDE_DOTS_OFF: f32 = 4.0;
+/// How far past its section's ICONS a side box's page dots stand (their
+/// centres): right by them (Max, 2026-10-21: "closer to their icons").
+const SIDE_DOTS_FROM_ICONS: f32 = 6.0;
 
 /// How wide the open box is beside a side dock: the dock's band, the
 /// padding, and Files · Install · Apps with the gaps between them (each
@@ -3752,10 +3752,13 @@ pub fn scene(
         // right — right by its own column, not out in the gap ("they are the
         // apps dots": as under a bottom section, just past its edge).
         if sec.vertical {
+            // (The icons stand centred in their cells: the outer column's
+            // edge is the cell's margin in from the section's.)
+            let margin = ((sec_cell_w - grid_icon) / 2.0).max(0.0);
             let dot_x = if layout.side == Side::Left {
-                sec.viewport.x - SIDE_DOTS_OFF
+                sec.viewport.x + margin - SIDE_DOTS_FROM_ICONS * icon_scale
             } else {
-                sec.viewport.x + sec.viewport.w + SIDE_DOTS_OFF
+                sec.viewport.x + sec.viewport.w - margin + SIDE_DOTS_FROM_ICONS * icon_scale
             };
             let dot_cy = sec.viewport.y + sec.viewport.h / 2.0;
             if sec.n_pages > 1 && reveal_rect.contains((dot_x, dot_cy)) {
