@@ -110,6 +110,34 @@ pub(crate) struct Group {
     /// way a switch row stands. (Each word is lit by its own `on`: several
     /// may be, as the Other monitors are.)
     pub labelled: bool,
+    /// THE SCREENS, DRAWN (the Monitors page, 2026-10-21): boxes to arrange
+    /// by dragging and pick by a click — the group's choices are the
+    /// screens' picks, then the picked one's two turning corners.
+    pub screens: Vec<ScreenShape>,
+}
+
+/// One screen in the Monitors page's drawing (`monitors_page.rs`): its box
+/// in logical px (as arranged on the page), its turn, and what stands on it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScreenShape {
+    /// What it is known by (`Monitor::selector`).
+    pub sel: String,
+    /// Its name in the drawing.
+    pub short: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Quarter turns clockwise, in degrees.
+    pub rot: u16,
+    /// The Options bar and the dock are on it (a mark each).
+    pub bar: bool,
+    pub dock: bool,
+    pub picked: bool,
+    /// The screens show one picture (Mirror): drawn one over the other.
+    pub mirrored: bool,
+    /// Kept apart (Isolated): its sides stick a gap away, not touching.
+    pub isolated: bool,
 }
 
 /// THE PALETTE EDITOR (Max, 2026-10-16; the mockup's "+" tile): six places
@@ -557,6 +585,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Colours"
             | "Tiles"
             | "Launcher"
+            | "Monitors"
     )
 }
 
@@ -565,6 +594,7 @@ pub(crate) fn ui_key(key: &str) -> bool {
     // (Every key of the Colours box is the UI thread's: the palette is applied there.)
     key.starts_with("colors-")
         || key.starts_with("launcher-")
+        || key.starts_with("monitors-")
         || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
@@ -653,7 +683,21 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false, screens: Vec::new() }
+}
+
+/// [`group`], for the pages built in their own modules.
+pub(crate) fn group_of(caption: Option<&'static str>, key: &'static str, choices: Vec<Choice>) -> Group {
+    group(caption, key, 0.0, choices)
+}
+
+/// [`line`] and [`on_off`], likewise.
+pub(crate) fn line_of(text: String) -> Group {
+    line(text)
+}
+
+pub(crate) fn on_off_of(caption: Option<&'static str>, key: &'static str, on: bool) -> Group {
+    on_off(caption, key, on)
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -664,7 +708,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false, screens: Vec::new() }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -2160,6 +2204,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 ..line(tr("Press Ctrl + or Ctrl − while the launcher is open to change the icon size.").to_owned())
             });
         }
+        "Monitors" => crate::monitors_page::view(&mut view),
         "About Golem" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));

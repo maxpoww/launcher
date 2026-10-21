@@ -69,9 +69,9 @@ type Item = (&'static str, u8, &'static str);
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [Item; 25] = [
+const SETTINGS: [Item; 26] = [
     // (name, first layer, search keywords: what else people call it or
-    // look for it by). 5 near, 9 middle, 11 far.
+    // look for it by). 5 near, 9 middle, 12 far.
     ("Resolution", 0, "display screen monitor size pixels"),
     ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
     ("Wi-Fi", 0, "wifi wireless network internet connection"),
@@ -88,6 +88,8 @@ const SETTINGS: [Item; 25] = [
     ("Tiles", 1, "windows tiling tile floating snap magnets magnetism layout arrange side column"),
     // The dock and its box (Max, 2026-10-20: "we will call it Launcher").
     ("Launcher", 2, "dock launcher apps box hide hidden stay away position left right bottom side monitors screens displays animated icons motion arrange sort order"),
+    // The screens together (Max, 2026-10-21): arranged, mirrored, what goes where.
+    ("Monitors", 2, "monitors screens displays external tv projector arrange mirror extend isolated rotate turn resolution scale lid"),
     ("Notifications", 1, "alerts do not disturb dnd messages"),
     ("Keyboard layout", 1, "input language typing keys"),
     ("Power mode", 1, "battery performance energy saver"),
@@ -324,6 +326,12 @@ const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 // ---- Layout (px at bar scale 1) -----------------------------------------
 /// Air kept off the card's sides.
 const MARGIN: f32 = 22.0;
+/// The Monitors page's drawing: its height, the turning corners' size, and
+/// how near (field px) a screen's side comes before it sticks to another's.
+const SCREENS_H: f32 = 210.0;
+const SCREENS_MIN_H: f32 = 110.0;
+const CORNER: f32 = 22.0;
+const STICK: f32 = 10.0;
 /// The field's largest size (px at bar scale 1): the size it had on Max's
 /// card when he set it as the maximum (2026-09-30: "i dont want it wider or
 /// taller no matter how big the box gets"). Smaller cards shrink it.
@@ -603,6 +611,39 @@ enum Style {
     Button { main: bool },
     /// A text field: the words over a hairline.
     Field,
+    /// A SCREEN in the Monitors page's drawing: a hairline box, bright when
+    /// picked, with its marks — the Options bar on its top edge, the dock on
+    /// its bottom, turned with it; `held` while it is dragged.
+    Screen { rot: u16, bar: bool, dock: bool, held: bool },
+    /// One of the picked screen's two turning corners (`back`: the other way).
+    Corner { back: bool },
+}
+
+/// Where the Monitors page's drawing puts the screens: a logical pixel is
+/// `k` of the field's, the logical origin at `(ox, oy)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScreenView {
+    k: f32,
+    ox: f32,
+    oy: f32,
+}
+
+/// A screen of the drawing in the hand (`Panel::screen_press`).
+#[derive(Clone, Debug)]
+pub(crate) struct ScreenDrag {
+    /// The group it is of, and which screen.
+    group: u8,
+    index: usize,
+    /// Where the press was (surface px) and the screen's corner then.
+    from: (f32, f32),
+    origin: (f64, f64),
+    /// The drawing as it was at the press: it holds still under the hand.
+    view: ScreenView,
+    /// Where it is now (logical px), and the side it sticks to.
+    at: (f64, f64),
+    side: Option<(crate::monitors_page::Side, usize)>,
+    /// It has gone further than a click's wobble.
+    moved: bool,
 }
 
 /// A line of text the layout placed (a row's name, a slider's value).
@@ -750,6 +791,10 @@ struct OpenContent {
     dots: Option<(f32, usize, usize)>,
     sliders: Vec<Slider>,
     texts: Vec<Text>,
+    /// Thin filled lines (the edge two screens touch along, in the drawing).
+    lines: Vec<Rect>,
+    /// The Monitors page's drawing: its group and where it put the screens.
+    screens_view: Option<(u8, ScreenView)>,
 }
 
 /// The pill that became the whole card.
@@ -932,6 +977,11 @@ pub(crate) struct Panel {
     wall_h: Option<f32>,
     /// The slider last dragged: see [`Knob`].
     knob: Option<Knob>,
+    /// A screen of the Monitors page's drawing in the hand.
+    screen_drag: Option<ScreenDrag>,
+    /// How tall the drawing is laid out (design px; 0: `SCREENS_H`): less
+    /// in a box too short for the whole page (`open_content`).
+    screens_h: std::cell::Cell<f32>,
 }
 
 impl Panel {
@@ -1779,6 +1829,192 @@ impl Panel {
         y + h + 10.0 * s
     }
 
+    /// THE SCREENS, DRAWN (the Monitors page, `monitors_page.rs`): each a
+    /// hairline box in its own proportions and place, the whole fitted to
+    /// the box's width; the picked one bright, its two turning corners on
+    /// its top corners; the one in the hand where the hand has it, the edge
+    /// it touches lit. Mirrored, they stand one over the other.
+    fn flow_screens(&self, out: &mut OpenContent, y: f32, group: u8, g: &crate::controls::Group) -> f32 {
+        use crate::monitors_page::{Box2, Side};
+        let s = self.scale;
+        let fw = self.key.0;
+        let tall = if self.screens_h.get() > 0.0 { self.screens_h.get() } else { SCREENS_H };
+        let area = Rect::new(2.0 * MARGIN * s, y, fw - 4.0 * MARGIN * s, tall * s);
+        let held = self.screen_drag.as_ref().filter(|d| d.group == group && d.moved);
+        let boxes: Vec<Box2> = g
+            .screens
+            .iter()
+            .enumerate()
+            .map(|(i, sh)| match held.filter(|d| d.index == i) {
+                Some(d) => Box2 { x: d.at.0, y: d.at.1, w: sh.w, h: sh.h },
+                None => Box2 { x: sh.x, y: sh.y, w: sh.w, h: sh.h },
+            })
+            .collect();
+        let mirrored = g.screens.iter().any(|sh| sh.mirrored);
+        // The drawing holds still while a screen is in the hand.
+        let view = match held {
+            Some(d) => d.view,
+            None => screens_fit(&g.screens, area, mirrored),
+        };
+        out.screens_view = Some((group, view));
+        let cx = area.x + area.w / 2.0;
+        let cy = area.y + area.h / 2.0;
+        let mut picked = None;
+        for (i, (sh, b)) in g.screens.iter().zip(&boxes).enumerate() {
+            let (w, h) = (b.w as f32 * view.k, b.h as f32 * view.k);
+            let (x, y) = if mirrored { (cx - w / 2.0, cy - h / 2.0) } else { (view.ox + b.x as f32 * view.k, view.oy + b.y as f32 * view.k) };
+            let r = Rect::new(x, y, w, h);
+            let in_hand = held.is_some_and(|d| d.index == i);
+            out.chips.push(Chip {
+                rect: r,
+                text: if mirrored && !sh.picked { String::new() } else { sh.short.clone() },
+                on: sh.picked,
+                action: PanelAction::Pick { group, index: i as u8 },
+                image: None,
+                swatch: Vec::new(),
+                seg: false,
+                palette: false,
+                cell: false,
+                icon: None,
+                hint: None,
+                style: Style::Screen { rot: sh.rot, bar: sh.bar, dock: sh.dock, held: in_hand },
+            });
+            if sh.picked {
+                picked = Some((r, in_hand));
+            }
+        }
+        // The picked one's corners: back on the left, on (clockwise) on the
+        // right — not while it is in the hand.
+        let n = g.screens.len();
+        if let Some((r, false)) = picked.filter(|_| g.choices.len() >= n + 2) {
+            let d = CORNER * s;
+            for (k, back) in [(0, true), (1, false)] {
+                let x = if back { r.x - d / 2.0 } else { r.x + r.w - d / 2.0 };
+                out.chips.push(Chip {
+                    rect: Rect::new(x, r.y - d / 2.0, d, d),
+                    text: String::new(),
+                    on: false,
+                    action: PanelAction::Pick { group, index: (n + k) as u8 },
+                    image: None,
+                    swatch: Vec::new(),
+                    seg: false,
+                    palette: false,
+                    cell: false,
+                    icon: None,
+                    hint: None,
+                    style: Style::Corner { back },
+                });
+            }
+        }
+        // The edge the one in the hand touches, lit.
+        if let Some(d) = held.filter(|_| !mirrored && !g.screens.iter().any(|sh| sh.isolated)) {
+            if let Some((side, oi)) = d.side {
+                let others: Vec<Box2> = boxes.iter().enumerate().filter(|(i, _)| *i != d.index).map(|(_, b)| *b).collect();
+                if let (Some(o), Some(b)) = (others.get(oi), boxes.get(d.index)) {
+                    let t = 2.0 * s;
+                    let line = match side {
+                        Side::Right | Side::Left => {
+                            let x = if side == Side::Right { o.x + o.w } else { o.x };
+                            let (y0, y1) = (b.y.max(o.y), (b.y + b.h).min(o.y + o.h));
+                            (y1 > y0).then(|| Rect::new(view.ox + x as f32 * view.k - t / 2.0, view.oy + y0 as f32 * view.k, t, (y1 - y0) as f32 * view.k))
+                        }
+                        Side::Below | Side::Above => {
+                            let y = if side == Side::Below { o.y + o.h } else { o.y };
+                            let (x0, x1) = (b.x.max(o.x), (b.x + b.w).min(o.x + o.w));
+                            (x1 > x0).then(|| Rect::new(view.ox + x0 as f32 * view.k, view.oy + y as f32 * view.k - t / 2.0, (x1 - x0) as f32 * view.k, t))
+                        }
+                    };
+                    out.lines.extend(line);
+                }
+            }
+        }
+        y + area.h + 10.0 * s
+    }
+
+    /// A press at `pos` on a screen of the drawing (not on a corner): it is
+    /// taken in the hand (it moves only once the pointer has gone further
+    /// than a click's wobble). True when it was.
+    pub(crate) fn screen_press(&mut self, pos: (f32, f32)) -> bool {
+        self.screen_drag = None;
+        let Some(label) = self.open_control_label() else { return false };
+        let Some(content) = self.open_content(label) else { return false };
+        let Some((group, view)) = content.screens_view else { return false };
+        let f = self.field;
+        let at = |c: &Chip| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(pos);
+        if content.chips.iter().any(|c| matches!(c.style, Style::Corner { .. }) && at(c)) {
+            return false;
+        }
+        let Some(PanelAction::Pick { index, .. }) = content.chips.iter().find(|c| matches!(c.style, Style::Screen { .. }) && at(c)).map(|c| c.action) else {
+            return false;
+        };
+        let Some(sh) = self.control.as_ref().and_then(|v| v.groups.get(group as usize)).and_then(|g| g.screens.get(index as usize)) else {
+            return false;
+        };
+        if sh.mirrored {
+            return false;
+        }
+        self.screen_drag = Some(ScreenDrag {
+            group,
+            index: index as usize,
+            from: pos,
+            origin: (sh.x, sh.y),
+            view,
+            at: (sh.x, sh.y),
+            side: None,
+            moved: false,
+        });
+        true
+    }
+
+    /// Whether a screen is in the hand.
+    pub(crate) fn screen_dragging(&self) -> bool {
+        self.screen_drag.is_some()
+    }
+
+    /// The pointer moved with a screen in the hand: it follows, its sides
+    /// sticking to the others' and its ends lining up with theirs (the
+    /// magnet, `monitors_page::magnet`).
+    pub(crate) fn screen_drag_to(&mut self, pos: (f32, f32)) {
+        use crate::monitors_page::{magnet, Box2, ISOLATED_GAP};
+        let s = self.scale;
+        let Some(d) = self.screen_drag.as_mut() else { return };
+        let Some(g) = self.control.as_ref().and_then(|v| v.groups.get(d.group as usize)) else { return };
+        let Some(sh) = g.screens.get(d.index) else { return };
+        let (dx, dy) = (pos.0 - d.from.0, pos.1 - d.from.1);
+        if !d.moved && dx.hypot(dy) < 4.0 * s {
+            return;
+        }
+        d.moved = true;
+        let k = f64::from(d.view.k.max(1e-6));
+        let raw = Box2 { x: d.origin.0 + f64::from(dx) / k, y: d.origin.1 + f64::from(dy) / k, w: sh.w, h: sh.h };
+        let others: Vec<Box2> = g.screens.iter().enumerate().filter(|(i, _)| *i != d.index).map(|(_, o)| Box2 { x: o.x, y: o.y, w: o.w, h: o.h }).collect();
+        let gap = if sh.isolated { ISOLATED_GAP } else { 0.0 };
+        let (x, y, side) = magnet(raw, &others, f64::from(STICK * s) / k, gap);
+        d.at = (x, y);
+        d.side = side;
+    }
+
+    /// The pointer went up: a screen that was moved is let go where it
+    /// rests (laid against the others, `monitors_page::settle`) — drawn
+    /// there at once, ahead of the page being read again — and its name and
+    /// place given back to be saved. `None`: it was a click (or nothing).
+    pub(crate) fn screen_release(&mut self) -> Option<(String, f64, f64)> {
+        use crate::monitors_page::{settle, Box2};
+        let d = self.screen_drag.take().filter(|d| d.moved)?;
+        let g = self.control.as_mut().and_then(|v| v.groups.get_mut(d.group as usize))?;
+        let others: Vec<Box2> = g.screens.iter().enumerate().filter(|(i, _)| *i != d.index).map(|(_, o)| Box2 { x: o.x, y: o.y, w: o.w, h: o.h }).collect();
+        let sh = g.screens.get_mut(d.index)?;
+        let (x, y) = settle(Box2 { x: d.at.0, y: d.at.1, w: sh.w, h: sh.h }, &others, sh.isolated);
+        sh.x = x;
+        sh.y = y;
+        // (Picked as it was taken.)
+        let picked = sh.sel.clone();
+        for o in &mut g.screens {
+            o.picked = o.sel == picked;
+        }
+        Some((picked, x, y))
+    }
+
     /// What a group laid INLINE on a line takes: a switch (`on`/`off`) as
     /// its name and a small switch, anything else as its choices in small
     /// words (a slider's look pair).
@@ -2263,6 +2499,11 @@ impl Panel {
                 y = self.flow_slider(&mut out, y, gi as u8, g, pair);
                 continue;
             }
+            // THE SCREENS, DRAWN (the Monitors page).
+            if !g.screens.is_empty() {
+                y = self.flow_screens(&mut out, y, gi as u8, g);
+                continue;
+            }
             // ON OR OFF is a switch row: its name left, the switch right —
             // or, centred, the two together in the middle.
             if is_switch(g) {
@@ -2376,6 +2617,8 @@ impl Panel {
             dots: None,
             sliders: Vec::new(),
             texts: Vec::new(),
+            lines: Vec::new(),
+            screens_view: None,
         };
         let mut out = blank();
         if !self.modules && crate::controls::is_control(label) {
@@ -2383,7 +2626,18 @@ impl Panel {
             let Some(view) = self.control.as_ref().filter(|v| v.label == label) else {
                 return Some(out);
             };
+            self.screens_h.set(0.0);
             let content = self.control_content(view, blank(), false);
+            // THE SCREENS' DRAWING gives up height to a box too short for the
+            // whole page (the rows under it stay on it), down to a floor.
+            if view.groups.iter().any(|g| !g.screens.is_empty()) {
+                let whole = self.field.h.max(self.key.1);
+                let over = content.foot_y + QUICK_FOOT * self.scale - whole;
+                if over > 0.0 {
+                    self.screens_h.set((SCREENS_H - over / self.scale.max(0.01)).max(SCREENS_MIN_H));
+                    return Some(self.control_content(view, blank(), false));
+                }
+            }
             // FOUR ROWS OF CARDS, OR THREE (the Colours model, 2026-10-20):
             // laid out with four, a box that would run past its height is
             // laid out again with three.
@@ -2463,11 +2717,12 @@ impl Panel {
     fn open_hit(&self, label: &str, pos: (f32, f32)) -> Option<Option<PanelAction>> {
         let f = self.field;
         match self.open_content(label) {
-            Some(content) => content
-                .chips
-                .iter()
-                .find(|c| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(pos))
-                .map(|c| Some(c.action)),
+            Some(content) => {
+                let at = |c: &&Chip| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(pos);
+                // (A screen's turning corner is over its box: it comes first.)
+                let corner = content.chips.iter().filter(|c| matches!(c.style, Style::Corner { .. })).find(at);
+                corner.or_else(|| content.chips.iter().find(at)).map(|c| Some(c.action))
+            }
             None => content_hit(self.key, self.scale, pos, f).then_some(None),
         }
     }
@@ -3594,7 +3849,55 @@ impl Panel {
                         label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, ink_c(a));
                         rect(out, r.x, r.y + r.h - 2.0 * s, r.w, 1.0 * s, 0.0, ink_c(if chip.on || keyed { 0.8 } else { 0.3 }));
                     }
+                    // A SCREEN of the Monitors page's drawing: a hairline box,
+                    // a faint wash when picked (more while in the hand), the
+                    // Options bar along its top edge and the dock on its
+                    // bottom — its top turned with it (a quarter turn
+                    // clockwise puts it on the right).
+                    Style::Screen { rot, bar, dock, held } => {
+                        if held || chip.on {
+                            rect(out, r.x, r.y, r.w, r.h, 3.0 * s, crate::options::wash(!paint.bright, if held { 0.10 } else { 0.05 }));
+                        }
+                        let (mx, my) = map(r.x, r.y);
+                        let a = if chip.on || held || keyed { 1.0 } else { 0.5 };
+                        out.rects.push(RectInst { rect: Rect::new(mx, my, r.w * cs, r.h * cs), radius: 3.0 * s * cs, color: ink_c(a), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
+                        // An edge's strip: `t` thick, `pad` in from the edge,
+                        // from `from` to `to` (fractions) along it.
+                        let strip = |edge: u16, t: f32, pad: f32, from: f32, to: f32| -> (f32, f32, f32, f32) {
+                            match edge {
+                                90 => (r.x + r.w - pad - t, r.y + r.h * from, t, r.h * (to - from)),
+                                180 => (r.x + r.w * from, r.y + r.h - pad - t, r.w * (to - from), t),
+                                270 => (r.x + pad, r.y + r.h * from, t, r.h * (to - from)),
+                                _ => (r.x + r.w * from, r.y + pad, r.w * (to - from), t),
+                            }
+                        };
+                        if bar {
+                            let (x, y, w, h) = strip(rot % 360, 3.0 * s, 0.0, 0.0, 1.0);
+                            rect(out, x, y, w, h, 0.0, ink_c(0.4));
+                        }
+                        if dock {
+                            let (x, y, w, h) = strip((rot + 180) % 360, 2.5 * s, 3.0 * s, 0.28, 0.72);
+                            rect(out, x, y, w, h, 1.2 * s, ink_c(0.4));
+                        }
+                        if !chip.text.is_empty() {
+                            label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - 11.0 * 1.3 * s) / 2.0, (r.w - 8.0 * s).max(1.0), 11.0, ink_c(if chip.on || held { 0.9 } else { 0.65 }));
+                        }
+                    }
+                    // A TURNING CORNER of the picked screen: a small round
+                    // button over its corner, the way it turns on it.
+                    Style::Corner { back } => {
+                        let ground = if paint.bright { [0.96, 0.96, 0.95, ca] } else { [0.12, 0.12, 0.13, ca] };
+                        rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, ground);
+                        let (mx, my) = map(r.x, r.y);
+                        out.rects.push(RectInst { rect: Rect::new(mx, my, r.w * cs, r.h * cs), radius: r.h / 2.0 * cs, color: ink_c(if keyed { 0.95 } else { 0.55 }), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
+                        let glyph = if back { "↺" } else { "↻" };
+                        label_in(out, glyph.to_owned(), r.x + r.w / 2.0, r.y + (r.h - 13.0 * 1.3 * s) / 2.0, r.w, 13.0, ink_c(0.9));
+                    }
                 }
+            }
+            // The edge two screens touch along while one is in the hand.
+            for l in &content.lines {
+                rect(out, l.x, l.y, l.w, l.h, l.w.min(l.h) / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.95 * ca]);
             }
             text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             return;
@@ -3760,6 +4063,33 @@ impl Panel {
 }
 
 /// The settings about the screen, fed by [`crate::display`].
+/// Where the drawing puts the screens: their bounds fitted to `area` with
+/// air around, centred (mirrored: each centred, the biggest fitted).
+fn screens_fit(screens: &[crate::controls::ScreenShape], area: Rect, mirrored: bool) -> ScreenView {
+    if screens.is_empty() {
+        return ScreenView { k: 1.0, ox: area.x, oy: area.y };
+    }
+    let (x0, y0, x1, y1) = if mirrored {
+        let w = screens.iter().map(|s| s.w).fold(1.0_f64, f64::max);
+        let h = screens.iter().map(|s| s.h).fold(1.0_f64, f64::max);
+        (0.0, 0.0, w, h)
+    } else {
+        (
+            screens.iter().map(|s| s.x).fold(f64::MAX, f64::min),
+            screens.iter().map(|s| s.y).fold(f64::MAX, f64::min),
+            screens.iter().map(|s| s.x + s.w).fold(f64::MIN, f64::max),
+            screens.iter().map(|s| s.y + s.h).fold(f64::MIN, f64::max),
+        )
+    };
+    let (bw, bh) = ((x1 - x0).max(1.0) as f32, (y1 - y0).max(1.0) as f32);
+    let k = (area.w * 0.86 / bw).min(area.h * 0.8 / bh);
+    ScreenView {
+        k,
+        ox: area.x + (area.w - bw * k) / 2.0 - x0 as f32 * k,
+        oy: area.y + (area.h - bh * k) / 2.0 - y0 as f32 * k,
+    }
+}
+
 fn is_display_setting(label: &str) -> bool {
     matches!(label, "Scale" | "Resolution")
 }
@@ -4227,6 +4557,12 @@ impl App {
     /// slider drags its knob.
     pub(crate) fn panel_drag(&mut self, pos: (f32, f32)) {
         let Some(from) = self.gesture.press_pos else { return };
+        // …or a screen of the Monitors page's drawing.
+        if self.panel.screen_dragging() {
+            self.panel.screen_drag_to(pos);
+            self.schedule_frame();
+            return;
+        }
         self.slider_to(from, pos, false);
     }
 
@@ -4295,7 +4631,7 @@ impl App {
     }
 
     /// Hand the settings' worker a command, starting it at the first one.
-    fn controls_send(&mut self, cmd: ControlCommand) {
+    pub(crate) fn controls_send(&mut self, cmd: ControlCommand) {
         if self.controls.is_none() {
             let (tx, rx) = calloop::channel::channel::<ControlEvent>();
             let _ = self.loop_handle.insert_source(rx, |ev, _, app: &mut App| {
@@ -4376,7 +4712,7 @@ impl App {
     }
 
     /// What only this thread knows about the settings.
-    fn ui_facts(&self) -> UiFacts {
+    pub(crate) fn ui_facts(&self) -> UiFacts {
         let stale = self.brain.as_ref().is_some_and(|c| c.deploy.stale_generation);
         UiFacts {
             dnd: self.notif_muted(),
@@ -4546,6 +4882,7 @@ impl App {
             }
             k if k.starts_with("colors-") => self.colors_pick(key, &value),
             k if k.starts_with("launcher-") => self.launcher_pick(key, &value),
+            k if k.starts_with("monitors-") => self.monitors_pick(key, &value),
             "dnd" => {
                 if self.notif_muted() != (value == "on") {
                     self.toggle_notif_mute();
@@ -4936,9 +5273,9 @@ mod tests {
     #[test]
     fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
         let p = panel();
-        assert_eq!(p.pills.len(), 25);
+        assert_eq!(p.pills.len(), 26);
         let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [5, 9, 11]);
+        assert_eq!(per_layer, [5, 9, 12]);
         assert_clean(&p, "at rest");
         // Up under the dock: the heap starts at the top gap.
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
@@ -4950,14 +5287,14 @@ mod tests {
         let mut p = panel();
         let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [9, 11, 5], "down: the near group goes to the back");
+        assert_eq!(counts(&p), [9, 12, 5], "down: the near group goes to the back");
         assert_clean(&p, "one step down");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [11, 5, 9]);
+        assert_eq!(counts(&p), [12, 5, 9]);
         assert_clean(&p, "two steps down");
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [5, 9, 11], "up undoes it");
+        assert_eq!(counts(&p), [5, 9, 12], "up undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
@@ -5062,10 +5399,10 @@ mod tests {
         assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
-        assert_eq!(layer_sizes(&p), [5, 9, 11], "the layers keep their sizes");
+        assert_eq!(layer_sizes(&p), [5, 9, 12], "the layers keep their sizes");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
-        assert_eq!(layer_sizes(&p), [5, 9, 11]);
+        assert_eq!(layer_sizes(&p), [5, 9, 12]);
         // Whoever it passed stepped back exactly one layer.
         let back: Vec<(&str, u8, u8)> = p
             .pills
@@ -5199,6 +5536,7 @@ mod tests {
             grid_rows: None,
             hug: false,
             labelled: false,
+            screens: Vec::new(),
         }
     }
 
@@ -5377,6 +5715,58 @@ mod tests {
         assert!((label.x - 2.0 * MARGIN).abs() < 0.01 && label.y > hint.y && label.y < last.y + last.h);
         assert!(words[1].on && !words[0].on && !words[2].on);
         assert_eq!(words[1].action, PanelAction::Pick { group: 1, index: 1 });
+    }
+
+    #[test]
+    fn the_screens_are_drawn_picked_turned_and_dragged_to_a_side() {
+        use crate::controls::ScreenShape;
+        let shape = |sel: &str, x: f64, w: f64, h: f64, picked: bool| ScreenShape {
+            sel: sel.to_owned(),
+            short: sel.to_owned(),
+            x,
+            y: 0.0,
+            w,
+            h,
+            rot: 0,
+            bar: sel == "laptop",
+            dock: sel == "laptop",
+            picked,
+            mirrored: false,
+            isolated: false,
+        };
+        let screens = vec![shape("laptop", 0.0, 2000.0, 1250.0, true), shape("tv", 2000.0, 3840.0, 2160.0, false)];
+        let choices = vec![plain_choice("laptop", true), plain_choice("tv", false), plain_choice("back", false), plain_choice("on", false)];
+        let g = crate::controls::Group { screens, choices, ..plain_group("monitors-arrange") };
+        let mut p = colours_open(vec![g], (900.0, 760.0));
+        let c = p.open_content("Colours").unwrap();
+        let boxes: Vec<&Chip> = c.chips.iter().filter(|ch| matches!(ch.style, Style::Screen { .. })).collect();
+        let corners: Vec<&Chip> = c.chips.iter().filter(|ch| matches!(ch.style, Style::Corner { .. })).collect();
+        assert_eq!(boxes.len(), 2);
+        let (laptop, tv) = (boxes[0].rect, boxes[1].rect);
+        assert!((laptop.x + laptop.w - tv.x).abs() < 0.01 && (laptop.y - tv.y).abs() < 0.01, "side by side, tops lined up");
+        assert!((tv.w / laptop.w - 3840.0 / 2000.0).abs() < 1e-3, "in their own sizes");
+        // The picked one's corners: back on its top left, on on its top right.
+        assert_eq!(corners.len(), 2);
+        assert!(matches!(corners[0].style, Style::Corner { back: true }) && (corners[0].rect.x + corners[0].rect.w / 2.0 - laptop.x).abs() < 0.01);
+        assert_eq!(corners[1].action, PanelAction::Pick { group: 0, index: 3 });
+        // A click on a corner is the corner's, not the box's under it.
+        let f = p.field;
+        let at = |r: Rect| (f.x + r.x + r.w / 2.0, f.y + r.y + r.h / 2.0);
+        assert_eq!(p.open_hit("Colours", at(corners[1].rect)), Some(Some(PanelAction::Pick { group: 0, index: 3 })));
+        // THE TV TAKEN AND MOVED UNDER THE LAPTOP: near enough, it sticks to
+        // its bottom, left ends lined up; let go, it rests there.
+        let from = at(tv);
+        assert!(p.screen_press(from));
+        let k = laptop.w / 2000.0;
+        let to = (from.0 - (2000.0 * k) - 3.0, from.1 + 1250.0 * k + 4.0);
+        p.screen_drag_to(to);
+        let c = p.open_content("Colours").unwrap();
+        assert_eq!(c.lines.len(), 1, "the edge they touch is lit");
+        let (sel, x, y) = p.screen_release().expect("it was moved");
+        assert_eq!((sel.as_str(), x, y), ("tv", 0.0, 1250.0));
+        // A press and let go without moving is a click: no move.
+        assert!(p.screen_press(from));
+        assert_eq!(p.screen_release(), None);
     }
 
     #[test]

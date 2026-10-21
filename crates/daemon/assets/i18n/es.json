@@ -1091,5 +1091,18 @@
   "{n} h ago": "hace {n} h",
   "History": "Historial",
   "Undone": "Deshecho",
-  "Can’t undo": "No se puede deshacer"
+  "Can’t undo": "No se puede deshacer",
+ "Monitors": "Monitores",
+ "How your screens work together.": "Cómo trabajan juntas tus pantallas.",
+ "Built-in": "Integrada",
+ "Turn back": "Girar hacia atrás",
+ "Screens": "Pantallas",
+ "Extend": "Extender",
+ "Mirror": "Duplicar",
+ "Isolated": "Aisladas",
+ "Main screen": "Pantalla principal",
+ "Every screen": "Todas las pantallas",
+ "Follows you": "Te sigue",
+ "Lid closed": "Tapa cerrada",
+ "The built-in turns off and everything goes to the other screen.": "La integrada se apaga y todo pasa a la otra pantalla."
 }

@@ -86,6 +86,7 @@ mod launch;
 mod launcher_prefs;
 mod dock_screen;
 mod shell_screens;
+mod monitors_page;
 mod managed;
 mod managed_webapps;
 mod minimized;
@@ -7742,6 +7743,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if let Some(from) = app.fast.slide_from {
                     app.slider_to(from, pos, true);
                 }
+                // A screen of the Monitors page's drawing in the hand (the
+                // quick box's).
+                if app.fast.boxed.is_some() && app.quick.screen_dragging() {
+                    app.quick.screen_drag_to(pos);
+                    app.schedule_frame();
+                }
                 // Edge-crossing jelly poke: fire whenever the pointer crosses
                 // the card boundary (inside ↔ outside), regardless of click.
                 {
@@ -7913,9 +7920,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // A press on a slider of the quick box: it drags the knob.
                 if state == WEnum::Value(wl_pointer::ButtonState::Pressed) {
                     app.fast.slide_from = app.pointer_pos.filter(|&p| app.fast.boxed.is_some() && app.quick.on_slider(p));
+                    // (A press on a screen of the Monitors page takes it in the hand.)
+                    if let Some(p) = app.pointer_pos.filter(|_| app.fast.boxed.is_some()) {
+                        app.quick.screen_press(p);
+                    }
                 }
                 if state == WEnum::Value(wl_pointer::ButtonState::Released) {
-                    if let Some(pos) = app.pointer_pos {
+                    // A screen dragged and let go: it rests, saved; no click.
+                    if let Some((sel, x, y)) = app.quick.screen_release() {
+                        app.monitors_moved(&sel, x, y);
+                        app.schedule_frame();
+                    } else if let Some(pos) = app.pointer_pos {
                         if let Some(from) = app.fast.slide_from.take() {
                             // Let go: the knob stays where it was taken, the box stays up.
                             app.slider_to(from, pos, true);
@@ -7934,6 +7949,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.update_hover();
                         app.gesture.pressed = app.hover;
                         app.gesture.press_pos = app.pointer_pos;
+                        // (A press on a screen of the Monitors page takes it in the hand.)
+                        if let Some(p) = app.pointer_pos.filter(|_| app.control_panel) {
+                            app.panel.screen_press(p);
+                        }
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
                         let slide_from = app.gesture.press_pos.filter(|&f| app.control_panel && app.panel.on_slider(f));
@@ -7974,7 +7993,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                         app.slider_to(from, pos, false);
                                         app.slider_end(false);
                                     }
-                                    None => app.panel_click(pos),
+                                    None => match app.panel.screen_release() {
+                                        // A screen dragged and let go: it
+                                        // rests, saved; no click.
+                                        Some((sel, x, y)) => {
+                                            app.monitors_moved(&sel, x, y);
+                                            app.schedule_frame();
+                                        }
+                                        None => app.panel_click(pos),
+                                    },
                                 }
                             } else if app.ui.target() == Target::Open {
                                 // Dismiss only if the click landed outside the

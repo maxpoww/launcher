@@ -381,6 +381,10 @@ pub(crate) struct GolemSettings {
     /// ([`crate::palette`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors: Option<crate::palette::ColorChoice>,
+    /// The Monitors page's choices ([`crate::monitors_page`]): saved, not
+    /// applied yet.
+    #[serde(default, skip_serializing_if = "crate::monitors_page::MonitorsChoice::is_default")]
+    pub monitors: crate::monitors_page::MonitorsChoice,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
 }
