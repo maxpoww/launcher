@@ -242,9 +242,9 @@ impl ColorChoice {
 
     /// What a surface wears: its own levels; under Ambient the sun's look and
     /// light (`sun`); under Auto Golem's defaults besides (the palette as made,
-    /// icons untinted, the palette's own wallpaper whole and a picture as it
-    /// is, saturation as made). `system_dark` stands in for a look never chosen.
-    pub(crate) fn levels(&self, s: Surface, sun: Option<(bool, u8)>, wall_follows: bool, system_dark: bool) -> Levels {
+    /// icons untinted, the wallpaper at Palette 0% — a picture as it is — and
+    /// saturation as made). `system_dark` stands in for a look never chosen.
+    pub(crate) fn levels(&self, s: Surface, sun: Option<(bool, u8)>, system_dark: bool) -> Levels {
         let auto = self.auto_of(s);
         let (own_dark, own_light, own_tint, own_sat) = match s {
             Surface::Shell => (self.shell_dark, self.shell_light, self.shell_tint, self.shell_sat),
@@ -259,8 +259,10 @@ impl ColorChoice {
         };
         let (tint, sat) = if auto {
             let tint = match s {
-                Surface::Icons => Some(0),
-                Surface::Wall => Some(if wall_follows { 100 } else { 0 }),
+                // (0% for every wallpaper: Max, 2026-10-21, "set BG auto to:
+                // hambient on, palette 0% saturation as made". It was 100%
+                // for the palette's own, which grades the box's pictures whole.)
+                Surface::Icons | Surface::Wall => Some(0),
                 _ => None,
             };
             (tint, 50)
@@ -271,11 +273,9 @@ impl ColorChoice {
     }
 
     /// [`levels`] with what is true now: the sun's line while a fade shows it,
-    /// whether the wallpaper follows the colours (read only for the wallpaper),
     /// and the shell's look.
     pub(crate) fn levels_now(&self, s: Surface) -> Levels {
-        let follows = s == Surface::Wall && crate::display::GolemSettings::load().wallpaper_follows;
-        self.levels(s, crate::lighting::ambient_line_for(s), follows, crate::look::dark())
+        self.levels(s, crate::lighting::ambient_line_for(s), crate::look::dark())
     }
 }
 
@@ -727,9 +727,9 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
     .unwrap_or_else(golem);
     // Each surface through its levels: Auto's defaults and Ambient's sun apply
     // here (the programs and the web through the held look, if one).
-    let apps = choice.levels(Surface::Apps, crate::lighting::ambient_line_for(Surface::Apps), false, dark);
-    let web = choice.levels(Surface::Web, crate::lighting::ambient_line_for(Surface::Web), false, dark);
-    let icons = choice.levels(Surface::Icons, crate::lighting::ambient_line_for(Surface::Icons), false, dark);
+    let apps = choice.levels(Surface::Apps, crate::lighting::ambient_line_for(Surface::Apps), dark);
+    let web = choice.levels(Surface::Web, crate::lighting::ambient_line_for(Surface::Web), dark);
+    let icons = choice.levels(Surface::Icons, crate::lighting::ambient_line_for(Surface::Icons), dark);
     let apps_tint = apps.tint;
     let web_tint = web.tint;
     // (The shell's own hues kept readable too: Fluor's and Golem's light
@@ -1836,7 +1836,7 @@ pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
 }
 
 fn set_shell(picked: &ColorChoice, system_dark: bool) {
-    let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark);
+    let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), system_dark);
     SHELL_COLOURED.store(lv.tint != Some(0), Ordering::Relaxed);
     SHELL_IS_DARK.store(lv.dark, Ordering::Relaxed);
     store_shell(shell_plan(picked, system_dark).pair(lv.light));
@@ -1884,13 +1884,13 @@ impl ShellPlan {
 }
 
 pub(crate) fn shell_plan(picked: &ColorChoice, system_dark: bool) -> ShellPlan {
-    shell_plan_look(picked, picked.levels(Surface::Shell, crate::lighting::ambient_line(), false, system_dark).dark)
+    shell_plan_look(picked, picked.levels(Surface::Shell, crate::lighting::ambient_line(), system_dark).dark)
 }
 
 /// [`shell_plan`] in a look given: a fade across the looks keeps one of each.
 pub(crate) fn shell_plan_look(picked: &ColorChoice, dark: bool) -> ShellPlan {
     let want = picked.palette_id();
-    let lv = Levels { dark, ..picked.levels(Surface::Shell, None, false, dark) };
+    let lv = Levels { dark, ..picked.levels(Surface::Shell, None, dark) };
     if lv.tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
         // boxes "have a reddish ground" — they sampled a desert wallpaper):
@@ -3130,11 +3130,10 @@ impl crate::App {
                         c.ambient = on.then_some(true);
                     }
                     if !on {
-                        let follows = s.wallpaper_follows;
                         let surfaces: &[Surface] = if wall { &[Surface::Wall] } else { &[Surface::Shell, Surface::Apps, Surface::Icons, Surface::Web] };
                         let defaults = ColorChoice { auto: Some(true), wall_auto: Some(true), ..Default::default() };
                         for &sf in surfaces {
-                            let d = defaults.levels(sf, None, follows, true);
+                            let d = defaults.levels(sf, None, true);
                             match sf {
                                 Surface::Shell => {
                                     c.shell_tint = d.tint;
@@ -3714,21 +3713,20 @@ mod tests {
     #[test]
     fn the_levels_are_the_owners_the_suns_or_golems() {
         let own = ColorChoice { apps_tint: Some(80), apps_sat: Some(20), apps_dark: Some(false), apps_light: Some(70), ..Default::default() };
-        let l = own.levels(Surface::Apps, Some((true, 10)), false, true);
+        let l = own.levels(Surface::Apps, Some((true, 10)), true);
         assert_eq!(l, Levels { dark: false, light: 70, tint: Some(80), sat: 20 }, "manual: the owner's, the sun ignored");
         let amb = ColorChoice { ambient: Some(true), ..own.clone() };
-        let l = amb.levels(Surface::Apps, Some((true, 10)), false, true);
+        let l = amb.levels(Surface::Apps, Some((true, 10)), true);
         assert_eq!(l, Levels { dark: true, light: 10, tint: Some(80), sat: 20 }, "Ambient: the sun's look and light, the owner's colours");
-        let l = amb.levels(Surface::Apps, None, false, true);
+        let l = amb.levels(Surface::Apps, None, true);
         assert_eq!(l.light, 70, "no sun yet: the owner's");
         let auto = ColorChoice { auto: Some(true), ..own.clone() };
-        let l = auto.levels(Surface::Apps, Some((false, 60)), false, true);
+        let l = auto.levels(Surface::Apps, Some((false, 60)), true);
         assert_eq!(l, Levels { dark: false, light: 60, tint: None, sat: 50 }, "Auto: Golem's defaults, the sun's light");
-        assert_eq!(auto.levels(Surface::Icons, None, false, true).tint, Some(0), "Auto: icons untinted");
-        assert_eq!(auto.levels(Surface::Wall, None, true, true).tint, Some(0), "the wallpaper's Auto is its own tab's");
+        assert_eq!(auto.levels(Surface::Icons, None, true).tint, Some(0), "Auto: icons untinted");
+        assert_eq!(auto.levels(Surface::Wall, None, true).tint, Some(0), "the wallpaper's Auto is its own tab's");
         let wall = ColorChoice { wall_auto: Some(true), ..Default::default() };
-        assert_eq!(wall.levels(Surface::Wall, None, true, true).tint, Some(100), "Auto: the palette's own wallpaper whole");
-        assert_eq!(wall.levels(Surface::Wall, None, false, true).tint, Some(0), "Auto: a picture as it is");
+        assert_eq!(wall.levels(Surface::Wall, None, true), Levels { dark: true, light: 50, tint: Some(0), sat: 50 }, "Auto: Palette 0%, Saturation as made");
         assert!(wall.ambient_of(Surface::Wall) && !wall.ambient_of(Surface::Shell), "each tab's Auto brings its own Ambient");
         // A fresh ColorChoice is manual (a fresh INSTALL is set to Auto by settle_lines).
         assert!(!ColorChoice::default().auto_of(Surface::Apps));
