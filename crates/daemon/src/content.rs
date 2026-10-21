@@ -3739,12 +3739,20 @@ pub fn scene(
         // the reveal edge (they ride the same fixed layout as the grid,
         // so unclipped they would linger as a ghost once the box hides).
         // Pages going down (beside a side dock): the dots stand in a column
-        // at the section's right, in the room before what comes next.
+        // on the box's own side of the section (Max, 2026-10-21): at its
+        // left when the box is on the left, at its right when it is on the
+        // right, in the room between it and its neighbour (or the card's edge).
         if sec.vertical {
-            let right = sec.viewport.x + sec.viewport.w;
-            let next = layout.sections.iter().map(|o| o.viewport.x).filter(|&x| x > right).fold(f32::MAX, f32::min);
-            let room = if next < f32::MAX { next - right } else { GRID_PAD_X };
-            let dot_x = right + room / 2.0;
+            let (left_edge, right) = (sec.viewport.x, sec.viewport.x + sec.viewport.w);
+            let dot_x = if layout.side == Side::Left {
+                let prev = layout.sections.iter().map(|o| o.viewport.x + o.viewport.w).filter(|&x| x < left_edge).fold(f32::MIN, f32::max);
+                let room = if prev > f32::MIN { left_edge - prev } else { GRID_PAD_X };
+                left_edge - room / 2.0
+            } else {
+                let next = layout.sections.iter().map(|o| o.viewport.x).filter(|&x| x > right).fold(f32::MAX, f32::min);
+                let room = if next < f32::MAX { next - right } else { GRID_PAD_X };
+                right + room / 2.0
+            };
             let dot_cy = sec.viewport.y + sec.viewport.h / 2.0;
             if sec.n_pages > 1 && reveal_rect.contains((dot_x, dot_cy)) {
                 let dot_r = 3.0;
