@@ -133,6 +133,8 @@ pub(crate) const TILES_PER_PAGE: usize = 63;
 const TILE_DOTS_H: f32 = 22.0;
 const TILE_DOT: f32 = 6.0;
 const TILE_RADIUS: f32 = 8.0;
+/// A palette card's colour at Palette 100 ("full colour"), against as made.
+const CARD_FULL: f32 = 0.6;
 const TILE_MAX_W: f32 = 420.0;
 /// THE CARDS' GRID (the Colours model, Max 2026-10-20: "7×4 cards"): the
 /// palettes — and the apps' tiles, the same card — stand as many across as
@@ -820,6 +822,9 @@ pub(crate) struct PanelDraw {
     pub images: Vec<(Rect, String)>,
     /// The corner the pictures are cut to (their tiles').
     pub picture_radius: f32,
+    /// The palettes' cards as the Palette and Saturation sliders would make
+    /// them: their colour scaled by this (0 grey, 1 as made).
+    pub card_chroma: Option<f32>,
     /// Apps' icons to draw (the Colours Apps tiles): the app entry and
     /// where — drawn through the dock's icon layers, as fast launch's are.
     pub icons: Vec<(usize, Rect)>,
@@ -3363,6 +3368,27 @@ impl Panel {
                     let a = if k == page { 0.9 } else { 0.3 };
                     rect(out, x0 + k as f32 * step, top, d, d, d / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], a]);
                 }
+            }
+            // THE CARDS SHOW THE SLIDERS (Max, 2026-10-21: "the pallete and
+            // the saturation slider have to show the prev on the cards, like
+            // the palette on BG cards"): a section's Palette and Saturation,
+            // at the knobs as they are this frame, scale the palettes' colour —
+            // Palette from grey (0) through as made (its notch) to full
+            // colour, Saturation from grey to vivid, as `tint::saturate` does.
+            let mut grade = (None, None);
+            for sl in &content.sliders {
+                let key = self.control.as_ref().and_then(|c| c.groups.get(sl.group as usize)).map(|g| g.key);
+                let t = knob_shown(sl.value, sl.count, self.knob_of(sl));
+                match key {
+                    Some("colors-shell" | "colors-apps" | "colors-icons" | "colors-web") => {
+                        grade.0 = Some(if t <= 0.5 { t / 0.5 } else { 1.0 + (t - 0.5) / 0.5 * CARD_FULL });
+                    }
+                    Some("colors-shell-sat" | "colors-apps-sat" | "colors-icons-sat" | "colors-web-sat") => grade.1 = Some(t / 0.5),
+                    _ => {}
+                }
+            }
+            if grade.0.is_some() || grade.1.is_some() {
+                out.card_chroma = Some(grade.0.unwrap_or(1.0) * grade.1.unwrap_or(1.0));
             }
             for (i, chip) in content.chips.into_iter().enumerate() {
                 let r = chip.rect;

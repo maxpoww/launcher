@@ -270,6 +270,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if (wall && texel.a > 0.004) {
             c = vec4<f32>(wall_grade(texel.rgb / texel.a) * texel.a, texel.a);
         }
+        // A PALETTE'S CARD under the Palette and Saturation sliders
+        // (`plate.z` = 1 + how much colour: 1 grey, 2 as made).
+        if (in.plate.z > 0.5 && texel.a > 0.004) {
+            let lab = to_oklab(texel.rgb / texel.a);
+            let k = in.plate.z - 1.0;
+            let rgb = lch_rgb(lab.x, length(lab.yz) * k, atan2(lab.z, lab.y));
+            c = vec4<f32>(rgb * texel.a, texel.a);
+        }
         return c * cov * in.plate.y * globals.alpha;
     }
     // PLATE WITH HOLES (ring in (-1.5, -1.4)): the apps button holding pins
