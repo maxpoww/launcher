@@ -337,7 +337,7 @@ The big daemon files are cohesive but long — go straight to the function:
   dark look; Colours must fit a 900 px field — the panel does not scroll). The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
   the UI thread in `App::control_pick`).
 - `lighting.rs` — AUTO LIGHTING (Max, 2026-10-18; Colours page: "Auto" beside the Lighting slider, "Include the
-  background" under it): the Lighting follows the sun (`curve`: 50 from +6° up, 20 from -12° down, eased; the
+  background" under it): the Lighting follows the sun (`line`: Light 60 from +45°, one even slope to Light 15 at the horizon, Dark 60 → 20 by -12°; the
   elevation is `options_engine::sun_elevation_deg`, the place from the timezone) and changes ONLY IN FRONT OF THE
   OWNER (Golem §7). Presence = ext-idle-notify-v1 (120 s "away", 3 s "quiet"; `hyprlock` running or a sleep =
   gone); `Plan` (pure, tested) says when to look: present AND settled (2 min) AND not under a fullscreen window,

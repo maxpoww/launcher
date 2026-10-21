@@ -1386,7 +1386,9 @@ fn main() -> anyhow::Result<()> {
     app.reassert_floating_mode();
     // The control panel's choices that live outside the compositor.
     controls::reassert();
-    // The palette: the shell wears it, the apps get its files.
+    // The palette: the shell wears it, the apps get its files — at the light
+    // the sun asks for now, where Ambient is on.
+    app.lighting_wake();
     app.colors_apply(true);
     // …and, if the owner asked, the light follows the sun (in front of them).
     app.lighting_start();

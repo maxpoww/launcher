@@ -87,21 +87,22 @@ fn smoothstep(x: f64) -> f64 {
 }
 
 /// THE SUN'S LINE: the Lighting the sun asks for, as the box's one line
-/// (`palette::line_of`, both looks). The Light look from the horizon up —
-/// soft at dawn and dusk (Light 15 at 0°), as designed from +6°, up to Light
-/// 60 under a high sun — and the Dark look below it: Dark 60 at the horizon
-/// down to Dark 20 past −12° (the end of nautical twilight). The flip is the
-/// horizon (Max, 2026-10-20: "light in the morning, dark when it gets dark,
-/// like the Auto of macOS"); the gap between the halves is what a fade leaps.
+/// (`palette::line_of`, both looks). The Light look from the horizon up — one
+/// even slope through the afternoon, Light 15 at 0°, as designed near +25°,
+/// Light 60 from +45° (Max, 2026-10-21: "slightly stronger during the
+/// afternoon, we don't want a massive jump at 19"; it was flat at 50 down to
+/// +6° and then fell 35 in half an hour) — and the Dark look below it: Dark
+/// 60 at the horizon down to Dark 20 past −12° (the end of nautical
+/// twilight). The flip is the horizon (Max, 2026-10-20: "light in the
+/// morning, dark when it gets dark, like the Auto of macOS"); the gap between
+/// the halves is what a fade leaps.
 pub(crate) fn line(elevation_deg: f64) -> u8 {
     if !elevation_deg.is_finite() {
         return palette::line_of(true, DAY);
     }
     let e = elevation_deg;
-    let light = if e >= 6.0 {
-        50.0 + 10.0 * smoothstep((e - 6.0) / 34.0)
-    } else if e >= 0.0 {
-        15.0 + 35.0 * smoothstep(e / 6.0)
+    let light = if e >= 0.0 {
+        15.0 + 45.0 * (e.min(45.0) / 45.0 * std::f64::consts::FRAC_PI_2).sin()
     } else {
         f64::from(NIGHT) + 40.0 * smoothstep((e + 12.0) / 12.0)
     };
@@ -646,11 +647,44 @@ impl App {
             },
             |f| f.shown,
         );
-        SUN.store(target, Ordering::Relaxed);
         match decide(from, target) {
-            Some(to) => self.lighting_fade(from, to, catch_up),
-            None => debug!("lighting: sun at {elevation:.1}° asks {target}, shown {from}: close enough"),
+            Some(to) => {
+                SUN.store(target, Ordering::Relaxed);
+                self.lighting_fade(from, to, catch_up);
+            }
+            None => {
+                debug!("lighting: sun at {elevation:.1}° asks {target}, shown {from}: close enough");
+                // What is shown stays the line, so a slow sun adds up to a
+                // fade. (Taking the target here, unshown, swallowed every
+                // small step: the afternoon never moved, nothing was kept.)
+                // The first look keeps it for every surface.
+                if SUN.load(Ordering::Relaxed) == NONE {
+                    SUN.store(from, Ordering::Relaxed);
+                    store(from);
+                    self.lighting.apply_pending = true;
+                    self.lighting_apply_if_due();
+                }
+            }
         }
+    }
+
+    /// The dock's start: the line the sun asks for now, kept for every
+    /// surface whose Ambient is on, before anything is made — so a start
+    /// never shows the levels of another hour, or each surface its own.
+    /// (Nothing is on the screen yet; from here the light moves only in
+    /// front of the owner, by the schedule.)
+    pub(crate) fn lighting_wake(&mut self) {
+        let picked = palette::choice();
+        if !picked.ambient_of(palette::Surface::Shell) && !picked.ambient_of(palette::Surface::Wall) {
+            return;
+        }
+        let Some(elevation) = options_engine::sun_elevation_deg(unix_now() as f64) else {
+            return;
+        };
+        let target = line(elevation);
+        SUN.store(target, Ordering::Relaxed);
+        store(target);
+        info!("lighting: the sun at {elevation:.1}° asks {target} at the start");
     }
 
     fn lighting_fade(&mut self, from: u8, to: u8, catch_up: bool) {
@@ -888,8 +922,9 @@ mod tests {
             let (d, l) = line_to(line(e));
             assert!(d == want.0 && l.abs_diff(want.1) <= 1, "{why}: {e}° -> ({d}, {l}), wanted {want:?}");
         };
-        near(40.0, (false, 60), "a high sun: Light 60");
-        near(6.0, (false, 50), "the day as designed from +6°");
+        near(45.0, (false, 60), "a high sun: Light 60");
+        near(24.5, (false, 50), "the afternoon as designed");
+        near(10.0, (false, 30), "an hour before dusk: well on the way down, not all at the end");
         near(0.0, (false, 15), "the horizon, still Light: soft");
         near(-0.1, (true, 60), "under the horizon: Dark 60 — the flip");
         near(-6.0, (true, 40), "dusk");
