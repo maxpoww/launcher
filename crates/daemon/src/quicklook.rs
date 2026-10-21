@@ -289,6 +289,11 @@ impl Up {
         }
     }
 
+    /// A slideshow's photo comes up from black (its sharp body fades in).
+    pub(crate) fn sharp_from_black(&mut self) {
+        self.sharp = 0.0;
+    }
+
     /// Where the song is, in seconds.
     pub(crate) fn song_at(&self) -> f32 {
         self.play
@@ -346,6 +351,10 @@ pub(crate) struct QuickLook {
     /// each piece begins and ends (measured in the font: no font is sure to
     /// be monospaced). Keyed by the words, so it holds while text is written.
     code_x: HashMap<(String, Vec<u16>), Vec<f32>>,
+    /// FILES' "Play" and "Slideshow" (`peek_slides.rs`): what plays one
+    /// after another, and the photos shown full screen.
+    pub(crate) playlist: Option<crate::peek_slides::Playlist>,
+    pub(crate) slides: Option<crate::peek_slides::Slides>,
 }
 
 impl QuickLook {
@@ -1160,6 +1169,8 @@ impl App {
     /// drop), the video's texture, the pointer given back to the windows.
     pub(crate) fn peek_gone(&mut self) {
         self.peek.up = None;
+        self.peek.playlist = None;
+        self.peek.slides = None;
         if let Some(renderer) = self.desktop_top.renderer.as_mut() {
             renderer.drop_video();
         }
@@ -1375,6 +1386,8 @@ impl App {
         }
         up.stop();
         up.closing = true;
+        self.peek.playlist = None;
+        self.peek.slides = None;
         up.start = up.rect;
         up.t = 0.0;
         self.request_desktop_top_draw();
@@ -1449,7 +1462,12 @@ impl App {
     /// A video starts as soon as it is shown.
     fn peek_autoplay(&mut self) {
         let video = self.peek_shown().is_some_and(|(_, p)| p.video.is_some());
-        if video
+        // (A song plays as it is shown only in a playlist: Files' "Play".)
+        let song = self.peek.playlist.is_some()
+            && self
+                .peek_shown()
+                .is_some_and(|(_, p)| matches!(p.body, Body::Song { .. }));
+        if (video || song)
             && self.peek.up.as_ref().is_some_and(|u| {
                 u.play.is_none() && u.frames == 0 && !u.closing && u.trim_edit.is_none()
             })
@@ -1541,6 +1559,10 @@ impl App {
         if frame.is_empty() {
             up.stop();
             up.at = secs;
+            if self.peek.playlist.is_some() {
+                self.peek_list_next();
+                return;
+            }
         } else {
             // (Its clock starts with its first frame: the decoder takes a
             // moment to start.)
@@ -1588,6 +1610,15 @@ impl App {
         }
         if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) {
             self.edit_key(key, utf8);
+            return true;
+        }
+        // A slideshow: the arrows turn it, Escape (or Space) ends it.
+        if self.peek.slides.is_some() {
+            match key {
+                Keysym::Right | Keysym::Down => self.peek_slide_step(1),
+                Keysym::Left | Keysym::Up => self.peek_slide_step(-1),
+                _ => self.peek_close(),
+            }
             return true;
         }
         match key {
@@ -1687,6 +1718,27 @@ impl App {
             Axis, ButtonState, Event,
         };
         use smithay_client_toolkit::reexports::client::WEnum;
+        // A slideshow: a click on its × ends it, anywhere else turns it on.
+        if self.peek.slides.is_some() {
+            match event {
+                Event::Enter { surface_x, surface_y, .. } | Event::Motion { surface_x, surface_y, .. } => {
+                    if let Some(up) = self.peek.up.as_mut() {
+                        up.ptr = Some((*surface_x as f32, *surface_y as f32));
+                    }
+                    self.request_desktop_top_draw();
+                }
+                Event::Button { state: WEnum::Value(ButtonState::Pressed), .. } => {
+                    let at = self.peek.up.as_ref().and_then(|u| u.ptr).unwrap_or_default();
+                    if self.slide_caption().is_some_and(|(_, x)| x.contains(at)) {
+                        self.peek_close();
+                    } else {
+                        self.peek_slide_step(1);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         // The pencil taken: the pointer is the editor's.
         if self.peek.up.as_ref().is_some_and(|u| u.edit.is_some()) && self.edit_pointer(event) {
             return;
@@ -1863,6 +1915,9 @@ impl App {
             self.desktop_top.size.0 as f32,
             self.desktop_top.size.1 as f32,
         );
+        if self.peek.slides.is_some() {
+            return Rect::new(0.0, 0.0, sw, sh);
+        }
         let scale = self.surface_scale(crate::fractional::SurfaceKind::DesktopTop);
         let (mw, mh) = (sw * MAX, sh * MAX - HEAD);
         // The pencil taken: the edited picture's shape (room for the
@@ -1942,6 +1997,28 @@ impl App {
     pub(crate) fn peek_ease(&mut self, dt: f32) -> bool {
         // (A zoomed photo that stood still: its sharp part asked for.)
         let zoom_waiting = self.peek_zoom_tick();
+        // (A song of a playlist that ended: the next one — unless it ended
+        // as it began: the player could not play it, and racing through the
+        // rest would be no better.)
+        let ended_after = self.peek.up.as_mut().and_then(|u| match &mut u.play {
+            Some(Play {
+                what: Playing::Song(child),
+                since,
+                ..
+            }) => matches!(child.try_wait(), Ok(Some(_))).then(|| since.elapsed()),
+            _ => None,
+        });
+        if let (Some(after), true) = (ended_after, self.peek.playlist.is_some()) {
+            if let Some(up) = self.peek.up.as_mut() {
+                up.stop();
+            }
+            if after < std::time::Duration::from_secs(1) && self.peek_secs().unwrap_or(0.0) > 2.0 {
+                warn!("quick look: the song could not be played; the playlist stops");
+                self.peek.playlist = None;
+            } else {
+                self.peek_list_next();
+            }
+        }
         let Some(target) = self.peek.up.as_ref().map(|u| {
             if u.closing {
                 u.from
@@ -1973,8 +2050,10 @@ impl App {
             up.stop();
             up.at = secs;
         }
+        // (A slideshow's photo fades in slower: one comes after another.)
+        let fade = if self.peek.slides.is_some() { 0.45 } else { SHARP_SECS };
         if ready && up.sharp < 1.0 {
-            up.sharp = (up.sharp + dt / SHARP_SECS).min(1.0);
+            up.sharp = (up.sharp + dt / fade).min(1.0);
         }
         if up.closing && up.t >= 1.0 {
             self.peek_gone();
@@ -2191,6 +2270,88 @@ impl App {
     }
 
     /// Quick Look into `scene`.
+    /// Where a slideshow's caption is ("name · 3 of 52 · ×"), and its ×.
+    pub(crate) fn slide_caption(&self) -> Option<(Rect, Rect)> {
+        let slides = self.peek.slides.as_ref()?;
+        let up = self.peek.up.as_ref()?;
+        let (sw, sh) = (self.desktop_top.size.0 as f32, self.desktop_top.size.1 as f32);
+        let words = slides.caption(&up.name);
+        let w = (words.chars().count() as f32 * 7.0 + 18.0 + 34.0).min(sw - 40.0);
+        let r = Rect::new(((sw - w) / 2.0).round(), sh - 24.0 - 32.0, w.round(), 32.0);
+        let x = Rect::new(r.x + r.w - 30.0, r.y + 4.0, 24.0, 24.0);
+        Some((r, x))
+    }
+
+    /// A SLIDESHOW's frame: black, the photo fitted to the screen and
+    /// fading in, its caption at the foot.
+    fn slides_push(&self, scene: &mut Scene, up: &Up, open: f32) {
+        let (sw, sh) = (self.desktop_top.size.0 as f32, self.desktop_top.size.1 as f32);
+        let full = Rect::new(0.0, 0.0, sw, sh);
+        scene.rects.push(RectInst {
+            rect: full,
+            radius: 0.0,
+            color: [0.0, 0.0, 0.0, open],
+            glass: 0.0,
+            border: 0.0,
+        });
+        let mut g = GridContent {
+            clip: full,
+            ..Default::default()
+        };
+        let shown = self.peek_shown();
+        let tiles_up = shown
+            .as_ref()
+            .is_some_and(|(key, _)| self.desktop_top.peek_tiles.as_ref() == Some(key));
+        if let Some(pic) = shown.and_then(|(_, p)| pic_of(&p.body)).filter(|_| tiles_up) {
+            let room = Rect::new(0.0, 0.0, sw, sh - 72.0);
+            let k = (room.w / pic.w as f32).min(room.h / pic.h as f32);
+            let (w, h) = (pic.w as f32 * k, pic.h as f32 * k);
+            let into = Rect::new(((sw - w) / 2.0).round(), ((room.h - h) / 2.0 + 12.0).round(), w, h);
+            let (kx, ky) = (into.w / pic.w as f32, into.h / pic.h as f32);
+            let clip = [into.x, into.y, into.x + into.w, into.y + into.h];
+            for row in 0..pic.rows {
+                for col in 0..pic.cols {
+                    let x = into.x + (col * STEP) as f32 * kx - kx;
+                    let y = into.y + (row * STEP) as f32 * ky - ky;
+                    g.icons.push(IconInst {
+                        rect: Rect::new(x, y, TILE as f32 * kx, TILE as f32 * ky),
+                        layer: row * pic.cols + col,
+                        tint: clip,
+                        ring: -1.6,
+                        plate: [0.0, up.sharp * open, 0.0, 0.0],
+                    });
+                }
+            }
+        }
+        // The caption: its name, where in the show, ×.
+        if let (Some((r, x)), Some(slides)) = (self.slide_caption(), self.peek.slides.as_ref()) {
+            g.rects.push(RectInst {
+                rect: r,
+                radius: r.h / 2.0,
+                color: [0.09, 0.09, 0.09, 0.85 * open],
+                glass: 0.0,
+                border: 0.0,
+            });
+            let ink = [1.0, 1.0, 1.0, 0.9 * open];
+            g.labels.push(text_label(&slides.caption(&up.name), (r.x + 16.0, r.y + 8.0), r.w - 50.0, 13.0, None, ink));
+            let hot = up.ptr.is_some_and(|p| x.contains(p));
+            if hot {
+                g.rects.push(RectInst {
+                    rect: x,
+                    radius: 12.0,
+                    color: [1.0, 1.0, 1.0, 0.16 * open],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            g.labels.push(Label {
+                centered: true,
+                ..text_label("×", (x.x + x.w / 2.0, x.y + 2.0), x.w, 16.0, None, ink)
+            });
+        }
+        scene.grids.push(g);
+    }
+
     pub(crate) fn peek_push(&self, scene: &mut Scene) {
         let Some(up) = self.peek.up.as_ref() else {
             return;
@@ -2202,6 +2363,10 @@ impl App {
         let k = ease_out(up.t);
         // How open it is: growing, all of it; going back, less and less.
         let open = if up.closing { 1.0 - k } else { k.max(0.35) };
+        // A SLIDESHOW: the photo on black, full screen.
+        if self.peek.slides.is_some() {
+            return self.slides_push(scene, up, if up.closing { 1.0 - k } else { 1.0 });
+        }
         let pal = self.filer_palette();
         let r = up.rect;
         scene.rects.push(RectInst {

@@ -78,6 +78,20 @@ fn describe(undo: &Undo) -> (String, &'static str) {
             };
             (text, "open")
         }
+        Undo::Wallpaper { now, .. } => (
+            fill(
+                tr("Wallpaper: “{name}”"),
+                &[("name", &file_name(Path::new(now)))],
+            ),
+            "pic",
+        ),
+        Undo::Rotated(paths) => (
+            match paths.as_slice() {
+                [one] => fill(tr("Rotated “{name}”"), &[("name", &file_name(one))]),
+                _ => fill(tr("Rotated {n} items"), &[("n", &paths.len())]),
+            },
+            "rotate",
+        ),
         Undo::Grouped { folder, moved } => (
             fill(
                 tr("Put {n} items in “{name}”"),
@@ -119,6 +133,10 @@ pub(super) fn can_undo(undo: &Undo, bin: &[crate::trash::TrashItem]) -> bool {
         Undo::Grouped { moved, .. } => moved
             .iter()
             .any(|(from, now)| now.exists() && !from.exists()),
+        Undo::Wallpaper { now, .. } => {
+            crate::controls::wallpaper_now().as_deref() == Some(now.as_str())
+        }
+        Undo::Rotated(paths) => paths.iter().any(|p| p.exists()),
     }
 }
 

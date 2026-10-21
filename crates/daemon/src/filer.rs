@@ -400,8 +400,9 @@ enum Spot {
     Undo,
     HistRow(usize),
     HistUndo(usize),
-    /// The selection pill's `n`th button.
+    /// The selection pill's `n`th button; the folder's own action.
     Pill(usize),
+    Here,
     /// A part of the chrome that takes the pointer and does nothing (the
     /// sidebar's ground, the search field, the i card).
     Chrome,
@@ -864,6 +865,10 @@ pub(crate) enum Undo {
     /// Things put together in a new folder ("New folder with these"):
     /// the folder, and each thing's place before and in it.
     Grouped { folder: PathBuf, moved: Vec<(PathBuf, PathBuf)> },
+    /// A photo made the wallpaper: the one before, and it.
+    Wallpaper { was: String, now: String },
+    /// Photos turned a quarter clockwise.
+    Rotated(Vec<PathBuf>),
 }
 
 /// What bringing `sources` in did, as things to take back: those that are
@@ -968,6 +973,16 @@ pub(crate) fn take_back(undo: Undo) -> Option<String> {
                 .count();
             let _ = std::fs::remove_dir(&folder);
             (n > 0).then(|| fill(tr("Undone: {n} moved back"), &[("n", &n)]))
+        }
+        // The wallpaper before, put up again (through the box's own pick).
+        Undo::Wallpaper { was, .. } => {
+            crate::wall_follow::picked_other(move || crate::controls::pick_wallpaper(was));
+            Some(tr("Undone: the wallpaper before is back").to_owned())
+        }
+        // Turned back: three quarters more, as losslessly.
+        Undo::Rotated(paths) => {
+            let n = paths.iter().filter(|p| p.exists() && smart::rotate(p, 3)).count();
+            (n > 0).then(|| fill(tr("Undone: {n} turned back"), &[("n", &n)]))
         }
     }
 }
@@ -1324,6 +1339,8 @@ struct Hits {
     hist: Rect,
     hist_undo: Vec<(Rect, usize)>,
     hist_rows: Vec<(Rect, usize)>,
+    /// The folder's own action by the ↶ ("Play all", "Slideshow").
+    here: Option<(Rect, Action)>,
     /// THE SELECTION PILL, and its buttons.
     pill: Rect,
     pill_btns: Vec<(Rect, chrome::PillAct)>,
@@ -1443,6 +1460,9 @@ struct Win {
     hist_first: f32,
     /// When the history up was last read against the disk.
     hist_read: Option<Instant>,
+    /// What the folder shown is mostly (the button by the ↶), for which
+    /// listing.
+    here_kind: Option<(u64, Option<smart::FolderKind>)>,
     /// THE SELECTION PILL (`chrome::filer_pill`): how far it is in (0..1),
     /// what it shows (kept while it goes), whether it is wanted (the files
     /// then get room under their last row); a line it says for a moment.
@@ -1823,6 +1843,7 @@ impl Win {
                 (h.tab_add, Spot::TabAdd),
                 (h.pencil, Spot::Pencil),
                 (h.undo, Spot::Undo),
+                (h.here.map_or(Rect::default(), |(r, _)| r), Spot::Here),
                 (h.sort, Spot::Sort),
                 (h.info, Spot::Info),
                 (h.grid, Spot::View(false)),
@@ -2659,6 +2680,7 @@ impl App {
             hist_open: false,
             hist_first: 0.0,
             hist_read: None,
+            here_kind: None,
             pill_t: 0.0,
             pill_view: None,
             pill_on: false,
@@ -3860,6 +3882,14 @@ impl App {
                 self.send_to(n, paths, Some(id));
             }
             Action::NewFolderWith => self.filer_group(id, selected),
+            Action::Play
+            | Action::Shuffle
+            | Action::PlayHere
+            | Action::Slideshow
+            | Action::SlideshowHere
+            | Action::SetWallpaper
+            | Action::Rotate
+            | Action::Print => self.filer_smart_act(id, action),
             // A stick's or a phone's own rows, from the sidebar: what its
             // icon on the desktop does.
             Action::Eject
@@ -5398,7 +5428,7 @@ impl App {
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
             Spot::Place(_) | Spot::View(_) | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
             Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
-            Spot::Undo | Spot::HistUndo(_) | Spot::Pill(_) => true,
+            Spot::Undo | Spot::HistUndo(_) | Spot::Pill(_) | Spot::Here => true,
             Spot::Mode(n) => (n == 1) != win.media,
             Spot::Chrome | Spot::HistRow(_) => false,
         };
@@ -6675,6 +6705,11 @@ impl App {
             }
             // The ↶ takes back the newest that can be; a row's Undo, its own.
             Spot::Undo => self.filer_undo(id),
+            Spot::Here => {
+                if let Some((_, action)) = win.hits.here {
+                    self.filer_smart_act(id, action);
+                }
+            }
             Spot::Pill(n) => {
                 if let Some(act) = win.hits.pill_btns.get(n).map(|(_, a)| a.clone()) {
                     self.filer_pill_act(id, act);
@@ -7216,6 +7251,12 @@ impl App {
                 let said = self.filer_menu_row(id, row);
                 info!("files: pick {row}: {said}");
                 return said;
+            }
+            // `here`: as a click on the folder's own action by the ↶.
+            "here" => {
+                if let Some((_, action)) = self.filer.win(id).and_then(|w| w.hits.here) {
+                    self.filer_smart_act(id, action);
+                }
             }
             // `flash <words>`: said in the pill for a moment.
             "flash" => self.filer_flash(id, rest.to_owned()),

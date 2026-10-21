@@ -119,11 +119,13 @@ pub(super) struct Info {
 // ── the chrome's own symbols ────────────────────────────────────────────
 
 /// The symbols the chrome wears (the shell's own set: `glyphs.rs`).
-const CHROME: [&str; 26] = [
+const CHROME: [&str; 31] = [
     "clock", "pin", "files", "media", "sort", "info", "grid", "list", "search", "pen", "x", "plus",
     "chev", "folder", "undo", "rename", "trash", "newf", "copy", "open", "dup",
     // (The selection pill's: there at once when it rises.)
     "move", "openwith", "usb", "more", "paste",
+    // (And what a kind of thing is for: the pill's, and by the ↶.)
+    "play", "slides", "pic", "print", "extract",
 ];
 
 /// The icon key of symbol `name`.
@@ -288,6 +290,11 @@ fn words(text: &str, (x, y): (f32, f32), max_w: f32, px: f32, color: [f32; 4]) -
         color: Some(color),
         ..label(text, (x, y), max_w, false, false)
     }
+}
+
+/// Words of the top line, at its size.
+fn words_at_line(text: &str, at: (f32, f32), max_w: f32, color: [f32; 4]) -> Label {
+    words(text, at, max_w, LINE_PX, color)
 }
 
 /// A symbol in `color`, its alpha how much it shows (the icon washed whole
@@ -703,9 +710,25 @@ impl App {
         let rules = [more - 107.0 + 49.0, more - 107.0 + 103.0];
         // The ↶ left of sort: out of nothing (its width and its air) while
         // something can be taken back.
+        // The folder's own action, when it is mostly songs or photos ("Play
+        // all", "Slideshow"): standing still left of sort, the ↶ sliding in
+        // left of it (so it does not move when the ↶ comes).
+        let here = match Self::filer_here_kind(win) {
+            Some(super::smart::FolderKind::Play) => {
+                Some(("play", tr("Play all"), Action::PlayHere))
+            }
+            Some(super::smart::FolderKind::Slides) => {
+                Some(("slides", tr("Slideshow"), Action::SlideshowHere))
+            }
+            None => None,
+        };
+        let here_rect = here.map(|(_, words, _)| {
+            let w = 7.0 + BTN_ICON + 5.0 + measure(win, words, LINE_PX, None) + 8.0;
+            Rect::new(sort.x - UNDO_GAP - w, cy - BTN_H / 2.0, w, BTN_H)
+        });
         let u = smooth(win.undo_t);
         let undo = Rect::new(
-            sort.x - (BTN_W + UNDO_GAP) * u,
+            here_rect.map_or(sort.x, |r| r.x) - (BTN_W + UNDO_GAP) * u,
             cy - BTN_H / 2.0,
             BTN_W * u,
             BTN_H,
@@ -737,6 +760,28 @@ impl App {
             Spot::Sort,
         );
         button(&mut g, win, info, "info", win.info_on, Spot::Info);
+        hits.here = None;
+        if let (Some((sign, words, action)), Some(r)) = (here, here_rect) {
+            let pointed = win.hover == Spot::Here;
+            if pointed {
+                g.rects.push(rect(r, 6.0, tones.hover));
+            }
+            let c = if pointed { ink } else { tones.dim };
+            symbol(
+                &mut g,
+                win,
+                &glyph(sign),
+                square((r.x + 7.0 + BTN_ICON / 2.0, cy), BTN_ICON),
+                c,
+            );
+            g.labels.push(words_at_line(
+                words,
+                (r.x + 7.0 + BTN_ICON + 5.0, text_y),
+                r.w,
+                if pointed { ink } else { tones.dim_text },
+            ));
+            hits.here = Some((r, action));
+        }
         hits.undo = Rect::default();
         if u > 0.01 {
             // (Its symbol fades with it: it is not a dimmed button, it is

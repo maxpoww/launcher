@@ -129,6 +129,11 @@ pub(crate) fn open_oriented(path: &Path) -> Option<image::DynamicImage> {
     Some(img)
 }
 
+/// A JPEG's orientation as its EXIF number (1 = upright), from its header.
+pub(crate) fn jpeg_orientation_tag(path: &Path) -> u16 {
+    u16::from(jpeg_orientation(path).to_exif())
+}
+
 /// A JPEG's orientation, from its header alone.
 fn jpeg_orientation(path: &Path) -> image::metadata::Orientation {
     use image::ImageDecoder;

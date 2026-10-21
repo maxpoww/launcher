@@ -3349,7 +3349,15 @@ impl App {
             | Action::AddPlace
             | Action::RemovePlace
             | Action::ToggleHidden
-            | Action::OpenInTab => {}
+            | Action::OpenInTab
+            | Action::Play
+            | Action::Shuffle
+            | Action::PlayHere
+            | Action::Slideshow
+            | Action::SlideshowHere
+            | Action::SetWallpaper
+            | Action::Rotate
+            | Action::Print => {}
             Action::SortBy(_) | Action::SortDir(_) => self.desktop_sort(action),
             // Archives are the system archiver's work (File Roller).
             Action::Extract | Action::Compress => {

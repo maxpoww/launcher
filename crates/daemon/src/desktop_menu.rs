@@ -121,6 +121,18 @@ pub(crate) enum Action {
     MovingWallpaper,
     Colours,
     Display,
+    /// WHAT A KIND OF THING IS FOR (`filer/smart.rs`): songs and videos
+    /// played (in a shuffled order), photos shown one after another, one
+    /// made the wallpaper or turned, documents printed; `…Here`: of the
+    /// folder shown (the button by the ↶).
+    Play,
+    Shuffle,
+    PlayHere,
+    Slideshow,
+    SlideshowHere,
+    SetWallpaper,
+    Rotate,
+    Print,
 }
 
 /// One row: an action, a line that only says something, or a rule.
