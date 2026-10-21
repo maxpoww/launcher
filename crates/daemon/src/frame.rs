@@ -12,7 +12,7 @@ use tracing::error;
 use crate::install::FAIL_FLASH;
 use crate::state::Target;
 use crate::{animation, apps, content, groups, pager, pages};
-use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_REST_AFTER_CLOSE};
+use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_HOP_DURATION, DOCK_HOP_HEIGHT, DOCK_REST_AFTER_CLOSE};
 
 /// Exponential make-room glide rate (per second) for the grid and dock
 /// reflow while dragging — higher is snappier, lower is slower. Kept brisk
@@ -326,6 +326,25 @@ impl App {
         Some((index, BOUNCE_HEIGHT * hops * (1.0 - 0.45 * t)))
     }
 
+    /// The whole dock's bounce (`dock_bounce`): one hop and a smaller
+    /// rebound, every icon on it together, expiring when done.
+    pub(crate) fn dock_hop_offset(&mut self) -> f32 {
+        if crate::animation::reduce_motion() {
+            self.dock_hop = None;
+            return 0.0;
+        }
+        let Some(start) = self.dock_hop else {
+            return 0.0;
+        };
+        let t = start.elapsed().as_secs_f32() / DOCK_HOP_DURATION.as_secs_f32();
+        if t >= 1.0 {
+            self.dock_hop = None;
+            return 0.0;
+        }
+        let hops = (2.0 * std::f32::consts::PI * t).sin().abs();
+        DOCK_HOP_HEIGHT * hops * (1.0 - 0.8 * t)
+    }
+
     /// Render one frame and request the next frame callback, which rides
     /// on this frame's commit. The callback redraws only if the scene is
     /// animating or damaged again — otherwise it fires clean and the
@@ -339,8 +358,6 @@ impl App {
             self.dirty = true;
             return;
         }
-        // An arrangement picked on the Launcher page lands once its box is up.
-        self.arrange_tick();
         // ONE frame per compositor frame. A frame callback is still out: the
         // screen has not shown the last frame yet, so this one waits for the
         // callback (which draws whenever `dirty`). Drawing here anyway — as
@@ -626,6 +643,7 @@ impl App {
         // (`before_present` below): a frame that changes nothing makes none.
 
         let bounce = self.bounce_offset();
+        let dock_hop = self.dock_hop_offset();
         let layout = self.current_layout();
         // The dock plate grows to wrap minimized tiles; the surface is full
         // width, so the pointer input region must follow the plate's width
@@ -1679,6 +1697,7 @@ impl App {
                 dock_mag: &dock_mag,
                 plate: icon_plate,
                 bounce,
+                dock_hop,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
                 search_expand: self.search.expand,
@@ -1795,7 +1814,7 @@ impl App {
         // animation still in flight ticks on a short timer instead; a bare
         // commit asking for a callback is not answered by a compositor that
         // damages only what a commit changed (see `Renderer::render`).
-        if unchanged && (self.ui.is_animating() || self.bounce.is_some() || self.dirty) {
+        if unchanged && (self.ui.is_animating() || self.bounce.is_some() || self.dock_hop.is_some() || self.dirty) {
             self.redraw_soon();
         }
     }

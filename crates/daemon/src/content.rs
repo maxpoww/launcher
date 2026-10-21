@@ -2058,6 +2058,8 @@ pub struct FrameInput<'a> {
     pub plate: [f32; 4],
     /// Launch bounce: (entry index, upward offset in px).
     pub bounce: Option<(usize, f32)>,
+    /// The whole dock's bounce: every icon on it lifted by this, px.
+    pub dock_hop: f32,
     /// Live search query (empty shows the placeholder).
     pub query: &'a str,
     /// Auto-selected grid position (best match while searching), as
@@ -2379,6 +2381,7 @@ pub fn scene(
         dock_mag,
         plate,
         bounce,
+        dock_hop,
         query,
         selected,
         search_expand,
@@ -2522,6 +2525,8 @@ pub fn scene(
         Some((b, offset)) if b == i => offset,
         _ => 0.0,
     };
+    // (On the dock, the whole dock's bounce on top.)
+    let dock_lift = |i: usize| lift(i) + dock_hop;
 
     // Dock row: per-icon magnification scales, then spread visual centers.
     // Hit-boxes stay at fixed slot positions; only drawn positions spread.
@@ -2778,12 +2783,12 @@ pub fn scene(
         // (amplified: at icon scale the raw factor reads as nothing).
         let drop = 1.0 + (stretch - 1.0) * DOCK_STRETCH_GAIN;
         let icon_rect = if sideways {
-            let x = if side == Side::Left { edge_x + lift(entry_idx) } else { edge_x - size - lift(entry_idx) };
+            let x = if side == Side::Left { edge_x + dock_lift(entry_idx) } else { edge_x - size - dock_lift(entry_idx) };
             Rect::new(x, vcx - size / 2.0, size, size)
         } else {
             Rect::new(
                 vcx - size / 2.0,
-                baseline - (size + lift(entry_idx)) * drop,
+                baseline - (size + dock_lift(entry_idx)) * drop,
                 size,
                 size * drop,
             )
@@ -2827,7 +2832,7 @@ pub fn scene(
                 let (cx, cy) = (icon_rect.x + icon_rect.w / 2.0, icon_rect.y + icon_rect.h / 2.0);
                 Rect::new(cx - tw / 2.0, cy - th / 2.0, tw, th)
             } else {
-                let icon_cy = baseline - (size + lift(entry_idx)) * drop / 2.0; // the pinned icon's vertical mid
+                let icon_cy = baseline - (size + dock_lift(entry_idx)) * drop / 2.0; // the pinned icon's vertical mid
                 Rect::new(vcx - tile_w / 2.0, icon_cy - tile_h * drop / 2.0, tile_w, tile_h * drop)
             };
             // The thumbnail fills the rect UNPLATED: it is a picture, not a
@@ -3023,7 +3028,7 @@ pub fn scene(
                 let (letter_x, icon_center_y) = if sideways {
                     (icon_rect.x + icon_rect.w / 2.0, icon_rect.y + icon_rect.h / 2.0)
                 } else {
-                    (vcx, baseline - size / 2.0 - lift(entry_idx))
+                    (vcx, baseline - size / 2.0 - dock_lift(entry_idx))
                 };
                 scene.labels.push(Label {
                     text: letter,
@@ -3067,8 +3072,8 @@ pub fn scene(
                 apps_cy + (s - ov.cap as f32) * step
             };
             let x = match side {
-                Side::Left => slot_rect.x + DOCK_BASELINE_PAD * icon_scale,
-                _ => slot_rect.x + slot_rect.w - DOCK_BASELINE_PAD * icon_scale - size,
+                Side::Left => slot_rect.x + DOCK_BASELINE_PAD * icon_scale + dock_hop,
+                _ => slot_rect.x + slot_rect.w - DOCK_BASELINE_PAD * icon_scale - size - dock_hop,
             };
             edge.icons.push(IconInst {
                 rect: Rect::new(x, cy - size / 2.0, size, size),
@@ -3119,7 +3124,7 @@ pub fn scene(
                 // (cap - 1 → its own slot; cap → behind the button's middle.)
                 apps_cx + (s - ov.cap as f32) * step
             };
-            let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
+            let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale - dock_hop;
             edge.icons.push(IconInst {
                 rect: Rect::new(cx - size / 2.0, baseline - size * drop, size, size * drop),
                 layer: layer_of(entry_idx),
@@ -3156,7 +3161,7 @@ pub fn scene(
                     let line_px = font_px * 1.3;
                     let scale = dock_scales.get(i).copied().unwrap_or(1.0);
                     let size = (dock_icon * scale).min(slot.h.min(dock_slot) + MAGNIFY_HEADROOM);
-                    let icon_top = slot.y + slot.h - size - lift(entry_idx);
+                    let icon_top = slot.y + slot.h - size - dock_lift(entry_idx);
                     // Width from the same glyph-advance model truncate_label uses.
                     let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
                     let pill_h = line_px + 6.0;
@@ -3164,8 +3169,8 @@ pub fn scene(
                     // the screen's side of it.
                     let (pill_cx, pill_y) = match side {
                         Side::Bottom => (vcx, (icon_top - 6.0 - pill_h).max(2.0)),
-                        Side::Left => (slot.x + DOCK_BASELINE_PAD * icon_scale + size + lift(entry_idx) + 6.0 + pill_w / 2.0, vcx - pill_h / 2.0),
-                        Side::Right => (slot.x + slot.w - DOCK_BASELINE_PAD * icon_scale - size - lift(entry_idx) - 6.0 - pill_w / 2.0, vcx - pill_h / 2.0),
+                        Side::Left => (slot.x + DOCK_BASELINE_PAD * icon_scale + size + dock_lift(entry_idx) + 6.0 + pill_w / 2.0, vcx - pill_h / 2.0),
+                        Side::Right => (slot.x + slot.w - DOCK_BASELINE_PAD * icon_scale - size - dock_lift(entry_idx) - 6.0 - pill_w / 2.0, vcx - pill_h / 2.0),
                     };
                     let mut bg = dock_bg;
                     bg[3] = bg[3].max(0.92);
@@ -5276,6 +5281,33 @@ mod tests {
     }
 
     #[test]
+    fn the_dock_bounce_lifts_every_icon_off_its_edge() {
+        let cfg = config();
+        let docked = (cfg.window.input_bar_height + cfg.window.bottom_margin) as f32;
+        let (es, order) = (entries(9), idslots(9));
+        let icons = |side: Side, hop: f32| {
+            let l = side_layout(side, docked, 0, 0.0);
+            let s = scene(
+                &cfg,
+                1.0,
+                &l,
+                &es,
+                &vis(9),
+                SCREEN,
+                &FrameInput { alpha: 1.0, stretch: 1.0, dock_order: &order, dock_hop: hop, ..Default::default() },
+            );
+            s.icons.iter().map(|i| i.rect).collect::<Vec<_>>()
+        };
+        let (rest, up) = (icons(Side::Bottom, 0.0), icons(Side::Bottom, 12.0));
+        assert_eq!(rest.len(), up.len());
+        assert!(rest.iter().zip(&up).all(|(a, b)| (a.y - b.y - 12.0).abs() < 0.01 && a.x == b.x), "all up, together");
+        let (rest, out) = (icons(Side::Left, 0.0), icons(Side::Left, 12.0));
+        assert!(rest.iter().zip(&out).all(|(a, b)| (b.x - a.x - 12.0).abs() < 0.01 && a.y == b.y), "a left dock's away from the edge");
+        let (rest, out) = (icons(Side::Right, 0.0), icons(Side::Right, 12.0));
+        assert!(rest.iter().zip(&out).all(|(a, b)| (a.x - b.x - 12.0).abs() < 0.01), "a right dock's to the left");
+    }
+
+    #[test]
     fn a_resting_side_dock_is_a_column_live_to_the_edge() {
         let cfg = config();
         let docked = (cfg.window.input_bar_height + cfg.window.bottom_margin) as f32;
@@ -5286,7 +5318,7 @@ mod tests {
         assert!(((first.y + last.y + last.h) / 2.0 - (BANNER + SCREEN.1) / 2.0).abs() < 0.01);
         assert!(l.dock_slots.windows(2).all(|p| (p[1].y - p[0].y - DOCK_SLOT).abs() < 0.01 && p[0].x == p[1].x));
         // The screen's very edge is live, row by row.
-        let mid = |s: Rect| (s.y + s.h / 2.0);
+        let mid = |s: Rect| s.y + s.h / 2.0;
         assert_eq!(hit_test(&l, (1.0, mid(l.dock_slots[3])), false, &[]), Some(Hit::DockIcon(3)));
         assert_eq!(hit_test(&l, (60.0, mid(l.dock_slots[3])), false, &[]), None, "nothing past the plate");
         // Hidden: off the screen to the left.

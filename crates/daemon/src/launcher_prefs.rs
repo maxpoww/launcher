@@ -14,10 +14,10 @@
 //! on the features later, first do the controls box"). In, each shown live
 //! where it is seen: Position (the side dock, `content::layout_side`), Stay
 //! away (`intellihide`), Animated icons (`icons_move`; turned on, the icons
-//! play their turn — `icons_wave`) and Arrange apps (`arrange_shown`; the box
-//! opens and the icons glide to their places — `arrange_show`) and Other
-//! monitors (the dock follows the call to a chosen screen, `dock_screen.rs`;
-//! a screen turned on shows its edge for a beat).
+//! play their turn — `icons_wave`), Arrange apps (`arrange_shown`; the dock
+//! bounces, `dock_bounce`) and Other monitors (the dock follows the call to
+//! a chosen screen, `dock_screen.rs`; a screen turned on shows its edge for
+//! a beat). EVERY CHANGE KEEPS THE DOCK AND THE BOX ON (Max, 2026-10-21).
 //!
 //! THE BUILT-IN SCREEN ALWAYS HAS THE LAUNCHER, and the MAIN one when the
 //! built-in is off (a closed lid, a desktop with none). That is done, not
@@ -163,18 +163,13 @@ impl App {
         self.config.input.intellihide && !self.settings.launcher_away
     }
 
-    /// STAY AWAY turned on: the dock goes AT ONCE (Max, 2026-10-21: "as soon
-    /// as I toggle it, now it waits until I close the box") — the box it was
-    /// picked in with it, wherever the pointer is; turned off, its place is
-    /// judged again and a free one brings the dock back to park.
+    /// STAY AWAY turned on: the dock and the box it was picked in STAY
+    /// (Max, 2026-10-21: "all changes should keep the dock and the box on");
+    /// the dock goes when the box closes, and from then on stays away.
+    /// Turned off, its place is judged again and a free one parks it.
     fn stay_away_changed(&mut self) {
         self.zone_free = false;
-        if self.settings.launcher_away {
-            self.hide_deadline = None;
-            if self.ui.target() != crate::state::Target::Hidden {
-                self.handle_command(waverunner_proto::Command::Hide);
-            }
-        } else {
+        if !self.settings.launcher_away {
             self.on_layout_changed();
         }
     }
@@ -207,7 +202,14 @@ impl App {
                 if let Some(arrange) = Arrange::of(value) {
                     self.settings.launcher_arrange = arrange;
                     self.settings.save();
-                    self.arrange_show(arrange);
+                    // Nothing opens (Max, 2026-10-21: "dont need to show
+                    // anything, just a bounce of the dock"): the grid takes
+                    // it, the dock bounces, the box stays.
+                    if self.arrange_shown != arrange {
+                        self.arrange_shown = arrange;
+                        self.refilter();
+                    }
+                    self.dock_bounce();
                 }
             }
             // A monitor's word: the launcher on it goes, or comes back.
@@ -234,6 +236,14 @@ impl App {
         info!("launcher: {key} = {value}");
     }
 
+    /// The whole dock bounces once: a setting it takes was changed (Arrange
+    /// apps). See `dock_hop_offset`.
+    pub(crate) fn dock_bounce(&mut self) {
+        self.dock_hop = Some(std::time::Instant::now());
+        self.dirty = true;
+        self.schedule_frame();
+    }
+
     /// The dock's moving icons move (Animated icons on).
     pub(crate) fn icons_move(&self) -> bool {
         !self.settings.launcher_still
@@ -254,52 +264,6 @@ impl App {
         self.files_hover.click();
         self.dirty = true;
         self.schedule_frame();
-    }
-
-    /// ARRANGE APPS picked (Max, 2026-10-21: "when I press organize by… I
-    /// want the box to open and see the icons organize live"): the box opens
-    /// on the apps — in place of the control panel it was picked in, or out
-    /// of the dock when it was the quick controls' box (which goes) — and
-    /// the grid takes the arrangement once it is up (`arrange_tick`), each
-    /// icon gliding to its new place.
-    fn arrange_show(&mut self, arrange: Arrange) {
-        use crate::state::Target;
-        self.arrange_pending = Some((arrange, std::time::Instant::now()));
-        if self.fast.open {
-            self.close_fast_launch();
-            // (Leaving the quick box arms the called dock's autohide, which
-            // would fold the box opened here: it is not hiding now.)
-            self.hide_deadline = None;
-        }
-        if self.ui.target() == Target::Open {
-            if self.control_panel {
-                self.control_panel = false;
-                self.control_panel_from_apps = false;
-                self.panel_reset_due = true;
-            }
-        } else {
-            self.handle_command(waverunner_proto::Command::Expand);
-        }
-        self.schedule_frame();
-    }
-
-    /// Land a picked arrangement once the apps are up and still (or after a
-    /// while regardless): the grid re-sorts, the icons glide there.
-    pub(crate) fn arrange_tick(&mut self) {
-        use crate::state::Target;
-        let Some((arrange, since)) = self.arrange_pending else { return };
-        let up = self.ui.target() == Target::Open && !self.control_panel && self.panel_mix <= 0.001 && !self.ui.is_animating();
-        if !up && since.elapsed() < std::time::Duration::from_millis(1500) {
-            self.dirty = true;
-            return;
-        }
-        self.arrange_pending = None;
-        // (A beat with the box at rest first, then the glide.)
-        if self.arrange_shown != arrange {
-            self.arrange_shown = arrange;
-            self.refilter();
-            self.dirty = true;
-        }
     }
 
     /// The Apps grid's cells (entry indices) sorted as `arrange` says: by

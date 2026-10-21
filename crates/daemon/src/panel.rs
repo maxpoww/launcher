@@ -4714,9 +4714,13 @@ impl App {
     /// The quick box of `label` was left.
     pub(crate) fn quick_left(&mut self, label: &'static str) {
         // The dock the Colours or Launcher box called goes back to hiding (as
-        // it does when the pointer leaves it: unless the pointer is on it).
-        if calls_dock(label) && DOCK_CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            self.schedule_autohide();
+        // it does when the pointer leaves it: unless the pointer is on it) —
+        // so does one parked in view when Stay away was turned on in it.
+        if calls_dock(label) {
+            let called = DOCK_CALLED.swap(false, std::sync::atomic::Ordering::Relaxed);
+            if called || self.settings.launcher_away {
+                self.schedule_autohide();
+            }
         }
         // (The wallpapers are on the Colours box's Wallpaper tab.)
         if label == "Wallpaper" || label == "Colours" {

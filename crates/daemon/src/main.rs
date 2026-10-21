@@ -1003,7 +1003,6 @@ fn main() -> anyhow::Result<()> {
         sunset_auto: false,
         settings: settings::Settings::load(),
         arrange_shown: settings::Settings::load().launcher_arrange,
-        arrange_pending: None,
         action_tracks: action_track::load(),
         screen: screen::ScreenState::load(),
         cava_reveal: 0.0,
@@ -1068,6 +1067,7 @@ fn main() -> anyhow::Result<()> {
         minimized: Vec::new(),
         last_rescan: Instant::now(),
         bounce: None,
+        dock_hop: None,
         placeholders: Vec::new(),
         zone_free: false,
         exit: false,
@@ -2386,12 +2386,9 @@ pub struct App {
     sunset_auto: bool,
     /// Golem's own settings — what the gear's pages set (see `settings.rs`).
     settings: settings::Settings,
-    /// The arrangement the Apps grid SHOWS (the Launcher page's Arrange
-    /// apps): it follows a pick once the box is open to see it, so the
-    /// icons glide to their places in front of the owner.
+    /// The arrangement the Apps grid shows (the Launcher page's Arrange
+    /// apps; a drag in a sorted grid turns it to By hand).
     arrange_shown: launcher_prefs::Arrange,
-    /// An arrangement picked and waiting for the box to be open, and since when.
-    arrange_pending: Option<(launcher_prefs::Arrange, Instant)>,
     /// Offers Golem made and the user answered, keyed by the timestamp of the
     /// notification card that records each one. See `action_track.rs`: the card
     /// is the visible half, this is the memory behind it (what was offered, the
@@ -2579,6 +2576,8 @@ pub struct App {
     last_rescan: Instant,
     /// A launch bounce in flight: (entry index, start time).
     bounce: Option<(usize, Instant)>,
+    /// The whole dock's bounce in flight, since when (`dock_bounce`).
+    dock_hop: Option<Instant>,
     /// Which entries have placeholder tiles (no resolved icon).
     placeholders: Vec<bool>,
     /// Intellihide: no window currently overlaps the dock zone, so the
@@ -2817,6 +2816,10 @@ const ZONE_POLL_INTERVAL: Duration = Duration::from_millis(800);
 const BOUNCE_DURATION: Duration = Duration::from_millis(550);
 /// Peak height of the launch bounce, in logical pixels.
 const BOUNCE_HEIGHT: f32 = 18.0;
+/// The whole dock's bounce: its length and first hop's height (the rebound
+/// is smaller).
+const DOCK_HOP_DURATION: Duration = Duration::from_millis(560);
+const DOCK_HOP_HEIGHT: f32 = 14.0;
 /// Hover dwell before a dock icon's name tooltip appears.
 const DOCK_TOOLTIP_DELAY: Duration = Duration::from_millis(750);
 
@@ -6966,7 +6969,7 @@ impl CompositorHandler for App {
             return;
         }
         self.frame_pending = false;
-        if self.ui.is_animating() || self.bounce.is_some() || self.dirty {
+        if self.ui.is_animating() || self.bounce.is_some() || self.dock_hop.is_some() || self.dirty {
             self.draw();
         } else {
             self.last_frame = None;
