@@ -511,7 +511,8 @@ impl App {
         // raw constants (otherwise every row/column is mis-counted at any
         // non-default icon size, and the make-room reacts on the wrong cell).
         let scale = self.icon_scale();
-        let fx = (pos.0 - sec.viewport.x) / (content::GRID_CELL_W * scale);
+        // (The section's own cell: narrower beside a side dock.)
+        let fx = (pos.0 - sec.viewport.x) / (sec.viewport.w / sec.cols.max(1) as f32);
         let fy = (pos.1 - sec.viewport.y) / (content::GRID_CELL_H * scale);
         let col = (fx.floor() as usize).min(sec.cols.saturating_sub(1));
         let row = (fy.floor() as usize).min(sec.rows.saturating_sub(1));

@@ -281,7 +281,7 @@ impl App {
                 // It takes whole rows' room, so a full grid stays on its
                 // rows: the last ones leave whole.
                 // The grid's own cells, on its columns.
-                let cw = content::GRID_CELL_W * scale;
+                let cw = vp.w / layout.sections[content::SECTION_APPS].cols.max(1) as f32;
                 let ((w, h), grid, cap) = content::row_cells(n, (cw, cell), vp.w);
                 let row = if oy >= vp.y { ((oy - vp.y) / cell).floor() as isize } else { -1 };
                 let split = vp.y + (row + 1) as f32 * cell;

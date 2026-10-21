@@ -1383,6 +1383,10 @@ const SIDE_BASIN_AIR: f32 = 14.0;
 /// From the box's top to the titles' line, and under the search pill.
 const SIDE_TOP: f32 = GRID_TOP_GAP + 5.0;
 const SIDE_BOTTOM: f32 = 12.0;
+/// The grid's cells are narrower beside a side dock: as wide as they are
+/// tall, the icons closer across (Max, 2026-10-21: "the horizontal gaps
+/// between the icons should be less — but not the gap between sections").
+pub const SIDE_CELL_W: f32 = GRID_CELL_H;
 
 /// How wide the open box is beside a side dock: the dock's band, the
 /// padding, and Files · Install · Apps with the gaps between them (each
@@ -1390,7 +1394,7 @@ const SIDE_BOTTOM: f32 = 12.0;
 /// padding).
 pub fn side_open_w(config: &Config, icon_scale: f32) -> f32 {
     let band = config.window.input_bar_height as f32 * icon_scale;
-    let cell = GRID_CELL_W * icon_scale;
+    let cell = SIDE_CELL_W * icon_scale;
     band + 2.0 * GRID_PAD_X + (2 + SIDE_APPS_COLS) as f32 * cell + 2.0 * SECTION_GAP
 }
 
@@ -1475,7 +1479,7 @@ fn layout_side(
     let (w, h) = surface;
     let dock_slot = DOCK_SLOT * icon_scale;
     let dock_pad = DOCK_PAD_X * icon_scale;
-    let cell_w = GRID_CELL_W * icon_scale;
+    let cell_w = SIDE_CELL_W * icon_scale;
     let cell_h = GRID_CELL_H * icon_scale;
     let band = config.window.input_bar_height as f32 * icon_scale;
     let gap = config.window.bottom_margin as f32 * icon_scale;
@@ -1909,6 +1913,8 @@ pub fn hit_test(
             // pointer, then its row and column as on a page across.
             if sec.vertical {
                 let page_h = sec.viewport.h.max(1.0);
+                // (A side box's cells are narrower than tall: its rows by its height.)
+                let cell_h = page_h / sec.rows.max(1) as f32;
                 let adjusted_y = pos.1 - sec.viewport.y + sec.scroll;
                 let page = (adjusted_y / page_h).floor() as usize % sec.n_pages.max(1);
                 let in_page = adjusted_y - (adjusted_y / page_h).floor() * page_h;
@@ -2435,7 +2441,6 @@ pub fn scene(
     let grid_icon = GRID_ICON * icon_scale;
     let grid_icon_top = GRID_ICON_TOP * icon_scale;
     let box_tile = BOX_TILE * icon_scale;
-    let grid_cell_w = GRID_CELL_W * icon_scale;
     let grid_cell_h = GRID_CELL_H * icon_scale;
     // The magnified open box's current rect (grows from the tile into its
     // rest square). Used to draw the box and to hide the grid labels it
@@ -3419,6 +3424,8 @@ pub fn scene(
         // (A page's length along the way the pages go: across, or down
         // beside a side dock.)
         let page_w = sec.page_len();
+        // The section's own cell (narrower beside a side dock).
+        let sec_cell_w = sec.viewport.w / sec.cols.max(1) as f32;
         let cells_per_page = (sec.cols * sec.rows).max(1);
         let total_w = (sec.n_pages as f32 * page_w).max(1.0);
         // A cell's place comes from its display index — fractional
@@ -3437,12 +3444,12 @@ pub fn scene(
                 let part = layout.apps_part.filter(|_| s == SECTION_APPS).map_or(0.0, |p| p.shift(row));
                 if sec.vertical {
                     return (
-                        sec.viewport.x + col as f32 * grid_cell_w + sec.row_shift(i),
+                        sec.viewport.x + col as f32 * sec_cell_w + sec.row_shift(i),
                         sec.viewport.y + rel + row as f32 * grid_cell_h + part,
                     );
                 }
                 (
-                    sec.viewport.x + rel + col as f32 * grid_cell_w + sec.row_shift(i),
+                    sec.viewport.x + rel + col as f32 * sec_cell_w + sec.row_shift(i),
                     sec.viewport.y + row as f32 * grid_cell_h + part,
                 )
             };
@@ -3474,12 +3481,12 @@ pub fn scene(
             let off_page = if sec.vertical {
                 cell_y - sec.viewport.y <= -grid_cell_h || cell_y - sec.viewport.y >= page_w
             } else {
-                cell_x - sec.viewport.x <= -grid_cell_w || cell_x - sec.viewport.x >= page_w
+                cell_x - sec.viewport.x <= -sec_cell_w || cell_x - sec.viewport.x >= page_w
             };
             if off_page {
                 continue;
             }
-            let cell = Rect::new(cell_x, cell_y, grid_cell_w, grid_cell_h);
+            let cell = Rect::new(cell_x, cell_y, sec_cell_w, grid_cell_h);
             if selected == Some((s, i)) {
                 let hl = dock_highlight;
                 g.rects.push(RectInst {
@@ -5286,7 +5293,7 @@ mod tests {
         assert!((sec.page_len() - sec.viewport.h).abs() < 0.01);
         let cell = |l: &Layout, col: f32, row: f32| {
             let v = l.sections[SECTION_APPS].viewport;
-            (v.x + (col + 0.5) * GRID_CELL_W, v.y + (row + 0.5) * GRID_CELL_H)
+            (v.x + (col + 0.5) * SIDE_CELL_W, v.y + (row + 0.5) * GRID_CELL_H)
         };
         let slots = idslots(30);
         assert_eq!(hit_test(&l, cell(&l, 2.0, 1.0), false, &slots), Some(Hit::GridCell(SECTION_APPS, 5)), "row-major, three across");
