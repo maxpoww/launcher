@@ -1043,10 +1043,12 @@ impl App {
             },
             // A screen of the Monitors page dropped at x y (logical px), as
             // a drag would: `place EXT -1920 0`.
-            (Some("place"), Some(sel)) => {
-                let at: Vec<f64> = words.by_ref().filter_map(|w| w.parse().ok()).collect();
-                match at[..] {
-                    [x, y] => self.monitors_moved(sel, x, y),
+            // (A screen's name may have spaces: the last two words are x y.)
+            (Some("place"), Some(first)) => {
+                let rest: Vec<&str> = std::iter::once(first).chain(words.by_ref()).collect();
+                let at = rest.len().checked_sub(2).and_then(|k| Some((k, rest[k].parse::<f64>().ok()?, rest[k + 1].parse::<f64>().ok()?)));
+                match at {
+                    Some((k, x, y)) if k > 0 => self.monitors_moved(&rest[..k].join(" "), x, y),
                     _ => warn!("display: place <screen> <x> <y>"),
                 }
             }

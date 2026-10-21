@@ -231,6 +231,46 @@ fn touching(a: Box2, b: Box2, eps: f64) -> Option<Side> {
     }
 }
 
+/// ALONG A SHARED SIDE, from the drawing (mm) to the screens (logical px):
+/// where screen `i` starts along it, given screen `j`'s start and length in
+/// both and `i`'s in both. Lined up in the drawing — starts, ends or
+/// middles — they are lined up on the screens; else the middle of the
+/// side they share is the same point on both. A side's offset can NOT be
+/// carried at one screen's pixels per mm: the TV at 200 % has a third of
+/// the laptop's, and taken at the laptop's it slid off the laptop's side
+/// altogether — nowhere left to cross (Max, 2026-10-21).
+fn along_to_logical(i: (f64, f64), i_px: f64, j: (f64, f64), j_at: f64, j_px: f64) -> f64 {
+    let ((i0, il), (j0, jl)) = (i, j);
+    if (i0 - j0).abs() < 0.5 {
+        j_at
+    } else if (i0 + il - (j0 + jl)).abs() < 0.5 {
+        j_at + j_px - i_px
+    } else if (i0 + il / 2.0 - (j0 + jl / 2.0)).abs() < 0.5 {
+        j_at + (j_px - i_px) / 2.0
+    } else {
+        let c = (i0.max(j0) + (i0 + il).min(j0 + jl)) / 2.0;
+        let on_j = j_at + (c - j0) * j_px / jl.max(1e-6);
+        on_j - (c - i0) * i_px / il.max(1e-6)
+    }
+}
+
+/// The way back of [`along_to_logical`]: where `i` starts along the shared
+/// side in the drawing, from the screens.
+fn along_to_mm(i: (f64, f64), i_mm: f64, j: (f64, f64), j_at: f64, j_mm: f64) -> f64 {
+    let ((i0, il), (j0, jl)) = (i, j);
+    if (i0 - j0).abs() < 1.0 {
+        j_at
+    } else if (i0 + il - (j0 + jl)).abs() < 1.0 {
+        j_at + j_mm - i_mm
+    } else if (i0 + il / 2.0 - (j0 + jl / 2.0)).abs() < 1.0 {
+        j_at + (j_mm - i_mm) / 2.0
+    } else {
+        let c = (i0.max(j0) + (i0 + il).min(j0 + jl)) / 2.0;
+        let on_j = j_at + (c - j0) * j_mm / jl.max(1e-6);
+        on_j - (c - i0) * i_mm / il.max(1e-6)
+    }
+}
+
 /// Place every screen from the main one outward: `place(i, j, side)` puts
 /// screen `i` against placed screen `j` it touches (`touch(i, j)` says on
 /// which side), `alone(i)` one touching none, from the main one. The main
@@ -281,12 +321,15 @@ pub(crate) fn logical_from_mm(screens: &[PageScreen], main: usize) -> Vec<(f64, 
         |i, j| touching(drawn[i], drawn[j], 0.5),
         |i, j, side| {
             let mut at = at_cell.borrow_mut();
-            let (k, (jx, jy)) = (per_mm(j), at[j]);
+            let (jx, jy) = at[j];
+            let (di, dj) = (drawn[i], drawn[j]);
+            let down = || along_to_logical((di.y, di.h), size[i].h, (dj.y, dj.h), jy, size[j].h);
+            let across = || along_to_logical((di.x, di.w), size[i].w, (dj.x, dj.w), jx, size[j].w);
             at[i] = match side {
-                Side::Right => (jx + size[j].w, jy + (drawn[i].y - drawn[j].y) * k.1),
-                Side::Left => (jx - size[i].w, jy + (drawn[i].y - drawn[j].y) * k.1),
-                Side::Below => (jx + (drawn[i].x - drawn[j].x) * k.0, jy + size[j].h),
-                Side::Above => (jx + (drawn[i].x - drawn[j].x) * k.0, jy - size[i].h),
+                Side::Right => (jx + size[j].w, down()),
+                Side::Left => (jx - size[i].w, down()),
+                Side::Below => (across(), jy + size[j].h),
+                Side::Above => (across(), jy - size[i].h),
             };
         },
         |i| {
@@ -326,12 +369,15 @@ pub(crate) fn mm_from_logical(screens: &mut [PageScreen], main: usize) {
         |i, j| touching(size[i], size[j], 2.0),
         |i, j, side| {
             let mut at = at_cell.borrow_mut();
-            let (k, (jx, jy)) = (per_mm(j), at[j]);
+            let (jx, jy) = at[j];
+            let (li, lj) = (size[i], size[j]);
+            let down = || along_to_mm((li.y, li.h), drawn[i].h, (lj.y, lj.h), jy, drawn[j].h);
+            let across = || along_to_mm((li.x, li.w), drawn[i].w, (lj.x, lj.w), jx, drawn[j].w);
             at[i] = match side {
-                Side::Right => (jx + drawn[j].w, jy + (size[i].y - size[j].y) / k.1),
-                Side::Left => (jx - drawn[i].w, jy + (size[i].y - size[j].y) / k.1),
-                Side::Below => (jx + (size[i].x - size[j].x) / k.0, jy + drawn[j].h),
-                Side::Above => (jx + (size[i].x - size[j].x) / k.0, jy - drawn[i].h),
+                Side::Right => (jx + drawn[j].w, down()),
+                Side::Left => (jx - drawn[i].w, down()),
+                Side::Below => (across(), jy + drawn[j].h),
+                Side::Above => (across(), jy - drawn[i].h),
             };
         },
         |i| {
@@ -841,16 +887,48 @@ mod tests {
         assert_eq!((s[0].at, s[1].at), ((0.0, 0.0), (340.0, 0.0)), "drawn at their real sizes, side by side");
         assert!(s[1].drawn().w / s[0].drawn().w > 3.3, "the TV three times and more the laptop");
         assert_eq!(logical_from_mm(&s, 0), vec![(0.0, 0.0), (2000.0, 0.0)], "and back");
-        // Raised 215 mm: its corner above by 215 mm at the LAPTOP's pixels
-        // per mm (the side it is against).
-        s[1].at = (340.0, -215.0);
-        assert_eq!(logical_from_mm(&s, 0)[1], (2000.0, (-215.0_f64 * 1250.0 / 220.0).round()));
-        // On the laptop's left: below zero; the laptop keeps 0,0.
+        // On the laptop's left, tops lined up: so on the screens; below
+        // zero, the laptop keeps 0,0.
         s[1].at = (-1150.0, 0.0);
         assert_eq!(logical_from_mm(&s, 0), vec![(0.0, 0.0), (-1920.0, 0.0)]);
+        // Bottoms lined up: so.
+        s[1].at = (340.0, 220.0 - 650.0);
+        assert_eq!(logical_from_mm(&s, 0)[1], (2000.0, 1250.0 - 1080.0));
         // Under it, its left ends lined up.
         s[1].at = (0.0, 220.0);
         assert_eq!(logical_from_mm(&s, 0)[1], (0.0, 1250.0));
+        // MAX'S, ON TOP (2026-10-21: "I put the TV on top of the built-in
+        // and now I can't cross"): the TV centred over the laptop in the
+        // drawing — it is centred over it on the screens, their sides
+        // shared, not slid off at the laptop's pixels per mm.
+        s[0].at = (419.0, 0.0);
+        s[1].at = (14.0, -650.0);
+        s[1].mode = (4096, 2160);
+        let at = logical_from_mm(&s, 0);
+        let tv = (at[1].0, at[1].0 + 2048.0);
+        assert_eq!(at[1], (-24.0, -1080.0), "centred, its bottom on the laptop's top");
+        assert!(tv.0 < 2000.0 && tv.1 > 0.0, "a side to cross");
+        // A raise that lines nothing up: the middle of what they share is
+        // the same point on both.
+        s[0].at = (0.0, 0.0);
+        s[1].mode = (3840, 2160);
+        s[1].at = (340.0, -215.0);
+        let y = logical_from_mm(&s, 0)[1].1;
+        let middle_on_laptop = 110.0 * 1250.0 / 220.0;
+        assert!((y + (110.0 + 215.0) * 1080.0 / 650.0 - middle_on_laptop).abs() < 1.0, "{y}");
+    }
+
+    #[test]
+    fn the_screens_drawn_from_the_compositor_line_up_as_they_are() {
+        // The TV centred above the laptop on the screens: centred above it
+        // in the drawing too.
+        let mut s = vec![
+            page("laptop", (3200, 2000), 1.6, (340.0, 220.0), (0.0, 0.0)),
+            page("tv", (4096, 2160), 2.0, (1150.0, 650.0), (-24.0, -1080.0)),
+        ];
+        mm_from_logical(&mut s, 0);
+        assert_eq!(s[1].at, (-405.0, -650.0));
+        assert_eq!(logical_from_mm(&s, 0)[1], (-24.0, -1080.0), "and back");
     }
 
     #[test]
