@@ -644,6 +644,16 @@ fn prune_shaders(in_use: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grey_is_grey_not_as_made() {
+        // (Saturation 0 once made a factor of 0, which reads "no filter".)
+        let id = crate::palette::all().into_iter().next().expect("a palette").id;
+        let f = crate::palette::filter_for(&id, 0, false, 0);
+        assert!(active(&f) && sat_of(&f) < 0.01, "Grey makes the wallpaper grey: {}", sat_of(&f));
+        let made = crate::palette::filter_for(&id, 0, false, 50);
+        assert!((sat_of(&made) - 1.0).abs() < 1e-6, "50 is as made");
+    }
     use crate::palette::filter_rgb;
 
     fn jade() -> Filter {

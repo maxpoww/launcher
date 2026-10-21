@@ -1923,7 +1923,6 @@ fn set_icon_filter(t: &Theme) {
 /// row 0's last slot as a chroma factor for the shaders.
 pub(crate) fn filter_for(id: &str, level: u8, dim: bool, sat: u8) -> [[f32; 4]; 7] {
     let mut f = [[0.0f32; 4]; 7];
-    f[0][3] = f32::from(sat.min(100)) / 50.0;
     if let Some(p) = palette_of(id) {
         let soul: Vec<Rgb> = if p.soul.is_empty() { p.dark[8..16].to_vec() } else { p.soul.clone() };
         let all: Vec<(f32, f32, f32)> = soul.iter().map(|&c| tint::lch(c)).collect();
@@ -1934,6 +1933,10 @@ pub(crate) fn filter_for(id: &str, level: u8, dim: bool, sat: u8) -> [[f32; 4]; 
             f[k + 1] = [l, c, h.to_radians(), 0.0];
         }
     }
+    // (Last: row 0 is written whole above, and the Saturation was lost with
+    // it — the wallpapers' Saturation never reached them, 2026-10-21. Grey is
+    // a hair above 0: an empty filter's 0 reads "as made", `wall_tint::sat_of`.)
+    f[0][3] = (f32::from(sat.min(100)) / 50.0).max(0.001);
     f
 }
 
@@ -1964,10 +1967,16 @@ pub(crate) fn wall_filter() -> [[f32; 4]; 7] {
 /// every frame; nothing is saved until the slider is let go.
 static WALL_LIVE: std::sync::Mutex<Option<[[f32; 4]; 7]>> = std::sync::Mutex::new(None);
 
-/// Put the dragged level in use (`None`: the saved one is what is shown).
-pub(crate) fn set_wall_live(level: Option<u8>) {
-    let sat = choice().levels_now(Surface::Wall).sat;
-    let f = level.map(|l| if l == 0 && sat == 50 { [[0.0; 4]; 7] } else { filter_for(&current().id, l.min(100), false, sat) });
+/// Put the dragged level in use (`None`: the saved one is what is shown):
+/// the Colours slider's, or (`sat`) the Saturation's (Max, 2026-10-21: "same
+/// live on background … so i can turn my BG in to sepia, or even B&W") —
+/// the other one as saved.
+pub(crate) fn set_wall_live(dragged: Option<(bool, u8)>) {
+    let lw = choice().levels_now(Surface::Wall);
+    let f = dragged.map(|(sat_dragged, v)| {
+        let (l, sat) = if sat_dragged { (lw.tint.unwrap_or(0).min(100), v) } else { (v.min(100), lw.sat) };
+        if l == 0 && sat == 50 { [[0.0; 4]; 7] } else { filter_for(&current().id, l, false, sat) }
+    });
     if let Ok(mut g) = WALL_LIVE.lock() {
         *g = f;
     }

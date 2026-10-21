@@ -694,6 +694,8 @@ pub(crate) struct Knob {
 
 /// The key of the wallpapers' Colours slider (see `App::slider_to`).
 const WALL_SLIDER: &str = "colors-wallpaper";
+/// The wallpapers' Saturation: live on the tiles while dragged, like Colours.
+const WALL_SAT: &str = "colors-wall-sat";
 
 /// A knob's place 0..=1 as a level 0..=100.
 fn knob_level(v: f32) -> u8 {
@@ -4202,9 +4204,9 @@ impl App {
         let panel = if quick { &mut self.quick } else { &mut self.panel };
         let pick = panel.slide(from, pos);
         let knob = panel.knob_held();
-        if let Some(k) = knob.filter(|k| k.key == WALL_SLIDER) {
+        if let Some(k) = knob.filter(|k| k.key == WALL_SLIDER || k.key == WALL_SAT) {
             crate::wall_tint::drag_begin();
-            crate::palette::set_wall_live(Some(knob_level(k.v)));
+            crate::palette::set_wall_live(Some((k.key == WALL_SAT, knob_level(k.v))));
         } else if let Some((group, index)) = pick {
             self.control_pick(group, index, quick);
         }
@@ -4219,12 +4221,12 @@ impl App {
     pub(crate) fn slider_end(&mut self, quick: bool) {
         let panel = if quick { &mut self.quick } else { &mut self.panel };
         let Some(k) = panel.knob_let_go() else { return };
-        if k.key != WALL_SLIDER {
+        if k.key != WALL_SLIDER && k.key != WALL_SAT {
             return;
         }
         // (The lit stop first, as a pick does, then the exact level.)
         let label = panel.control_pick(k.group, k.stop).map(|(label, ..)| label);
-        self.colors_pick(WALL_SLIDER, &knob_level(k.v).to_string());
+        self.colors_pick(k.key, &knob_level(k.v).to_string());
         crate::palette::set_wall_live(None);
         crate::wall_tint::drag_end();
         if let Some(label) = label {
