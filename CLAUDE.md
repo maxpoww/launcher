@@ -437,6 +437,35 @@ The big daemon files are cohesive but long — go straight to the function:
   (`phone_pill_reserve`: the task pill's fallback place, the camera pill's right end), and what
   it opens over leaves the bar while it is out (`options_pills`, as for the bell). Pointer-free:
   `debug-desktop "phonepill fake [words]|gone|open|close|free"` — never a click (it ejects).
+- `desktop_menu.rs` + `glyphs.rs` — THE ONE MENU (Max, 2026-10-21, mockups v50/v52 "All menus":
+  "Build all of it"): EVERY right-click — Files' file / folder / several / archive / app shortcut /
+  empty space / bin item / bin / sidebar place, the desktop's wallpaper and what stands on it, a
+  stick, a phone (and the bar's phone pill's box) — is built by ONE builder, `rows_for(&Ctx)`
+  (`Ctx`: `On` = what was clicked, plus what the rows depend on: `here`, `clip`, `desk`, `stick`,
+  `undo`, `moving`, `volume`…). The same ORDER everywhere: Open · Copy/Move · Change · Send · Keep ·
+  Get info · the way out LAST (Move to bin, or Eject). A row is a SYMBOL + sentence-case words
+  (`Row::Item { label, icon, action, danger, off }`; the symbols are the Files mockup's strokes,
+  `glyphs.rs` — written once as SVGs, read by the icon loader by path: a file window uploads those its
+  menu wears with its own icons, `chrome::icon_keys`; the desktop's top surface lends its first layers
+  while a menu is up, `top_glyphs_sync` — Quick Look takes them back); `›` = the row turns the menu's
+  PAGE (`Page`: Open with · Send to · Sort by, each led back by "‹ <its name>"; `Menu::turn` /
+  `show_main`; no flyouts); "…" = opens a window (Format…, Wallpapers…, Colours…, Display…,
+  Configure…); RED only for what cannot be undone (Delete for good, Empty the bin, Format…). ⛔ NOTHING
+  OPENS ON HOVER (Max: "i dont want the open on hover on the menus"): pages and Get info on a CLICK.
+  The look: rows 29 px, 14 px symbols at 75 % of the ink, the row under the pointer an ACCENT band with
+  white words (red for a red row), hairline rules between groups, the width the words want (214 at
+  least, `width_of`). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
+  `filer::copy_name`, undoable), Paste into folder, Select all, Copy to <the one stick plugged in>
+  (`one_stick`), Send to › (a COPY now), New folder with these ("New folder with items", the selection
+  moved in, its name typed; `Undo::Grouped`), Get info (Files: the i card; a place, the desktop: the
+  Properties box). THE DESKTOP'S WALLPAPER: Undo <what> (`Desktop::history` — its own, 30 kept, recorded
+  by rename, bin, new folder, paste, Move to Home, duplicate, send, group; `desktop_undo`, Ctrl+Z) · Paste ·
+  New folder · Select all · Sort by › (`desktop_sort`: folders first, then the key; volumes keep their
+  cells) · Clean up · Hide/Show icons · Next wallpaper (`controls::next_wallpaper`: the next picture of
+  Pictures/Wallpapers, round, through the box's own pick) · Wallpapers… / Colours… / Display… (the
+  setting's box mid-screen, as Super+H opens it: `App::settings_box`) · Pause/Play moving wallpaper (only
+  while it moves: `controls::HOLD_USER`). Rig: `files menu [n]|placemenu <n>|rows|pick <row>`,
+  `debug-desktop "menu [n]|rows|pick <row>"`.
 - `desktop.rs` — the DESKTOP: `~/Desktop` as icons behind the windows (macOS/Windows style) on
   its own `Bottom`-layer surface (`surface::create_desktop_surface`; Bottom, not Background, so
   swww can never map over it) with its own renderer + icon array (layer = item index). Lists the
@@ -473,32 +502,31 @@ The big daemon files are cohesive but long — go straight to the function:
   Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col> <row>|import
   <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|forget]`; the live daemon logs
   to `~/.local/state/waverunner/daemon.log`. HIDE/SHOW: a click on bare wallpaper toggles the
-  icons (fade; `settings.desktop_hidden`). MENU (`desktop_menu.rs`, the approved mockup at
-  ~/desktop-menu-mockup): right-click → `Menu::open` at the pointer (icon: Open · Open in
-  terminal · Rename · ─ · Move to · Move to Home · Move to bin · ─ · Properties; wallpaper: [Paste ·] New folder · Clean up), drawn as a `GridContent`
+  icons (fade; `settings.desktop_hidden`). MENU (`desktop_menu.rs`, THE ONE MENU — its own entry above): right-click → `Menu::new` at the
+  pointer (`desktop_menu_ctx`: the wallpaper's, a volume's, an item's), drawn as a `GridContent`
   so it paints over the icons (names under it are skipped), a left press on a row acts on
-  release, elsewhere closes; `debug-desktop menu [n]` / `pick <row>`. RENAME in place: the name
+  release (`desktop_menu_row`), elsewhere closes; `debug-desktop menu [n]` / `pick <row>` / `rows`. RENAME in place: the name
   becomes a field (`Rename`, all-selected first key replaces); the desktop takes the keyboard
   EXCLUSIVE for exactly that long (a Bottom layer gets it on hover with Exclusive, never via
   OnDemand without a click) and `begin_keyboard_handback(KbSurface::Desktop)` returns it;
   keys route first in `main.rs::handle_key_event` → `desktop_key`; a keyboard `leave` mid-name
   keeps what was typed. New folder = "untitled folder" at the clicked cell → rename. PROPERTIES
-  (`desktop_props.rs`): the menu's LAST row, opened by HOVER — the menu becomes the box (the
+  (`desktop_props.rs`): the menu's Get info, opened by a CLICK — the menu becomes the box (the
   panel lerps from the menu's rect, `grow_from`; `Props.back` keeps the menu, the `‹ Back` row
-  turns it back on hover or click, any other press closes). Lines: Kind, Contains (folders/files/hidden), Size (a
+  turns it back on a click, any other press closes). Lines: Kind, Contains (folders/files/hidden), Size (a
   folder's tree walked on a thread, `folder_size`), Dimensions (images), Link to, Where, Owner,
   Access, Modified, Created, Opened. `debug-desktop props <n>` opens it without a menu. Not yet:
-  per-output surfaces, Escape closing the menu (no keyboard while it is up). MOVE TO: that row
-  does not act, it turns the menu's PAGE (`Menu::show_targets`, the menu stays up; `‹ Back`, on hover or click →
-  `show_main`): Cut · Copy (`App::serve_files` puts the selection on the clipboard as a file
-  manager does, verb included) · the sticks and phones · the other computers. The lists are
+  per-output surfaces, Escape closing the menu (no keyboard while it is up). SEND TO (Move to until
+  2026-10-21; Copy and Move are rows of their own now): that row turns the menu's PAGE
+  (`App::send_targets_ask`, for the desktop's menu or a file window's — `SendFor`; `desktop_menu::send_rows`;
+  `‹ Send to` → `show_main`): "Plugged in" — the sticks and phones · "On the network" — the other computers. The lists are
   `desktop_send.rs`: sticks = volumes mounted under `/run/media/<user>` or `/media` (read from
   `/proc/mounts` at once; an unmounted stick is not listed) PLUS every volume on the desktop
   (`Desktop::volumes` — a phone goes to `phone_dest`: its first storage's Download), devices = KDE Connect's paired AND
   reachable ones (`kdeconnect-cli -a --id-name-only`, asked on a thread — "Looking for devices…"
   until it answers; a `desktop`/`laptop` type, read with `busctl`, goes in the second list).
-  `Action::SendTo(n)` indexes `Desktop::targets`; `desktop_send::send` runs on a thread: a stick
-  gets a MOVE (copy, then the original goes once it has arrived, then `sync -f`), a device a SEND
+  `Action::SendTo(n)` indexes `Desktop::targets`; `desktop_send::send` runs on a thread (`App::send_to`): a stick
+  gets a COPY (then `sync -f`; taken back as `Undo::Copied`), a device a SEND
   (`kdeconnect-cli --share`, the file stays; folders are skipped), and the outcome is a
   notification (`desktop_send_notify`). PASTE (wallpaper menu, only when the newest clip is
   files — `App::clipboard_files`): `desktop_send::put` copies them in, or moves them if they
@@ -965,11 +993,11 @@ The big daemon files are cohesive but long — go straight to the function:
   desktop's `Menu` with this window's rows (`menu_rows`, `Menu::with_rows`), drawn IN the window
   (names under it are left out — `covered`; it cannot hang past the window's edge; UNLIT, as the
   Properties box, the sort menu and the History — `MenuPaint::glass` from `filer_panel_paint`: the
-  dark look's night light sank their lower rows toward black; the desktop's menus keep 0.0): on a thing
-  Open · Open in terminal · Cut · Copy · Rename · Move to bin · Properties (last, opened by HOVER,
-  `Props` grown from the menu, Back on hover), on a group Open · Cut · Copy · Move to bin, on the
-  folder [Paste ·] New folder · Open in terminal; a row acts on RELEASE (`filer_button`),
-  everything goes through `filer_act` — and so do the keys: Ctrl+C/X/V, Delete, F2, Ctrl+Shift+N,
+  dark look's night light sank their lower rows toward black; the desktop's menus keep 0.0): its rows are THE
+  ONE MENU's (`desktop_menu::rows_for`, from `filer_open_menu`'s `Ctx`; a place of the sidebar has its own —
+  `filer_place_menu`, a stick's or a phone's rows going to its desktop icon's handlers: `desktop_volume_act`);
+  a row acts on RELEASE (`filer_menu_row`: a page turns, what cannot be undone asks once, Get info opens the i
+  card — a place's, the Properties box grown out of the menu), everything goes through `filer_act` — and so do the keys: Ctrl+C/X/V, Delete, F2, Ctrl+Shift+N,
   Escape. Cut/copy = `serve_files`, paste = `desktop_send::put` off the loop (what came is left
   selected), the bin = `trash_file`, a name is typed in place (`Rename`, by PATH; the rules are
   the desktop's, now shared: `desktop::typed_name` / `rename_file`; a new folder's name is typed
@@ -1066,14 +1094,14 @@ The big daemon files are cohesive but long — go straight to the function:
   found there follows the folder's own (`Win::deep`, `deep_from`, `show_found`; `deep_gen` drops
   a late answer), each said with its folder (`below`: dim under the name, before it in the
   list). OPEN WITH (a file's menu): the row turns the menu's PAGE, as the desktop's "Move to"
-  does (`filer_menu_apps` / `filer_menu_back`, `Win::asked`; Back also on hover) to the apps
+  does (`filer_menu_apps` / `filer_menu_back`) to the apps
   that say they open that kind of file — `xdg-mime query filetype` then `gio mime`, off the
   loop (`apps_for`, `parse_gio_mime`), each id looked up in the dock's own index for its name
-  and command (`Win::open_with`, `Action::SendTo(n)`). Rig: `files apps` / `menuback` with a
+  and command (`Win::open_with`, `Action::OpenApp(n)`). Rig: `files apps` / `menuback` with a
   menu up. THE OWNER'S OWN PLACES are GTK's bookmarks (`gtk-3.0/bookmarks`: `marks_path`,
-  `parse_marks`, `marks_with`; `Win::marks`) — a folder's menu has "Add to places" / "Remove
-  from places" (`Action::AddPlace|RemovePlace`), a kept place's own row has a menu to take it
-  out (`Win::menu_place`), and what is kept here is in every app's open/save dialog, and the
+  `parse_marks`, `marks_with`; `Win::marks`) — a folder's menu has "Add to sidebar" / "Remove
+  from sidebar" (`Action::AddPlace|RemovePlace`), a kept place's own row has a menu to take it
+  out (`filer_place_menu`, the place handed to `filer_act_on`), and what is kept here is in every app's open/save dialog, and the
   other way round. The ground's menu shows or puts away dot files (`Action::ToggleHidden`).
   What was CUT is drawn FADED until it is pasted (`clipboard_files` cut → an icon wash toward the
   ground at `ring = -1.3`: at -1.0 a tinted icon also wears the dock's bin can; `filer_clip_changed`
