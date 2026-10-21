@@ -21,9 +21,18 @@
 //! go, and saves those places and turns as the screens' own rules
 //! (`DisplayChoice::position`, `transform`), so they come back so.
 //!
-//! The arrangement is kept in the compositor's own terms: each screen's
-//! top-left corner in logical pixels (pixels over scale), as Hyprland
-//! places them, and its turn in quarters.
+//! THE DRAWING IS IN MILLIMETRES (Max, 2026-10-21: "I'd like an
+//! approximation to the real sizes on the preview"): each screen at the
+//! size it says it is (`physicalWidth/Height`: the laptop 340×220, the TV
+//! 1150×650 — not the pixels, which drew the TV twice the laptop where it
+//! is three and a half times it), and the arrangement is kept so, each
+//! screen's corner in mm and its turn in quarters. Applied, it becomes the
+//! compositor's logical pixels screen by screen: the main one at 0,0, each
+//! other against the one it touches, its offset along that side measured at
+//! THAT screen's pixels per mm ([`logical_from_mm`]; the way back,
+//! [`mm_from_logical`], draws an arrangement the page has not made). A
+//! screen that does not say its size, or says it wrong (some TVs give their
+//! aspect, 16×9), is drawn as if at 96 dots an inch.
 
 use std::collections::BTreeMap;
 
@@ -35,7 +44,7 @@ use crate::display::{GolemSettings, Monitor};
 use crate::i18n::tr;
 use crate::App;
 
-/// Where one screen stands on the page: its corner (logical px) and turn.
+/// Where one screen stands on the page: its corner (mm) and turn.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Placed {
     pub x: f64,
@@ -51,8 +60,8 @@ pub(crate) struct Placed {
 pub(crate) struct MonitorsChoice {
     /// The screen picked in the drawing (`Monitor::selector`).
     pub picked: Option<String>,
-    /// Each screen's place, by selector.
-    pub arrange: BTreeMap<String, Placed>,
+    /// Each screen's place in the drawing (mm), by selector.
+    pub places: BTreeMap<String, Placed>,
     /// Screens: `extend` (absent), `mirror`, `isolated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screens: Option<String>,
@@ -73,7 +82,7 @@ impl MonitorsChoice {
     }
 }
 
-/// A box in logical px.
+/// A box (in mm in the drawing, in logical px on the screens).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Box2 {
     pub x: f64,
@@ -97,8 +106,15 @@ pub(crate) enum Side {
     Above,
 }
 
-/// How far apart Isolated screens are kept (logical px).
-pub(crate) const ISOLATED_GAP: f64 = 240.0;
+/// How far apart Isolated screens are kept in the drawing (mm), and how
+/// much of two sides must face each other when one is laid against the
+/// other (mm).
+pub(crate) const ISOLATED_GAP: f64 = 60.0;
+const KEEP: f64 = 30.0;
+/// The same two on the screens (logical px), where a placing would
+/// otherwise cover one.
+const ISOLATED_GAP_PX: f64 = 240.0;
+const KEEP_PX: f64 = 120.0;
 
 /// THE MAGNET: where a screen of `size` held at `raw` lands among `others`
 /// — a side that comes within `reach` of one of theirs sticks to it (a
@@ -144,14 +160,22 @@ pub(crate) fn magnet(raw: Box2, others: &[Box2], reach: f64, gap: f64) -> (f64, 
     (x, y, Some((side, i)))
 }
 
-/// DROPPED: where a screen let go at `d` rests. Extend: touching — on the
-/// side it stuck to, or slid to the nearest side of the nearest screen;
-/// Isolated: where it was, unless it covers another (then just off it).
+/// DROPPED: where a screen let go at `d` rests (in the drawing, mm).
+/// Extend: touching — on the side it stuck to, or slid to the nearest side
+/// of the nearest screen; Isolated: where it was, unless it covers another
+/// (then just off it).
 pub(crate) fn settle(d: Box2, others: &[Box2], isolated: bool) -> (f64, f64) {
+    settle_in(d, others, isolated.then_some(ISOLATED_GAP), KEEP)
+}
+
+/// [`settle`] in any unit: a `gap` kept apart (Isolated) or none, and
+/// `keep` of two sides facing.
+fn settle_in(d: Box2, others: &[Box2], gap: Option<f64>, keep: f64) -> (f64, f64) {
     if others.is_empty() {
         return (d.x, d.y);
     }
-    let gap = if isolated { ISOLATED_GAP } else { 0.0 };
+    let isolated = gap.is_some();
+    let gap = gap.unwrap_or(0.0);
     let free = |b: &Box2| !others.iter().any(|o| b.overlaps(o));
     if isolated && free(&d) {
         return (d.x, d.y);
@@ -165,7 +189,6 @@ pub(crate) fn settle(d: Box2, others: &[Box2], isolated: bool) -> (f64, f64) {
     }
     // Every side of every screen it could rest at, with at least a little
     // of the two sides facing; the nearest that covers nothing.
-    let keep = 120.0_f64;
     let mut spots = Vec::new();
     for o in others {
         let cy = d.y.clamp(o.y - d.h + keep, o.y + o.h - keep);
@@ -186,8 +209,158 @@ pub(crate) fn settle(d: Box2, others: &[Box2], isolated: bool) -> (f64, f64) {
         .find(|&(x, y)| free(&Box2 { x, y, ..d }))
         .unwrap_or(spots[0]);
     // (Lined up with what it rests against, when near.)
-    let (x, y, _) = magnet(Box2 { x: at.0, y: at.1, ..d }, others, 120.0, gap);
+    let (x, y, _) = magnet(Box2 { x: at.0, y: at.1, ..d }, others, keep, gap);
     (x.round(), y.round())
+}
+
+/// The side of `b` that `a` stands at, touching it (within `eps`) with
+/// some of the two sides facing.
+fn touching(a: Box2, b: Box2, eps: f64) -> Option<Side> {
+    let facing_x = a.y < b.y + b.h - eps && a.y + a.h > b.y + eps;
+    let facing_y = a.x < b.x + b.w - eps && a.x + a.w > b.x + eps;
+    if facing_x && (a.x - (b.x + b.w)).abs() < eps {
+        Some(Side::Right)
+    } else if facing_x && (a.x + a.w - b.x).abs() < eps {
+        Some(Side::Left)
+    } else if facing_y && (a.y - (b.y + b.h)).abs() < eps {
+        Some(Side::Below)
+    } else if facing_y && (a.y + a.h - b.y).abs() < eps {
+        Some(Side::Above)
+    } else {
+        None
+    }
+}
+
+/// Place every screen from the main one outward: `place(i, j, side)` puts
+/// screen `i` against placed screen `j` it touches (`touch(i, j)` says on
+/// which side), `alone(i)` one touching none, from the main one. The main
+/// one is placed first by the caller.
+fn outward(n: usize, main: usize, touch: impl Fn(usize, usize) -> Option<Side>, mut place: impl FnMut(usize, usize, Side), mut alone: impl FnMut(usize)) {
+    let mut done = vec![false; n];
+    if main < n {
+        done[main] = true;
+    }
+    loop {
+        let mut more = false;
+        for i in 0..n {
+            if done[i] {
+                continue;
+            }
+            if let Some((j, side)) = (0..n).filter(|&j| done[j]).find_map(|j| touch(i, j).map(|side| (j, side))) {
+                place(i, j, side);
+                done[i] = true;
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    for (i, d) in done.iter().enumerate() {
+        if !d {
+            alone(i);
+        }
+    }
+}
+
+/// THE DRAWING ON THE SCREENS: each screen's logical corner from its place
+/// in mm — the main one at 0,0; each other against the screen it touches,
+/// its offset along that side at that screen's pixels per mm; one touching
+/// none from the main one, at its. A placing that would cover another is
+/// moved just off it.
+pub(crate) fn logical_from_mm(screens: &[PageScreen], main: usize) -> Vec<(f64, f64)> {
+    let n = screens.len();
+    let drawn: Vec<Box2> = screens.iter().map(PageScreen::drawn).collect();
+    let size: Vec<Box2> = screens.iter().map(PageScreen::logical).collect();
+    let per_mm = |j: usize| (size[j].w / drawn[j].w.max(1e-6), size[j].h / drawn[j].h.max(1e-6));
+    let mut at = vec![(0.0, 0.0); n];
+    let at_cell = std::cell::RefCell::new(&mut at);
+    outward(
+        n,
+        main,
+        |i, j| touching(drawn[i], drawn[j], 0.5),
+        |i, j, side| {
+            let mut at = at_cell.borrow_mut();
+            let (k, (jx, jy)) = (per_mm(j), at[j]);
+            at[i] = match side {
+                Side::Right => (jx + size[j].w, jy + (drawn[i].y - drawn[j].y) * k.1),
+                Side::Left => (jx - size[i].w, jy + (drawn[i].y - drawn[j].y) * k.1),
+                Side::Below => (jx + (drawn[i].x - drawn[j].x) * k.0, jy + size[j].h),
+                Side::Above => (jx + (drawn[i].x - drawn[j].x) * k.0, jy - size[i].h),
+            };
+        },
+        |i| {
+            let mut at = at_cell.borrow_mut();
+            let k = per_mm(main);
+            at[i] = ((drawn[i].x - drawn[main].x) * k.0, (drawn[i].y - drawn[main].y) * k.1);
+        },
+    );
+    // (Never one over another: pixels per mm that differ can bring two
+    // together that the drawing has apart.)
+    for i in 0..n {
+        if i == main {
+            continue;
+        }
+        let b = Box2 { x: at[i].0, y: at[i].1, ..size[i] };
+        let others: Vec<Box2> = (0..n).filter(|&j| j != i).map(|j| Box2 { x: at[j].0, y: at[j].1, ..size[j] }).collect();
+        if others.iter().any(|o| b.overlaps(o)) {
+            at[i] = settle_in(b, &others, Some(ISOLATED_GAP_PX), KEEP_PX);
+        }
+    }
+    at.iter().map(|&(x, y)| (x.round(), y.round())).collect()
+}
+
+/// THE SCREENS IN THE DRAWING: each screen's place in mm from its logical
+/// corner — the way back of [`logical_from_mm`], for an arrangement the
+/// page has not made (the compositor's own, a screen plugged in since).
+pub(crate) fn mm_from_logical(screens: &mut [PageScreen], main: usize) {
+    let n = screens.len();
+    let size: Vec<Box2> = screens.iter().map(PageScreen::logical).collect();
+    let drawn: Vec<Box2> = screens.iter().map(PageScreen::drawn).collect();
+    let per_mm = |j: usize| (size[j].w / drawn[j].w.max(1e-6), size[j].h / drawn[j].h.max(1e-6));
+    let mut at = vec![(0.0, 0.0); n];
+    let at_cell = std::cell::RefCell::new(&mut at);
+    outward(
+        n,
+        main,
+        |i, j| touching(size[i], size[j], 2.0),
+        |i, j, side| {
+            let mut at = at_cell.borrow_mut();
+            let (k, (jx, jy)) = (per_mm(j), at[j]);
+            at[i] = match side {
+                Side::Right => (jx + drawn[j].w, jy + (size[i].y - size[j].y) / k.1),
+                Side::Left => (jx - drawn[i].w, jy + (size[i].y - size[j].y) / k.1),
+                Side::Below => (jx + (size[i].x - size[j].x) / k.0, jy + drawn[j].h),
+                Side::Above => (jx + (size[i].x - size[j].x) / k.0, jy - drawn[i].h),
+            };
+        },
+        |i| {
+            let mut at = at_cell.borrow_mut();
+            let k = per_mm(main);
+            at[i] = ((size[i].x - size[main].x) / k.0, (size[i].y - size[main].y) / k.1);
+        },
+    );
+    for (s, a) in screens.iter_mut().zip(at) {
+        s.at = (a.0.round(), a.1.round());
+    }
+}
+
+/// A screen's real size in mm as made (not turned): what it says, else —
+/// nothing said, or a size that cannot be (some TVs give their aspect,
+/// 16×9; a density no screen has) — its logical pixels at 96 dots an inch.
+fn real_mm(m: &Monitor, logical: (f64, f64)) -> (f64, f64) {
+    let (w, h) = (f64::from(m.mm.0), f64::from(m.mm.1));
+    let (pw, ph) = (f64::from(m.mode.w), f64::from(m.mode.h));
+    let sane = w > 0.0
+        && h > 0.0
+        && (1.0..=30.0).contains(&(pw / w))
+        && (1.0..=30.0).contains(&(ph / h))
+        && ((w / h) / (pw / ph) - 1.0).abs() < 0.2;
+    if sane {
+        (w, h)
+    } else {
+        (logical.0 * 25.4 / 96.0, logical.1 * 25.4 / 96.0)
+    }
 }
 
 /// A quarter turn (`by` 90 clockwise, -90 back) of a screen about its
@@ -210,7 +383,11 @@ pub(crate) struct PageScreen {
     pub mode: (u32, u32),
     pub scale: f64,
     pub rot: u16,
+    /// Its corner on the screens (logical px) and in the drawing (mm).
+    pub lpos: (f64, f64),
     pub at: (f64, f64),
+    /// Its real size in mm, as made (not turned).
+    pub mm: (f64, f64),
     pub sizes: Vec<(u32, u32)>,
     pub stops: Vec<f64>,
     /// The one in use (the compositor's focus).
@@ -218,18 +395,25 @@ pub(crate) struct PageScreen {
 }
 
 impl PageScreen {
-    /// Its box in logical px, turned.
+    /// Its box on the screens (logical px), turned.
     pub(crate) fn logical(&self) -> Box2 {
         let s = if self.scale > 0.0 { self.scale } else { 1.0 };
         let (w, h) = (f64::from(self.mode.0) / s, f64::from(self.mode.1) / s);
         let (w, h) = if self.rot.is_multiple_of(180) { (w, h) } else { (h, w) };
+        Box2 { x: self.lpos.0, y: self.lpos.1, w, h }
+    }
+
+    /// Its box in the drawing (mm), turned.
+    pub(crate) fn drawn(&self) -> Box2 {
+        let (w, h) = if self.rot.is_multiple_of(180) { self.mm } else { (self.mm.1, self.mm.0) };
         Box2 { x: self.at.0, y: self.at.1, w, h }
     }
 }
 
-/// The screens as the page shows them.
+/// The screens as the page shows them: placed as the page saved them when
+/// it has every one, else drawn from where the compositor has them.
 pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<PageScreen> {
-    screens
+    let mut out: Vec<PageScreen> = screens
         .iter()
         .map(|m| {
             let sel = m.selector();
@@ -237,7 +421,9 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
             // (What the screen has: these two are applied, not only saved.)
             let mode = (m.mode.w, m.mode.h);
             let scale = m.scale;
-            let placed = choice.arrange.get(&sel).copied();
+            let placed = choice.places.get(&sel).copied();
+            let s = if scale > 0.0 { scale } else { 1.0 };
+            let mm = real_mm(m, (f64::from(mode.0) / s, f64::from(mode.1) / s));
             // The sizes: the one in use and the biggest few others.
             let mut sizes: Vec<(u32, u32)> = Vec::new();
             for md in &m.modes {
@@ -270,13 +456,20 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
                 scale,
                 // (Turned as the page put it, else as the compositor has it.)
                 rot: placed.map_or(u16::from(m.transform.min(3)) * 90, |p| p.rot),
-                at: placed.map_or(m.pos, |p| (p.x, p.y)),
+                lpos: m.pos,
+                at: placed.map_or((0.0, 0.0), |p| (p.x, p.y)),
+                mm,
                 sizes,
                 stops,
                 focused: m.focused,
             }
         })
-        .collect()
+        .collect();
+    if out.iter().any(|s| !choice.places.contains_key(&s.sel)) {
+        let main = crate::launcher_prefs::main_screen(screens).unwrap_or(0);
+        mm_from_logical(&mut out, main);
+    }
+    out
 }
 
 /// Screens whose places were saved but whose sizes have changed since (a
@@ -285,13 +478,21 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
 /// the first screen stays, each other is settled in turn.
 fn keep_together(screens: &mut [PageScreen], isolated: bool) {
     for i in 1..screens.len() {
-        let others: Vec<Box2> = screens.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| o.logical()).collect();
-        let b = screens[i].logical();
+        let others: Vec<Box2> = screens.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| o.drawn()).collect();
+        let b = screens[i].drawn();
         let touching = magnet(b, &others, 1.0, if isolated { ISOLATED_GAP } else { 0.0 }).2.is_some();
         let overlaps = others.iter().any(|o| b.overlaps(o));
         if overlaps || (!isolated && !touching) {
             screens[i].at = settle(b, &others, isolated);
         }
+    }
+}
+
+/// Every screen's place as the drawing has it now, kept: once the page has
+/// arranged one, it has them all.
+fn keep_places(c: &mut MonitorsChoice, screens: &[PageScreen]) {
+    for s in screens {
+        c.places.insert(s.sel.clone(), Placed { x: s.at.0, y: s.at.1, rot: s.rot });
     }
 }
 
@@ -325,7 +526,7 @@ pub(crate) fn view(view: &mut ControlView) {
     let saved = GolemSettings::load().monitors;
     let monitors = crate::display::monitors();
     let mut screens = page_screens(&monitors, &saved);
-    if !saved.arrange.is_empty() && saved.screens.as_deref() != Some("mirror") {
+    if !saved.places.is_empty() && saved.screens.as_deref() != Some("mirror") {
         keep_together(&mut screens, saved.screens.as_deref() == Some("isolated"));
     }
     view.subtitle = tr("How your screens work together.").to_owned();
@@ -342,7 +543,7 @@ pub(crate) fn view(view: &mut ControlView) {
     let shapes: Vec<ScreenShape> = screens
         .iter()
         .map(|s| {
-            let b = s.logical();
+            let b = s.drawn();
             ScreenShape {
                 sel: s.sel.clone(),
                 short: s.short.clone(),
@@ -430,10 +631,11 @@ impl App {
                         "pick" => c.picked = Some(sel.to_owned()),
                         "cw" | "ccw" => {
                             if let Some(s) = screens.iter().find(|s| s.sel == sel) {
-                                let (b, rot) = turned(s.logical(), s.rot, if verb == "cw" { 90 } else { -90 });
-                                let others: Vec<Box2> = screens.iter().filter(|o| o.sel != sel).map(PageScreen::logical).collect();
+                                let (b, rot) = turned(s.drawn(), s.rot, if verb == "cw" { 90 } else { -90 });
+                                let others: Vec<Box2> = screens.iter().filter(|o| o.sel != sel).map(PageScreen::drawn).collect();
                                 let (x, y) = settle(b, &others, isolated);
-                                c.arrange.insert(sel.to_owned(), Placed { x, y, rot });
+                                keep_places(c, &screens);
+                                c.places.insert(sel.to_owned(), Placed { x, y, rot });
                                 c.picked = Some(sel.to_owned());
                                 arranged = true;
                             }
@@ -466,15 +668,14 @@ impl App {
                 return None;
             }
             let screens = page_screens(&monitors, &g.monitors);
-            let boxes: Vec<(String, Box2, u16)> = screens.iter().map(|s| (s.sel.clone(), s.logical(), s.rot)).collect();
             // The MAIN screen keeps the corner 0,0 (what makes it the main one
-            // with no built-in): the others stand where they are from it,
-            // left of it or above it below zero.
+            // with no built-in): the others stand where the drawing has them
+            // from it, left of it or above it below zero.
             let main = crate::launcher_prefs::main_screen(&monitors).unwrap_or(0);
-            let (x0, y0) = boxes.get(main).map_or((0.0, 0.0), |(_, b, _)| (b.x, b.y));
+            let corners = logical_from_mm(&screens, main);
             let mut choices = Vec::new();
-            for ((sel, b, rot), m) in boxes.iter().zip(&monitors) {
-                let (x, y) = ((b.x - x0).round(), (b.y - y0).round());
+            for ((s, (x, y)), m) in screens.iter().zip(corners).zip(&monitors) {
+                let (sel, rot) = (&s.sel, &s.rot);
                 let mut choice = g.displays.get(sel).cloned().unwrap_or(crate::display::DisplayChoice {
                     mode: m.mode.rule(),
                     scale: m.scale,
@@ -483,7 +684,6 @@ impl App {
                 });
                 choice.position = Some(format!("{}x{}", x as i64, y as i64));
                 choice.transform = Some((rot / 90 % 4) as u8);
-                g.monitors.arrange.insert(sel.clone(), Placed { x, y, rot: *rot });
                 choices.push((sel.clone(), choice));
             }
             if !crate::display::apply_all(&choices) {
@@ -534,19 +734,20 @@ impl App {
         }
     }
 
-    /// A screen dragged in the drawing and let go at `(x, y)` (logical px):
-    /// it rests where the magnet and its sides say, saved; the page is read
-    /// again.
+    /// A screen dragged in the drawing and let go at `(x, y)` (mm): it rests
+    /// where the magnet and its sides say, saved; the screens are arranged
+    /// so and the page is read again.
     pub(crate) fn monitors_moved(&mut self, sel: &str, x: f64, y: f64) {
         let monitors = crate::display::monitors();
         GolemSettings::change(|g| {
             let c = &mut g.monitors;
             let screens = page_screens(&monitors, c);
             let Some(s) = screens.iter().find(|s| s.sel == sel) else { return };
-            let others: Vec<Box2> = screens.iter().filter(|o| o.sel != sel).map(PageScreen::logical).collect();
-            let d = Box2 { x, y, ..s.logical() };
+            let others: Vec<Box2> = screens.iter().filter(|o| o.sel != sel).map(PageScreen::drawn).collect();
+            let d = Box2 { x, y, ..s.drawn() };
             let (x, y) = settle(d, &others, c.screens.as_deref() == Some("isolated"));
-            c.arrange.insert(sel.to_owned(), Placed { x, y, rot: s.rot });
+            keep_places(c, &screens);
+            c.places.insert(sel.to_owned(), Placed { x, y, rot: s.rot });
             c.picked = Some(sel.to_owned());
             g.store();
             info!("monitors: {sel} arranged at {x},{y}");
@@ -607,6 +808,71 @@ mod tests {
         let (back, rot) = turned(b, rot, -90);
         assert_eq!((back, rot), (tv, 0));
         assert_eq!(turned(tv, 0, -90).1, 270);
+    }
+
+    fn page(sel: &str, mode: (u32, u32), scale: f64, mm: (f64, f64), lpos: (f64, f64)) -> PageScreen {
+        PageScreen {
+            sel: sel.to_owned(),
+            title: sel.to_owned(),
+            short: sel.to_owned(),
+            builtin: sel == "laptop",
+            mode,
+            scale,
+            rot: 0,
+            lpos,
+            at: (0.0, 0.0),
+            mm,
+            sizes: Vec::new(),
+            stops: Vec::new(),
+            focused: false,
+        }
+    }
+
+    #[test]
+    fn the_drawing_is_in_real_sizes_and_goes_to_the_screens_in_pixels() {
+        // Max's two (2026-10-21): the laptop 3200×2000 at 160 % (2000×1250
+        // logical), 340×220 mm; the TV 3840×2160 at 200 % (1920×1080),
+        // 1150×650 mm, at its right.
+        let mut s = vec![
+            page("laptop", (3200, 2000), 1.6, (340.0, 220.0), (0.0, 0.0)),
+            page("tv", (3840, 2160), 2.0, (1150.0, 650.0), (2000.0, 0.0)),
+        ];
+        mm_from_logical(&mut s, 0);
+        assert_eq!((s[0].at, s[1].at), ((0.0, 0.0), (340.0, 0.0)), "drawn at their real sizes, side by side");
+        assert!(s[1].drawn().w / s[0].drawn().w > 3.3, "the TV three times and more the laptop");
+        assert_eq!(logical_from_mm(&s, 0), vec![(0.0, 0.0), (2000.0, 0.0)], "and back");
+        // Raised 215 mm: its corner above by 215 mm at the LAPTOP's pixels
+        // per mm (the side it is against).
+        s[1].at = (340.0, -215.0);
+        assert_eq!(logical_from_mm(&s, 0)[1], (2000.0, (-215.0_f64 * 1250.0 / 220.0).round()));
+        // On the laptop's left: below zero; the laptop keeps 0,0.
+        s[1].at = (-1150.0, 0.0);
+        assert_eq!(logical_from_mm(&s, 0), vec![(0.0, 0.0), (-1920.0, 0.0)]);
+        // Under it, its left ends lined up.
+        s[1].at = (0.0, 220.0);
+        assert_eq!(logical_from_mm(&s, 0)[1], (0.0, 1250.0));
+    }
+
+    #[test]
+    fn a_screen_that_does_not_say_its_size_or_says_its_aspect_is_drawn_at_96_dpi() {
+        let mut m = crate::display::Monitor {
+            name: "HDMI-A-1".to_owned(),
+            desc: String::new(),
+            model: String::new(),
+            mode: crate::display::Mode { w: 1920, h: 1080, hz: 60.0 },
+            scale: 1.0,
+            modes: Vec::new(),
+            focused: false,
+            pos: (0.0, 0.0),
+            transform: 0,
+            mm: (530, 300),
+        };
+        assert_eq!(real_mm(&m, (1920.0, 1080.0)), (530.0, 300.0), "a 24-inch says so");
+        let guess = (1920.0 * 25.4 / 96.0, 1080.0 * 25.4 / 96.0);
+        m.mm = (0, 0);
+        assert_eq!(real_mm(&m, (1920.0, 1080.0)), guess);
+        m.mm = (16, 9);
+        assert_eq!(real_mm(&m, (1920.0, 1080.0)), guess, "an aspect is not a size");
     }
 
     #[test]

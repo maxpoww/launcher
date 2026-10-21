@@ -122,6 +122,8 @@ pub(crate) struct Monitor {
     /// How it is turned: the compositor's `transform` (0 as made, 1 a
     /// quarter, 2 a half, 3 three quarters; 4–7 flipped).
     pub transform: u8,
+    /// Its real size in millimetres, as it says (0: it does not), as made.
+    pub mm: (u32, u32),
 }
 
 impl Monitor {
@@ -184,6 +186,10 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
                 focused: m["focused"].as_bool().unwrap_or(false),
                 pos: (m["x"].as_f64().unwrap_or(0.0), m["y"].as_f64().unwrap_or(0.0)),
                 transform: m["transform"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
+                mm: (
+                    m["physicalWidth"].as_u64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+                    m["physicalHeight"].as_u64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+                ),
             })
         })
         .collect()

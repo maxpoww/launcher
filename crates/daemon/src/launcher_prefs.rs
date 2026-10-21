@@ -406,6 +406,7 @@ mod tests {
             focused: false,
             pos,
             transform: 0,
+            mm: (0, 0),
         }
     }
 
