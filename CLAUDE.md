@@ -1163,8 +1163,12 @@ The big daemon files are cohesive but long — go straight to the function:
   bare weight of 500 matched JetBrains Mono's Medium instead. Rig: `files pill <n>`
   (its nth button), `files flash <words>`. ACTIONS BY KIND (Max, 2026-10-21, mockup v51: "one action per case
   on the pill, two, even 3 on the context menu; only actions that just happen"; `filer/smart.rs`, `sort_of` by
-  ending, `filer_smart`): songs/videos → Play (+ Shuffle for 2+); one photo → Set as wallpaper, Rotate, Slideshow
-  from here; photos → Slideshow, Rotate; a PDF or text → Print; an archive → Extract here (the pill only); a
+  ending, `filer_smart` → the rules alone, `smart_files`, tested as a table): songs/videos → Play (+ Shuffle for
+  2+); one photo → Set as wallpaper, Rotate, then Print with a printer, else Slideshow from here; photos →
+  Slideshow, Rotate (+ Print with a printer) — the pill keeps Set as wallpaper / Slideshow; a PDF, text or
+  PostScript → Print; an office file (doc docx odt rtf xls xlsx ods ppt pptx odp) → Print only with LibreOffice
+  too; any mix where EVERY one can be printed → Print; with no printer none of these, and a document's pill shows
+  Open with again; an archive → Extract here (the pill only); a
   folder that is mostly songs or photos (`folder_kind`: 70 % of at least 3 files, read once a change —
   `kind_of_folder`) → Play all (+ Shuffle) / Slideshow. The pill wears ONE, first, in Open with's place; the menu
   up to three, right after Open (`Ctx::smart`). BY THE ↶: the folder shown's own Play all / Slideshow (icon +
@@ -1177,8 +1181,18 @@ The big daemon files are cohesive but long — go straight to the function:
   that photo in the folder's order); SET AS WALLPAPER = the box's own pick (`controls::pick_wallpaper`),
   undoable back to the one before (`Undo::Wallpaper`); ROTATE = a quarter clockwise and NEVER a pixel lost — a
   JPEG by its EXIF orientation only (`exiftool`, else `jpegtran -perfect`), a PNG drawn again; undoable
-  (`Undo::Rotated`: three more quarters); its pictures made again (`thumb_stale`, `peek_forget`); PRINT = `lp`
-  to the default printer, "No printer is set up" said quietly when there is none (`lpstat -d`). Rig: `files
+  (`Undo::Rotated`: three more quarters); its pictures made again (`thumb_stale`, `peek_forget`); PRINT
+  (`filer/print.rs`, Max 2026-10-21: "only when a printer exists") — what can be printed (`print::Can`: a
+  destination in `lpstat -e`, `soffice` on PATH) is asked OFF the loop and kept 30 s (`Filer::printers`,
+  `filer_printers`: again as a window opens, and from a draw once old; never waited for; the windows draw again
+  when it changes), so it follows whatever CUPS the system has (no `lpstat`/`lp` on PATH = no printer); printing is
+  `lp -d <dest> -t <name>` to `lpstat -d`'s default, else the first, off the loop (C locale; 8 s at most a
+  command): a photo CUPS takes no such of (heic, webp…) is made a PNG first, an office file a PDF by
+  `soffice --headless --convert-to pdf` (its own profile in the cache, 120 s at most), in a scratch folder
+  removed after; text goes as `document-format=text/plain`. Flash "Printing “x”" / "Printing 3 documents" (or
+  photos; "Getting ready to print…" first for office files); what failed is said quietly with lp's reason. Rig:
+  `files printers` (asks again now; the reply is in the log); stubs that log their arguments in place of
+  `lpstat`/`lp`/`soffice` on the rig dock's PATH. Rig: `files
   here` (the button by the ↶). Rig: `files undo`,
   `files hist [open|close|undo <row>]` (rows from the top; the reply/log is the history),
   `files where undo|histrow <n>|histundo <n>`, `files rclick <x> <y>`. A PATH CAN BE TYPED (Ctrl+L, or a `/` or `~` typed —
