@@ -711,24 +711,31 @@ pub struct FastPill {
 
 /// A setting's pictures on their tiles. A thumbnail is the whole picture
 /// centred on a clear square; the square is sized so the picture (of shape
-/// `shape`, width over height) is as big as fits inside its tile.
-fn picture_tiles(scene: &mut Scene, images: &[(Rect, u32, f32)]) {
-    picture_tiles_as(scene, images, |r| r);
+/// `shape`, width over height) FILLS its tile, and it is cut to the tile's
+/// rounded corners (`radius`). (Fitted inside, square-cornered, the tile's
+/// ground and wash showed round it: Max, 2026-10-21, "the rectangles behind
+/// the items show behind … weird corners".)
+fn picture_tiles(scene: &mut Scene, images: &[(Rect, u32, f32)], radius: f32) {
+    picture_tiles_as(scene, images, radius, |r| r);
 }
 
 /// [`picture_tiles`], each tile put where `place` says (a box coming or
 /// going: its pictures move with it).
-fn picture_tiles_as(scene: &mut Scene, images: &[(Rect, u32, f32)], place: impl Fn(Rect) -> Rect) {
+fn picture_tiles_as(scene: &mut Scene, images: &[(Rect, u32, f32)], radius: f32, place: impl Fn(Rect) -> Rect) {
+    // (A little past the tile all round: the picture's own outer texels
+    // are half clear in its square, and must fall outside the cut.)
+    let over = 1.0 + 4.0 / crate::apps::ICON_SIZE as f32;
     for &(tile, layer, shape) in images {
         let tile = place(tile);
         let shape = shape.clamp(0.2, 5.0);
-        let side = if shape >= 1.0 { tile.w.min(tile.h * shape) } else { tile.h.min(tile.w / shape) };
+        let side = over * if shape >= 1.0 { tile.w.max(tile.h * shape) } else { tile.h.max(tile.w / shape) };
         scene.overlay.push(IconInst {
             rect: Rect::new(tile.x + (tile.w - side) / 2.0, tile.y + (tile.h - side) / 2.0, side, side),
             layer,
-            tint: [0.0; 4],
-            ring: -1.0,
-            plate: NO_PLATE,
+            tint: [tile.x, tile.y, tile.x + tile.w, tile.y + tile.h],
+            // A CLIPPED PICTURE (`icon.wgsl`): kept inside the tile's rounded rect.
+            ring: -1.6,
+            plate: [radius, 1.0, 0.0, 0.0],
         });
     }
 }
@@ -3276,7 +3283,7 @@ pub fn scene(
     // glows arrive with the card, not before it (overlay shadows are not
     // clipped, so they also wait for the field to be in).
     if panel_draw.is_some() && m > 0.995 && card_open > 0.995 {
-        picture_tiles(&mut scene, panel_images);
+        picture_tiles(&mut scene, panel_images, panel_draw.map_or(0.0, |d| d.picture_radius));
     }
     if let Some(pd) = panel_draw.filter(|_| m > 0.0005) {
         let rise = (1.0 - m) * travel;
@@ -3736,7 +3743,7 @@ pub fn scene(
         // picture has no opacity of its own — and a tint is the mark of an
         // app about to be removed, never a way to dim one).
         if q.a > 0.5 {
-            picture_tiles_as(&mut scene, q.images, place);
+            picture_tiles_as(&mut scene, q.images, q.draw.picture_radius * k, place);
             for &(entry, r) in &q.draw.icons {
                 scene.overlay.push(IconInst { rect: place(r), layer: layer_of(entry), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
             }

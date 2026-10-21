@@ -265,7 +265,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         let aa = max(fwidth(in.spot.x), 1e-4) * 0.5;
         let cov = 1.0 - smoothstep(-aa, aa, d);
-        return texel * cov * in.plate.y * globals.alpha;
+        // (A wallpaper's tile, cut to its card, still wears the Colours slider.)
+        var c = texel;
+        if (wall && texel.a > 0.004) {
+            c = vec4<f32>(wall_grade(texel.rgb / texel.a) * texel.a, texel.a);
+        }
+        return c * cov * in.plate.y * globals.alpha;
     }
     // PLATE WITH HOLES (ring in (-1.5, -1.4)): the apps button holding pins
     // (`apps_icon`): the plate alone, cut where the layer is opaque — its

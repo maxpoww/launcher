@@ -816,6 +816,8 @@ pub(crate) struct PanelDraw {
     /// Pictures to draw (a wallpaper's preview): where, and which file —
     /// whoever puts the panel on the screen finds each its texture.
     pub images: Vec<(Rect, String)>,
+    /// The corner the pictures are cut to (their tiles').
+    pub picture_radius: f32,
     /// Apps' icons to draw (the Colours Apps tiles): the app entry and
     /// where — drawn through the dock's icon layers, as fast launch's are.
     pub icons: Vec<(usize, Rect)>,
@@ -3069,10 +3071,18 @@ impl Panel {
                 let tile = Rect::new(mx, my, r.w * cs, r.h * cs);
                 let radius = TILE_RADIUS * s * cs;
                 let wash = crate::options::wash(!paint.bright, layer_wash[2]);
-                out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
+                // The ground is the picture's stand-in while it is not up
+                // (the box on its way, a page sliding): under the picture
+                // itself nothing is drawn — its own rounded edge is the only
+                // one seen (Max, 2026-10-21: "the rectangles behind the items
+                // show behind … weird corners, and like shinny stuff").
+                if !resting {
+                    out.rects.push(RectInst { rect: tile, radius, color: [wash[0], wash[1], wash[2], wash[3] * ca], glass: 0.0, border: 0.0 });
+                }
                 if resting {
                     // (The wallpapers wear the Colours slider: `wall_tint`.)
                     out.images.push((tile, file));
+                    out.picture_radius = radius;
                 }
                 if keyed {
                     let (grow, alpha, border) = (3.0 * s, 0.95, 2.4 * s);
