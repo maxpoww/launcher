@@ -315,6 +315,26 @@ const APPS_SHOWN: usize = 36;
 /// of [`SECTIONS`]), and on the Apps page the app chosen (its desktop id). A
 /// box opened afresh starts on Colours, Shell (`panel.rs` `control_due`).
 pub(crate) static COLOURS_TAB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The tab the Colours box opens on (0 Colours, 1 Wallpaper): what asked
+/// for it (`start_tab_for`).
+pub(crate) static COLOURS_START: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// THE WALLPAPER'S BOX IS THE COLOURS BOX on its Wallpaper tab (Max,
+/// 2026-10-21: "change the background tab name for Wallpaper, and make it
+/// the befault walpaper box"): the box a setting opens in.
+pub(crate) fn box_of(label: &'static str) -> &'static str {
+    if label == "Wallpaper" {
+        "Colours"
+    } else {
+        label
+    }
+}
+
+/// The Colours box opens on the tab `label` asked for: Wallpaper's, or Colours.
+pub(crate) fn start_tab_for(label: &str) {
+    COLOURS_START.store(u8::from(label == "Wallpaper"), std::sync::atomic::Ordering::Relaxed);
+}
 pub(crate) static COLOURS_SECTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) static APP_CHOSEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -1750,7 +1770,8 @@ pub(crate) fn pick_wallpaper(path: String) {
         // the box shows what is true now.
         let key = if shown { "wallpaper-saved" } else { "wallpaper-failed" };
         if let Some(door) = TO_WORKER.get() {
-            let cmd = ControlCommand::Set { label: "Wallpaper", key, value: path, ui: UiFacts::default() };
+            // (Read again as the box it is shown in: `box_of`.)
+            let cmd = ControlCommand::Set { label: box_of("Wallpaper"), key, value: path, ui: UiFacts::default() };
             let _ = door.lock().unwrap_or_else(|e| e.into_inner()).send(cmd);
         }
     });
@@ -1956,15 +1977,16 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Colours" => {
             use crate::palette::Surface;
             let picked = crate::palette::choice();
-            view.subtitle = tr("How everything looks.").to_owned();
             let backgrounds = COLOURS_TAB.load(std::sync::atomic::Ordering::Relaxed) == 1;
+            // (On the Wallpaper tab the words the Wallpaper box had.)
+            view.subtitle = if backgrounds { tr("The pictures in Pictures/Wallpapers.") } else { tr("How everything looks.") }.to_owned();
             let sec = usize::from(COLOURS_SECTION.load(std::sync::atomic::Ordering::Relaxed)).min(SECTIONS.len() - 1);
             if backgrounds {
                 wall_cards(&mut view.groups);
             } else {
                 palette_cards(&mut view.groups, &picked);
             }
-            let tabs = vec![choice(tr("Backgrounds"), backgrounds, "backgrounds"), choice(tr("Colours"), !backgrounds, "colours")];
+            let tabs = vec![choice(tr("Wallpaper"), backgrounds, "backgrounds"), choice(tr("Colours"), !backgrounds, "colours")];
             view.groups.push(Group { centred: true, ..group(None, "colors-tab", 0.0, tabs) });
             let (s, auto_key, amb_key, about) = if backgrounds {
                 (Surface::Wall, "colors-wall-auto", "colors-wall-ambient", "The colours on the wallpaper.")

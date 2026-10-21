@@ -1403,18 +1403,22 @@ impl Panel {
     }
 
     /// Grow pill `i` into its setting.
-    fn open_pill(&mut self, i: usize) {
-        let p = &self.pills[i];
+    fn open_pill(&mut self, clicked: usize) {
+        let p = &self.pills[clicked];
         let d = p.drawn as usize;
         let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
         let (w, h) = (p.w[d] * k, p.h[d] * k);
-        info!("control panel: opening {}", p.label);
+        let from = Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h);
+        // (Wallpaper's pill opens the Colours box on its Wallpaper tab,
+        // grown out of its own pill: `controls::box_of`.)
+        let i = if self.modules { clicked } else { self.box_pill(clicked) };
+        info!("control panel: opening {}", self.pills[i].label);
         self.focus = None;
         self.open = Some(OpenBox {
             pill: i,
             k: 0.0,
             want: 1.0,
-            from: Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h),
+            from,
             pop: 0.0,
             vel: 0.0,
             shown: 0.0,
@@ -1436,7 +1440,16 @@ impl Panel {
             self.control_ask = true;
         }
         // The swap happens now, behind the setting growing over the field.
-        self.record_use(i, now_secs());
+        self.record_use(clicked, now_secs());
+    }
+
+    /// The pill whose box pill `i` opens (`controls::box_of`), the tab it
+    /// asks for set.
+    fn box_pill(&self, i: usize) -> usize {
+        let label = self.pills[i].label;
+        crate::controls::start_tab_for(label);
+        let to = crate::controls::box_of(label);
+        self.pills.iter().position(|q| q.label == to).unwrap_or(i)
     }
 
     /// Whether the open setting is one about the screen, and it is time to
@@ -1500,7 +1513,7 @@ impl Panel {
         // A setting opened afresh starts on its own page (Colours: the
         // Colours tab, Shell, not its apps page).
         crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
-        crate::controls::COLOURS_TAB.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::controls::COLOURS_TAB.store(crate::controls::COLOURS_START.swap(0, std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Relaxed);
         crate::controls::COLOURS_SECTION.store(0, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut a) = crate::controls::APP_CHOSEN.lock() {
             *a = None;
@@ -4705,7 +4718,8 @@ impl App {
         if label == "Colours" && DOCK_CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.schedule_autohide();
         }
-        if label == "Wallpaper" {
+        // (The wallpapers are on the Colours box's Wallpaper tab.)
+        if label == "Wallpaper" || label == "Colours" {
             self.pictures_rest();
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Set { label, key: "wallpaper-leave", value: String::new(), ui });
@@ -5121,13 +5135,26 @@ mod tests {
         p
     }
 
+    #[test]
+    fn the_wallpaper_opens_the_colours_box() {
+        let mut p = panel();
+        p.field = Rect::new(40.0, 90.0, 960.0, 560.0);
+        p.step(0.0, None);
+        p.open_named("Wallpaper");
+        assert_eq!(p.open.as_ref().map(|o| p.pills[o.pill].label), Some("Colours"), "Wallpaper's pill opens the Colours box");
+        assert_eq!(crate::controls::box_of("Wallpaper"), "Colours");
+        assert_eq!(crate::controls::box_of("Scale"), "Scale");
+    }
+
     /// The wallpaper box open on `n` pictures, the first of them (when
     /// `caption`) the palette's card with its words.
     fn wall_open(n: usize, caption: bool) -> Panel {
         let mut p = panel();
         p.field = Rect::new(40.0, 90.0, 960.0, 560.0);
         p.step(0.0, None);
-        p.open_named("Wallpaper");
+        // (Its own box, as it was laid out: a pill now opens the Colours
+        // box's Wallpaper tab instead, `the_wallpaper_opens_the_colours_box`.)
+        assert!(p.open_solo("Wallpaper", Rect::new(0.0, 0.0, 10.0, 10.0)));
         for _ in 0..40 {
             p.step(1.0 / 60.0, None);
         }

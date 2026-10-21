@@ -790,9 +790,12 @@ impl App {
         };
         if self.fast.controls {
             // The setting in front opens in its box, growing out of the card.
-            let Some(&(label, _)) = crate::panel::Panel::real_settings().get(idx) else {
+            let Some(&(asked, _)) = crate::panel::Panel::real_settings().get(idx) else {
                 return;
             };
+            // (Wallpaper opens in the Colours box, on its Wallpaper tab.)
+            crate::controls::start_tab_for(asked);
+            let label = crate::controls::box_of(asked);
             let from = self.fast.pill_card;
             self.fast.boxed = Some(label);
             self.fast.enter = None;
