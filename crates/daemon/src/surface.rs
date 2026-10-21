@@ -24,6 +24,7 @@ pub fn create_layer_surface(
     width: u32,
     height: u32,
     render_scale: u32,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     let layer = layer_shell.create_layer_surface(
@@ -31,7 +32,9 @@ pub fn create_layer_surface(
         surface,
         Layer::Top,
         Some("waverunner"),
-        None, // let the compositor pick the active output
+        // None: the compositor picks the active output (at start); a dock
+        // called on another screen is made again there (`dock_screen.rs`).
+        output,
     );
 
     // Full output width (anchored left+right, width 0 → compositor fills it),

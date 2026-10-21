@@ -84,6 +84,7 @@ mod ipc;
 mod jelly;
 mod launch;
 mod launcher_prefs;
+mod dock_screen;
 mod managed;
 mod managed_webapps;
 mod minimized;
@@ -349,6 +350,7 @@ fn main() -> anyhow::Result<()> {
         surface_width,
         surface_height,
         render_scale,
+        None,
     );
 
     // The OPTIONS topbar: a second top-anchored strip, created only when
@@ -438,6 +440,8 @@ fn main() -> anyhow::Result<()> {
     // Where each surface has anything to show (visible.rs), when the
     // compositor takes the hint.
     let visible_regions = visible::VisibleRegions::bind(&globals, compositor.wl_compositor(), &qh);
+    // What the dock is made again with on another screen (dock_screen.rs).
+    let dock_kit = dock_screen::Kit::bind(&globals, &qh, fractional.clone(), visible_regions.clone());
     let dock_visible = visible_regions
         .as_ref()
         .map(|v| v.attach(layer.wl_surface(), &qh));
@@ -919,6 +923,7 @@ fn main() -> anyhow::Result<()> {
         display_pending: None,
         display_pointer: None,
         veil: transition::Veil::bind(&globals, &qh, layer_shell),
+        dock_screens: dock_screen::DockScreens::new(dock_kit),
         dissolve: None,
         dissolve_runs: 0,
         controls_band: 0.0,
@@ -1460,6 +1465,9 @@ pub struct App {
     /// Fractional-scale state per surface (see `fractional.rs`); `None` when
     /// the compositor lacks the protocols (integer `render_scale` path).
     dock_fscale: Option<fractional::SurfaceScale>,
+    /// Which screen the dock is on, made again on another when called there
+    /// (`dock_screen.rs`), and the edges that catch the pointer on the others.
+    dock_screens: dock_screen::DockScreens,
     /// Each surface's visible region (see `visible.rs`); `None` without the
     /// protocol.
     pub(crate) dock_visible: Option<visible::SurfaceVisible>,
@@ -2935,7 +2943,7 @@ impl App {
         let levels = &content::ICON_SCALES;
         let requested = levels[self.icon_size];
         let base_full = (self.config.window.height + self.config.window.bottom_margin) as f32;
-        let Some(h) = self.output_logical_height() else {
+        let Some(h) = self.dock_screen_h() else {
             return requested;
         };
         if base_full <= 0.0 {
@@ -2961,7 +2969,7 @@ impl App {
         // it; this width is only the fallback when the compositor's configure
         // hasn't arrived (it drives the real width via the left+right anchor).
         let w = self
-            .output_logical_width()
+            .dock_screen_w()
             .map(|w| w.round() as u32)
             .unwrap_or_else(|| {
                 (self.config.window.width as f32 * s).round() as u32 + 2 * content::DRAG_MARGIN_X as u32
@@ -2975,7 +2983,7 @@ impl App {
         // the box a setting opens in, the wallpapers' nearly the whole
         // screen — needs it to reach the top. Everything else is laid out
         // from its bottom edge, so a taller surface moves nothing.
-        let h = self.output_logical_height().map_or(h, |screen| h.max(screen.round() as u32));
+        let h = self.dock_screen_h().map_or(h, |screen| h.max(screen.round() as u32));
         (w, h)
     }
 
@@ -3035,6 +3043,11 @@ impl App {
         // tap opens the box. (The box itself, open, closes further down as
         // it always did.)
         if command == Command::Toggle && self.close_what_is_open() {
+            return;
+        }
+        // OTHER MONITORS: called from another chosen screen, the dock is made
+        // again there first, and this call runs once it is (`dock_screen.rs`).
+        if !self.dock_suppressed() && self.dock_follow(&command) {
             return;
         }
         // Calling the dock or a box closes FAST LAUNCH (Max, 2026-10-02).
@@ -3610,6 +3623,10 @@ impl App {
             if prev == Target::Open && next != Target::Open {
                 self.panel_reset_due = true;
             }
+            // Gone from a screen turned off while it was up there: home.
+            if next == Target::Hidden && prev != Target::Hidden {
+                self.sync_edges();
+            }
             // Minimized dock tiles hide while the launcher is open and return
             // when it closes (`minimized_entries` gate) — rebuild the dock
             // order for the new state as the launcher crosses that edge.
@@ -3660,7 +3677,7 @@ impl App {
         // error must not flip zone_free to false and trigger a spurious dodge.
         let last_known = self.zone_free;
         let free = (|| -> anyhow::Result<bool> {
-            let mon = hypr::focused_monitor()?;
+            let mon = hypr::monitor_info(self.dock_screen_name().as_deref())?;
             let zone_w = self.config.window.width as f64;
             let zone_h =
                 (self.config.window.input_bar_height + self.config.window.bottom_margin) as f64;
@@ -6974,6 +6991,9 @@ impl CompositorHandler for App {
         // that output — not enumeration order — is where the shell lives, so
         // it drives the small-screen scale. Re-sync the reserved zone in case
         // this panel's size changes it (laptop vs external).
+        if self.layer.wl_surface() == surface {
+            self.dock_entered(output);
+        }
         if self.scale_owner_surface() == surface && self.shell_output.as_ref() != Some(output) {
             self.shell_output = Some(output.clone());
             self.sync_options_zone();
@@ -7048,6 +7068,11 @@ impl LayerShellHandler for App {
             self.card_renderer = None;
             return;
         }
+        // The dock's (its screen went: made again on the main one), the one
+        // being made again, or an edge.
+        if self.dock_closed(layer.wl_surface()) {
+            return;
+        }
         self.exit = true;
     }
 
@@ -7111,6 +7136,14 @@ impl LayerShellHandler for App {
             self.configure_card(configure);
             return;
         }
+        if self.is_dock_edge(layer.wl_surface()) {
+            self.configure_dock_edge(layer.wl_surface(), configure);
+            return;
+        }
+        // The dock made again on another screen takes over here.
+        if self.is_dock_next(layer.wl_surface()) && !self.dock_arrived() {
+            return;
+        }
         let (mut width, mut height) = configure.new_size;
         if width == 0 || height == 0 {
             let (sw, sh) = self.scaled_surface_size();
@@ -7169,6 +7202,7 @@ impl LayerShellHandler for App {
         // response to configure; presenting a frame satisfies it.
         self.draw_forced = true;
         self.draw();
+        self.dock_arrived_then();
     }
 }
 
@@ -7557,6 +7591,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         // own pointer handling and must never fall through into the dock's.
         if let wl_pointer::Event::Enter { surface, .. } = &event {
             app.pointer_surface = app.classify_pointer_surface(surface);
+        }
+        // An edge on another screen: touched, the dock comes over.
+        if app.pointer_surface == options::PointerSurface::Edge {
+            if let wl_pointer::Event::Enter { surface, .. } = &event {
+                app.dock_edge_touched(surface);
+            }
+            return;
         }
         // Whether the pointer is on ANY surface of ours: off all of them it is
         // on a window, and the desktop must not keep the keyboard from it.
@@ -8002,6 +8043,8 @@ impl OutputHandler for App {
         self.refresh_scaled_geometry();
         // A screen arrived: "second monitor" is one of the arrangement states.
         self.sync_shell_state();
+        // …and one the dock can be called to.
+        self.sync_edges();
     }
 
     fn update_output(
@@ -8013,6 +8056,7 @@ impl OutputHandler for App {
         self.sync_options_zone();
         self.refresh_scaled_geometry();
         self.sync_shell_state();
+        self.sync_edges();
     }
 
     fn output_destroyed(
@@ -8026,6 +8070,7 @@ impl OutputHandler for App {
         // A screen left — the state has to fall back as readily as it rose, or
         // an OPTION that only makes sense with two screens outlives the second.
         self.sync_shell_state();
+        self.sync_edges();
     }
 }
 

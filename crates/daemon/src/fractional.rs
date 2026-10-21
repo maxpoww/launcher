@@ -43,6 +43,7 @@ pub enum SurfaceKind {
 }
 
 /// The two globals, bound only when the compositor offers both.
+#[derive(Clone)]
 pub struct Fractional {
     manager: WpFractionalScaleManagerV1,
     viewporter: WpViewporter,
@@ -84,6 +85,17 @@ impl SurfaceScale {
         self.scale120.map_or(fallback, |s| s as f32 / 120.0)
     }
 
+    /// Whether this is the state `proxy` reports for.
+    pub fn is(&self, proxy: &WpFractionalScaleV1) -> bool {
+        self._fractional == *proxy
+    }
+
+    /// Let the surface go (before the surface itself is destroyed).
+    pub fn destroy(self) {
+        self._fractional.destroy();
+        self.viewport.destroy();
+    }
+
     /// Show the buffer at `logical` size, whatever its pixel size.
     pub fn set_logical_size(&self, width: u32, height: u32) {
         self.viewport.set_destination(width as i32, height as i32);
@@ -98,13 +110,21 @@ pub fn physical(logical: u32, scale: f32) -> u32 {
 impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
     fn event(
         app: &mut Self,
-        _: &WpFractionalScaleV1,
+        proxy: &WpFractionalScaleV1,
         event: wp_fractional_scale_v1::Event,
         kind: &SurfaceKind,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // (The dock made again on another screen says its scale before
+            // it takes over: kept for it, `dock_screen.rs`.)
+            if matches!(kind, SurfaceKind::Dock) {
+                if let Some(next) = app.dock_next_fscale(proxy) {
+                    next.scale120 = Some(scale);
+                    return;
+                }
+            }
             let slot = match kind {
                 SurfaceKind::Dock => app.dock_fscale.as_mut(),
                 SurfaceKind::Options => app.options_fscale.as_mut(),

@@ -56,6 +56,7 @@ pub mod proto {
 
 /// The global, bound when the compositor has it (version 2: the visible
 /// region).
+#[derive(Clone)]
 pub(crate) struct VisibleRegions {
     manager: HyprlandSurfaceManagerV1,
     compositor: WlCompositor,
@@ -118,6 +119,11 @@ impl SurfaceVisible {
         region.destroy();
         self.sent = Some(rects.to_vec());
         crate::perf::VISIBLE_SET.hit();
+    }
+
+    /// Let the surface go (before the surface itself is destroyed).
+    pub(crate) fn destroy(self) {
+        self.hypr.destroy();
     }
 
     /// What was last set, for the damage check.

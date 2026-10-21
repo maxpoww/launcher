@@ -15,8 +15,9 @@
 //! where it is seen: Position (the side dock, `content::layout_side`), Stay
 //! away (`intellihide`), Animated icons (`icons_move`; turned on, the icons
 //! play their turn — `icons_wave`) and Arrange apps (`arrange_shown`; the box
-//! opens and the icons glide to their places — `arrange_show`). Still only
-//! saved: Other monitors.
+//! opens and the icons glide to their places — `arrange_show`) and Other
+//! monitors (the dock follows the call to a chosen screen, `dock_screen.rs`;
+//! a screen turned on shows its edge for a beat).
 //!
 //! THE BUILT-IN SCREEN ALWAYS HAS THE LAUNCHER, and the MAIN one when the
 //! built-in is off (a closed lid, a desktop with none). That is done, not
@@ -212,12 +213,21 @@ impl App {
             // A monitor's word: the launcher on it goes, or comes back.
             "launcher-screen" => {
                 let off = &mut self.settings.launcher_screens_off;
-                if let Some(i) = off.iter().position(|s| s == value) {
+                let on = if let Some(i) = off.iter().position(|s| s == value) {
                     off.remove(i);
+                    true
                 } else {
                     off.push(value.to_owned());
-                }
+                    false
+                };
                 self.settings.save();
+                // Turned on, its edge shows for a beat on that screen; off,
+                // it goes (and the dock, once it is not up there).
+                if on {
+                    self.screen_chosen(value);
+                } else {
+                    self.sync_edges();
+                }
             }
             _ => return,
         }
@@ -329,6 +339,8 @@ impl App {
         self.input_extent = None;
         self.sync_input_region();
         self.on_layout_changed();
+        // The other screens' edges move to the new side.
+        self.sync_edges();
         self.dirty = true;
         self.schedule_frame();
     }

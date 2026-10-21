@@ -186,7 +186,7 @@ impl App {
             self.controls_band,
             self.ui.open_trim(),
             self.control_rows(),
-            self.options_bar_h(),
+            self.dock_top_reserved(),
         );
         // Search results split their partial rows about the titles.
         let centre_rows = !self.grid_resting();
@@ -332,6 +332,11 @@ impl App {
     /// daemon goes fully idle (no further frame requests).
     pub(crate) fn draw(&mut self) {
         if self.renderer.is_none() {
+            return;
+        }
+        // Its screen went and the new one is not up: nothing to draw on.
+        if self.dock_lost() {
+            self.dirty = true;
             return;
         }
         // An arrangement picked on the Launcher page lands once its box is up.
@@ -632,6 +637,8 @@ impl App {
         if (layout.dock_basin_w - self.dock_basin_w).abs() > 0.5 {
             self.dock_basin_w = layout.dock_basin_w;
             self.sync_input_region();
+            // The other screens' edges are as long as it, at rest.
+            self.resize_edges();
         }
 
         // The search caret anchors to the query's shaped width.

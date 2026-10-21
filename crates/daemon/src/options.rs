@@ -948,6 +948,8 @@ pub(crate) enum PointerSurface {
     Card,
     /// A file manager window, by its id (see [`crate::filer`]).
     Files(u32),
+    /// An edge that brings the dock to another screen (`dock_screen.rs`).
+    Edge,
 }
 
 /// THE QUIET LANGUAGE (Max, 2026-10-16): no zebra in the bar's boxes —
@@ -5355,6 +5357,8 @@ impl App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             PointerSurface::Card
+        } else if self.is_dock_edge(surface) {
+            PointerSurface::Edge
         } else {
             PointerSurface::Dock
         }

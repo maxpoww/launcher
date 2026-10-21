@@ -255,6 +255,9 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// It draws on the shell's one GPU device ([`SharedGpu`]): what lets it
+    /// move to another surface ([`Renderer::retarget`]).
+    on_shared_gpu: bool,
     /// Sustained ambient animation must be frame-throttled: true for a
     /// software adapter (llvmpipe — every frame costs real cores). The GL
     /// backend no longer is: its present doesn't block since `NoVblankWait`.
@@ -1447,6 +1450,7 @@ impl Renderer {
             device,
             queue,
             config,
+            on_shared_gpu,
             frame_throttle,
             pace_by_gpu,
             gpu_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1500,6 +1504,43 @@ impl Renderer {
 
     /// Handle a compositor-driven buffer size change (output scale change;
     /// the logical surface size itself is fixed by design).
+    /// Draw on `wl_surface` from now on, keeping everything else: the
+    /// pipelines, the icons, the labels. The dock called on another screen is
+    /// a new surface there (`dock_screen.rs`), and building a renderer anew
+    /// would upload every icon again. The old surface's swapchain goes here,
+    /// so call it while that surface still lives.
+    pub fn retarget(&mut self, conn: &Connection, wl_surface: &WlSurface) -> anyhow::Result<()> {
+        if !self.on_shared_gpu {
+            anyhow::bail!("it has a GPU device of its own");
+        }
+        let _no_vblank_wait = NoVblankWait::arm();
+        let display = NonNull::new(conn.backend().display_ptr().cast())
+            .ok_or_else(|| anyhow!("null wl_display"))?;
+        let window = NonNull::new(wl_surface.id().as_ptr().cast())
+            .ok_or_else(|| anyhow!("null wl_surface"))?;
+        let surface = SHARED_GPU.with(|g| -> anyhow::Result<wgpu::Surface<'static>> {
+            let g = g.borrow();
+            let g = g.as_ref().ok_or_else(|| anyhow!("no shared GPU"))?;
+            // SAFETY: as in `new` — live Wayland objects owned by App, which
+            // drops the renderer first.
+            let surface = unsafe {
+                g.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display)),
+                    raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
+                })
+            }?;
+            if !g.adapter.is_surface_supported(&surface) {
+                anyhow::bail!("the shared GPU cannot present to it");
+            }
+            Ok(surface)
+        })?;
+        surface.configure(&self.device, &self.config);
+        self.surface = surface;
+        self.damage_prev = None;
+        self.frost = None;
+        Ok(())
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == self.config.width && height == self.config.height {
             return;

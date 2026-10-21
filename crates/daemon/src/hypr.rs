@@ -1429,13 +1429,17 @@ pub struct MonitorInfo {
 
 /// Query the focused monitor.
 pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
+    monitor_info(None)
+}
+
+/// Query the monitor by this connector name (`None`, or one not there: the
+/// focused monitor).
+pub fn monitor_info(name: Option<&str>) -> anyhow::Result<MonitorInfo> {
     let monitors: serde_json::Value =
         serde_json::from_str(&request("j/monitors")?).context("parsing monitors JSON")?;
-    monitors
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| m["focused"].as_bool().unwrap_or(false))
+    let all = monitors.as_array().into_iter().flatten();
+    name.and_then(|n| all.clone().find(|m| m["name"].as_str() == Some(n)))
+        .or_else(|| all.clone().find(|m| m["focused"].as_bool().unwrap_or(false)))
         .map(|m| {
             // `width`/`height` are physical pixels; `at`/`size` in
             // j/clients are logical pixels — divide by scale so both
