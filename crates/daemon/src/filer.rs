@@ -62,6 +62,7 @@ use crate::i18n::{fill, tr};
 use crate::{launch, App};
 
 mod chrome;
+mod recent;
 
 /// The windows' class: what the compositor, the dock and window memory
 /// know them by.
@@ -928,6 +929,8 @@ fn window_title(dir: &Path) -> String {
         tr("Home").to_owned()
     } else if dir == bin_root() {
         tr("Recycle Bin").to_owned()
+    } else if dir == recent::root() {
+        tr("Recents").to_owned()
     } else {
         file_name(dir)
     }
@@ -1664,6 +1667,10 @@ impl Win {
     /// symbol of its own keeps its icon.
     fn place_key(&self, place: &Place) -> String {
         let icon = place.icon.as_str();
+        // (The chrome's own symbols — Recents' clock — are symbols already.)
+        if icon.ends_with(".svg") {
+            return icon.to_owned();
+        }
         if self.place_icon() > SYMBOL_FROM {
             return icon.to_owned();
         }
@@ -1674,6 +1681,13 @@ impl Win {
         } else {
             symbol
         }
+    }
+
+    /// The way here as a path to type over (Recents, a place of no folder:
+    /// Home).
+    fn typed_here(&self) -> String {
+        let dir = if self.dir == recent::root() { home() } else { self.dir.clone() };
+        dir.to_string_lossy().into_owned()
     }
 
     /// Whether the window is wide enough for a sidebar.
@@ -2009,7 +2023,7 @@ fn file_name(path: &Path) -> String {
 }
 
 /// The sidebar's places in its two sections (Max, 2026-10-21, "A ·
-/// Unified"): FAVOURITES — Home, under the owner's name as the way here
+/// Unified"): FAVOURITES — Recents (`recent.rs`), Home, under the owner's name as the way here
 /// starts with it, the owner's folders from `user-dirs.dirs`, `~/Phones`,
 /// then the owner's own (GTK's bookmarks) — and LOCATIONS: the owner's other
 /// disks, what is plugged in, the bin. `gap` marks the first of Locations
@@ -2021,13 +2035,22 @@ pub(crate) fn places(
     marks: &[(String, PathBuf)],
     volumes: &[crate::mounts::Mounted],
 ) -> Vec<Place> {
-    let mut out = vec![Place {
-        name: file_name(home),
-        path: home.to_path_buf(),
-        icon: "asset:user-home".to_owned(),
-        gap: false,
-        start: true,
-    }];
+    let mut out = vec![
+        Place {
+            name: tr("Recents").to_owned(),
+            path: recent::root(),
+            icon: chrome::glyph("clock"),
+            gap: false,
+            start: true,
+        },
+        Place {
+            name: file_name(home),
+            path: home.to_path_buf(),
+            icon: "asset:user-home".to_owned(),
+            gap: false,
+            start: true,
+        },
+    ];
     for (key, fallback, icon) in [
         ("DESKTOP", "Desktop", "user-desktop"),
         ("DOCUMENTS", "Documents", "folder-documents"),
@@ -2119,6 +2142,29 @@ pub(crate) fn floor<'a>(dir: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
 /// 2026-10-14): a click goes up, and it is where things are dragged OUT of
 /// a folder to.
 pub(crate) const UP: &str = "..";
+
+/// `places` for a window on `dir`: `..` — the folder this one is in —
+/// first, a place like the others (Max, 2026-10-14: "tiene que ser otra
+/// carpeta arriba de Home"; brought back to the sidebar of 2026-10-21: "add
+/// the '..' place too"). At the root there is nowhere up, and nothing is
+/// above a root (`floor`): no `..` at all there (Max: hidden, not grey).
+pub(crate) fn with_up(places: &[Place], dir: &Path, roots: Option<&[PathBuf]>) -> Vec<Place> {
+    let Some(parent) = dir.parent() else {
+        return places.to_vec();
+    };
+    if roots.is_some_and(|roots| floor(dir, roots).is_none_or(|f| f == dir)) {
+        return places.to_vec();
+    }
+    let mut out = vec![Place {
+        name: UP.to_owned(),
+        path: parent.to_path_buf(),
+        icon: "asset:folder-up".to_owned(),
+        gap: false,
+        start: false,
+    }];
+    out.extend(places.iter().cloned());
+    out
+}
 
 /// The way to `dir` as steps to click: from the place it is deepest under
 /// (Home, a stick, a phone), else from the root.
@@ -2605,14 +2651,17 @@ impl App {
         let marks = parse_marks(&std::fs::read_to_string(marks_path()).unwrap_or_default());
         let list = places(&home, &user_dirs, &bin_root(), &marks, &self.desktop.volumes);
         let marked: Vec<PathBuf> = marks.into_iter().map(|(_, p)| p).collect();
+        let base = self.filer_roots(None);
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
-        // (No `..` among them since the sidebar of 2026-10-21: the way here
-        // and the title bar's arrows go up and back.)
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
                 win.marks = marked.clone();
+                // (Each window's own: `..` is the folder ITS folder is in.)
+                let mut roots = base.clone();
+                roots.extend(win.root.clone());
+                let list = with_up(&list, &win.dir, Some(&roots));
                 if win.places != list {
-                    win.places = list.clone();
+                    win.places = list;
                     // (A drag over them held a place by its number.)
                     win.drop_place = None;
                     self.filer_request_draw(id);
@@ -2625,7 +2674,7 @@ impl App {
     /// what is plugged in and open.
     /// (A window's own root too, when `id` names one opened from outside.)
     pub(crate) fn filer_roots(&self, id: Option<u32>) -> Vec<PathBuf> {
-        let mut roots = vec![home(), bin_root()];
+        let mut roots = vec![home(), bin_root(), recent::root()];
         roots.extend(self.desktop.volumes.iter().filter(|v| !v.closed).map(|v| v.path.clone()));
         roots.extend(crate::mounts::own_disks());
         roots.extend(id.and_then(|id| self.filer.win(id)).and_then(|w| w.root.clone()));
@@ -2745,7 +2794,9 @@ impl App {
         if let Some(token) = win.watch.take() {
             self.loop_handle.remove(token);
         }
-        if let Some(fd) = crate::apps::watch_dirs(std::slice::from_ref(&dir)) {
+        // (Recents is no folder: it is read again when Files opens a file.)
+        let watched = (dir != recent::root()).then(|| crate::apps::watch_dirs(std::slice::from_ref(&dir))).flatten();
+        if let Some(fd) = watched {
             use std::os::fd::AsFd;
             let source = calloop::generic::Generic::new(fd, calloop::Interest::READ, calloop::Mode::Level);
             let token = self.loop_handle.insert_source(source, move |_, fd, app: &mut App| {
@@ -2878,7 +2929,13 @@ impl App {
         self.desktop_off_loop(
             // (The bin is read through its own records: names, newest first.)
             move || {
-                let items = if dir == bin_root() { list_bin() } else { list(&dir, hidden)? };
+                let items = if dir == bin_root() {
+                    list_bin()
+                } else if dir == recent::root() {
+                    recent::list()
+                } else {
+                    list(&dir, hidden)?
+                };
                 let meta = meta_of(&items);
                 Ok((items, meta))
             },
@@ -3059,7 +3116,11 @@ impl App {
             placed,
             hidden: win.hidden,
         };
-        let rows = keep_systems(menu_rows(asked), &win.selected);
+        let mut rows = keep_systems(menu_rows(asked), &win.selected);
+        // (Recents' ground has nothing to offer: nothing is made there.)
+        if win.dir == recent::root() && path.is_none() {
+            rows.clear();
+        }
         win.asked = Some(asked);
         win.open_with.clear();
         win.asking_apps = false;
@@ -3167,6 +3228,13 @@ impl App {
         };
         let dir = win.dir.clone();
         let bin = win.in_bin();
+        // RECENTS is a place, not a folder: nothing is made or put in it.
+        if dir == recent::root()
+            && (matches!(action, Action::Paste | Action::NewFolder | Action::CleanUp | Action::Compress)
+                || (action == Action::OpenTerminal && item.is_none()))
+        {
+            return;
+        }
         // In the bin nothing is made, named, moved in or thrown away again.
         if bin != InBin::No
             && matches!(
@@ -3275,10 +3343,14 @@ impl App {
             }
             Action::OpenTerminal => {
                 // In the folder clicked, else in the one shown.
-                let at_dir = item
-                    .and_then(|i| win.items.get(i))
-                    .filter(|it| matches!(it.kind, Kind::Folder | Kind::Volume))
-                    .map_or_else(|| dir.to_string_lossy().into_owned(), |it| it.path.clone());
+                let at_dir = match item.and_then(|i| win.items.get(i)) {
+                    Some(it) if matches!(it.kind, Kind::Folder | Kind::Volume) => it.path.clone(),
+                    // (A thing of Recents: in the folder it is in.)
+                    Some(it) if dir == recent::root() => {
+                        Path::new(&it.path).parent().map_or_else(|| home().to_string_lossy().into_owned(), |p| p.to_string_lossy().into_owned())
+                    }
+                    _ => dir.to_string_lossy().into_owned(),
+                };
                 let exec = format!("cd {} && exec {}", launch::shell_quote(&at_dir), self.config.launch.terminal);
                 info!("files: terminal at {at_dir}");
                 if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
@@ -3331,7 +3403,10 @@ impl App {
                 let exec = format!("{exec} {}", launch::shell_quote(path));
                 if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
                     error!("files: {name} could not be started: {e:#}");
+                    return;
                 }
+                let path = PathBuf::from(path);
+                self.filer_used(&path);
             }
             Action::AddPlace | Action::RemovePlace => {
                 // The folder the menu is on — or the place whose row it is.
@@ -3379,7 +3454,7 @@ impl App {
         let Some((paths, cut)) = self.clipboard_files() else {
             return;
         };
-        let Some(dir) = self.filer.win(id).map(|w| w.dir.clone()) else {
+        let Some(dir) = self.filer.win(id).map(|w| w.dir.clone()).filter(|d| *d != recent::root()) else {
             return;
         };
         let into = dir.clone();
@@ -3574,6 +3649,10 @@ impl App {
             return;
         };
         let dir = win.dir.clone();
+        // (Recents is no folder: nothing is made in it.)
+        if dir == recent::root() {
+            return;
+        }
         let path = (1..)
             .map(|n| {
                 if n == 1 {
@@ -3778,6 +3857,11 @@ impl App {
         info!("files: open {}", item.path);
         if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
             error!("files: opening {} failed: {e:#}", item.path);
+            return;
+        }
+        // (Used: in Recents, here and in every app's.)
+        if item.kind == Kind::File {
+            self.filer_used(Path::new(&item.path));
         }
     }
 
@@ -3847,7 +3931,7 @@ impl App {
         let words = win
             .find
             .clone()
-            .filter(|f| !f.trim().is_empty() && win.in_bin() == InBin::No);
+            .filter(|f| !f.trim().is_empty() && win.in_bin() == InBin::No && win.dir != recent::root());
         win.deep_busy = words.is_some();
         let (generation, dir, hidden) = (win.deep_gen, win.dir.clone(), win.hidden);
         // What is shown changed under everything that held a place in it.
@@ -5139,6 +5223,7 @@ impl App {
         info!("files: {} in hand ({} in all)", item.name, paths.len());
         // Its place stays open until the pointer says otherwise.
         let orderly = win.in_bin() == InBin::No
+            && win.dir != recent::root()
             && win.sort.0 == SortKey::Name
             && win.find.as_ref().is_none_or(|f| f.is_empty());
         let hole = orderly.then(|| win.items[..i].iter().filter(|it| !paths.contains(&it.path)).count());
@@ -5323,6 +5408,7 @@ impl App {
         let in_field = place.is_none()
             && layout.body.contains(at)
             && win.in_bin() == InBin::No
+            && win.dir != recent::root()
             && win.sort.0 == SortKey::Name
             && win.find.as_ref().is_none_or(|f| f.is_empty());
         let (d, fx) = layout.slot_at(at, win.scroll);
@@ -5672,6 +5758,12 @@ impl App {
         arrange: Option<(Vec<String>, Vec<String>)>,
         then: impl FnOnce() + 'static,
     ) {
+        // Nothing is put in Recents: it is a list of what was used.
+        if dir == recent::root() {
+            info!("files: nothing goes into Recents");
+            then();
+            return;
+        }
         // Into the bin (its window, or its place): thrown away, not moved
         // into its folder — the bin keeps a record of where each came from.
         if dir.starts_with(bin_root()) {
@@ -5791,7 +5883,7 @@ impl App {
                 // pencil again puts it back.
                 if win.go_to.take().is_none() {
                     win.edit_w = win.hits.cur_tab.w;
-                    win.go_to = Some(win.dir.to_string_lossy().into_owned());
+                    win.go_to = Some(win.typed_here());
                 }
                 win.go_bad = false;
                 self.filer_request_draw(id);
@@ -6155,7 +6247,7 @@ impl App {
             Keysym::z | Keysym::Z if ctrl => self.filer_undo(),
             Keysym::l | Keysym::L if ctrl => {
                 // The way here, as a path to be typed over (the pencil's).
-                let mut text = win.dir.to_string_lossy().into_owned();
+                let mut text = win.typed_here();
                 if !text.ends_with('/') {
                     text.push('/');
                 }
@@ -6267,8 +6359,9 @@ impl App {
         };
         match verb {
             "go" => {
-                let dir = as_path(rest);
-                if !dir.is_dir() {
+                // (`go recents`: the place of no folder.)
+                let dir = if rest == "recents" { recent::root() } else { as_path(rest) };
+                if !dir.is_dir() && dir != recent::root() {
                     return format!("not a folder: {}", dir.display());
                 }
                 self.filer_go(id, dir);
@@ -6498,7 +6591,7 @@ impl App {
                 if let Some(win) = self.filer.win_mut(id) {
                     if win.go_to.take().is_none() {
                         win.edit_w = win.hits.cur_tab.w;
-                        win.go_to = Some(win.dir.to_string_lossy().into_owned());
+                        win.go_to = Some(win.typed_here());
                     }
                 }
                 self.filer_request_draw(id);
@@ -6710,6 +6803,27 @@ mod tests {
         assert_eq!(user_dir(text, home, "MUSIC"), None);
         assert_eq!(user_dir(text, home, "VIDEOS"), Some(PathBuf::from("/data/Videos")));
         assert_eq!(user_dir(text, home, "PICTURES"), None);
+    }
+
+    #[test]
+    fn two_dots_lead_to_the_folder_this_one_is_in() {
+        let home = Place {
+            name: "Home".to_owned(),
+            path: PathBuf::from("/home/max"),
+            icon: String::new(),
+            gap: false,
+            start: true,
+        };
+        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"), None);
+        assert_eq!((places[0].name.as_str(), places[0].path.as_path()), (UP, Path::new("/home/max/Documents")));
+        assert!(!places[1].gap && places[1].path == home.path);
+        // At the root, at Home (the floor) and at Recents (a root of its
+        // own): no `..`.
+        assert_eq!(with_up(std::slice::from_ref(&home), Path::new("/"), None), [home.clone()]);
+        let roots = [PathBuf::from("/home/max"), recent::root()];
+        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max"), Some(&roots)).iter().all(|p| p.name != UP));
+        assert!(with_up(std::slice::from_ref(&home), &recent::root(), Some(&roots)).iter().all(|p| p.name != UP));
+        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents"), Some(&roots)).iter().any(|p| p.name == UP));
     }
 
     #[test]

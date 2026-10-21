@@ -109,7 +109,11 @@ pub(super) struct Info {
 
 /// The mockup's own symbols (16 units, strokes 1.35 wide), written once as
 /// SVG files that the icon loader reads by their path (`glyph`).
-const GLYPHS: [(&str, &str); 13] = [
+const GLYPHS: [(&str, &str); 14] = [
+    (
+        "clock",
+        r#"<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.5"/>"#,
+    ),
     (
         "pin",
         r#"<path d="M6 2.6h4M6.7 2.6l-.4 4L4.2 8.8h7.6L9.7 6.6l-.4-4M8 8.8v4.6"/>"#,
@@ -186,12 +190,21 @@ pub(super) fn icon_keys(win: &Win) -> Vec<String> {
         .iter()
         .filter(|p| p.path == home() || p.path == bin_root())
     {
-        keys.push(format!("{}-symbolic", p.icon));
+        keys.push(symbolic(&p.icon));
     }
     if let Some(info) = win.info.as_ref().filter(|_| win.info_on) {
         keys.push(info.icon.clone());
     }
     keys
+}
+
+/// A place's icon as its symbol (the chrome's own are symbols already).
+fn symbolic(icon: &str) -> String {
+    if icon.ends_with(".svg") {
+        icon.to_owned()
+    } else {
+        format!("{icon}-symbolic")
+    }
 }
 
 /// Write the symbols where `glyph` says (only what is not there as it is).
@@ -592,11 +605,16 @@ impl App {
                 )
             });
         };
-        heading(&mut list, y, tr("Favourites"));
-        y += SEC_H;
         hits.places.clear();
+        // (`..` stands first, over Favourites' heading.)
+        let mut headed = false;
         for n in 0..win.places.len() {
             let place = &win.places[n];
+            if !headed && place.name != UP {
+                heading(&mut list, y, tr("Favourites"));
+                y += SEC_H;
+                headed = true;
+            }
             if place.gap {
                 heading(&mut list, y, tr("Locations"));
                 y += SEC_H;
@@ -615,7 +633,7 @@ impl App {
             }
             let key = win.place_key(place);
             let at = Rect::new(row.x + 8.0, row.y + (row_h - icon) / 2.0, icon, icon);
-            if key.ends_with("-symbolic") {
+            if key.ends_with("-symbolic") || key.ends_with(".svg") {
                 symbol(
                     &mut list,
                     win,
@@ -950,14 +968,12 @@ impl App {
                     .map(|p| p.icon.clone());
                 let ic = square((chip.x + 8.0 + CHIP_ICON / 2.0, cy), CHIP_ICON);
                 if ic.x + ic.w <= chip.x + chip.w {
-                    match sign.filter(|_| dir == home() || dir == bin_root()) {
-                        Some(sign) => symbol(
-                            &mut g,
-                            win,
-                            &format!("{sign}-symbolic"),
-                            ic,
-                            faded(pal.accent, a),
-                        ),
+                    match sign.filter(|_| {
+                        dir == home() || dir == bin_root() || dir == super::recent::root()
+                    }) {
+                        Some(sign) => {
+                            symbol(&mut g, win, &symbolic(&sign), ic, faded(pal.accent, a))
+                        }
                         None => picture(&mut g, win, "asset:folder", ic, a),
                     }
                 }
@@ -1107,7 +1123,12 @@ impl App {
         } else {
             96.0
         };
-        picture(&mut g, win, &icon, square(mid(pic), size), 1.0);
+        if icon.ends_with(".svg") {
+            // (A symbol of the chrome's own — Recents' clock.)
+            symbol(&mut g, win, &icon, square(mid(pic), 72.0), tones.dim);
+        } else {
+            picture(&mut g, win, &icon, square(mid(pic), size), 1.0);
+        }
         let fit = |win: &mut Win, text: &str, room: f32, px: f32, family: Option<&str>| {
             crate::desktop::fit_label(text, room, &mut |t| measure(win, t, px, family))
         };
@@ -1415,8 +1436,9 @@ impl App {
             .find(|p| p.path == dir)
             .map_or_else(|| "asset:folder".to_owned(), |p| p.icon.clone());
         let here_name = tab_name(&dir, &win.places);
+        let shown = win.items.len();
         self.desktop_off_loop(
-            move || read_info(key, &dir, &picked, here_icon, here_name),
+            move || read_info(key, &dir, &picked, here_icon, here_name, shown),
             move |app, (mut info, opens)| {
                 let names = |id: &str| {
                     app.entries
@@ -1452,8 +1474,12 @@ fn read_info(
     picked: &[Item],
     here_icon: String,
     here_name: String,
+    shown: usize,
 ) -> (Info, Option<String>) {
-    let free = crate::desktop_props::space(dir).map(|(_, free)| free);
+    let recents = dir == super::recent::root();
+    let free =
+        crate::desktop_props::space(if recents { home() } else { dir.to_path_buf() }.as_path())
+            .map(|(_, free)| free);
     let count = |path: &Path| {
         std::fs::read_dir(path).map_or(0, |d| {
             d.flatten()
@@ -1482,6 +1508,18 @@ fn read_info(
             },
             rows: Vec::new(),
             icon: crate::desktop::asset_key("asset-doc"),
+            free,
+        };
+        return (info, None);
+    }
+    // Recents, nothing picked: how many it lists.
+    if recents && picked.is_empty() {
+        let info = Info {
+            key,
+            name: here_name,
+            kind: String::new(),
+            rows: vec![(tr("Contains").to_owned(), items(shown))],
+            icon: here_icon,
             free,
         };
         return (info, None);
