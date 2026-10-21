@@ -927,12 +927,16 @@ The big daemon files are cohesive but long — go straight to the function:
   picture shows, `SEL_PAD` 4 at the sides and under; radius 9; black 7.5 % / white 10 %, `pic_mark`,
   UNLIT), hugging that thing — a one-line name's box is not stretched — and its name in its own box of
   the same soft colour laid again (`name_mark`, `NAME_PAD`, radius 4); a selected row is the soft
-  colour across with its name in the darker box, the words as ever; NO accent but in a name being
+  colour across — a SQUARE band, edge to edge, over its stripe (`band_on_stripe`) — with its name in
+  the darker box, the words as ever; NO accent but in a name being
   typed. Where two selected things stand one above the other the lower box begins under the upper's
   (the rows are close). PICTURES SIT ON THE BOTTOM of their space and the name is ~3 px under what
   they show (`LABEL_GAP` 4 with the name box's pixel): each picture's empty rows above and under are
   read once from its pixels (`ink_rows`, `Win::ink`) and it is moved down by those under. The list's
-  zebra is the A mockup's faint one (3.5 % / 4 %), so a selected row stands out of it. Finder's clicks: one click
+  zebra is the A mockup's faint one (3.5 % / 4 %), so a selected row stands out of it; its stripes are
+  SQUARE and run EDGE TO EDGE (sidebar to window side, the grid's clip cuts them) and on PAST the last
+  row to the bottom of what is seen, scrolling with the rows (Max, 2026-10-21, mockup v44: a stripe
+  every other row SLOT, first plain; none in an empty folder); the words keep their 18 px in. Finder's clicks: one click
   selects; a SECOND click on the one thing selected — on its PICTURE opens it, on its NAME types its name
   in place once the double click's time is out (`Press::then`, `Then`, `Win::part_at`,
   `filer_rename_soon`, `rename_due`; another click meanwhile is a double click and opens; travel is a
