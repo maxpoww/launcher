@@ -238,6 +238,8 @@ impl App {
                     .filter(|ds| !ds.in_grid)
                     .map(|ds| ds.id.clone())
             };
+            // (Read before the closure below takes the layout to write to it.)
+            let (sideways, dock_band, left) = (layout.sideways(), layout.dock_band, layout.side == crate::launcher_prefs::Side::Left);
             let placed = if let Some(aid) = dock_anchor {
                 self.dock_order
                     .iter()
@@ -260,6 +262,12 @@ impl App {
                             (self.buffer_size.0 as f32 - 2.0 * m).max(slot),
                             layout.card_top,
                         );
+                        // Beside a side dock: a column by the dock's band.
+                        if sideways {
+                            let m = content::DOCK_PAD_X * scale + dock_h;
+                            let area = content::Rect::new(0.0, m, self.buffer_size.0 as f32, (self.buffer_size.1 as f32 - 2.0 * m).max(band));
+                            return content::col_box(dock_band, dock_rect, n, (slot, band), area, content::BOX_GAP, left);
+                        }
                         let plate = content::Rect::new(dock_rect.x, layout.card_top, dock_rect.w, dock_h);
                         content::row_box(plate, n, (slot, band), area, content::BOX_GAP)
                     })
@@ -984,7 +992,13 @@ impl App {
                 // can reorder or drop into the grid, but never follows the
                 // pointer up/out of the card (dropping outside just snaps
                 // back). Grid/Install drags are unclamped.
-                pos: if drag.from_dock {
+                pos: if drag.from_dock && layout.sideways() {
+                    // (Beside a side dock: held within the card.)
+                    (
+                        drag.pos.0.clamp(layout.card_x, layout.card_x + layout.card_w),
+                        drag.pos.1.clamp(layout.card_top, layout.card_top + layout.card_h),
+                    )
+                } else if drag.from_dock {
                     let right = self.buffer_size.0 as f32 - content::DRAG_MARGIN_X;
                     (
                         drag.pos.0.clamp(content::DRAG_MARGIN_X, right),

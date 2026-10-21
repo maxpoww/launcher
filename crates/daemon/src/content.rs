@@ -1430,6 +1430,8 @@ pub fn layout_on(
         extent,
         n_entries,
         n_min,
+        pins,
+        pin_off,
         n_visible,
         scroll,
         box_open,
@@ -1455,6 +1457,8 @@ fn layout_side(
     extent: f32,
     n_entries: usize,
     n_min: usize,
+    pins: usize,
+    pin_off: f32,
     n_visible: [usize; N_SECTIONS],
     scroll: [f32; N_SECTIONS],
     box_open: bool,
@@ -1473,15 +1477,40 @@ fn layout_side(
     let open_w = side_open_w(config, icon_scale);
 
     // The column: square slots (a minimized window's picture fits its
-    // square), as many as the screen's height holds.
-    let hard_cap = (((h - 2.0 * dock_pad) / dock_slot).floor() as usize).max(1);
+    // square). A column longer than the screen holds OVERFLOWS as the
+    // bottom row does (`layout`): the pins give way, sliding through a
+    // window that ends at the Apps button, never the trio, the running or
+    // the minimized ones. (It keeps a band's room at each end, off the bar.)
     let n_normal = n_entries.saturating_sub(n_min);
-    let n_normal_shown = n_normal.min(hard_cap);
-    let n_min_shown = if n_normal_shown == n_normal { n_min.min(hard_cap - n_normal_shown) } else { 0 };
+    let pins = pins.min(n_normal);
+    let others = (n_normal - pins + n_min) as f32 * dock_slot + if n_min > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
+    let budget = h - 4.0 * dock_pad - 2.0 * band;
+    let pin_room = ((budget - others) / dock_slot).floor();
+    let pin_cap = (pin_room.max(1.0) as usize).min(pins.max(1));
+    let overflow = pins > 0 && pin_room >= 1.0 && pins > pin_room as usize;
+    let max_off = if overflow { (pins - pin_cap) as f32 } else { 0.0 };
+    let off = pin_off.clamp(0.0, max_off);
+    let pin_f = |i: usize| -> f32 {
+        if !overflow || i >= pins {
+            1.0
+        } else {
+            (i as f32 + 1.0 - off).min(off + pin_cap as f32 - i as f32).clamp(0.0, 1.0)
+        }
+    };
+    let hard_cap = (((h - 2.0 * dock_pad) / dock_slot).floor() as usize).max(1);
+    let n_normal_shown = if overflow { n_normal } else { n_normal.min(hard_cap) };
+    let n_min_shown = if overflow {
+        n_min
+    } else if n_normal_shown == n_normal {
+        n_min.min(hard_cap - n_normal_shown)
+    } else {
+        0
+    };
     let n_dock = n_normal_shown + n_min_shown;
     let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
     let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
-    let row_len = n_dock as f32 * dock_slot + dock_min_gap;
+    let slot_len = |i: usize| if i < n_normal_shown { dock_slot * pin_f(i) } else { dock_slot };
+    let row_len = (0..n_dock).map(slot_len).sum::<f32>() + dock_min_gap;
     let basin_h = (row_len + 2.0 * (dock_pad + SIDE_BASIN_AIR * icon_scale)).min(h - 2.0 * gap);
 
     // The open box's rows: as many as the screen holds, six at most; a
@@ -1513,8 +1542,8 @@ fn layout_side(
         if i == dock_min_start {
             y += dock_min_gap;
         }
-        dock_slots.push(Rect::new(slot_x, y, dock_slot, dock_slot));
-        y += dock_slot;
+        dock_slots.push(Rect::new(slot_x, y, dock_slot, slot_len(i)));
+        y += slot_len(i);
     }
     let docked = card_w <= band + 0.5;
     let dock_band = match (docked, left) {
@@ -1602,8 +1631,14 @@ fn layout_side(
         dock_slots,
         dock_min_start,
         dock_min_gap,
-        dock_slot_f: vec![1.0; n_dock],
-        dock_overflow: None,
+        dock_slot_f: (0..n_dock).map(pin_f).collect(),
+        dock_overflow: overflow.then(|| DockOverflow {
+            apps_slot: pins,
+            hidden_right: (0..pins).filter(|&i| i as f32 >= off && pin_f(i) < 0.5).count(),
+            max_off,
+            off,
+            cap: pin_cap,
+        }),
         // (Along a side the plate's resting LENGTH: its height.)
         dock_basin_w: basin_h,
         sections,
@@ -1776,6 +1811,18 @@ pub fn row_box(
     let ((w, h), grid, cap) = row_cells(n, cells, area.w);
     let x = row_box_x(anchor, w, area);
     (Rect::new(x, (anchor.y - gap - h).max(area.y), w, h), grid, cap)
+}
+
+/// A side dock's folder open: its members in a COLUMN (a second dock
+/// beside the dock), centred on `anchor` (the dock icon) and `gap` past the
+/// dock's `band` on the screen's side, kept inside `area`'s height.
+pub fn col_box(band: Rect, anchor: Rect, n: usize, (cell_w, cell_h): (f32, f32), area: Rect, gap: f32, left: bool) -> (Rect, (usize, usize), usize) {
+    let cap = ((area.h / cell_h.max(1.0) + 0.001).floor() as usize).max(1);
+    let rows = n.clamp(1, cap);
+    let h = rows as f32 * cell_h;
+    let y = (anchor.y + anchor.h / 2.0 - h / 2.0).clamp(area.y, (area.y + area.h - h).max(area.y));
+    let x = if left { band.x + band.w + gap } else { band.x - gap - cell_w };
+    (Rect::new(x, y, cell_w, h), (1, rows), cap)
 }
 
 /// An open box's left edge: `w` wide, centred on `anchor`, inside `area`.
@@ -2382,6 +2429,13 @@ pub fn scene(
         // Over the dock: the same run upwards, from its bottom edge — the
         // one next to its icon. A plate like the dock's, with the dock's
         // own padding at the ends.
+        // Beside a SIDE dock: a column, opening out of its edge by the dock.
+        (false, Some(_), Some(to)) if layout.sideways() => {
+            let w = to.w * group_expand.clamp(0.0, 1.0);
+            let pad = DOCK_PAD_X * icon_scale;
+            let x = if layout.side == Side::Left { to.x } else { to.x + to.w - w };
+            Some(Rect::new(x, to.y - pad, w, to.h + 2.0 * pad))
+        }
         (false, Some(_), Some(to)) => {
             let h = to.h * group_expand.clamp(0.0, 1.0);
             let pad = DOCK_PAD_X * icon_scale;
@@ -2953,7 +3007,52 @@ pub fn scene(
     // the row's start and at the button's right side (short of its round
     // corner, so nothing shows past it); then the button over them. (The
     // count pill this replaced is gone: the last one in shows behind.)
-    if let (Some(ov), Some(apps)) = (overflow, apps_drawn) {
+    if let (Some(ov), Some(apps)) = (overflow.filter(|_| sideways), apps_drawn) {
+        // DOWN A SIDE DOCK: the same line along the column, cut at its top
+        // and just past the button's lower side, the button over them.
+        let apps_cy = dock_vcx.get(ov.apps_slot).copied().unwrap_or(apps.y + apps.h / 2.0);
+        let top = layout.dock_slots.first().map_or(0.0, |r| r.y);
+        let mut edge = GridContent {
+            clip: Rect::new(0.0, top, surface.0, (apps.y + apps.h * 0.78) - top),
+            ..Default::default()
+        };
+        for &(slot, entry_idx, s) in &edge_pins {
+            let Some(slot_rect) = layout.dock_slots.get(slot) else { continue };
+            let scale = dock_scales.get(slot).copied().unwrap_or(1.0);
+            let size = (dock_icon * scale).min(slot_rect.w.min(dock_slot) + MAGNIFY_HEADROOM);
+            let own = dock_slot + dock_icon * (scale - 1.0);
+            let step = (dock_vw.get(ov.apps_slot).copied().unwrap_or(dock_slot) + own) / 2.0;
+            let cy = if s < 0.0 {
+                dock_vcx.get(slot + 1).map_or(apps_cy, |y| y - own)
+            } else {
+                apps_cy + (s - ov.cap as f32) * step
+            };
+            let x = match side {
+                Side::Left => slot_rect.x + DOCK_BASELINE_PAD * icon_scale,
+                _ => slot_rect.x + slot_rect.w - DOCK_BASELINE_PAD * icon_scale - size,
+            };
+            edge.icons.push(IconInst {
+                rect: Rect::new(x, cy - size / 2.0, size, size),
+                layer: layer_of(entry_idx),
+                tint: [0.0; 4],
+                ring: -1.0,
+                plate: plate_of(entry_idx),
+            });
+        }
+        if let Some(slot_rect) = layout.dock_slots.get(ov.apps_slot) {
+            let edge_x = match side {
+                Side::Left => slot_rect.x + DOCK_BASELINE_PAD * icon_scale + DOCK_DOT_GAP,
+                _ => slot_rect.x + slot_rect.w - DOCK_BASELINE_PAD * icon_scale - DOCK_DOT_GAP,
+            };
+            dock_dots_col(&mut scene.rects, edge_x, apps_cy, ov.hidden_right, apps.h * 0.8);
+        }
+        scene.grids.push(edge);
+        scene.grids.push(GridContent {
+            clip: Rect::new(0.0, 0.0, surface.0, surface.1),
+            icons: std::mem::take(&mut apps_top),
+            ..Default::default()
+        });
+    } else if let (Some(ov), Some(apps)) = (overflow, apps_drawn) {
         let apps_cx = dock_vcx.get(ov.apps_slot).copied().unwrap_or(apps.x + apps.w / 2.0);
         let mut edge = GridContent {
             clip: Rect::new(
@@ -3867,11 +3966,20 @@ pub fn scene(
         // In the grid that is its top edge, the members coming down; over
         // the dock its bottom edge, the members going up.
         let rest = layout.open_box.unwrap_or(box_rect);
-        let slide = (1.0 - t) * rest.h * if box_over_dock { 1.0 } else { -1.0 };
-        let members_rect = Rect::new(rest.x, rest.y + slide, rest.w, rest.h);
-        // What the members clip to: their own columns (pages slide past
-        // the sides), no further than the box has opened.
-        let members_clip = Rect::new(members_rect.x, box_rect.y, members_rect.w, box_rect.h);
+        // (Beside a side dock the column's members ride out sideways, from
+        // behind the edge by the dock.)
+        let across = box_over_dock && layout.sideways();
+        let (members_rect, members_clip) = if across {
+            let slide = (1.0 - t) * rest.w * if layout.side == Side::Left { -1.0 } else { 1.0 };
+            let r = Rect::new(rest.x + slide, rest.y, rest.w, rest.h);
+            (r, Rect::new(box_rect.x, r.y, box_rect.w, r.h))
+        } else {
+            let slide = (1.0 - t) * rest.h * if box_over_dock { 1.0 } else { -1.0 };
+            let r = Rect::new(rest.x, rest.y + slide, rest.w, rest.h);
+            // What the members clip to: their own columns (pages slide past
+            // the sides), no further than the box has opened.
+            (r, Rect::new(r.x, box_rect.y, r.w, box_rect.h))
+        };
         // Built as its own grid pushed last, so it draws over the loose
         // grid behind it (section grids draw in order).
         let mut boxgrid = GridContent {
@@ -5071,5 +5179,104 @@ mod tests {
         );
         assert_eq!(s.icons[3].layer, 3, "the thumbnail keeps the tile's own layer");
         assert_eq!(s.icons[4].layer, 7, "the badge draws the resolved app layer");
+    }
+
+    // ---- the dock on a side (Max, 2026-10-21) ----
+
+    const SCREEN: (f32, f32) = (1440.0, 900.0);
+
+    fn side_layout(side: Side, extent: f32, apps: usize, scroll: f32) -> Layout {
+        let cfg = config();
+        layout_on(side, &cfg, 1.0, SCREEN, extent, 9, 0, 0, 0.0, &[], [apps, 6, 9], [scroll, 0.0, 0.0], false, (1.0, 1.0), None, 0.0, 0.0, 1)
+    }
+
+    fn side_open(cfg: &Config) -> f32 {
+        side_open_w(cfg, 1.0) + cfg.window.bottom_margin as f32
+    }
+
+    #[test]
+    fn a_side_box_stands_files_install_apps_from_the_edge_to_the_dock() {
+        let cfg = config();
+        let l = side_layout(Side::Left, side_open(&cfg), 30, 0.0);
+        let x = |s: usize| l.sections[s].viewport.x;
+        assert!(x(SECTION_FILES) < x(SECTION_INSTALL) && x(SECTION_INSTALL) < x(SECTION_APPS), "left: Files, Install, Apps");
+        // The dock rides the box's far side: right of Apps.
+        let apps = l.sections[SECTION_APPS].viewport;
+        assert!(l.dock_slots.iter().all(|s| s.x >= apps.x + apps.w), "the dock after Apps");
+        // Every title on one line; the pages go down; Apps 3 across, 18 a page.
+        assert!(l.sections.iter().all(|s| (s.title_pos.1 - l.sections[0].title_pos.1).abs() < 0.01 && s.vertical));
+        assert_eq!((l.sections[SECTION_APPS].cols, l.sections[SECTION_APPS].cap), (3, 18));
+        assert_eq!((l.sections[SECTION_FILES].cols, l.sections[SECTION_FILES].cap), (1, 6));
+        // Search under the sections.
+        assert!(l.search_box.y > apps.y + apps.h);
+        // On the right: mirrored, Apps by the dock.
+        let r = side_layout(Side::Right, side_open(&cfg), 30, 0.0);
+        let rx = |s: usize| r.sections[s].viewport.x;
+        assert!(rx(SECTION_APPS) < rx(SECTION_INSTALL) && rx(SECTION_INSTALL) < rx(SECTION_FILES));
+        assert!(r.dock_slots.iter().all(|s| s.x + s.w <= rx(SECTION_APPS)), "the dock before Apps");
+        assert!((r.card_x + r.card_w - (SCREEN.0 - cfg.window.bottom_margin as f32)).abs() < 0.01, "a gap off the right edge");
+    }
+
+    #[test]
+    fn a_resting_side_dock_is_a_column_live_to_the_edge() {
+        let cfg = config();
+        let docked = (cfg.window.input_bar_height + cfg.window.bottom_margin) as f32;
+        let l = side_layout(Side::Left, docked, 0, 0.0);
+        assert!((l.card_x - cfg.window.bottom_margin as f32).abs() < 0.01 && (l.card_w - cfg.window.input_bar_height as f32).abs() < 0.01);
+        // Centred down the screen, one slot under another.
+        let (first, last) = (l.dock_slots[0], l.dock_slots[8]);
+        assert!(((first.y + last.y + last.h) / 2.0 - SCREEN.1 / 2.0).abs() < 0.01);
+        assert!(l.dock_slots.windows(2).all(|p| (p[1].y - p[0].y - DOCK_SLOT).abs() < 0.01 && p[0].x == p[1].x));
+        // The screen's very edge is live, row by row.
+        let mid = |s: Rect| (s.y + s.h / 2.0);
+        assert_eq!(hit_test(&l, (1.0, mid(l.dock_slots[3])), false, &[]), Some(Hit::DockIcon(3)));
+        assert_eq!(hit_test(&l, (60.0, mid(l.dock_slots[3])), false, &[]), None, "nothing past the plate");
+        // Hidden: off the screen to the left.
+        let hidden = side_layout(Side::Left, 0.0, 0, 0.0);
+        assert!(hidden.card_x + hidden.card_w <= 0.01);
+    }
+
+    #[test]
+    fn a_side_box_pages_down() {
+        let cfg = config();
+        let open = side_open(&cfg);
+        let l = side_layout(Side::Left, open, 30, 0.0);
+        let sec = &l.sections[SECTION_APPS];
+        assert_eq!(sec.n_pages, 2);
+        assert!((sec.page_len() - sec.viewport.h).abs() < 0.01);
+        let cell = |l: &Layout, col: f32, row: f32| {
+            let v = l.sections[SECTION_APPS].viewport;
+            (v.x + (col + 0.5) * GRID_CELL_W, v.y + (row + 0.5) * GRID_CELL_H)
+        };
+        let slots = idslots(30);
+        assert_eq!(hit_test(&l, cell(&l, 2.0, 1.0), false, &slots), Some(Hit::GridCell(SECTION_APPS, 5)), "row-major, three across");
+        // A page down: the same place is the second page's.
+        let down = side_layout(Side::Left, open, 30, sec.viewport.h);
+        assert_eq!(hit_test(&down, cell(&down, 0.0, 0.0), false, &slots), Some(Hit::GridCell(SECTION_APPS, 18)));
+        assert!((scroll_to_reveal(sec, 20) - sec.viewport.h).abs() < 0.01);
+        // The dock's icons, beside the box, by their rows.
+        let s = l.dock_slots[2];
+        assert_eq!(hit_test(&l, (s.x + s.w / 2.0, s.y + s.h / 2.0), false, &slots), Some(Hit::DockIcon(2)));
+    }
+
+    #[test]
+    fn a_side_dock_overflows_down_its_column_and_opens_folders_beside_it() {
+        let cfg = config();
+        let docked = (cfg.window.input_bar_height + cfg.window.bottom_margin) as f32;
+        // 40 pins and the trio: more than a 900 px column holds.
+        let l = layout_on(Side::Left, &cfg, 1.0, SCREEN, docked, 43, 0, 40, 0.0, &[], [0; 3], [0.0; 3], false, (1.0, 1.0), None, 0.0, 0.0, 1);
+        let ov = l.dock_overflow.expect("the pins overflow");
+        assert_eq!(ov.apps_slot, 40);
+        let last = l.dock_slots.last().unwrap();
+        assert!(l.dock_slots[0].y >= 0.0 && last.y + last.h <= SCREEN.1, "the column stays on the screen");
+        assert!((l.dock_slots[40].h - DOCK_SLOT).abs() < 0.01, "the trio keeps its slots");
+        // A folder on it opens as a column beside the band, centred on its icon.
+        let anchor = l.dock_slots[3];
+        let (b, grid, cap) = col_box(l.dock_band, anchor, 5, (78.0, 70.0), Rect::new(0.0, 50.0, SCREEN.0, 800.0), 12.0, true);
+        assert_eq!((grid, cap), ((1, 5), 11));
+        assert!((b.x - (l.dock_band.x + l.dock_band.w + 12.0)).abs() < 0.01);
+        assert!(b.y >= 50.0 && b.y + b.h <= 850.0);
+        let (r, ..) = col_box(l.dock_band, anchor, 5, (78.0, 70.0), Rect::new(0.0, 50.0, SCREEN.0, 800.0), 12.0, false);
+        assert!((r.x + r.w - (l.dock_band.x - 12.0)).abs() < 0.01, "on the right, before the band");
     }
 }

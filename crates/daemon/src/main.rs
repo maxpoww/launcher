@@ -6433,9 +6433,9 @@ impl App {
         // On an overflowing dock a side-scroll slides the pins' window:
         // icons come out of the overflow tile one way, go back the other.
         let layout = self.current_layout();
-        if let (Some(ov), Some((_, y))) = (layout.dock_overflow, self.pointer_pos) {
-            if y >= layout.card_top && y < layout.dock_hit_bottom {
-                let slot_px = layout.dock_slots.get(ov.apps_slot).map_or(44.0, |r| r.w.max(1.0));
+        if let (Some(ov), Some(pos)) = (layout.dock_overflow, self.pointer_pos) {
+            if layout.on_dock(pos) {
+                let slot_px = layout.dock_slots.get(ov.apps_slot).map_or(44.0, |r| layout.slot_span(r).1.max(1.0));
                 self.dock_pin_target = (self.dock_pin_target + value as f32 / slot_px).clamp(0.0, ov.max_off);
                 self.dock_hscroll_at = Some(Instant::now());
                 self.schedule_frame();

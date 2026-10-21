@@ -75,6 +75,15 @@ impl App {
     ) -> Option<usize> {
         let (x, y) = pos;
         let slots = &layout.dock_slots;
+        // Beside a side dock: on its band, before the first slot whose
+        // middle is below the pointer.
+        if layout.sideways() {
+            if !layout.on_dock(pos) {
+                return None;
+            }
+            let insert = slots.iter().position(|s| y < s.y + s.h / 2.0).unwrap_or(slots.len());
+            return Some(insert.min(self.dock_user_pins));
+        }
         let dock_top = layout.card_top;
         // An empty dock has no slots to measure against, but the band is
         // still there — fall back to its height so a drop anywhere in it
@@ -111,7 +120,16 @@ impl App {
         if let Some(bin) = self.dock_order.iter().position(|&e| {
             self.entries.get(e).is_some_and(|e| groups::is_trash(&e.id))
         }) {
-            if let Some(s) = layout.dock_slots.get(bin) {
+            // Beside a side dock: its share of the column, and a margin on
+            // the screen's side of the band.
+            if let Some(s) = layout.dock_slots.get(bin).filter(|_| layout.sideways()) {
+                let reach = s.h * BIN_REACH;
+                let b = layout.dock_band;
+                let margin = s.w * BIN_REACH_ABOVE;
+                if y >= s.y - reach && y <= s.y + s.h + reach && x >= b.x - margin && x <= b.x + b.w + margin {
+                    return Some(bin);
+                }
+            } else if let Some(s) = layout.dock_slots.get(bin) {
                 let reach = s.w * BIN_REACH;
                 if x >= s.x - reach
                     && x <= s.x + s.w + reach
@@ -122,12 +140,14 @@ impl App {
                 }
             }
         }
-        if y < layout.card_top || y > layout.dock_hit_bottom {
+        let sideways = layout.sideways();
+        if if sideways { !layout.on_dock(pos) } else { y < layout.card_top || y > layout.dock_hit_bottom } {
             return None;
         }
         let slot = layout.dock_slots.iter().position(|s| {
-            let fx = (x - s.x) / s.w;
-            (0.25..0.75).contains(&fx)
+            let (start, len) = layout.slot_span(s);
+            let f = (if sideways { y } else { x } - start) / len;
+            (0.25..0.75).contains(&f)
         })?;
         // The fixed trio takes no folds — only the Bin takes drops (delete).
         let id = self.dock_order.get(slot).and_then(|&e| self.entries.get(e)).map(|e| e.id.as_str());
@@ -287,9 +307,9 @@ impl App {
             .take(layout.dock_slots.len())
             .filter(|(_, &e)| e != drag.entry_idx)
             .map(|(k, &e)| {
-                let slot = &layout.dock_slots[k];
+                let (start, len) = layout.slot_span(&layout.dock_slots[k]);
                 let shift = self.dock_slide.get(k).copied().unwrap_or(0.0);
-                (e, slot.x + slot.w / 2.0 + shift * slot.w)
+                (e, start + len / 2.0 + shift * len)
             })
             .collect();
         debug!(
@@ -445,8 +465,8 @@ impl App {
         self.dock_slide = vec![0.0; n_dock];
         for (k, &e) in self.dock_order.iter().take(n_dock).enumerate() {
             if let Some(&(_, cx)) = dock_vis.iter().find(|&&(ve, _)| ve == e) {
-                let slot = &new_layout.dock_slots[k];
-                self.dock_slide[k] = (cx - (slot.x + slot.w / 2.0)) / slot.w;
+                let (start, len) = new_layout.slot_span(&new_layout.dock_slots[k]);
+                self.dock_slide[k] = (cx - (start + len / 2.0)) / len;
             }
         }
         // Magnification sleeps a full second so the icon simply *is*
@@ -565,8 +585,10 @@ impl App {
         // (Max wants the cycle; the drop always lands on the page
         // that's live at release).
         let vp = layout.sections[content::SECTION_APPS].viewport;
+        let vertical = layout.sections[content::SECTION_APPS].vertical;
         if layout.sections[content::SECTION_APPS].n_pages > 1 {
-            let dir = edge_page_dir(vp.x, vp.w, pos.0);
+            // (Pages going down: the bands are the grid's top and bottom.)
+            let dir = if vertical { edge_page_dir(vp.y, vp.h, pos.1) } else { edge_page_dir(vp.x, vp.w, pos.0) };
             if edge_page_due(&mut self.grid_drag_page_at, dir) {
                 info!("drag page turn: dir {dir}");
                 self.page_by(content::SECTION_APPS, dir, true);
@@ -591,12 +613,15 @@ impl App {
         // append slot — the SH edge-drop bug was exactly this zone
         // resolving to "outside" (the drop no-op'd and snapped back).
         let Some((d, fx, _fy)) = self.apps_display_cell(layout, pos) else {
-            let beside =
-                pos.1 >= vp.y && pos.1 <= vp.y + vp.h && edge_page_dir(vp.x, vp.w, pos.0) != 0;
+            let beside = if vertical {
+                pos.0 >= vp.x && pos.0 <= vp.x + vp.w && edge_page_dir(vp.y, vp.h, pos.1) != 0
+            } else {
+                pos.1 >= vp.y && pos.1 <= vp.y + vp.h && edge_page_dir(vp.x, vp.w, pos.0) != 0
+            };
             let want = beside.then(|| {
                 let cap = self.apps_cap.max(1);
                 let page_start = self.scroll.per[content::SECTION_APPS]
-                    .page(vp.w.max(1.0))
+                    .page(layout.sections[content::SECTION_APPS].page_len().max(1.0))
                     .min(
                         layout.sections[content::SECTION_APPS]
                             .n_pages
@@ -734,7 +759,11 @@ impl App {
         // a release there lands on the live page (the pointer was parked
         // there flipping pages — treating it as "outside" silently no-op'd
         // the whole drag-to-new-page gesture; SH edge-drop bug).
-        let beside = pos.1 >= vp.y && pos.1 <= vp.y + vp.h && edge_page_dir(vp.x, vp.w, pos.0) != 0;
+        let beside = if layout.sections[content::SECTION_APPS].vertical {
+            pos.0 >= vp.x && pos.0 <= vp.x + vp.w && edge_page_dir(vp.y, vp.h, pos.1) != 0
+        } else {
+            pos.1 >= vp.y && pos.1 <= vp.y + vp.h && edge_page_dir(vp.x, vp.w, pos.0) != 0
+        };
         if !vp.contains(pos) && !beside {
             // Dropped outside the grid (a dock app snaps back and stays
             // pinned; a grid member dragged out just returns): no-op.
