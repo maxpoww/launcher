@@ -457,7 +457,17 @@ The big daemon files are cohesive but long — go straight to the function:
   OPENS ON HOVER (Max: "i dont want the open on hover on the menus"): pages and Get info on a CLICK.
   The look: rows 29 px, 14 px symbols at 75 % of the ink, the row under the pointer an ACCENT band with
   white words (red for a red row), hairline rules between groups, the width the words want (214 at
-  least, `width_of`). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
+  least, `width_of`). THE BAND GLIDES (Max, 2026-10-21: "smooth the jump between the items on the menus";
+  `desktop_menu::Band`): ONE band, its top and height on a critically damped spring (`glide`, ω `GLIDE` 41:
+  nine tenths there in ~95 ms, at rest by ~140; exact for any dt, and a newer row mid-way keeps its speed),
+  straight over the rules; a row's words and symbol turn white as much as the band LIES on them (`covered`),
+  its colour eases to red onto a red row; it FADES IN (and grows its last 2 px) on the row it first lands on
+  and fades out where it is when the pointer leaves the panel — over a rule, a note or a row with nothing to
+  do it stays on the last row (`Menu::point`: the hosts call it with the pointer, never set `hover`); a page
+  turned starts it afresh (`turn`); `ease_band` is run with the entrance's ease and says when it is at rest
+  (nothing drawn again then). Not on the phone pill's box (its own drawing). Rig: `files rowsat` (each
+  row's place in the window); strips are recorded with `wf-recorder -D` on the rig's output and cut with
+  ffmpeg's `mpdecimate`. NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
   `filer::copy_name`, undoable), Paste into folder, Select all, Copy to <the one stick plugged in>
   (`one_stick`), Send to › (a COPY now), New folder with these ("New folder with items", the selection
   moved in, its name typed; `Undo::Grouped`), Get info (Files: the i card; a place, the desktop: the
