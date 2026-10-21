@@ -773,6 +773,13 @@ const ICON_INK: f32 = 0.75;
 const NOTE_INK: f32 = 0.5;
 const LINE_INK: f32 = 0.12;
 const OFF_INK: f32 = 0.38;
+/// THE BAND's glide: ω of a critically damped spring — at rest ~140 ms
+/// after it sets off, nine tenths there in ~95 (`glide`).
+const GLIDE: f32 = 41.0;
+/// Its fade in and out (as `ease_toward`'s rate), and how much smaller it is
+/// at nothing (it grows the last pixels as it fades in).
+const BAND_FADE: f32 = 30.0;
+const BAND_GROW: f32 = 2.0;
 
 /// A colour given in sRGB, as the renderer takes it.
 fn lin(c: [f32; 4]) -> [f32; 4] {
@@ -789,6 +796,43 @@ fn lin(c: [f32; 4]) -> [f32; 4] {
 /// The one colour of its own: what cannot be undone — the palette's red.
 fn red() -> [f32; 4] {
     lin(crate::palette::danger_srgb())
+}
+
+/// THE BAND under the pointer (Max, 2026-10-21: "smooth the jump between
+/// the items on the menus"): ONE band that GLIDES from row to row, straight
+/// over the rules and notes on its way, a row's words and symbol turning
+/// white as much as it lies on them; red on its way onto a red row. It
+/// fades in on the row it first lands on, and out where it is when the
+/// pointer leaves the panel (`Menu::point`, `Menu::ease_band`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Band {
+    /// The row it goes to (none: it fades out where it is).
+    pub to: Option<usize>,
+    /// It came back from nothing: it is put on its row, never slid there.
+    fresh: bool,
+    /// Its top (from the panel's top) and height, and their speeds.
+    y: f32,
+    h: f32,
+    vy: f32,
+    vh: f32,
+    /// How much of it shows, and how red it is (0: the accent).
+    alpha: f32,
+    red: f32,
+}
+
+/// `x` (at speed `v`) a critically damped spring's `dt` on toward `to` —
+/// exact for any `dt`, so the glide is the same at any frame rate, and a
+/// new `to` mid-way carries the speed it has (no restart, no lag).
+fn glide(x: f32, v: f32, to: f32, dt: f32) -> (f32, f32) {
+    let d = x - to;
+    let e = (-GLIDE * dt).exp();
+    let b = v + GLIDE * d;
+    (to + (d + b * dt) * e, (v - GLIDE * b * dt) * e)
+}
+
+/// `a` mixed toward `b` by `k`.
+fn mix(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * k)
 }
 
 /// What the menu is painted with: the OPTIONS boxes' adaptive surface
@@ -848,6 +892,8 @@ pub(crate) struct Menu {
     /// It hangs UP from its foot (the selection pill's ⋯): a new page
     /// keeps the foot where it is.
     pub up: bool,
+    /// The band under the pointer.
+    pub band: Band,
 }
 
 impl Menu {
@@ -893,6 +939,7 @@ impl Menu {
             t: 0.0,
             grow_from: None,
             up: false,
+            band: Band::default(),
         }
     }
 
@@ -914,10 +961,90 @@ impl Menu {
         self.grow_from = None;
     }
 
-    /// Turn to `page`, made of `rows`.
+    /// Turn to `page`, made of `rows`. (Another page: the band starts
+    /// afresh on it — it does not slide across.)
     pub fn turn(&mut self, page: Page, rows: Vec<Row>) {
+        if page != self.page {
+            self.band = Band::default();
+        }
         self.page = page;
         self.set_rows(rows);
+    }
+
+    /// The pointer is at `at` (none: off the surface): the row under it,
+    /// and where the band goes — to that row; on over a rule, a note or a
+    /// row with nothing to do (it stays on the last row: it never stops on
+    /// those); away out of the panel. Whether anything changed.
+    pub fn point(&mut self, at: Option<(f32, f32)>) -> bool {
+        let before = (self.hover, self.band.to);
+        self.hover = at.and_then(|p| self.hit(p));
+        let inside = at.is_some_and(|p| self.rect.contains(p));
+        let to = match self.hover {
+            Some(i) => Some(i),
+            None if inside => self.band.to,
+            None => None,
+        };
+        if to.is_some() && self.band.to.is_none() {
+            self.band.fresh = true;
+        }
+        self.band.to = to;
+        before != (self.hover, self.band.to)
+    }
+
+    /// Move the band `dt` on: whether it still moves (nothing is drawn
+    /// again for it at rest).
+    pub fn ease_band(&mut self, dt: f32) -> bool {
+        use crate::animation::{ease_toward, reduce_motion};
+        let target = self.band.to.and_then(|i| {
+            let r = self.row_rects().get(i).copied()?;
+            match self.rows.get(i)? {
+                Row::Item {
+                    danger, off: false, ..
+                } => Some((r.y - self.rect.y, r.h, *danger)),
+                _ => None,
+            }
+        });
+        let b = &mut self.band;
+        let Some((ty, th, danger)) = target else {
+            let (alpha, fading) = ease_toward(b.alpha, 0.0, dt, BAND_FADE, 0.01);
+            b.alpha = alpha;
+            return fading;
+        };
+        let red = if danger { 1.0 } else { 0.0 };
+        // Back from nothing (or never shown): put on its row, to fade in
+        // there — never slid in from where it last was.
+        if b.fresh || b.alpha < 0.01 || reduce_motion() {
+            let alpha = if b.fresh { 0.0 } else { b.alpha };
+            *b = Band {
+                to: b.to,
+                y: ty,
+                h: th,
+                red,
+                alpha,
+                ..Band::default()
+            };
+        }
+        (b.y, b.vy) = glide(b.y, b.vy, ty, dt);
+        (b.h, b.vh) = glide(b.h, b.vh, th, dt);
+        let at_rest = (b.y - ty).abs() < 0.2
+            && b.vy.abs() < 4.0
+            && (b.h - th).abs() < 0.2
+            && b.vh.abs() < 4.0;
+        if at_rest {
+            (b.y, b.vy, b.h, b.vh) = (ty, 0.0, th, 0.0);
+        }
+        let (alpha, showing) = ease_toward(b.alpha, 1.0, dt, BAND_FADE, 0.01);
+        let (r, reddening) = ease_toward(b.red, red, dt, BAND_FADE, 0.01);
+        (b.alpha, b.red) = (alpha, r);
+        !at_rest || showing || reddening
+    }
+
+    /// How much the band lies on the row at `y`, `h` high (0..1, its fade
+    /// in it): how white that row's ink is.
+    fn covered(&self, y: f32, h: f32) -> f32 {
+        let b = &self.band;
+        let over = (b.y + b.h).min(y + h) - b.y.max(y);
+        (over / h).clamp(0.0, 1.0) * b.alpha
     }
 
     /// Back to the first page.
@@ -1035,7 +1162,7 @@ impl Menu {
                 });
             }
         };
-        for (i, (row, rect)) in self.rows.iter().zip(self.row_rects()).enumerate() {
+        for (row, rect) in self.rows.iter().zip(self.row_rects()) {
             let rect = Rect::new(rect.x, rect.y + lift, rect.w, rect.h);
             match row {
                 Row::Sep => grid.rects.push(RectInst {
@@ -1066,27 +1193,14 @@ impl Menu {
                     danger,
                     off,
                 } => {
-                    // The row under the pointer: a band of the accent (red
-                    // for what cannot be undone), its words and symbol white.
-                    let hot = self.hover == Some(i) && !off;
-                    if hot {
-                        grid.rects.push(RectInst {
-                            rect,
-                            radius: ROW_RADIUS,
-                            color: fade(if *danger { red() } else { paint.accent }),
-                            glass: 0.0,
-                            border: 0.0,
-                        });
-                    }
-                    let base = if hot {
-                        white
-                    } else if *danger {
-                        red()
-                    } else {
-                        paint.ink
-                    };
+                    // Under the band its words and symbol are white, as
+                    // much as it lies on them.
+                    let hot = self.covered(rect.y - lift - self.rect.y, rect.h);
+                    let rest = if *danger { red() } else { paint.ink };
+                    let base = mix(rest, white, hot);
                     let k = if *off { OFF_INK } else { 1.0 };
                     let at = |a: f32| [base[0], base[1], base[2], base[3] * a * k];
+                    let toward = |a: f32| a + (1.0 - a) * hot;
                     let cy = rect.y + rect.h / 2.0;
                     if !icon.is_empty() {
                         let r = Rect::new(
@@ -1095,7 +1209,7 @@ impl Menu {
                             ICON,
                             ICON,
                         );
-                        symbol(&mut grid, icon, r, at(if hot { 1.0 } else { ICON_INK }));
+                        symbol(&mut grid, icon, r, at(toward(ICON_INK)));
                     }
                     let chev = turns_page(*action);
                     if chev {
@@ -1105,7 +1219,7 @@ impl Menu {
                             CHEV,
                             CHEV,
                         );
-                        symbol(&mut grid, "chev", r, at(if hot { 1.0 } else { 0.55 }));
+                        symbol(&mut grid, "chev", r, at(toward(0.55)));
                     }
                     let room = rect.w - TEXT_X - if chev { CHEV + 12.0 } else { 8.0 };
                     grid.labels.push(label(
@@ -1119,6 +1233,26 @@ impl Menu {
                     ));
                 }
             }
+        }
+        // THE BAND: the accent (red onto a red row), over the rules it
+        // crosses, under the words (a grid draws its fills first).
+        let b = &self.band;
+        if b.alpha > 0.0 && b.h > 0.0 {
+            let grow = (1.0 - b.alpha) * BAND_GROW;
+            let rect = Rect::new(
+                self.rect.x + PAD + grow,
+                self.rect.y + lift + b.y + grow,
+                self.rect.w - 2.0 * PAD - 2.0 * grow,
+                b.h - 2.0 * grow,
+            );
+            let color = mix(paint.accent, red(), b.red);
+            grid.rects.push(RectInst {
+                rect,
+                radius: ROW_RADIUS,
+                color: fade([color[0], color[1], color[2], color[3] * b.alpha]),
+                glass: 0.0,
+                border: 0.0,
+            });
         }
         scene.grids.push(grid);
     }
@@ -1451,6 +1585,142 @@ mod tests {
         assert!(sort.contains(&Row::item("Size", "tick", Action::SortBy(2))));
         assert!(sort.contains(&Row::item("Descending", "tick", Action::SortDir(true))));
     }
+    /// A file's menu, its rows' middles (every row, rules too).
+    fn band_menu() -> (Menu, Vec<(f32, f32)>) {
+        let menu = Menu::new(
+            Ctx {
+                on: On::File,
+                here: true,
+                ..Default::default()
+            },
+            Some(0),
+            false,
+            (10.0, 10.0),
+            900.0,
+            900.0,
+        );
+        let mids = menu
+            .row_rects()
+            .iter()
+            .map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0))
+            .collect();
+        (menu, mids)
+    }
+
+    /// Ease `menu`'s band for `secs` at `hz`: whether it still moves.
+    fn run(menu: &mut Menu, secs: f32, hz: f32) -> bool {
+        let mut moving = true;
+        for _ in 0..(secs * hz).round() as usize {
+            moving = menu.ease_band(1.0 / hz);
+        }
+        moving
+    }
+
+    #[test]
+    fn the_band_fades_in_where_it_lands_and_glides_from_row_to_row() {
+        let (mut m, mids) = band_menu();
+        let tops: Vec<f32> = m.row_rects().iter().map(|r| r.y - m.rect.y).collect();
+        let top = |i: usize| tops[i];
+        // Entering on the third row: put there, fading in — not slid in.
+        assert!(m.point(Some(mids[2])));
+        m.ease_band(1.0 / 60.0);
+        assert_eq!(m.band.y, top(2));
+        assert!(m.band.alpha > 0.0 && m.band.alpha < 1.0);
+        assert!(!run(&mut m, 0.3, 60.0), "at rest: nothing drawn again");
+        assert_eq!(m.band.alpha, 1.0);
+        // On to the sixth (over a rule): it glides, at rest within ~160 ms
+        // and the same at 60 and 144 frames a second.
+        let (mut a, mut b) = (m.clone(), m.clone());
+        for menu in [&mut a, &mut b] {
+            menu.point(Some(mids[6]));
+        }
+        run(&mut a, 1.0 / 12.0, 60.0);
+        run(&mut b, 1.0 / 12.0, 144.0);
+        assert!(
+            (a.band.y - b.band.y).abs() < 0.01,
+            "{} {}",
+            a.band.y,
+            b.band.y
+        );
+        assert!(a.band.y > top(2) && a.band.y < top(6), "on its way");
+        run(&mut a, 1.0 / 12.0, 60.0);
+        assert!((a.band.y - top(6)).abs() < 1.5, "there by ~160 ms");
+        assert!(!run(&mut a, 0.1, 60.0));
+        assert_eq!(a.band.y, top(6));
+    }
+
+    #[test]
+    fn the_band_follows_the_newest_row_keeping_its_speed() {
+        let (mut m, mids) = band_menu();
+        m.point(Some(mids[0]));
+        run(&mut m, 0.3, 60.0);
+        m.point(Some(mids[8]));
+        run(&mut m, 0.03, 60.0);
+        let (y, vy) = (m.band.y, m.band.vy);
+        assert!(vy > 0.0);
+        // A newer row mid-way: the speed it has is carried on, not restarted.
+        m.point(Some(mids[13]));
+        m.ease_band(0.0);
+        assert!((m.band.y - y).abs() < 0.01 && (m.band.vy - vy).abs() < 0.01);
+        run(&mut m, 0.4, 60.0);
+        assert_eq!(m.band.y, m.row_rects()[13].y - m.rect.y);
+    }
+
+    #[test]
+    fn the_band_never_stops_on_a_rule_and_fades_where_it_is_on_leaving() {
+        let (mut m, mids) = band_menu();
+        let rule = m.rows.iter().position(|r| *r == Row::Sep).unwrap();
+        m.point(Some(mids[rule - 1]));
+        run(&mut m, 0.3, 60.0);
+        let y = m.band.y;
+        // Over the rule: no row under the pointer, the band stays.
+        m.point(Some(mids[rule]));
+        assert_eq!((m.hover, m.band.to), (None, Some(rule - 1)));
+        // Out of the panel: it fades out where it is.
+        m.point(Some((m.rect.x + m.rect.w + 40.0, mids[rule].1)));
+        assert_eq!(m.band.to, None);
+        assert!(!run(&mut m, 0.4, 60.0));
+        assert_eq!((m.band.y, m.band.alpha), (y, 0.0));
+        // Back on another row: put there and faded in, not slid from y.
+        m.point(Some(mids[rule + 2]));
+        m.ease_band(1.0 / 60.0);
+        assert_eq!(m.band.y, m.row_rects()[rule + 2].y - m.rect.y);
+        // A page turned: it starts afresh there.
+        m.turn(Page::Sort, sort_page(0, false));
+        assert_eq!(m.band, Band::default());
+    }
+
+    #[test]
+    fn the_band_turns_red_on_its_way_onto_a_red_row() {
+        let mut m = Menu::new(
+            Ctx {
+                on: On::BinItem,
+                ..Default::default()
+            },
+            Some(0),
+            false,
+            (10.0, 10.0),
+            900.0,
+            900.0,
+        );
+        let rects = m.row_rects();
+        let red_row = m
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Item { danger: true, .. }))
+            .expect("the bin has a red row");
+        let first = m.rows.iter().position(|r| r.action().is_some()).unwrap();
+        let mid = |r: &Rect| (r.x + 5.0, r.y + r.h / 2.0);
+        m.point(Some(mid(&rects[first])));
+        run(&mut m, 0.3, 60.0);
+        assert_eq!(m.band.red, 0.0);
+        m.point(Some(mid(&rects[red_row])));
+        run(&mut m, 0.03, 60.0);
+        assert!(m.band.red > 0.0 && m.band.red < 1.0, "on its way");
+        run(&mut m, 0.3, 60.0);
+        assert_eq!(m.band.red, 1.0);
+    }
+
     /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one
     /// it has not is an empty gap where the symbol belongs).
     #[test]

@@ -171,7 +171,7 @@ impl App {
         if let Some(menu) = self.desktop.menu.as_mut() {
             let (t, m) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
             menu.t = t;
-            moving |= m;
+            moving |= m | menu.ease_band(dt);
         }
         if let Some(props) = self.desktop.props.as_mut() {
             let (t, m) = crate::animation::ease_toward(props.t, 1.0, dt, 16.0, 0.004);

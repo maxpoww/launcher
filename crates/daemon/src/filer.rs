@@ -3495,7 +3495,7 @@ impl App {
             return false;
         };
         menu.turn(Page::Send, rows.to_vec());
-        menu.hover = at.and_then(|p| menu.hit(p));
+        menu.point(at);
         true
     }
 
@@ -4984,7 +4984,7 @@ impl App {
         if let Some(menu) = win.menu.as_mut() {
             let (t, m) = crate::animation::ease_toward(menu.t, 1.0, dt, 20.0, 0.004);
             menu.t = t;
-            moving |= m;
+            moving |= m | menu.ease_band(dt);
         }
         if let Some(props) = win.props.as_mut() {
             let (t, m) = crate::animation::ease_toward(props.t, 1.0, dt, 16.0, 0.004);
@@ -5489,10 +5489,11 @@ impl App {
         // A menu or the Properties box up: only its rows answer the pointer
         // — and only by their band: nothing opens on hover (Max,
         // 2026-10-21: "i dont want the open on hover on the menus").
-        if let (Some(menu), Some(at)) = (win.menu.as_mut(), win.ptr) {
-            let over = menu.hit(at);
-            if over != menu.hover {
-                menu.hover = over;
+        // (Off the window, the band fades where it is.)
+        let at = win.ptr;
+        let band = win.menu.as_mut().is_some_and(|m| m.point(at));
+        if win.menu.is_some() && at.is_some() {
+            if band {
                 self.filer_request_draw(id);
             }
             return;
@@ -5505,7 +5506,7 @@ impl App {
         let side = win.side_follow();
         let wait = !waiting && win.side_wait.is_some();
         let spot = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
-        let changed = spot != win.hover || side;
+        let changed = spot != win.hover || side || band;
         win.hover = spot;
         if wait {
             self.filer_side_wait(id);
@@ -5813,7 +5814,7 @@ impl App {
                 menu.grow_from = Some(props.rect);
                 menu.t = 0.0;
                 menu.pressed = None;
-                menu.hover = menu.hit(at);
+                menu.point(Some(at));
                 win.menu = Some(menu);
             }
             self.filer_hover(id);
@@ -7317,6 +7318,18 @@ impl App {
                 }
             }
             // `rows` logs the rows of the menu that is up.
+            // `rowsat`: each row's place in the window (the band's rig).
+            "rowsat" => {
+                let said = self.filer.win(id).and_then(|w| w.menu.as_ref()).map_or_else(
+                    || "no menu is up".to_owned(),
+                    |m| {
+                        let r = m.row_rects();
+                        let at = |i: usize| format!("{i} {} {} {} {}", r[i].x, r[i].y, r[i].w, r[i].h);
+                        (0..r.len()).map(at).collect::<Vec<_>>().join("\n")
+                    },
+                );
+                return said;
+            }
             "rows" => {
                 let said = self.filer.win(id).and_then(|w| w.menu.as_ref()).map_or_else(
                     || "no menu is up".to_owned(),

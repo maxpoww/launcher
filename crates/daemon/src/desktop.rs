@@ -2676,7 +2676,7 @@ impl App {
         let (w, h) = self.desktop_size;
         let many = ctx.on == crate::desktop_menu::On::Many;
         let mut menu = Menu::new(ctx, item, many, at, w as f32, h as f32);
-        menu.hover = menu.hit(at);
+        menu.point(Some(at));
         self.desktop.menu = Some(menu);
         self.request_desktop_draw();
     }
@@ -2799,13 +2799,13 @@ impl App {
             Action::SortPage => {
                 let (key, desc) = self.desktop.sort;
                 menu.turn(Page::Sort, crate::desktop_menu::sort_page(key, desc));
-                menu.hover = at.and_then(|p| menu.hit(p));
+                menu.point(at);
                 self.request_desktop_draw();
                 return "Sort by".to_owned();
             }
             Action::Back => {
                 menu.show_main();
-                menu.hover = at.and_then(|p| menu.hit(p));
+                menu.point(at);
                 self.request_desktop_draw();
                 return "Back".to_owned();
             }
@@ -3178,7 +3178,7 @@ impl App {
         let turn = |menu: &mut Menu, at: Option<(f32, f32)>| {
             if matches!(menu.page, Page::Main | Page::Send) {
                 menu.turn(Page::Send, rows.clone());
-                menu.hover = at.and_then(|p| menu.hit(p));
+                menu.point(at);
             }
         };
         let to = self.desktop.send_for;
@@ -3709,7 +3709,7 @@ impl App {
             menu.grow_from = Some(props.rect);
             menu.t = 0.0;
             menu.pressed = None;
-            menu.hover = menu.hit(at);
+            menu.point(Some(at));
             self.desktop.menu = Some(menu);
         }
         self.request_desktop_draw();
@@ -4841,9 +4841,7 @@ impl App {
         // it — nothing opens on hover (Max, 2026-10-21: "i dont want the
         // open on hover on the menus").
         if let Some(menu) = self.desktop.menu.as_mut() {
-            let over = menu.hit((x, y));
-            if over != menu.hover {
-                menu.hover = over;
+            if menu.point(Some((x, y))) {
                 self.request_desktop_draw();
             }
             self.desktop_cursor();
