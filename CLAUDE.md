@@ -922,16 +922,25 @@ The big daemon files are cohesive but long — go straight to the function:
   loop by `filer_info_due` whenever the selection changes — `info_key`): preview, name, kind, Contains or
   Size (+ bytes), Modified, Where, Opens with (`quicklook::default_app` → the dock's index); its foot
   "N items, X available" / "n of N selected, X available". Solid (no blur to frost it), names under it
-  left out (`covered`). SELECTION AND CLICKS, the mockup's (Max, 2026-10-21): a selected thing in
-  the grid wears TWO marks apart — a soft rounded backdrop behind its picture (`SEL_PAD`; black 7.5 % /
-  white 10 %, `pic_mark`) and its name in a tight pill of the palette's ACCENT, white on it, both lines
-  (`NAME_PAD`); a selected row is the accent across, every word white. Finder's clicks: one click
+  left out (`covered`). SELECTION AND CLICKS, the mockup's (Max, 2026-10-21, "SELECTED: one soft box"): a selected
+  thing in the grid wears ONE soft box over its picture AND its name (`SEL_TOP` 6 over what the
+  picture shows, `SEL_PAD` 4 at the sides and under; radius 9; black 7.5 % / white 10 %, `pic_mark`,
+  UNLIT), hugging that thing — a one-line name's box is not stretched — and its name in its own box of
+  the same soft colour laid again (`name_mark`, `NAME_PAD`, radius 4); a selected row is the soft
+  colour across with its name in the darker box, the words as ever; NO accent but in a name being
+  typed. Where two selected things stand one above the other the lower box begins under the upper's
+  (the rows are close). PICTURES SIT ON THE BOTTOM of their space and the name is ~3 px under what
+  they show (`LABEL_GAP` 4 with the name box's pixel): each picture's empty rows above and under are
+  read once from its pixels (`ink_rows`, `Win::ink`) and it is moved down by those under. The list's
+  zebra is the A mockup's faint one (3.5 % / 4 %), so a selected row stands out of it. Finder's clicks: one click
   selects; a SECOND click on the one thing selected — on its PICTURE opens it, on its NAME types its name
   in place once the double click's time is out (`Press::then`, `Then`, `Win::part_at`,
   `filer_rename_soon`, `rename_due`; another click meanwhile is a double click and opens; travel is a
   drag and does neither; `Win::opened` keeps a double click from opening twice). A name being typed has
   its STEM selected (the ending stays out — `Rename::picked`, a caret `Rename::caret`, ←/→/Home/End/
-  Delete), in a field kept inside the field (`name_field_x`) with the names under it left out. Rig:
+  Delete), in a field of the page's colour with a hairline (radius 4; centred in the grid, left in a
+  list — `Typed`), the selected part in the ACCENT with white words; kept inside the field
+  (`name_field_x`), the names under it left out. Rig:
   `files click <x> <y>` (a real click at a window point), `files where item <n>` (logged). The grid
   and the list begin at `field_left`; the list's rows are rounded zebra
   stripes `LIST_AIR` in. Rig: `files side open|close`, `pin on|off`, `info on|off`, `tab new|close
