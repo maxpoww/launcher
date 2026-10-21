@@ -4598,8 +4598,11 @@ impl App {
         {
             self.desktop_end_rename(true);
         }
-        // QUICK LOOK is up (on the top surface): the pointer is its.
-        if self.peek.is_up() && self.desktop_top_ready() {
+        // QUICK LOOK is up (on the top surface): the pointer there is its.
+        // (Not the desktop's: Quick Look can be up on ANOTHER screen, and a
+        // click on this one's wallpaper went to it at this screen's points —
+        // onto its Save, its pencil, its slides.)
+        if self.peek.is_up() && self.desktop_top_ready() && self.pointer_surface == crate::options::PointerSurface::DesktopTop {
             self.peek_pointer(&event);
             return;
         }

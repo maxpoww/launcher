@@ -7069,6 +7069,9 @@ impl CompositorHandler for App {
             self.dock_entered(output);
         }
         self.part_entered(surface, output);
+        if let Some(id) = self.filer.id_of(surface) {
+            self.filer.screens.insert(id, output.clone());
+        }
         if self.scale_owner_surface() == surface && self.shell_output.as_ref() != Some(output) {
             self.shell_output = Some(output.clone());
             self.sync_options_zone();

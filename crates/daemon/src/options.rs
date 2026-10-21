@@ -4543,7 +4543,11 @@ impl App {
         // under a standing title changes what the pill is allowed to strip.
         // A window fullscreen on ANOTHER screen hides nothing on the bar's
         // (Max's TV, 2026-10-21): the bar and the wallpaper here carry on.
-        let fullscreen = fullscreen && !self.on_another_screen(addr.as_deref());
+        // And one fullscreen ON the bar's screen hides it whatever has the
+        // focus (a click on the TV brought the bar back over the laptop's
+        // fullscreen video).
+        let fullscreen = (fullscreen && !self.on_another_screen(addr.as_deref()))
+            || (self.output_state.outputs().nth(1).is_some() && self.bar_screen_name().is_some_and(|bar| hypr::screen_has_fullscreen(&bar)));
         // (A window fullscreen over the desktop: a moving wallpaper under it
         // holds still.)
         self.wallpaper_hold(crate::controls::HOLD_FULLSCREEN, fullscreen);

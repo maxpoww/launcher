@@ -773,6 +773,7 @@ impl App {
             return;
         };
         info!("display: setting {} now", m.name);
+        self.display_trial_leaves(&m.selector());
         GolemSettings::change(|store| {
             store.monitors.picked = Some(m.selector());
             store.save();
@@ -793,11 +794,48 @@ impl App {
     /// The compositor needs a moment to put a rule on the screen: have the
     /// panel read the screen back once it has.
     fn display_changed(&mut self) {
+        self.display_read_back();
+        // A screen of another size: the screens put back side to side as
+        // the Monitors page has them, once the compositor has it.
+        let armed = self.loop_handle.insert_source(Timer::from_duration(SETTLE), |_, _, app: &mut App| {
+            app.monitors_keep_arranged();
+            TimeoutAction::Drop
+        });
+        if let Err(e) = armed {
+            warn!("display: cannot put the screens back side to side ({e})");
+        }
+    }
+
+    /// The pages read the screen back once the compositor has a change on.
+    fn display_read_back(&mut self) {
         self.settings_panel_mut().display_refresh_at(Instant::now() + SETTLE);
         self.quick.display_refresh_at(Instant::now() + SETTLE);
         // (The Monitors page reads the screens again too.)
         self.monitors_read_soon(SETTLE);
         self.schedule_frame();
+    }
+
+    /// Another screen picked while a resolution is tried on one: the try
+    /// goes back (its "Keep this resolution?" stood under the screen picked
+    /// since, asking about one not shown).
+    pub(crate) fn display_trial_leaves(&mut self, picked: &str) {
+        if self.display_pending.as_ref().is_some_and(|p| p.selector != picked) {
+            self.revert_display();
+        }
+    }
+
+    /// The screen a resolution is being tried on (its selector).
+    pub(crate) fn display_trial_screen(&self) -> Option<String> {
+        self.display_pending.as_ref().map(|p| p.selector.clone())
+    }
+
+    /// The screen being tried was put somewhere else (the screens arranged
+    /// meanwhile): kept, it is kept there.
+    pub(crate) fn display_trial_placed(&mut self, position: Option<String>, transform: Option<u8>) {
+        if let Some(p) = self.display_pending.as_mut() {
+            p.wanted.position = position;
+            p.wanted.transform = transform;
+        }
     }
 
     /// Set the screen's scale (to the nearest one that divides it cleanly),
@@ -838,7 +876,9 @@ impl App {
         self.settings_panel_mut().display_expect_scale(scale);
         self.quick.display_expect_scale(scale);
         let (name, old) = (m.name.clone(), m.scale);
-        let (origin, px) = (m.pos, (m.mode.w, m.mode.h));
+        // (Turned a quarter, it is as wide as its mode is tall.)
+        let px = if m.transform % 2 == 1 { (m.mode.h, m.mode.w) } else { (m.mode.w, m.mode.h) };
+        let origin = m.pos;
         let output = name.clone();
         self.dissolve(
             &output,
@@ -937,6 +977,12 @@ impl App {
             position: position.clone(),
             transform,
         };
+        // A try still running on ANOTHER screen goes back first: its timer
+        // would have nothing left to take back (and that screen could be
+        // dark).
+        if self.display_pending.as_ref().is_some_and(|p| p.selector != selector) {
+            self.revert_display();
+        }
         // A second try on top of a first goes back to before the first.
         let previous = match self.display_pending.take() {
             Some(p) if p.selector == selector => p.previous,
@@ -1015,7 +1061,9 @@ impl App {
         });
         info!("display: {} back to Golem's defaults", m.name);
         hypr::reload_config();
-        self.display_changed();
+        // (Read back only: putting the screens side to side would save
+        // Golem's defaults as the owner's choice again.)
+        self.display_read_back();
     }
 
     /// `waverunner-ctl display …`: the settings without the panel (scripts,

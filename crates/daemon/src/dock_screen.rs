@@ -98,7 +98,14 @@ struct Move {
     /// The old surface was closed under us (its screen went): nothing is
     /// drawn until the new one is up.
     old_gone: bool,
+    /// Which move this is (`ARRIVE_BY` looks for it).
+    seq: u64,
 }
+
+/// A move whose surface the compositor never sizes (its screen gone just as
+/// it was asked) is given up after this: else every call after it waited
+/// for it, and the dock was dead on every screen.
+const ARRIVE_BY: Duration = Duration::from_secs(2);
 
 /// An edge that catches the pointer on a screen the dock is not on.
 struct Edge {
@@ -186,6 +193,14 @@ pub(crate) struct DockScreens {
     /// Counts the pointer's leaving the strip or an edge: a touch told apart
     /// after its visit ended marks nothing as passing.
     visit: u64,
+    /// Counts the moves (`Move::seq`).
+    moves: u64,
+    /// Calls run where the dock is, not followed (a move that failed or
+    /// never came: following again would only fail again).
+    stay: bool,
+    /// A setting's box asked for on a screen the dock was not on (the
+    /// desktop's menu, `settings_box`): opened once it is there.
+    pub(crate) box_after: Option<&'static str>,
 }
 
 /// The stretches of screen `name`'s edge on `side` another screen goes on
@@ -316,9 +331,13 @@ impl App {
     /// The dock's size on the screen it is on: its own (`dock_sizes`), else
     /// the main screen's. Set, not yet applied (the caller lays out).
     fn dock_size_here(&mut self) {
-        let level = self
-            .dock_screen_selector()
-            .and_then(|s| self.settings.dock_sizes.get(&s).copied())
+        // (On the main screen its size is the home one — the desktop's too —
+        // also when it was picked with that screen alone, so never kept as
+        // that screen's own.)
+        let main = self.main_output().is_some_and(|m| self.dock_screens.output.as_ref() == Some(&m));
+        let level = (!main)
+            .then(|| self.dock_screen_selector().and_then(|s| self.settings.dock_sizes.get(&s).copied()))
+            .flatten()
             .unwrap_or(self.icon_size_home);
         self.icon_size = level.min(crate::content::ICON_SCALES.len() - 1);
     }
@@ -371,16 +390,23 @@ impl App {
     /// the dock is made again there and the call runs once it is (true —
     /// the caller leaves it). Calls while a move is on wait for it.
     pub(crate) fn dock_follow(&mut self, command: &Command) -> bool {
-        if !follows(command) {
+        if !follows(command) || self.dock_screens.stay {
             return false;
         }
+        // (The control panel's own opening is a Toggle with a flag that is
+        // gone by the time a move is over: it goes as what it is.)
+        let command = if self.control_panel_opening && matches!(command, Command::Toggle) {
+            &Command::ControlPanel
+        } else {
+            command
+        };
         if let Some(m) = self.dock_screens.moving.as_mut() {
             m.then.push(command.clone());
             return true;
         }
         // Not while something of the dock's is up where it is: the call
-        // closes that there.
-        if self.ui.target() == Target::Open || self.fast.open {
+        // closes that there (an open folder box too: it stays until closed).
+        if self.ui.target() == Target::Open || self.fast.open || self.stack_open() {
             return false;
         }
         if self.output_state.outputs().nth(1).is_none() {
@@ -441,8 +467,40 @@ impl App {
             old_gone |= old.old_gone;
             drop_surface(old.layer, old.fscale, old.visible);
         }
-        self.dock_screens.moving = Some(Move { layer, fscale, visible, output, then, old_gone });
+        self.dock_screens.moves += 1;
+        let seq = self.dock_screens.moves;
+        self.dock_screens.moving = Some(Move { layer, fscale, visible, output, then, old_gone, seq });
+        let armed = self.loop_handle.insert_source(Timer::from_duration(ARRIVE_BY), move |_, _, app: &mut App| {
+            if app.dock_screens.moving.as_ref().is_some_and(|m| m.seq == seq) {
+                app.dock_move_given_up();
+            }
+            TimeoutAction::Drop
+        });
+        if let Err(e) = armed {
+            warn!("dock: no timer to give a move up ({e})");
+        }
         true
+    }
+
+    /// A move never came (`ARRIVE_BY`): let go, and what it was for is done
+    /// where the dock is — on the main screen when its own went too.
+    fn dock_move_given_up(&mut self) {
+        let Some(m) = self.dock_screens.moving.take() else {
+            return;
+        };
+        warn!("dock: its move to another screen never came; given up");
+        drop_surface(m.layer, m.fscale, m.visible);
+        if m.old_gone {
+            let home = self.main_output();
+            self.move_dock_to(home, m.then, true);
+            return;
+        }
+        self.dock_screens.box_after = None;
+        self.dock_screens.stay = true;
+        for command in m.then {
+            self.handle_command(command);
+        }
+        self.dock_screens.stay = false;
     }
 
     /// The main screen's output (the built-in, else the one at the origin).
@@ -485,9 +543,13 @@ impl App {
                 } else {
                     warn!("dock: cannot draw on the other screen ({e:#}); it stays");
                     drop_surface(m.layer, m.fscale, m.visible);
+                    // (Here, not followed again: that would fail again.)
+                    self.dock_screens.box_after = None;
+                    self.dock_screens.stay = true;
                     for command in m.then {
                         self.handle_command(command);
                     }
+                    self.dock_screens.stay = false;
                     return false;
                 }
             }
@@ -522,6 +584,30 @@ impl App {
         for command in std::mem::take(&mut self.dock_screens.then) {
             self.handle_command(command);
         }
+        if let Some(asked) = self.dock_screens.box_after.take() {
+            self.settings_box(asked);
+        }
+    }
+
+    /// A setting's box is asked for from the desktop (its menu's
+    /// Wallpapers…, Colours…, Display…): it comes out on the desktop's
+    /// screen — the dock (whose surface the box is drawn on) made again
+    /// there first when it is on another (true: the box follows).
+    pub(crate) fn box_follow(&mut self, asked: &'static str) -> bool {
+        if self.output_state.outputs().nth(1).is_none() || self.fast.open || self.ui.target() == Target::Open || self.stack_open() {
+            return false;
+        }
+        let Some(target) = self.part_output(crate::shell_screens::Part::Desktop).cloned() else {
+            return false;
+        };
+        if self.dock_screens.output.as_ref() == Some(&target) {
+            return false;
+        }
+        if self.dock_screens.moving.is_none() && !self.move_dock_to(Some(target), Vec::new(), false) {
+            return false;
+        }
+        self.dock_screens.box_after = Some(asked);
+        true
     }
 
     /// The dock's surface entered a screen (its first map, at start).
@@ -712,6 +798,18 @@ impl App {
     /// An edge called the dock: it comes over to that screen.
     fn dock_edge_called(&mut self, output: WlOutput) {
         if self.dock_suppressed() || self.dock_screens.moving.is_some() {
+            return;
+        }
+        // (A screen gone while the touch was told apart; something of the
+        // dock's up where it is — it stays until closed.)
+        if self.output_state.info(&output).is_none() || self.ui.target() == Target::Open || self.fast.open || self.stack_open() {
+            return;
+        }
+        // Already there (Super brought it meanwhile): only up.
+        if self.dock_screens.output.as_ref() == Some(&output) {
+            if self.ui.target() == Target::Hidden {
+                self.handle_command(Command::Show);
+            }
             return;
         }
         info!(

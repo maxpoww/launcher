@@ -528,6 +528,11 @@ impl App {
     /// A setting in its box mid-screen, as the quick controls open it
     /// (the desktop menu's "Wallpapers…", "Colours…", "Display…").
     pub(crate) fn settings_box(&mut self, asked: &'static str) {
+        // (On the desktop's screen: the dock, which it is drawn on, may be on
+        // another.)
+        if self.box_follow(asked) {
+            return;
+        }
         if !(self.fast.open && self.fast.controls) {
             self.toggle_fast_controls();
         }
@@ -643,6 +648,8 @@ impl App {
         }
         self.fast.open = false;
         self.quick_gone();
+        // (A screen turned off in the box while the dock was on it: home now.)
+        self.sync_edges();
         if self.interactive && self.ui.target() != crate::state::Target::Open {
             self.begin_keyboard_handback(KbSurface::Launcher, None);
             crate::surface::set_interactive(&self.layer, false);

@@ -3060,6 +3060,8 @@ impl Panel {
     pub(crate) fn reset(&mut self) {
         self.open = None;
         self.knob = None;
+        // (A screen of the Monitors page let go outside: not still in hand.)
+        self.screen_drag = None;
         self.hot = None;
         self.query.clear();
         if self.pills.is_empty() {

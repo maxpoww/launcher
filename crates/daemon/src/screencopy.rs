@@ -491,15 +491,19 @@ impl App {
         // and both are event-driven: the push must never ride the frame
         // loop (see `push_window_border`).
         self.push_window_border();
-        let wants = [
-            self.bar_want.as_ref(),
-            self.dock_want.as_ref(),
-            self.clip_want.as_ref(),
-        ];
         // ONE screen is captured at a time: the first want's. On two screens
         // (the dock called to the other one) a want of the other screen is
         // left out, its surface keeping the colour it has, rather than
-        // sampled from the wrong picture.
+        // sampled from the wrong picture — and the dock UP there goes first
+        // (it is what is being looked at; first the bar, it never changed
+        // colour there at all).
+        let dock_away = self.ui.target() != crate::state::Target::Hidden
+            && self.dock_want.as_ref().zip(self.bar_want.as_ref()).is_some_and(|(d, b)| d.output != b.output);
+        let wants = if dock_away {
+            [self.dock_want.as_ref(), self.bar_want.as_ref(), self.clip_want.as_ref()]
+        } else {
+            [self.bar_want.as_ref(), self.dock_want.as_ref(), self.clip_want.as_ref()]
+        };
         let first = wants.iter().find_map(|w| w.map(|w| w.output.clone()));
         let samples: Vec<(Slot, u32)> = wants
             .iter()

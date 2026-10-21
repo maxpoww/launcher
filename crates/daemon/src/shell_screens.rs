@@ -49,7 +49,9 @@ pub(crate) enum Part {
 }
 
 impl Part {
-    const ALL: [Part; 6] = [Part::Options, Part::Deck, Part::Desktop, Part::DesktopTop, Part::Card, Part::Veil];
+    /// (The veil before the desktop: a layer stacks over those made before
+    /// it, and the veil is a wash UNDER the icons.)
+    const ALL: [Part; 6] = [Part::Options, Part::Deck, Part::Veil, Part::Desktop, Part::DesktopTop, Part::Card];
 
     fn name(self) -> &'static str {
         match self {
@@ -251,11 +253,15 @@ impl App {
 
     /// Make `part` again on `output` (`None`: wherever the compositor puts
     /// it); `then` runs once it is up there. A move of it already on is
-    /// replaced (its `then` given way to this one's). False when it cannot
-    /// be (no kit): it stays where it is and `then` runs now.
+    /// replaced (its `then` kept when this one has none). False when it
+    /// cannot be (no kit): it stays where it is and `then` runs now.
     pub(crate) fn remake_part(&mut self, part: Part, output: Option<WlOutput>, then: Option<Then>, hide: bool) -> bool {
+        let mut then = then;
         if let Some(i) = self.shell_screens.remakes.iter().position(|r| r.part == part) {
             let old = self.shell_screens.remakes.remove(i);
+            if then.is_none() {
+                then = old.then;
+            }
             let_go(old.made, old.fscale, old.visible);
         }
         let Some(kit) = self.screen_kit.as_ref() else {
@@ -318,8 +324,22 @@ impl App {
         let visible = (part != Part::Veil)
             .then(|| kit.visible.as_ref().map(|v| v.attach(made.surface(), qh)))
             .flatten();
-        self.shell_screens.remakes.push(Remake { part, made, fscale, visible, output, then, hide });
+        self.shell_screens.remakes.push(Remake { part, made, fscale, visible, output: output.clone(), then, hide });
+        // A veil made anew stacks over the desktop's icons: the desktop is
+        // made again after it, on the same screen.
+        if part == Part::Veil && self.desktop_layer.is_some() {
+            self.remake_part(Part::Desktop, output, None, false);
+        }
         true
+    }
+
+    /// `part` is wanted where it is: a move of it still on its way
+    /// elsewhere is let go (it would carry it off once up).
+    fn stay_put(&mut self, part: Part) {
+        if let Some(i) = self.shell_screens.remakes.iter().position(|r| r.part == part) {
+            let old = self.shell_screens.remakes.remove(i);
+            let_go(old.made, old.fscale, old.visible);
+        }
     }
 
     /// A configure for a surface being made again: it takes its part's
@@ -368,6 +388,24 @@ impl App {
                     Part::Veil => {}
                 }
             }
+        }
+        // The keyboard on the old surface went with it, and no leave comes
+        // for a surface gone: let go as at one (else the desktop thought it
+        // still held the keys and never asked again — no copy, paste or
+        // rename until a window moved; the card's typing went to its window).
+        match part {
+            Part::Desktop => {
+                if self.desktop.rename.is_some() {
+                    self.desktop_end_rename(true);
+                }
+                if let Some(config) = self.desktop.config.as_mut().filter(|c| c.editing) {
+                    config.editing = false;
+                    config.all = false;
+                }
+                self.desktop.keys = false;
+            }
+            Part::Card => self.card_keys_left(),
+            _ => {}
         }
         self.shell_screens.lost.remove(&part);
         if let Some(output) = output {
@@ -454,10 +492,24 @@ impl App {
             }
             // Where it is not known yet — nothing shown on it so far (the
             // veil while the light needs none) — and it was left to the
-            // compositor: made where it belongs, to be sure.
+            // compositor: it was made with the desktop, so it is where the
+            // desktop is; that unknown too, made where it belongs, to be sure.
             let Some(on) = self.shell_screens.on.get(&part) else {
                 if part == Part::Veil && !self.shell_screens.placed.contains(&part) {
-                    self.remake_part(part, Some(home.clone()), None, false);
+                    match (self.desktop_layer.is_some(), self.shell_screens.on.get(&Part::Desktop).cloned()) {
+                        (true, Some(desktop)) => {
+                            self.shell_screens.on.insert(Part::Veil, desktop.clone());
+                            if desktop != home {
+                                self.remake_part(part, Some(home.clone()), None, false);
+                            }
+                        }
+                        // (The desktop's screen not known yet either: its
+                        // enter brings this round again.)
+                        (true, None) => {}
+                        (false, _) => {
+                            self.remake_part(part, Some(home.clone()), None, false);
+                        }
+                    }
                 }
                 continue;
             };
@@ -476,15 +528,23 @@ impl App {
         if self.output_state.outputs().nth(1).is_none() {
             return false;
         }
+        // (The Files window's OWN screen: the screen with the focus is the
+        // pointer's — Space with the pointer on the other screen opened it
+        // there, and each slide followed the pointer.)
         let target = if win == crate::quicklook::DESKTOP {
             self.part_output(Part::Desktop).cloned()
         } else {
-            crate::hypr::focused_monitor().ok().and_then(|m| self.output_named(&m.name))
+            self.filer
+                .screens
+                .get(&win)
+                .cloned()
+                .or_else(|| crate::hypr::focused_monitor().ok().and_then(|m| self.output_named(&m.name)))
         };
         let Some(target) = target else {
             return false;
         };
         if self.part_output(Part::DesktopTop) == Some(&target) {
+            self.stay_put(Part::DesktopTop);
             return false;
         }
         let thing = thing.clone();
@@ -509,6 +569,7 @@ impl App {
         // (Not known yet — nothing drawn on it so far: made where it is
         // wanted, to be sure.)
         if self.part_output(Part::Card) == Some(&target) {
+            self.stay_put(Part::Card);
             return false;
         }
         if self

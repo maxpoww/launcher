@@ -1953,6 +1953,9 @@ pub(crate) struct Filer {
     pub over_dock: bool,
     /// The video or GIF under the pointer, playing in its tile (`filer_live`).
     pub(crate) live: crate::filer_live::Live,
+    /// The screen each window is on (its surface's enter): Quick Look comes
+    /// out there.
+    pub(crate) screens: HashMap<u32, wayland_client::protocol::wl_output::WlOutput>,
 }
 
 impl Filer {
@@ -1979,6 +1982,7 @@ impl Filer {
             clip_forgot: None,
             live: Default::default(),
             over_dock: false,
+            screens: HashMap::new(),
         }
     }
 
@@ -2771,6 +2775,7 @@ impl App {
             self.peek_gone();
         }
         self.filer_live_closed(id);
+        self.filer.screens.remove(&id);
         info!("files: window {id} closed");
         self.filer_note_session();
         self.filer_note_nav();
@@ -6874,10 +6879,11 @@ impl App {
         let icon = layout.icon_in(&layout.cell(i), icon_scale);
         let (x, y) = layout.outward((icon.x, icon.y - win.scroll));
         let side = icon.w * layout.zoom;
-        // The window's corner on its screen (it has the keyboard: it is the
-        // active one).
+        // The window's corner on ITS screen (it has the keyboard: it is the
+        // active one; the screen with the focus is the pointer's).
+        let screen = self.filer.screens.get(&id).and_then(|o| self.output_state.info(o)).and_then(|i| i.name);
         let origin = crate::hypr::active_window_geom()
-            .zip(crate::hypr::focused_monitor().ok())
+            .zip(crate::hypr::monitor_info(screen.as_deref()).ok())
             .map_or((0.0, 0.0), |((wx, wy, _, _), m)| (wx as f32 - m.x as f32, wy as f32 - m.y as f32));
         // (One of several selected: its place among them.)
         let of = (win.selected.len() > 1 && win.selected.contains(&item.path)).then(|| {

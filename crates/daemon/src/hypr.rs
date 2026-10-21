@@ -1428,6 +1428,11 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         if name.starts_with("monitoradded") {
                             crate::controls::reassert_wallpaper();
                         }
+                        // …and, plugged in or out, the screens stand as the
+                        // Monitors page has them.
+                        if name == "monitoradded" || name == "monitorremoved" {
+                            app.monitors_plugged();
+                        }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
                             relevant = true;
@@ -1467,6 +1472,21 @@ pub struct MonitorInfo {
     pub scale: f64,
     /// Connector name (e.g. `DP-1`) — matches the `wl_output` name.
     pub name: String,
+}
+
+/// Whether the workspace showing on screen `name` has a window TRULY
+/// fullscreen on it (2: over the bar too; 1, maximized, keeps the bar).
+pub fn screen_has_fullscreen(name: &str) -> bool {
+    let Some(ws) = all_monitors().into_iter().find(|m| m.name == name).map(|m| m.active_ws) else {
+        return false;
+    };
+    reply_json("j/clients")
+        .and_then(|clients| {
+            Some(clients.as_array()?.iter().any(|c| {
+                c["workspace"]["id"].as_i64() == Some(ws) && c["fullscreen"].as_i64().unwrap_or(0) >= 2 && c["mapped"].as_bool() != Some(false)
+            }))
+        })
+        .unwrap_or(false)
 }
 
 /// The monitor workspace `ws` is on (`j/workspaces`).
@@ -1511,8 +1531,13 @@ fn parse_monitor(m: &serde_json::Value) -> MonitorInfo {
     // logical pixels — divide by scale so both sides of the zone-overlap
     // check are in the same space.
     let scale = m["scale"].as_f64().unwrap_or(1.0).max(0.1);
+    // (The scale is told to two decimals: 4/3 as 1.33 made a 2160-high
+    // screen 1624 tall, not 1620, and the screens' sides no longer met.
+    // The clean scale nearest it is the one in use.)
+    let (pw, ph) = (m["width"].as_f64().unwrap_or(0.0), m["height"].as_f64().unwrap_or(0.0));
+    let scale = crate::display::nearest_clean(pw as u32, ph as u32, scale).filter(|s| (s - scale).abs() < 0.01).unwrap_or(scale);
     // (A screen turned a quarter is as tall as its mode is wide.)
-    let (w, h) = (m["width"].as_f64().unwrap_or(0.0) / scale, m["height"].as_f64().unwrap_or(0.0) / scale);
+    let (w, h) = (pw / scale, ph / scale);
     let (w, h) = if m["transform"].as_u64().unwrap_or(0) % 2 == 1 { (h, w) } else { (w, h) };
     MonitorInfo {
         x: m["x"].as_f64().unwrap_or(0.0),
