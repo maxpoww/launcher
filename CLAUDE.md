@@ -963,7 +963,9 @@ The big daemon files are cohesive but long — go straight to the function:
   hand's keys), typing searches (below), Ctrl+A/H/R/N/W, F5. The ground is the
   dock's colour made solid (colours are LINEAR here). THE MENU (2026-10-13, second cut) is the
   desktop's `Menu` with this window's rows (`menu_rows`, `Menu::with_rows`), drawn IN the window
-  (names under it are left out — `covered`; it cannot hang past the window's edge): on a thing
+  (names under it are left out — `covered`; it cannot hang past the window's edge; UNLIT, as the
+  Properties box, the sort menu and the History — `MenuPaint::glass` from `filer_panel_paint`: the
+  dark look's night light sank their lower rows toward black; the desktop's menus keep 0.0): on a thing
   Open · Open in terminal · Cut · Copy · Rename · Move to bin · Properties (last, opened by HOVER,
   `Props` grown from the menu, Back on hover), on a group Open · Cut · Copy · Move to bin, on the
   folder [Paste ·] New folder · Open in terminal; a row acts on RELEASE (`filer_button`),
