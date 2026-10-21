@@ -447,7 +447,10 @@ The big daemon files are cohesive but long — go straight to the function:
   (`Row::Item { label, icon, action, danger, off }`; the symbols are the Files mockup's strokes,
   `glyphs.rs` — written once as SVGs, read by the icon loader by path: a file window uploads those its
   menu wears with its own icons, `chrome::icon_keys`; the desktop's top surface lends its first layers
-  while a menu is up, `top_glyphs_sync` — Quick Look takes them back); `›` = the row turns the menu's
+  while a menu is up, `top_glyphs_sync` — Quick Look takes them back; EVERY symbol is read once ahead of
+  the first menu — `filer_glyphs_warm` into `Filer::glyphs` for all the windows, `top_glyphs_warm` for the
+  desktop — and tests hold every name a row, the pill, the ↶ line or a kind wears to `glyphs::GLYPHS`: an
+  unknown name is an empty gap by its words); `›` = the row turns the menu's
   PAGE (`Page`: Open with · Send to · Sort by, each led back by "‹ <its name>"; `Menu::turn` /
   `show_main`; no flyouts); "…" = opens a window (Format…, Wallpapers…, Colours…, Display…,
   Configure…); RED only for what cannot be undone (Delete for good, Empty the bin, Format…). ⛔ NOTHING
@@ -1154,7 +1157,10 @@ The big daemon files are cohesive but long — go straight to the function:
   Copy / Move (the button, the menu, Ctrl+C/X) let go of the selection and they wait there — "3 items copied
   · Copy here · ×", "“x” to move · Move here · ×" (greyed where nothing can be put: Recents, the bin, Media —
   `Win::put_here`); what waits to be moved is drawn at 45 %; × forgets them (`Filer::clip_forgot`), a move
-  pasted is spent. Its symbols are the chrome's own (always in the window's layers). Rig: `files pill <n>`
+  pasted is spent. Its symbols are the chrome's own (always in the window's layers). Its first words (the name,
+  the count, a line said) are NOT bold (Max: thin, never heavy): `content::FONT_MEDIUM`, the words' own family's
+  medium where it has one (`renderer::SANS_MEDIUM`), else regular in full ink — Golem's FreeSans has none, and a
+  bare weight of 500 matched JetBrains Mono's Medium instead. Rig: `files pill <n>`
   (its nth button), `files flash <words>`. ACTIONS BY KIND (Max, 2026-10-21, mockup v51: "one action per case
   on the pill, two, even 3 on the context menu; only actions that just happen"; `filer/smart.rs`, `sort_of` by
   ending, `filer_smart`): songs/videos → Play (+ Shuffle for 2+); one photo → Set as wallpaper, Rotate, Slideshow
