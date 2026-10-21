@@ -6258,6 +6258,24 @@ impl App {
         let surface_w = self.buffer_size.0 as f32;
         let inset = (((surface_w - plate_w) / 2.0).max(0.0).round() as u32)
             .min((self.buffer_size.0 / 2).saturating_sub(1)); // keep a positive-width region
+        // HIDDEN, the strip is all the dock takes — and not where another
+        // screen goes on across its edge (`dock_screen.rs`: the pointer
+        // crosses there, it never pushes).
+        if self.ui.target() == Target::Hidden && !self.dock_screens.shared.is_empty() && !self.stack_open() && !self.fast.open {
+            let h = self.buffer_size.1 as i32;
+            let rects: Vec<(i32, i32, i32, i32)> = dock_screen::minus((f64::from(inset), f64::from(surface_w) - f64::from(inset)), &self.dock_screens.shared)
+                .into_iter()
+                .map(|(a, b)| (a.round() as i32, h - extent as i32, (b - a).round() as i32, extent as i32))
+                .collect();
+            if self.dock_screens.strip_sent.as_ref() != Some(&rects) {
+                surface::set_input_rects(&self.compositor, &self.layer, &rects);
+                self.dock_screens.strip_sent = Some(rects);
+                // (Shown again, the region is sent whole.)
+                self.input_extent = None;
+            }
+            return;
+        }
+        self.dock_screens.strip_sent = None;
         if self.input_extent != Some(extent) || self.input_inset != Some(inset) {
             match surface::set_input_extent(&self.compositor, &self.layer, self.buffer_size, extent, inset) {
                 Ok(()) => {
@@ -6514,6 +6532,14 @@ impl App {
     /// `edge_reveal_px` of the surface). False when edge reveal is off.
     fn pointer_on_reveal_strip(&self) -> bool {
         if !self.config.input.edge_reveal {
+            return false;
+        }
+        // (Not where another screen goes on across the edge.)
+        let along = match self.dock_side() {
+            launcher_prefs::Side::Bottom => self.pointer_pos.map(|(x, _)| f64::from(x)),
+            _ => self.pointer_pos.map(|(_, y)| f64::from(y)),
+        };
+        if along.is_some_and(|a| self.dock_screens.shared.iter().any(|&(lo, hi)| a >= lo && a < hi)) {
             return false;
         }
         // Beside a side dock: the strip down its edge.

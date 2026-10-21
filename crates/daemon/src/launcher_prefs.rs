@@ -376,6 +376,21 @@ impl App {
         };
         // (Kept as the extent/inset pair the bottom dock compares: the
         // strip's depth and where it starts.)
+        // HIDDEN beside another screen: not where it goes on across the edge
+        // (`dock_screen.rs`).
+        if self.ui.target() == crate::state::Target::Hidden && !full && !self.dock_screens.shared.is_empty() {
+            let rects: Vec<(i32, i32, i32, i32)> = crate::dock_screen::minus((f64::from(rect.1), f64::from(rect.1 + rect.3)), &self.dock_screens.shared)
+                .into_iter()
+                .map(|(a, b)| (rect.0, a.round() as i32, rect.2, (b - a).round() as i32))
+                .collect();
+            if self.dock_screens.strip_sent.as_ref() != Some(&rects) {
+                crate::surface::set_input_rects(&self.compositor, &self.layer, &rects);
+                self.dock_screens.strip_sent = Some(rects);
+                self.input_extent = None;
+            }
+            return;
+        }
+        self.dock_screens.strip_sent = None;
         let key = (rect.2 as u32, (rect.1.max(0) as u32) << 16 | rect.3.max(0) as u32);
         if self.input_extent != Some(key.0) || self.input_inset != Some(key.1) {
             match crate::surface::set_input_rect(&self.compositor, &self.layer, rect) {

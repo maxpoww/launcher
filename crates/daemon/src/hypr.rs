@@ -1502,11 +1502,14 @@ fn parse_monitor(m: &serde_json::Value) -> MonitorInfo {
     // logical pixels — divide by scale so both sides of the zone-overlap
     // check are in the same space.
     let scale = m["scale"].as_f64().unwrap_or(1.0).max(0.1);
+    // (A screen turned a quarter is as tall as its mode is wide.)
+    let (w, h) = (m["width"].as_f64().unwrap_or(0.0) / scale, m["height"].as_f64().unwrap_or(0.0) / scale);
+    let (w, h) = if m["transform"].as_u64().unwrap_or(0) % 2 == 1 { (h, w) } else { (w, h) };
     MonitorInfo {
         x: m["x"].as_f64().unwrap_or(0.0),
         y: m["y"].as_f64().unwrap_or(0.0),
-        w: m["width"].as_f64().unwrap_or(0.0) / scale,
-        h: m["height"].as_f64().unwrap_or(0.0) / scale,
+        w,
+        h,
         reserved: {
             let r = |i: usize| m["reserved"][i].as_f64().unwrap_or(0.0);
             (r(0), r(1), r(2), r(3))

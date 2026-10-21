@@ -18,6 +18,13 @@
 //!
 //! The dock's screen going (unplugged, a lid shut) closes its surface: it is
 //! made again on the main screen instead of the shell ending with it.
+//!
+//! NOT FROM THE OUTSIDE (Max, 2026-10-21, the TV on top of the laptop: "the
+//! dock must not show when I'm coming from the outside — from under, here,
+//! or from the left when it is on the left"): where another screen goes on
+//! across the dock's edge, the pointer passes on to it there and never
+//! pushes against that edge — so no strip stands there, the dock's own
+//! (`shared`) nor an edge's: the dock comes only at a real border.
 
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -108,6 +115,50 @@ pub(crate) struct DockScreens {
     edges: Vec<Edge>,
     /// The screen the dock is on (its surface's enter; set on a move).
     output: Option<WlOutput>,
+    /// The stretches of that screen's edge on the dock's side another screen
+    /// goes on across (px along the edge from its start): no strip there.
+    pub(crate) shared: Vec<(f64, f64)>,
+    /// The hidden dock's strip as last sent with those taken out.
+    pub(crate) strip_sent: Option<Vec<(i32, i32, i32, i32)>>,
+}
+
+/// The stretches of screen `name`'s edge on `side` another screen goes on
+/// across, in px along that edge from its start (left, or top).
+pub(crate) fn shared_stretches(all: &[crate::hypr::MonitorInfo], name: &str, side: Side) -> Vec<(f64, f64)> {
+    let Some(m) = all.iter().find(|m| m.name == name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for n in all.iter().filter(|n| n.name != name) {
+        let (touch, (a0, a1), (b0, b1), origin) = match side {
+            Side::Bottom => ((n.y - (m.y + m.h)).abs() < 2.0, (m.x, m.x + m.w), (n.x, n.x + n.w), m.x),
+            Side::Left => ((n.x + n.w - m.x).abs() < 2.0, (m.y, m.y + m.h), (n.y, n.y + n.h), m.y),
+            Side::Right => ((n.x - (m.x + m.w)).abs() < 2.0, (m.y, m.y + m.h), (n.y, n.y + n.h), m.y),
+        };
+        let (lo, hi) = (a0.max(b0), a1.min(b1));
+        if touch && hi > lo {
+            out.push((lo - origin, hi - origin));
+        }
+    }
+    out
+}
+
+/// `span` with `holes` taken out (what is left, in order).
+pub(crate) fn minus(span: (f64, f64), holes: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut left = vec![span];
+    for &(h0, h1) in holes {
+        left = left
+            .into_iter()
+            .flat_map(|(a, b)| {
+                if h1 <= a || h0 >= b {
+                    vec![(a, b)]
+                } else {
+                    [(a, h0), (h1, b)].into_iter().filter(|(x, y)| y - x > 0.5).collect()
+                }
+            })
+            .collect();
+    }
+    left
 }
 
 /// Whether the screen at `i` has the launcher: the main one always, the
@@ -600,6 +651,15 @@ impl App {
     pub(crate) fn sync_edges(&mut self) {
         let two = self.output_state.outputs().nth(1).is_some();
         let screens = if two { crate::display::monitors() } else { Vec::new() };
+        // Where the screens go on across the dock's edge (none with one).
+        let all = if two { crate::hypr::all_monitors() } else { Vec::new() };
+        let side_now = self.dock_side();
+        let shared = self.dock_screen_name().map_or_else(Vec::new, |name| shared_stretches(&all, &name, side_now));
+        if shared != self.dock_screens.shared {
+            self.dock_screens.shared = shared;
+            self.input_extent = None;
+            self.sync_input_region();
+        }
         let off = &self.settings.launcher_screens_off;
         let chosen: Vec<WlOutput> = (0..screens.len())
             .filter(|&i| has_launcher(&screens, i, off))
@@ -632,6 +692,22 @@ impl App {
         } else {
             Vec::new()
         };
+        // (A screen whose whole edge another goes on across has no edge: the
+        // pointer can never push against it there.)
+        let edge_holes = |o: &WlOutput| -> Vec<(f64, f64)> {
+            let name = self.output_state.info(o).and_then(|i| i.name).unwrap_or_default();
+            shared_stretches(&all, &name, side)
+        };
+        let want: Vec<WlOutput> = want
+            .into_iter()
+            .filter(|o| {
+                let len = self.output_state.info(o).and_then(|i| i.logical_size).map(|(w, h)| match side {
+                    Side::Bottom => f64::from(w),
+                    Side::Left | Side::Right => f64::from(h),
+                });
+                len.is_none_or(|len| !minus((0.0, len), &edge_holes(o)).is_empty())
+            })
+            .collect();
         self.dock_screens.edges.retain(|e| e.side == side && want.contains(&e.output));
         let Some(kit) = self.screen_kit.as_ref() else {
             return;
@@ -647,6 +723,31 @@ impl App {
         }
         // (A screen turned or resized: the edges kept are as long as it lets them.)
         self.resize_edges();
+        // Each edge takes the pointer only where no screen goes on across it.
+        for e in &self.dock_screens.edges {
+            let name = self.output_state.info(&e.output).and_then(|i| i.name).unwrap_or_default();
+            let holes = shared_stretches(&all, &name, e.side);
+            let Some(along) = self.output_state.info(&e.output).and_then(|i| i.logical_size).map(|(w, h)| match e.side {
+                Side::Bottom => f64::from(w),
+                Side::Left | Side::Right => f64::from(h),
+            }) else {
+                continue;
+            };
+            // (The edge stands centred on the screen's edge.)
+            let start = (along - f64::from(e.len)) / 2.0;
+            let depth = self.config.input.edge_reveal_px.max(1) as i32;
+            let rects: Vec<(i32, i32, i32, i32)> = minus((start, start + f64::from(e.len)), &holes)
+                .into_iter()
+                .map(|(a, b)| {
+                    let (a, len) = ((a - start).round() as i32, (b - a).round() as i32);
+                    match e.side {
+                        Side::Bottom => (a, 0, len, depth),
+                        Side::Left | Side::Right => (0, a, depth, len),
+                    }
+                })
+                .collect();
+            crate::surface::set_input_rects(&self.compositor, &e.layer, &rects);
+        }
     }
 }
 
@@ -770,6 +871,29 @@ mod tests {
         assert!(right[2 * 4 + 3] > right[3]);
         let left = edge_pixels(3, 1, Side::Left, true);
         assert!(left[3] > left[2 * 4 + 3]);
+    }
+
+    fn mon(name: &str, x: f64, y: f64, w: f64, h: f64) -> crate::hypr::MonitorInfo {
+        crate::hypr::MonitorInfo { x, y, w, h, reserved: (0.0, 0.0, 0.0, 0.0), active_ws: 1, scale: 1.0, name: name.to_owned() }
+    }
+
+    #[test]
+    fn where_another_screen_goes_on_across_the_docks_edge_no_strip_stands() {
+        // Max's (2026-10-21): the TV over the laptop, a little wider.
+        let all = [mon("eDP-1", 0.0, 0.0, 2000.0, 1250.0), mon("HDMI-A-1", -24.0, -1080.0, 2048.0, 1080.0)];
+        // The TV's bottom edge: the laptop goes on across 24..2024 of it.
+        assert_eq!(shared_stretches(&all, "HDMI-A-1", Side::Bottom), vec![(24.0, 2024.0)]);
+        assert_eq!(minus((0.0, 2048.0), &[(24.0, 2024.0)]), vec![(0.0, 24.0), (2024.0, 2048.0)], "only its ends");
+        // The laptop's bottom: nothing under it — a strip all along.
+        assert!(shared_stretches(&all, "eDP-1", Side::Bottom).is_empty());
+        // A screen on the laptop's left: its left edge is the laptop's
+        // right… the laptop's LEFT edge is shared where they face.
+        let side = [mon("eDP-1", 0.0, 0.0, 2000.0, 1250.0), mon("DP-1", -1920.0, 200.0, 1920.0, 1080.0)];
+        assert_eq!(shared_stretches(&side, "eDP-1", Side::Left), vec![(200.0, 1250.0)]);
+        assert!(shared_stretches(&side, "eDP-1", Side::Right).is_empty());
+        assert_eq!(shared_stretches(&side, "DP-1", Side::Right), vec![(0.0, 1050.0)]);
+        // A whole edge shared: nothing left of it.
+        assert!(minus((0.0, 2000.0), &[(0.0, 2000.0)]).is_empty());
     }
 
     #[test]
