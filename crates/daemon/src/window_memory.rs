@@ -219,9 +219,6 @@ impl App {
     /// Re-read every open window's geometry; note the ones fit to remember,
     /// and where every floating one stands.
     pub(crate) fn track_windows(&mut self) {
-        let Ok(mon) = hypr::focused_monitor() else {
-            return;
-        };
         let mut open = HashMap::new();
         for c in hypr::client_geometries() {
             let on_desk = c.floating && !c.special;
@@ -237,7 +234,9 @@ impl App {
                 && c.h >= MIN_H
                 && !self.side.in_column(&c.address);
             let prev = self.window_memory.seen.remove(&c.address);
-            let here = Place { x: c.x - mon.x, y: c.y - mon.y, w: c.w, h: c.h };
+            // (On its OWN screen: a window on the second one is kept
+            // where it is there, not against the focused one.)
+            let here = Place { x: c.x - c.screen.0, y: c.y - c.screen.1, w: c.w, h: c.h };
             let place = if fit_to_keep { Some(here) } else { prev.and_then(|p| p.place) };
             open.insert(
                 c.address,

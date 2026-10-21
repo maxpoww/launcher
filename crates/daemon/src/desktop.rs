@@ -1009,10 +1009,11 @@ fn phone_refuses(name: &str, serial: &str) -> Option<String> {
 }
 
 /// Where the pointer is on the desktop's surface, asked of the compositor
-/// (the surface covers its output from the output's own corner).
-fn desktop_pointer_now() -> Option<(f32, f32)> {
+/// (the surface covers its output — `screen`, else the focused one — from
+/// the output's own corner).
+fn desktop_pointer_now(screen: Option<&str>) -> Option<(f32, f32)> {
     let (x, y) = crate::hypr::cursor_pos()?;
-    let m = crate::hypr::focused_monitor().ok()?;
+    let m = crate::hypr::monitor_info(screen).ok()?;
     Some(((x - m.x) as f32, (y - m.y) as f32))
 }
 
@@ -2465,7 +2466,14 @@ impl App {
     /// The scale the desktop's grid and icons are laid out at: the dock's
     /// icon scale times the owner's zoom of the desktop (`zoom.rs`).
     pub(crate) fn desktop_icon_scale(&self) -> f32 {
-        self.icon_scale() * self.desktop_zoom()
+        // (Its own screen's: the dock called to another must not resize it.)
+        let screen_h = self
+            .part_output(crate::shell_screens::Part::Desktop)
+            .and_then(|o| self.output_state.info(o))
+            .and_then(|i| i.logical_size)
+            .map(|(_, h)| h as f32)
+            .or_else(|| self.output_logical_height());
+        self.icon_scale_for(screen_h) * self.desktop_zoom()
     }
 
     pub(crate) fn relayout_desktop(&mut self) {
@@ -3921,6 +3929,9 @@ impl App {
 
     /// Draw one desktop frame.
     pub(crate) fn draw_desktop(&mut self) {
+        if self.part_lost(crate::shell_screens::Part::Desktop) {
+            return;
+        }
         // (The selected icon prepared for Quick Look before Space.)
         if let Some(it) = self.desktop.items.iter().find(|it| self.desktop.selected.contains(&it.path)) {
             let path = it.path.clone();
@@ -4201,7 +4212,7 @@ impl App {
                     // ASUS, 2026-10-10). The compositor is asked where it is.
                     let at = match self.desktop.ptr {
                         Some(at) => at,
-                        None => match desktop_pointer_now() {
+                        None => match desktop_pointer_now(self.part_screen_name(crate::shell_screens::Part::Desktop).as_deref()) {
                             Some(at) => {
                                 self.desktop.ptr = Some(at);
                                 at

@@ -34,17 +34,22 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::QueueHandle;
 use waverunner_proto::Command;
 
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+
 use crate::fractional::{Fractional, SurfaceKind, SurfaceScale};
 use crate::launcher_prefs::{self, Side};
 use crate::state::Target;
 use crate::visible::{SurfaceVisible, VisibleRegions};
 use crate::App;
 
-/// What a dock made again needs: the globals its first surface was made with.
+/// What a surface made again needs: the globals the first ones were made
+/// with (the dock's here, the rest of the shell's in `shell_screens.rs`).
 pub(crate) struct Kit {
-    shell: LayerShell,
-    fractional: Option<Fractional>,
-    visible: Option<VisibleRegions>,
+    pub(crate) shell: LayerShell,
+    pub(crate) fractional: Option<Fractional>,
+    pub(crate) visible: Option<VisibleRegions>,
+    /// For the veil's stretched pixel.
+    pub(crate) viewporter: Option<WpViewporter>,
 }
 
 impl Kit {
@@ -55,9 +60,10 @@ impl Kit {
         visible: Option<VisibleRegions>,
     ) -> Option<Kit> {
         let shell = LayerShell::bind(globals, qh)
-            .map_err(|e| warn!("dock screens: no layer shell of its own ({e}); the dock stays put"))
+            .map_err(|e| warn!("screens: no layer shell of its own ({e}); the shell stays where it starts"))
             .ok()?;
-        Some(Kit { shell, fractional, visible })
+        let viewporter = globals.bind::<WpViewporter, App, _>(qh, 1..=1, ()).ok();
+        Some(Kit { shell, fractional, visible, viewporter })
     }
 }
 
@@ -96,19 +102,12 @@ const GLOW: std::time::Duration = std::time::Duration::from_millis(1400);
 
 #[derive(Default)]
 pub(crate) struct DockScreens {
-    kit: Option<Kit>,
     moving: Option<Move>,
     /// The calls a move came for, between its swap and the configure's draw.
     then: Vec<Command>,
     edges: Vec<Edge>,
     /// The screen the dock is on (its surface's enter; set on a move).
     output: Option<WlOutput>,
-}
-
-impl DockScreens {
-    pub(crate) fn new(kit: Option<Kit>) -> Self {
-        DockScreens { kit, ..Default::default() }
-    }
 }
 
 /// Whether the screen at `i` has the launcher: the main one always, the
@@ -224,7 +223,7 @@ impl App {
         }
     }
 
-    fn output_named(&self, name: &str) -> Option<WlOutput> {
+    pub(crate) fn output_named(&self, name: &str) -> Option<WlOutput> {
         self.output_state
             .outputs()
             .find(|o| self.output_state.info(o).and_then(|i| i.name).as_deref() == Some(name))
@@ -285,7 +284,7 @@ impl App {
     /// Make the dock again on `output` (see the module's note). False when it
     /// cannot be (no kit): it stays where it is.
     fn move_dock_to(&mut self, output: Option<WlOutput>, then: Vec<Command>, old_gone: bool) -> bool {
-        let Some(kit) = self.dock_screens.kit.as_ref() else {
+        let Some(kit) = self.screen_kit.as_ref() else {
             return false;
         };
         let (_, h) = self.scaled_surface_size();
@@ -315,7 +314,7 @@ impl App {
     }
 
     /// The main screen's output (the built-in, else the one at the origin).
-    fn main_output(&self) -> Option<WlOutput> {
+    pub(crate) fn main_output(&self) -> Option<WlOutput> {
         let screens = crate::display::monitors();
         let i = launcher_prefs::main_screen(&screens)?;
         self.output_named(&screens[i].name)
@@ -396,7 +395,17 @@ impl App {
         if self.dock_screens.output.as_ref() == Some(output) {
             return;
         }
+        let first = self.dock_screens.output.is_none();
         self.dock_screens.output = Some(output.clone());
+        // At START it is on the main screen, as the rest of the shell is
+        // (`shell_screens.rs`), wherever the focus was; from then on it
+        // follows the calls.
+        if first && self.dock_screens.moving.is_none() && self.output_state.outputs().nth(1).is_some() {
+            if let Some(home) = self.main_output().filter(|home| home != output) {
+                info!("dock: started on another screen; made again on the main one");
+                self.move_dock_to(Some(home), Vec::new(), false);
+            }
+        }
         self.refresh_scaled_geometry();
         self.sync_edges();
     }
@@ -581,7 +590,7 @@ impl App {
             Vec::new()
         };
         self.dock_screens.edges.retain(|e| e.side == side && want.contains(&e.output));
-        let Some(kit) = self.dock_screens.kit.as_ref() else {
+        let Some(kit) = self.screen_kit.as_ref() else {
             return;
         };
         let depth = self.config.input.edge_reveal_px.max(1);

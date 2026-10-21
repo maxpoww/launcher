@@ -191,7 +191,7 @@ impl App {
     /// Draw one frame of the top surface.
     pub(crate) fn draw_desktop_top(&mut self) {
         let (w, h) = self.desktop_top.size;
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || self.part_lost(crate::shell_screens::Part::DesktopTop) {
             return;
         }
         self.desktop_top.dirty = false;

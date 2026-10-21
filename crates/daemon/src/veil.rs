@@ -51,10 +51,11 @@ pub(crate) fn create(
     layer_shell: &LayerShell,
     qh: &QueueHandle<App>,
     viewporter: &WpViewporter,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> VeilLayer {
     let surface = compositor.create_surface(qh);
     let viewport = viewporter.get_viewport(&surface, qh, ());
-    let layer = layer_shell.create_layer_surface(qh, surface, Layer::Bottom, Some("waverunner-veil"), None);
+    let layer = layer_shell.create_layer_surface(qh, surface, Layer::Bottom, Some("waverunner-veil"), output);
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 0);
     layer.set_exclusive_zone(-1);
@@ -64,6 +65,19 @@ pub(crate) fn create(
     }
     layer.commit();
     VeilLayer { layer, viewport, size: None }
+}
+
+impl VeilLayer {
+    /// Its surface.
+    pub(crate) fn surface(&self) -> &wayland_client::protocol::wl_surface::WlSurface {
+        self.layer.wl_surface()
+    }
+
+    /// Let it go (the viewport first, then the surface).
+    pub(crate) fn destroy(self) {
+        self.viewport.destroy();
+        drop(self.layer);
+    }
 }
 
 impl App {
@@ -92,6 +106,9 @@ impl App {
     /// Cheap — called when the veil moves (a fade is ~30 steps), never per frame.
     pub(crate) fn veil_sync(&mut self) {
         let alpha = crate::lighting::veil_now();
+        if self.part_lost(crate::shell_screens::Part::Veil) {
+            return;
+        }
         let (Some(v), Some(shm)) = (self.veil_layer.as_ref(), self.shm.as_ref()) else {
             return;
         };

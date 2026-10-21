@@ -1079,6 +1079,7 @@ fn ease_out(t: f32) -> f32 {
 }
 
 /// What a file window says of the thing its keys are on.
+#[derive(Clone)]
 pub(crate) struct Thing {
     pub path: PathBuf,
     pub name: String,
@@ -1165,6 +1166,8 @@ impl App {
         if self.desktop_top_ready() {
             self.request_desktop_top_draw();
         }
+        // (Opened on another screen: the menus' surface goes home.)
+        self.sync_parts_home();
     }
 
     /// What was prepared of `path` is stale (it was written).
@@ -1294,6 +1297,12 @@ impl App {
     }
 
     pub(crate) fn peek_show(&mut self, win: u32, thing: Thing) {
+        // On the screen it is opened from (Max, 2026-10-21: "I open Golem
+        // Files on the TV, press Quick Look on a file and it showed on the
+        // laptop"): made again there first when it is not (`shell_screens.rs`).
+        if self.peek_follow(win, &thing) {
+            return;
+        }
         if !self.desktop_top_ready() {
             info!("quick look: no top surface");
             return;

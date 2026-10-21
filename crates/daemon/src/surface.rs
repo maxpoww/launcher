@@ -74,10 +74,11 @@ pub fn create_deck_surface(
     qh: &QueueHandle<App>,
     height: u32,
     render_scale: u32,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     let layer =
-        layer_shell.create_layer_surface(qh, surface, Layer::Top, Some("waverunner-deck"), None);
+        layer_shell.create_layer_surface(qh, surface, Layer::Top, Some("waverunner-deck"), output);
     layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, height);
     layer.set_exclusive_zone(0);
@@ -107,6 +108,7 @@ pub fn create_top_surface(
     bar_height: u32,
     surface_height: u32,
     render_scale: u32,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     // Overlay (not Top) so the bar sits *above* true-fullscreen windows: that
@@ -117,7 +119,9 @@ pub fn create_top_surface(
         surface,
         Layer::Overlay,
         Some("waverunner-options"),
-        None, // let the compositor pick the active output
+        // None: the compositor picks the active output (at start); made
+        // again on the main screen when that is another (`shell_screens.rs`).
+        output,
     );
 
     // Anchoring top + left + right with width 0 stretches to the output width;
@@ -156,6 +160,7 @@ pub fn create_desktop_surface(
     layer_shell: &LayerShell,
     qh: &QueueHandle<App>,
     render_scale: u32,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     let layer = layer_shell.create_layer_surface(
@@ -163,7 +168,7 @@ pub fn create_desktop_surface(
         surface,
         Layer::Bottom,
         Some("waverunner-desktop"),
-        None, // the compositor picks the active output
+        output, // None: the compositor picks the active output
     );
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 0);
@@ -194,6 +199,7 @@ pub fn create_card_surface(
     layer_shell: &LayerShell,
     qh: &QueueHandle<App>,
     render_scale: u32,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     let layer = layer_shell.create_layer_surface(
@@ -201,7 +207,7 @@ pub fn create_card_surface(
         surface,
         Layer::Top,
         Some("waverunner-card"),
-        None, // the compositor picks the active output
+        output, // None: the compositor picks the active output
     );
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 0);
@@ -227,6 +233,7 @@ pub fn create_desktop_top_surface(
     layer_shell: &LayerShell,
     qh: &QueueHandle<App>,
     render_scale: u32,
+    output: Option<&wayland_client::protocol::wl_output::WlOutput>,
 ) -> LayerSurface {
     let surface = compositor.create_surface(qh);
     let layer = layer_shell.create_layer_surface(
@@ -234,7 +241,7 @@ pub fn create_desktop_top_surface(
         surface,
         Layer::Overlay,
         Some("waverunner-desktop-menu"),
-        None,
+        output,
     );
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 0);

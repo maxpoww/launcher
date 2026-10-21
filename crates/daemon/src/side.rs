@@ -358,7 +358,7 @@ impl App {
             self.side_park(addr);
             return;
         }
-        let Ok(mon) = hypr::focused_monitor() else {
+        let Ok(mon) = hypr::monitor_of_window(addr) else {
             return;
         };
         let here = seen();
@@ -413,7 +413,7 @@ impl App {
     /// Park a window of the column's that is out (or snap one that is in):
     /// what it is now is its home, it goes small, into its place.
     fn side_park(&mut self, addr: &str) {
-        let Ok(mon) = hypr::focused_monitor() else {
+        let Ok(mon) = hypr::monitor_of_window(addr) else {
             return;
         };
         let here = seen();
@@ -448,7 +448,9 @@ impl App {
     /// leave; then the whole side is raised. Windows that moved to another
     /// workspace go to that workspace's column.
     pub(crate) fn side_layout(&mut self) {
-        let Ok(mon) = hypr::focused_monitor() else {
+        // (Each workspace's column on that workspace's screen: on two
+        // screens the second one's windows hang at ITS right edge.)
+        let Ok(focused) = hypr::focused_monitor() else {
             return;
         };
         let mut here = seen();
@@ -477,11 +479,14 @@ impl App {
                 self.side.place(ws, None, p);
             }
         }
-        self.side_adopt(&mon, &mut here, Adopt::Small);
+        for mon in hypr::all_monitors() {
+            self.side_adopt(&mon, &mut here, Adopt::Small);
+        }
         let mut lua = String::new();
         let mut shrunk: Vec<String> = Vec::new();
         let mut settled: Vec<String> = Vec::new();
-        for col in self.side.columns.values() {
+        for (&ws, col) in &self.side.columns {
+            let mon = hypr::workspace_monitor(ws).unwrap_or_else(|| focused.clone());
             // A window in the column is small: one that is not (resized by
             // hand, or by its app) is shrunk again, once — a window with a
             // bigger minimum of its own keeps it, and the column is laid out
@@ -638,7 +643,7 @@ impl App {
         let Some((out, called, home)) = self.side.get(addr).map(|p| (p.out, p.called, p.home)) else {
             return false;
         };
-        let Ok(mon) = hypr::focused_monitor() else {
+        let Ok(mon) = hypr::monitor_of_window(addr) else {
             return false;
         };
         let (ux, uy, uw, uh) = usable(&mon);
@@ -713,7 +718,7 @@ impl App {
     /// [`DRAG_OUT`] towards the centre, it is out. Moved by scroll and still
     /// for [`STILL`], it is down.
     fn side_drag_watch(&mut self, addr: &str) -> bool {
-        let Ok(mon) = hypr::focused_monitor() else {
+        let Ok(mon) = hypr::monitor_of_window(addr) else {
             self.side.dragging = None;
             return false;
         };
@@ -753,7 +758,7 @@ impl App {
         // the top sent the grown window's bar off the screen (y = -124 in
         // the rig): it is kept on the screen, and the hand moving on takes
         // it from there.
-        let clamp = match hypr::focused_monitor() {
+        let clamp = match hypr::monitor_of_window(addr) {
             Ok(mon) => {
                 let (ux, uy, uw, uh) = usable(&mon);
                 format!(
@@ -793,7 +798,7 @@ impl App {
     /// layout that follows.
     pub(crate) fn side_drag_ended(&mut self, addr: &str) {
         self.side_stop_watching(addr);
-        let Ok(mon) = hypr::focused_monitor() else {
+        let Ok(mon) = hypr::monitor_of_window(addr) else {
             return;
         };
         let mut here = seen();

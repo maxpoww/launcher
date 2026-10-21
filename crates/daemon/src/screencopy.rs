@@ -292,7 +292,7 @@ impl App {
             self.eval_transparent_bar();
             return;
         }
-        match hypr::top_fill(self.options_bar_h() as f64) {
+        match hypr::top_fill(self.options_bar_h() as f64, self.bar_screen_name().as_deref()) {
             Some(tf) => match self.output_by_name(&tf.monitor) {
                 Some(output) => self.begin_options_match(output, tf.sample_y),
                 None => {
@@ -330,7 +330,7 @@ impl App {
             self.eval_transparent_dock();
             return;
         }
-        match hypr::bottom_fill() {
+        match hypr::bottom_fill(self.dock_screen_name().as_deref()) {
             Some(bf) => match self.output_by_name(&bf.monitor) {
                 Some(output) => self.begin_dock_match(output, bf.sample_y),
                 None => {
@@ -360,7 +360,8 @@ impl App {
     /// paint ourselves, pills included.
     fn eval_transparent_bar(&mut self) {
         let had_match = self.options_bar_matched.take().is_some();
-        if let Ok(mon) = hypr::focused_monitor() {
+        // (The bar's own screen's wallpaper.)
+        if let Ok(mon) = hypr::monitor_info(self.bar_screen_name().as_deref()) {
             if let Some(output) = self.output_by_name(&mon.name) {
                 // A row inside the bar itself (mid-height) — always the
                 // blurred wallpaper, since the reserved zone keeps windows
@@ -412,7 +413,8 @@ impl App {
         /// window edge at the top of the gap.
         const GAP_ROW_UP: f64 = 3.0;
         let had_match = self.dock_bar_matched.take().is_some();
-        if let Ok(mon) = hypr::focused_monitor() {
+        // (The dock's own screen's.)
+        if let Ok(mon) = hypr::monitor_info(self.dock_screen_name().as_deref()) {
             if let Some(output) = self.output_by_name(&mon.name) {
                 let sample_y = ((mon.h - GAP_ROW_UP) * mon.scale.max(0.1)).round().max(1.0) as u32;
                 if had_match {
@@ -494,9 +496,14 @@ impl App {
             self.dock_want.as_ref(),
             self.clip_want.as_ref(),
         ];
+        // ONE screen is captured at a time: the first want's. On two screens
+        // (the dock called to the other one) a want of the other screen is
+        // left out, its surface keeping the colour it has, rather than
+        // sampled from the wrong picture.
+        let first = wants.iter().find_map(|w| w.map(|w| w.output.clone()));
         let samples: Vec<(Slot, u32)> = wants
             .iter()
-            .filter_map(|w| w.as_ref().map(|w| (w.slot, w.sample_y)))
+            .filter_map(|w| w.as_ref().filter(|w| Some(&w.output) == first.as_ref()).map(|w| (w.slot, w.sample_y)))
             .collect();
         if samples.is_empty() {
             self.abort_capture();
@@ -505,10 +512,7 @@ impl App {
             self.demand_since = None;
             return;
         }
-        // Any want's output — in the ordinary single-monitor-focused
-        // workflow they always agree; on the rare tick where they briefly
-        // disagree (a monitor change mid-evaluation) the next poll heals it.
-        let Some(output) = wants.iter().find_map(|w| w.map(|w| w.output.clone())) else {
+        let Some(output) = first else {
             return;
         };
         let changed = self
@@ -1218,11 +1222,11 @@ impl App {
         // open boxmenu." So the exclusion is unconditional: both states
         // read the same clean columns beside the card's footprint — one
         // colour source, no switch. Same trick BarMatch uses for the
-        // notif/clip drawers. The bar surface spans the full monitor width,
-        // so `options_size.0` doubles as the monitor's logical width for
-        // the logical→physical mapping; the card is centered on it.
+        // notif/clip drawers. The dock's own screen's logical width maps
+        // logical→physical (on two screens it need not be the bar's); the
+        // card is centered on it.
         if matches!(slot, Slot::DockMatch | Slot::DockFrost) {
-            let sw = self.options_size.0 as f32;
+            let sw = self.dock_screen_w().unwrap_or(self.options_size.0 as f32);
             if sw <= 0.0 {
                 // Can't place the card's columns — no sample beats reading
                 // our own card and re-entering the feedback loop.

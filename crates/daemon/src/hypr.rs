@@ -337,11 +337,10 @@ pub fn layout_windows() -> Vec<LayoutWindow> {
 /// (`w[tv1]`, `/etc/nixos/hyprland.lua`) zeroes its gaps for this very case.
 /// Measured against it: `[0,28] 2000×1222` on a 2000×1250 output with a 28px bar.
 ///
-/// Reads the FOCUSED monitor: a window opening unfocused on a second output
-/// would be sized from the wrong one, which is a real limit and not one this
-/// machine can hit.
-pub fn solitary_tile() -> Option<(f64, f64)> {
-    let m = focused_monitor().ok()?;
+/// Reads the monitor workspace `ws` is on (a second screen's tile is its
+/// own size), else the focused one.
+pub fn solitary_tile(ws: i64) -> Option<(f64, f64)> {
+    let m = workspace_monitor(ws).or_else(|| focused_monitor().ok())?;
     let (l, t, r, b) = m.reserved;
     let (w, h) = (m.w - l - r, m.h - t - b);
     (w > 1.0 && h > 1.0).then_some((w, h))
@@ -567,7 +566,11 @@ pub fn set_window_mode(target: WindowMode) -> bool {
 /// Read per call rather than cached: the answer changes with the output, and a
 /// float toggle is far too rare for one `j/monitors` read to matter.
 pub(crate) fn float_size() -> Option<(i64, i64)> {
-    let m = focused_monitor().ok()?;
+    float_size_on(&focused_monitor().ok()?)
+}
+
+/// Golem's floating size on monitor `m`.
+fn float_size_on(m: &MonitorInfo) -> Option<(i64, i64)> {
     let (w, h) = ((m.w * FLOAT_W) as i64, (m.h * FLOAT_H) as i64);
     (w > 1 && h > 1).then_some((w, h))
 }
@@ -883,12 +886,22 @@ pub struct ClientGeometry {
     /// The compositor's focus history: 0 is the focused window, 1 the one
     /// before it, and so on.
     pub focus_rank: i64,
+    /// The top-left corner of the screen it is on (global logical px).
+    pub screen: (f64, f64),
 }
 
 /// Every mapped window's geometry (one `j/clients` read).
 pub fn client_geometries() -> Vec<ClientGeometry> {
     let Some(clients) = reply_json("j/clients") else {
         return Vec::new();
+    };
+    let monitors = reply_json("j/monitors");
+    let screen_of = |id: Option<i64>| {
+        monitors
+            .as_ref()
+            .and_then(|m| m.as_array())
+            .and_then(|m| m.iter().find(|m| m["id"].as_i64() == id))
+            .map_or((0.0, 0.0), |m| (m["x"].as_f64().unwrap_or(0.0), m["y"].as_f64().unwrap_or(0.0)))
     };
     let pair = |v: &serde_json::Value| {
         let a = v.as_array();
@@ -923,6 +936,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                 special: workspace < 0,
                 workspace,
                 focus_rank: c["focusHistoryID"].as_i64().unwrap_or(i64::MAX),
+                screen: screen_of(c["monitor"].as_i64()),
                 staged: c["tags"]
                     .as_array()
                     .is_some_and(|t| t.iter().any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))),
@@ -975,6 +989,20 @@ pub fn window_spot(addr: &str) -> Option<WindowSpot> {
         h: h as f32,
         visible,
     })
+}
+
+/// The connector name of the screen `addr` is on (`j/clients` + `j/monitors`,
+/// the turn's snapshot).
+pub fn window_monitor(addr: &str) -> Option<String> {
+    let clients = reply_json("j/clients")?;
+    let mon = clients
+        .as_array()?
+        .iter()
+        .find(|c| c["address"].as_str() == Some(addr))?["monitor"]
+        .as_i64()?;
+    let monitors = reply_json("j/monitors")?;
+    let m = monitors.as_array()?.iter().find(|m| m["id"].as_i64() == Some(mon))?;
+    m["name"].as_str().map(str::to_owned)
 }
 
 /// The special workspace the waveview plugin parks minimized windows on.
@@ -1387,6 +1415,10 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                             app.reassert_window_border();
                             crate::card::declare_layer_rule();
                         }
+                        // A screen plugged in gets the wallpaper too.
+                        if name.starts_with("monitoradded") {
+                            crate::controls::reassert_wallpaper();
+                        }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
                             relevant = true;
@@ -1411,6 +1443,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
 /// workspace id. Hyprland reports monitor dimensions as physical pixels
 /// and window positions as logical pixels; dividing by scale brings them
 /// into the same coordinate space for the zone overlap check.
+#[derive(Clone)]
 pub struct MonitorInfo {
     pub x: f64,
     pub y: f64,
@@ -1427,6 +1460,19 @@ pub struct MonitorInfo {
     pub name: String,
 }
 
+/// The monitor workspace `ws` is on (`j/workspaces`).
+pub fn workspace_monitor(ws: i64) -> Option<MonitorInfo> {
+    let spaces = reply_json("j/workspaces")?;
+    let name = spaces.as_array()?.iter().find(|w| w["id"].as_i64() == Some(ws))?["monitor"].as_str()?.to_owned();
+    monitor_info(Some(&name)).ok().filter(|m| m.name == name)
+}
+
+/// The monitor window `addr` is on.
+pub fn window_monitor_info(addr: &str) -> Option<MonitorInfo> {
+    let name = window_monitor(addr)?;
+    monitor_info(Some(&name)).ok().filter(|m| m.name == name)
+}
+
 /// Query the focused monitor.
 pub fn focused_monitor() -> anyhow::Result<MonitorInfo> {
     monitor_info(None)
@@ -1440,26 +1486,43 @@ pub fn monitor_info(name: Option<&str>) -> anyhow::Result<MonitorInfo> {
     let all = monitors.as_array().into_iter().flatten();
     name.and_then(|n| all.clone().find(|m| m["name"].as_str() == Some(n)))
         .or_else(|| all.clone().find(|m| m["focused"].as_bool().unwrap_or(false)))
-        .map(|m| {
-            // `width`/`height` are physical pixels; `at`/`size` in
-            // j/clients are logical pixels — divide by scale so both
-            // sides of the zone-overlap check are in the same space.
-            let scale = m["scale"].as_f64().unwrap_or(1.0).max(0.1);
-            MonitorInfo {
-                x: m["x"].as_f64().unwrap_or(0.0),
-                y: m["y"].as_f64().unwrap_or(0.0),
-                w: m["width"].as_f64().unwrap_or(0.0) / scale,
-                h: m["height"].as_f64().unwrap_or(0.0) / scale,
-                reserved: {
-                    let r = |i: usize| m["reserved"][i].as_f64().unwrap_or(0.0);
-                    (r(0), r(1), r(2), r(3))
-                },
-                active_ws: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
-                scale,
-                name: m["name"].as_str().unwrap_or("").to_owned(),
-            }
-        })
+        .map(parse_monitor)
         .ok_or_else(|| anyhow!("no focused monitor in Hyprland reply"))
+}
+
+/// Every monitor (empty when Hyprland is unreachable).
+pub fn all_monitors() -> Vec<MonitorInfo> {
+    reply_json("j/monitors")
+        .and_then(|m| m.as_array().map(|a| a.iter().map(parse_monitor).collect()))
+        .unwrap_or_default()
+}
+
+fn parse_monitor(m: &serde_json::Value) -> MonitorInfo {
+    // `width`/`height` are physical pixels; `at`/`size` in j/clients are
+    // logical pixels — divide by scale so both sides of the zone-overlap
+    // check are in the same space.
+    let scale = m["scale"].as_f64().unwrap_or(1.0).max(0.1);
+    MonitorInfo {
+        x: m["x"].as_f64().unwrap_or(0.0),
+        y: m["y"].as_f64().unwrap_or(0.0),
+        w: m["width"].as_f64().unwrap_or(0.0) / scale,
+        h: m["height"].as_f64().unwrap_or(0.0) / scale,
+        reserved: {
+            let r = |i: usize| m["reserved"][i].as_f64().unwrap_or(0.0);
+            (r(0), r(1), r(2), r(3))
+        },
+        active_ws: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
+        scale,
+        name: m["name"].as_str().unwrap_or("").to_owned(),
+    }
+}
+
+/// The monitor window `addr` is on, else the focused one.
+pub fn monitor_of_window(addr: &str) -> anyhow::Result<MonitorInfo> {
+    match window_monitor_info(addr) {
+        Some(m) => Ok(m),
+        None => focused_monitor(),
+    }
 }
 
 /// What the OPTIONS bar needs to colour-match a maximized window: the
@@ -1491,8 +1554,10 @@ const WINDOW_TOP_INSET: f64 = 4.0;
 /// qualifies, so the bar tracks it in both gapped and edge-to-edge layouts.
 /// It samples from the window's *actual* top edge, so a gapped window (pushed
 /// down by a top gap) is still read at the right row.
-pub fn top_fill(bar_h_logical: f64) -> Option<TopFill> {
-    let mon = focused_monitor().ok()?;
+///
+/// On `monitor`, the bar's own screen (else the focused one).
+pub fn top_fill(bar_h_logical: f64, monitor: Option<&str>) -> Option<TopFill> {
+    let mon = monitor_info(monitor).ok()?;
     let clients = reply_json("j/clients")?;
     let usable_top = mon.y + bar_h_logical;
 
@@ -1522,7 +1587,8 @@ pub fn top_fill(bar_h_logical: f64) -> Option<TopFill> {
         // Sample a little below the window's actual top edge ([`WINDOW_TOP_INSET`])
         // — past the top-edge band (CSD rounding/border/gradient) yet firmly in
         // the chrome, and below the bar overhang so it never samples the bar.
-        sample_y: ((top + WINDOW_TOP_INSET) * mon.scale.max(0.1)).round() as u32,
+        // (Rows of THAT screen: from its own top.)
+        sample_y: ((top - mon.y + WINDOW_TOP_INSET) * mon.scale.max(0.1)).round() as u32,
     })
 }
 
@@ -1547,9 +1613,9 @@ const WINDOW_BOTTOM_INSET: f64 = 4.0;
 /// unlike the bar) can take its colour. The bottom-edge twin of [`top_fill`];
 /// same ambiguity rule: an empty workspace, a split, or only floating
 /// windows return `None` and the dock falls back to its own frosted
-/// backdrop.
-pub fn bottom_fill() -> Option<BottomFill> {
-    let mon = focused_monitor().ok()?;
+/// backdrop. On `monitor`, the dock's own screen (else the focused one).
+pub fn bottom_fill(monitor: Option<&str>) -> Option<BottomFill> {
+    let mon = monitor_info(monitor).ok()?;
     let clients = reply_json("j/clients")?;
     // Unlike the bar, the dock reserves NO exclusive zone (an auto-hide
     // overlay, floating over whatever's there) — so a flush window tiles all
@@ -1581,7 +1647,7 @@ pub fn bottom_fill() -> Option<BottomFill> {
         // Sample a little above the window's actual bottom edge
         // ([`WINDOW_BOTTOM_INSET`]) — past any bottom border/shadow, still
         // inside the chrome.
-        sample_y: ((bottom - WINDOW_BOTTOM_INSET) * mon.scale.max(0.1)).round() as u32,
+        sample_y: ((bottom - mon.y - WINDOW_BOTTOM_INSET) * mon.scale.max(0.1)).round() as u32,
     })
 }
 
@@ -2939,7 +3005,9 @@ pub fn float_all(on: bool) {
     // screen, so the desk filled up with huge floats (Max, 2026-09-13: *"the
     // windows that are already open go huge"*). They get Golem's float size and
     // place, the same as one arriving under the rule.
-    let place = float_size().zip(focused_monitor().ok());
+    // (Each on its own workspace's screen, sized for it: a second screen's
+    // windows land there, not on the focused one.)
+    let focused = focused_monitor().ok();
     // Counted per WORKSPACE: the cascade is about what you can see at once, and
     // two desks' windows never overlap on screen.
     let mut nth: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
@@ -2968,6 +3036,8 @@ pub fn float_all(on: bool) {
         if !on {
             continue; // back into the layout; the layout decides the geometry
         }
+        let m = workspace_monitor(w.workspace).or_else(|| focused.clone());
+        let place = m.and_then(|m| float_size_on(&m).map(|s| (s, m)));
         if let Some(((fw, fh), m)) = place.as_ref() {
             let (fw, fh) = (*fw, *fh);
             let i = nth.entry(w.workspace).or_default();
@@ -3005,7 +3075,8 @@ pub fn float_window(w: &LayoutWindow) {
     lua.push_str(&format!(
         "hl.dispatch(hl.dsp.window.float({{ action = \"toggle\", {win} }})) "
     ));
-    let place = float_size().zip(focused_monitor().ok());
+    let m = workspace_monitor(w.workspace).or_else(|| focused_monitor().ok());
+    let place = m.and_then(|m| float_size_on(&m).map(|s| (s, m)));
     if let Some(((fw, fh), m)) = place.as_ref() {
         let (fw, fh) = (*fw, *fh);
         let (x, y) = cascade_at(m, (fw, fh), 0);
@@ -3038,5 +3109,7 @@ fn cascade_at(m: &MonitorInfo, size: (i64, i64), i: usize) -> (i64, i64) {
     let step = CASCADE_STEP * (i % CASCADE_WRAP) as f64;
     let x = (l + (uw - fw) / 2.0 + step).clamp(l, (l + uw - fw).max(l));
     let y = (t + (uh - fh) / 2.0 + step).clamp(t, (t + uh - fh).max(t));
-    (x.round() as i64, y.round() as i64)
+    // (A move is in the layout's coordinates: from the screen's own corner,
+    // which is not the origin on a second screen.)
+    ((m.x + x).round() as i64, (m.y + y).round() as i64)
 }

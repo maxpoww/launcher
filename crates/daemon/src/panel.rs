@@ -4680,7 +4680,7 @@ impl App {
     fn quick_wall_room(&self) -> (f32, f32) {
         let s = self.options_scale() * self.fast_zoom();
         let sh = self.buffer_size.1 as f32;
-        let screen_h = self.output_logical_height().unwrap_or(sh).min(sh);
+        let screen_h = self.dock_screen_h().unwrap_or(sh).min(sh);
         let (dock_h, _) = self.scaled_extents();
         let top = self.options_pill_h() + 16.0 * s;
         (top, (screen_h - dock_h - QUICK_OFF_DOCK * s - top).max(QUICK_MIN_H * s))

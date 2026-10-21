@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use calloop::channel::Sender;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::display::GolemSettings;
 use crate::i18n::tr;
@@ -2522,6 +2522,33 @@ fn set_charge_limit(on: bool) {
 /// Put the saved choices that live outside the compositor back, at start:
 /// the apps' look (the home layer writes its own default at every rebuild)
 /// and the session's language and zone.
+/// A screen was plugged in: the owner's wallpaper goes up on it too. The
+/// picture program does not paint a screen it did not have when it was
+/// told (Max's TV stayed a plain colour, 2026-10-21). The same picture on
+/// every screen, without a fade, once the program has the new one.
+pub(crate) fn reassert_wallpaper() {
+    let spawned = std::thread::Builder::new().name("wallpaper-screens".into()).spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let s = GolemSettings::load();
+        let Some(picture) = crate::wall_follow::login_picture().or(s.wallpaper) else {
+            return;
+        };
+        if !std::path::Path::new(&picture).is_file() {
+            return;
+        }
+        let up = crate::wall_tint::for_display(&picture);
+        let _one = WALLPAPER_ONE.lock().unwrap_or_else(|e| e.into_inner());
+        // (A pick on its way has the say.)
+        if WALLPAPER_WANT.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            info!("controls: a screen came; the wallpaper on it too");
+            show_wallpaper(&up, false);
+        }
+    });
+    if let Err(e) = spawned {
+        warn!("controls: could not put the wallpaper on the new screen: {e}");
+    }
+}
+
 pub(crate) fn reassert() {
     let s = GolemSettings::load();
     // The compositor's own settings: on it now, and in the file it reads at

@@ -85,6 +85,7 @@ mod jelly;
 mod launch;
 mod launcher_prefs;
 mod dock_screen;
+mod shell_screens;
 mod managed;
 mod managed_webapps;
 mod minimized;
@@ -363,6 +364,7 @@ fn main() -> anyhow::Result<()> {
             config.options.height,
             config.options.height + OPTIONS_OVERHANG + OPTIONS_DROPDOWN_H,
             config.options.render_scale.max(1),
+            None,
         )
     });
     // The STAGE deck: a full-width strip on the bottom edge, drawn into the gap
@@ -375,6 +377,7 @@ fn main() -> anyhow::Result<()> {
         &qh,
         stage::BAND as u32,
         config.options.render_scale.max(1),
+        None,
     ));
 
     // THE VEIL: one wash over the wallpaper on its own surface, created
@@ -393,6 +396,7 @@ fn main() -> anyhow::Result<()> {
             &layer_shell,
             &qh,
             config.desktop.render_scale.max(1),
+            None,
         )
     });
 
@@ -403,6 +407,7 @@ fn main() -> anyhow::Result<()> {
             &layer_shell,
             &qh,
             config.desktop.render_scale.max(1),
+            None,
         )
     });
 
@@ -414,6 +419,7 @@ fn main() -> anyhow::Result<()> {
         &layer_shell,
         &qh,
         config.options.render_scale.max(1),
+        None,
     ));
 
     // Draw each surface at the output's real scale (fractional.rs), when the
@@ -441,7 +447,7 @@ fn main() -> anyhow::Result<()> {
     // compositor takes the hint.
     let visible_regions = visible::VisibleRegions::bind(&globals, compositor.wl_compositor(), &qh);
     // What the dock is made again with on another screen (dock_screen.rs).
-    let dock_kit = dock_screen::Kit::bind(&globals, &qh, fractional.clone(), visible_regions.clone());
+    let screen_kit = dock_screen::Kit::bind(&globals, &qh, fractional.clone(), visible_regions.clone());
     let dock_visible = visible_regions
         .as_ref()
         .map(|v| v.attach(layer.wl_surface(), &qh));
@@ -923,7 +929,9 @@ fn main() -> anyhow::Result<()> {
         display_pending: None,
         display_pointer: None,
         veil: transition::Veil::bind(&globals, &qh, layer_shell),
-        dock_screens: dock_screen::DockScreens::new(dock_kit),
+        screen_kit,
+        dock_screens: dock_screen::DockScreens::default(),
+        shell_screens: shell_screens::ShellScreens::default(),
         dissolve: None,
         dissolve_runs: 0,
         controls_band: 0.0,
@@ -1465,9 +1473,13 @@ pub struct App {
     /// Fractional-scale state per surface (see `fractional.rs`); `None` when
     /// the compositor lacks the protocols (integer `render_scale` path).
     dock_fscale: Option<fractional::SurfaceScale>,
+    /// What a surface made again on another screen is made with (`dock_screen.rs`).
+    screen_kit: Option<dock_screen::Kit>,
     /// Which screen the dock is on, made again on another when called there
     /// (`dock_screen.rs`), and the edges that catch the pointer on the others.
     dock_screens: dock_screen::DockScreens,
+    /// The rest of the shell's surfaces on the right screen (`shell_screens.rs`).
+    shell_screens: shell_screens::ShellScreens,
     /// Each surface's visible region (see `visible.rs`); `None` without the
     /// protocol.
     pub(crate) dock_visible: Option<visible::SurfaceVisible>,
@@ -2943,10 +2955,16 @@ impl App {
     /// distinct AND fits. Every extent and surface size derives from this one
     /// value, so the fit belongs here.
     pub fn icon_scale(&self) -> f32 {
+        self.icon_scale_for(self.dock_screen_h())
+    }
+
+    /// [`Self::icon_scale`] on a screen `screen_h` tall (logical px): the
+    /// dock's is the dock's screen, the desktop's its own.
+    pub(crate) fn icon_scale_for(&self, screen_h: Option<f32>) -> f32 {
         let levels = &content::ICON_SCALES;
         let requested = levels[self.icon_size];
         let base_full = (self.config.window.height + self.config.window.bottom_margin) as f32;
-        let Some(h) = self.dock_screen_h() else {
+        let Some(h) = screen_h else {
             return requested;
         };
         if base_full <= 0.0 {
@@ -6997,6 +7015,7 @@ impl CompositorHandler for App {
         if self.layer.wl_surface() == surface {
             self.dock_entered(output);
         }
+        self.part_entered(surface, output);
         if self.scale_owner_surface() == surface && self.shell_output.as_ref() != Some(output) {
             self.shell_output = Some(output.clone());
             self.sync_options_zone();
@@ -7025,6 +7044,11 @@ impl LayerShellHandler for App {
         // A dissolve's still closed under us (its output went): end it.
         if self.is_dissolve_surface(layer.wl_surface()) {
             self.dissolve_end();
+            return;
+        }
+        // Any other surface of the shell's but the dock's: made again on
+        // the main screen (`shell_screens.rs`).
+        if self.part_closed(layer.wl_surface()) {
             return;
         }
         if self.is_veil_surface(layer.wl_surface()) {
@@ -7087,6 +7111,18 @@ impl LayerShellHandler for App {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        // A surface made again on another screen takes its part's place
+        // first (`shell_screens.rs`); what it was made for runs after.
+        let then = self.part_arrived(layer.wl_surface());
+        self.route_configure(layer, configure);
+        if let Some(then) = then {
+            then(self);
+        }
+    }
+}
+
+impl App {
+    fn route_configure(&mut self, layer: &LayerSurface, configure: LayerSurfaceConfigure) {
         // Route by surface: a dissolve's still, then the OPTIONS topbar
         // with its own renderer and draw path; everything below is the
         // dock/card.
@@ -8048,6 +8084,7 @@ impl OutputHandler for App {
         self.sync_shell_state();
         // …and one the dock can be called to.
         self.sync_edges();
+        self.sync_parts_home();
     }
 
     fn update_output(
@@ -8060,6 +8097,7 @@ impl OutputHandler for App {
         self.refresh_scaled_geometry();
         self.sync_shell_state();
         self.sync_edges();
+        self.sync_parts_home();
     }
 
     fn output_destroyed(
@@ -8074,6 +8112,7 @@ impl OutputHandler for App {
         // an OPTION that only makes sense with two screens outlives the second.
         self.sync_shell_state();
         self.sync_edges();
+        self.sync_parts_home();
     }
 }
 
@@ -8409,5 +8448,5 @@ fn veil_layer_new(
     globals: &wayland_client::globals::GlobalList,
 ) -> Option<veil::VeilLayer> {
     let viewporter = globals.bind::<wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter, App, _>(qh, 1..=1, ()).ok()?;
-    Some(veil::create(compositor, layer_shell, qh, &viewporter))
+    Some(veil::create(compositor, layer_shell, qh, &viewporter, None))
 }

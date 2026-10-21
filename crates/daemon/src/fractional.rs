@@ -117,10 +117,10 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
         _: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            // (The dock made again on another screen says its scale before
-            // it takes over: kept for it, `dock_screen.rs`.)
-            if matches!(kind, SurfaceKind::Dock) {
-                if let Some(next) = app.dock_next_fscale(proxy) {
+            // (A surface made again on another screen says its scale before
+            // it takes over: kept for it, `dock_screen.rs`, `shell_screens.rs`.)
+            if !matches!(kind, SurfaceKind::Files(_)) {
+                if let Some(next) = app.incoming_fscale(proxy) {
                     next.scale120 = Some(scale);
                     return;
                 }

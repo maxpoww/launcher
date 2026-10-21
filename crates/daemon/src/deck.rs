@@ -484,7 +484,9 @@ impl App {
         // The deck spans the output, so its own width IS the screen width; the
         // height comes from the compositor so a tile can carry the screen's
         // aspect and read as a miniature of it.
-        let screen_h = crate::hypr::focused_monitor()
+        // (The deck's own screen's.)
+        let screen = self.part_screen_name(crate::shell_screens::Part::Deck);
+        let screen_h = crate::hypr::monitor_info(screen.as_deref())
             .map(|m| m.h as f32)
             .unwrap_or(width as f32 / 1.6);
         self.deck_screen = (width as f32, screen_h);
@@ -679,7 +681,7 @@ impl App {
     /// frame while anything still moves.
     pub(crate) fn draw_deck(&mut self) {
         let (w, h) = self.deck_size;
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || self.part_lost(crate::shell_screens::Part::Deck) {
             return;
         }
         let _perf = crate::perf::DECK_DRAW.time();

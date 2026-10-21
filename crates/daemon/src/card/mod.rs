@@ -4486,6 +4486,16 @@ impl App {
                 self.card_let_go();
             }
             Some(spot) => {
+                // On its window's screen (Max, 2026-10-21): hung under the
+                // bar, that is the bar's.
+                let screen = if self.card_banner_spot().is_some() || host == DESK {
+                    self.shell_output.as_ref().and_then(|o| self.output_state.info(o)).and_then(|i| i.name)
+                } else {
+                    crate::hypr::window_monitor(&host)
+                };
+                if self.card_follow_screen(screen.as_deref()) {
+                    return;
+                }
                 // (Hung under the bar, "its window" is the place there.)
                 let spot = self.card_banner_spot().unwrap_or(spot);
                 self.card.spot = Some(spot);
@@ -4664,6 +4674,10 @@ impl App {
     /// wait between two (Max, 2026-10-11: a drag that lags — which side is
     /// slow, the card's drawing or the moves it is sent?).
     pub(crate) fn draw_card(&mut self) {
+        // (Its screen gone, or on its way to its window's: shown nowhere.)
+        if self.part_lost(crate::shell_screens::Part::Card) {
+            return;
+        }
         if self.card.drag.is_none() {
             self.card.drag_pace = None;
             return self.draw_card_frame();

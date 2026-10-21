@@ -987,7 +987,8 @@ impl App {
 
     /// Where the card and its icons sit.
     pub(crate) fn fast_geometry(&self) -> Geo {
-        let screen_h = self.output_logical_height().unwrap_or(self.buffer_size.1 as f32);
+        // (The dock's screen: it is drawn on the dock's surface.)
+        let screen_h = self.dock_screen_h().unwrap_or(self.buffer_size.1 as f32);
         geometry(
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             screen_h,

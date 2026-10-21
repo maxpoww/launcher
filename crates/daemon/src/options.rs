@@ -4541,6 +4541,9 @@ impl App {
         // grooms — not only as current as the last focus change. It counts as a
         // change to the pill in its own right: an app that renames its class
         // under a standing title changes what the pill is allowed to strip.
+        // A window fullscreen on ANOTHER screen hides nothing on the bar's
+        // (Max's TV, 2026-10-21): the bar and the wallpaper here carry on.
+        let fullscreen = fullscreen && !self.on_another_screen(addr.as_deref());
         // (A window fullscreen over the desktop: a moving wallpaper under it
         // holds still.)
         self.wallpaper_hold(crate::controls::HOLD_FULLSCREEN, fullscreen);
@@ -4889,7 +4892,7 @@ impl App {
                 [only] => {
                     if only.mode == hypr::WindowMode::Tiled || only.mode == hypr::WindowMode::Pseudo
                     {
-                        if let Some(tile) = hypr::solitary_tile() {
+                        if let Some(tile) = hypr::solitary_tile(ws) {
                             tracing::debug!("layout: ws{ws} is down to one tile — pseudo");
                             hypr::pseudo_on(&only.address, tile);
                         }

@@ -1897,7 +1897,8 @@ impl App {
     /// surface (see [`crate::screencopy`]).
     pub(crate) fn draw_options(&mut self) {
         let (w, h) = self.options_size;
-        if w == 0 || h == 0 {
+        // (Nor while its screen has gone and it is being made again.)
+        if w == 0 || h == 0 || self.part_lost(crate::shell_screens::Part::Options) {
             return;
         }
         // ONE render per compositor frame, as the dock. The OPTION
