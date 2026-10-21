@@ -106,7 +106,9 @@ const CELL_H: f32 = crate::content::GRID_CELL_H - 8.0 + LABEL_LINE_PX;
 /// icons in the content be closer to each other") — the things stand nearer,
 /// more to a row; a long name takes its second line sooner.
 const FILES_CELL_W: f32 = 80.0;
-const LABEL_GAP: f32 = 5.0;
+/// From the bottom of what a picture shows to its name's words: about 3 px
+/// to its name's box, and the box's own pixel (Max, 2026-10-21).
+const LABEL_GAP: f32 = 4.0;
 /// Text in the head and the places.
 const TEXT_PX: f32 = 13.0;
 const TEXT_LINE: f32 = 17.0;
@@ -141,9 +143,11 @@ const LIST_ICON: f32 = 20.0;
 const LIST_NAME_X: f32 = 38.0;
 const LIST_SIZE_W: f32 = 84.0;
 const LIST_DATE_W: f32 = 150.0;
-/// A selected thing's two marks (the mockup's): the air round its picture,
-/// and round its name in the accent's pill (sideways, up and down).
+/// A selected thing's soft box (the mockup's): its air at the sides and
+/// under the name, and over the picture; the name's own box's (sideways, up
+/// and down).
 const SEL_PAD: f32 = 4.0;
+const SEL_TOP: f32 = 6.0;
 const NAME_PAD: (f32, f32) = (5.0, 1.0);
 /// The air beside the grid (inside `PAD`) and beside a list's rows, and
 /// where a list's first row begins.
@@ -1546,6 +1550,9 @@ struct Win {
     root: Option<PathBuf>,
 
     chains: HashMap<String, Vec<u8>>,
+    /// How much of each picture's square is empty above and under what it
+    /// shows (`ink_rows`), for it to sit on the bottom of its space.
+    ink: HashMap<String, (f32, f32)>,
     uploaded: Vec<Option<String>>,
     capacity: u32,
     pending: HashSet<String>,
@@ -1894,7 +1901,7 @@ impl Win {
         cell.y -= self.scroll;
         let icon = layout.icon_in(&cell, icon_scale);
         if !layout.list {
-            return if at.1 <= icon.y + icon.h + SEL_PAD { Part::Picture } else { Part::Name };
+            return if at.1 <= icon.y + icon.h + 2.0 { Part::Picture } else { Part::Name };
         }
         let name_x = cell.x + LIST_NAME_X;
         if at.0 < name_x - 4.0 {
@@ -2368,12 +2375,6 @@ pub(crate) struct Palette {
     pub ink: [f32; 4],
     pub band_fill: [f32; 4],
     pub band_line: [f32; 4],
-    /// A name being typed: its field, its rim, the mark over what is selected.
-    pub name_field: [f32; 4],
-    pub name_rim: [f32; 4],
-    pub name_mark: [f32; 4],
-    /// Every other row of a list (Max, 2026-10-17: "add zebra to the list").
-    pub zebra: [f32; 4],
 }
 
 fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palette::Theme) -> Palette {
@@ -2388,12 +2389,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
             ink: dock_ink,
             band_fill: [1.0, 1.0, 1.0, 0.07],
             band_line: [1.0, 1.0, 1.0, 0.38],
-            name_field: [0.0, 0.0, 0.0, 0.6],
-            name_rim: [1.0, 1.0, 1.0, 0.18],
-            name_mark: [1.0, 1.0, 1.0, 0.22],
-            // (The mockup's white at 15 %, laid in sRGB: in linear light
-            // that is a much thinner white.)
-            zebra: [1.0, 1.0, 1.0, 0.065],
         };
     }
     Palette {
@@ -2408,10 +2403,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
         ink: lin(theme.ink()),
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
-        name_field: lin(theme.bg()),
-        name_rim: [0.0, 0.0, 0.0, 0.22],
-        name_mark: [0.0, 0.0, 0.0, 0.12],
-        zebra: [0.0, 0.0, 0.0, 0.12],
     }
 }
 
@@ -2481,7 +2472,86 @@ fn is_media(name: &str) -> bool {
 /// its cell, but kept inside the field.
 fn name_field_x(layout: &Layout, cx: f32, w: f32) -> f32 {
     let (lo, hi) = (layout.body.x + 2.0, layout.body.x + layout.body.w - 2.0);
-    (cx - w / 2.0 - 7.0).min(hi - w - 14.0).max(lo)
+    (cx - w / 2.0 - NAME_PAD.0).min(hi - w - 2.0 * NAME_PAD.0).max(lo)
+}
+
+/// A name being typed, measured: its words, the selected part (from its
+/// start), the caret.
+struct Typed {
+    text: String,
+    picked: usize,
+    tw: f32,
+    mark_w: f32,
+    caret_x: f32,
+}
+
+impl Typed {
+    fn of(r: &Rename, measure: &mut dyn FnMut(&str) -> f32) -> Self {
+        Self {
+            tw: measure(&r.text),
+            mark_w: measure(&r.text[..r.picked]),
+            caret_x: measure(&r.text[..r.caret]),
+            text: r.text.clone(),
+            picked: r.picked,
+        }
+    }
+
+    /// The field's words' width.
+    fn width(&self) -> f32 {
+        self.tw.max(24.0)
+    }
+
+    /// Drawn with its words beginning at `x` (`top` their line's top): the
+    /// field — the page's colour, a hairline round it, radius 4 — the part
+    /// selected in the ACCENT with white words on it (the accent shows
+    /// nowhere else: Max, 2026-10-21), else the caret.
+    fn draw(
+        &self,
+        g: &mut GridContent,
+        x: f32,
+        top: f32,
+        (px, line): (f32, f32),
+        (ground, hair, accent, ink): ([f32; 4], [f32; 4], [f32; 4], [f32; 4]),
+    ) {
+        let field = Rect::new(x - NAME_PAD.0, top - NAME_PAD.1, self.width() + 2.0 * NAME_PAD.0, line + 2.0 * NAME_PAD.1);
+        g.rects.push(rect(field, 4.0, ground));
+        g.rects.push(RectInst {
+            border: 1.0,
+            ..rect(field, 4.0, hair)
+        });
+        if self.mark_w > 0.0 {
+            g.rects.push(rect(Rect::new(x, top, self.mark_w, line), 2.0, accent));
+        } else {
+            g.rects.push(rect(Rect::new(x + self.caret_x, top + 2.0, 1.0, line - 4.0), 0.0, ink));
+        }
+        let (head, rest) = self.text.split_at(self.picked);
+        for (words, at, color) in [(head, x, [1.0, 1.0, 1.0, 1.0]), (rest, x + self.mark_w, ink)] {
+            if !words.is_empty() {
+                g.labels.push(Label {
+                    font_px: px,
+                    line_px: line,
+                    cache: false,
+                    color: Some(color),
+                    ..label(words, (at, top), self.tw + 8.0, false, false)
+                });
+            }
+        }
+    }
+}
+
+/// How much of a picture's square is empty above and under what it shows
+/// (shares of its height): rows of its largest image with nothing more
+/// than a faint shadow in them.
+pub(crate) fn ink_rows(chain: &[u8]) -> (f32, f32) {
+    let n = crate::apps::ICON_SIZE as usize;
+    if chain.len() < n * n * 4 {
+        return (0.0, 0.0);
+    }
+    let inked = |y: usize| chain[y * n * 4..(y + 1) * n * 4].chunks_exact(4).any(|px| px[3] > 40);
+    let (Some(first), Some(last)) = ((0..n).find(|&y| inked(y)), (0..n).rev().find(|&y| inked(y))) else {
+        return (0.0, 0.0);
+    };
+    (first as f32 / n as f32, (n - 1 - last) as f32 / n as f32)
 }
 
 fn rect(rect: Rect, radius: f32, color: [f32; 4]) -> RectInst {
@@ -2634,6 +2704,7 @@ impl App {
             places: Vec::new(),
             root,
             chains: HashMap::new(),
+            ink: HashMap::new(),
             uploaded: Vec::new(),
             capacity: 0,
             pending: HashSet::new(),
@@ -4285,6 +4356,12 @@ impl App {
                 continue;
             }
             if let Some(chain) = win.chains.get(key) {
+                if !win.ink.contains_key(key) {
+                    if win.ink.len() > 4000 {
+                        win.ink.clear();
+                    }
+                    win.ink.insert(key.to_owned(), ink_rows(chain));
+                }
                 let free = win.uploaded.iter().position(Option::is_none);
                 if let (Some(layer), Some(r)) = (free, win.renderer.as_mut()) {
                     r.update_icon_layer(layer as u32, chain);
@@ -4419,6 +4496,27 @@ impl App {
         } else {
             chrome::mix(ground, [0.0, 0.0, 0.0, 1.0], 0.075)
         };
+        // (Every other row of a list: the "A · Unified" mockup's stripe —
+        // #f5f5f7 on white, #262628 on #1e1e1e — faint enough that a
+        // selected row, in the soft colour, stands out of them.)
+        let zebra = if pal.dark {
+            chrome::mix(ground, [1.0, 1.0, 1.0, 1.0], 0.035)
+        } else {
+            chrome::mix(ground, [0.0, 0.0, 0.0, 1.0], 0.04)
+        };
+        // (A selected name's own box: the same soft colour laid again on
+        // the box under it — one step darker.)
+        let name_mark = if pal.dark {
+            chrome::mix(pic_mark, [1.0, 1.0, 1.0, 1.0], 0.10)
+        } else {
+            chrome::mix(pic_mark, [0.0, 0.0, 0.0, 1.0], 0.075)
+        };
+        // (A typed name's field's hairline.)
+        let hair = if pal.dark {
+            chrome::mix(ground, [1.0, 1.0, 1.0, 1.0], 0.12)
+        } else {
+            chrome::mix(ground, [0.0, 0.0, 0.0, 1.0], 0.14)
+        };
         let squircle = self.config.theme.icon_squircle;
         let Some(mut win) = self.filer.take(id) else {
             return;
@@ -4521,8 +4619,8 @@ impl App {
             } else {
                 layout.icon_in(&cell, icon_scale).y + layout.icon_in(&cell, icon_scale).h + LABEL_GAP
             };
-            let x = if layout.list { cell.x + LIST_NAME_X - 7.0 } else { name_field_x(&layout, cell.x + cell.w / 2.0, tw) };
-            Some((i, Rect::new(x, top - 2.0, tw + 14.0, line + 4.0)))
+            let x = if layout.list { cell.x + LIST_NAME_X - NAME_PAD.0 } else { name_field_x(&layout, cell.x + cell.w / 2.0, tw) };
+            Some((i, Rect::new(x, top - NAME_PAD.1, tw + 2.0 * NAME_PAD.0, line + 2.0 * NAME_PAD.1)))
         });
         let over = [into_field(hits.card), typing.map_or(Rect::default(), |(_, r)| r)];
         let meets = |c: &Rect, r: &Rect| r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h;
@@ -4578,27 +4676,26 @@ impl App {
             let mut cell = layout.cell_at(win.slide[i]);
             cell.y -= win.scroll;
             if layout.list {
-                // A row: every other one a zebra stripe, a selected one lit
-                // across.
-                // (Selected: the accent across, its words white — the
-                // mockup's, Max 2026-10-21.)
+                // A row: every other one a zebra stripe, a selected one in
+                // the soft selection colour across (Max, 2026-10-21: no
+                // accent — the words stay as they are).
                 let across = Rect::new(cell.x - PAD, cell.y, cell.w + 2.0 * PAD, cell.h);
                 if win.selected.contains(&item.path) || win.drop_on == Some(i) {
-                    grid.rects.push(rect(across, 5.0, pal.accent));
+                    grid.rects.push(rect(across, 5.0, pic_mark));
                 } else if i % 2 == 1 {
-                    grid.rects.push(rect(across, 5.0, pal.zebra));
+                    grid.rects.push(rect(across, 5.0, zebra));
                 }
             }
-            let icon = layout.icon_in(&cell, icon_scale);
-            // SELECTED, THE MOCKUP'S WAY (Max, 2026-10-21): two marks apart — a
-            // soft rounded backdrop behind the picture, and the name in a pill
-            // of the accent (drawn with the name, below). A folder a drag
-            // would be let go into wears the backdrop.
+            // The picture's space, and the picture SITTING ON ITS BOTTOM (Max,
+            // 2026-10-21: the name about 3 px under what is seen): a folder's
+            // or a page's drawing has empty margin of its own, a wide photo
+            // stands in the middle of its square — each is moved down by the
+            // empty rows under what it shows (`Win::ink`, `ink_rows`).
+            let slot = layout.icon_in(&cell, icon_scale);
+            let (ink_top, ink_bottom) = if layout.list { (0.0, 0.0) } else { win.ink.get(&item.icon).copied().unwrap_or((0.0, 0.0)) };
+            let icon = Rect::new(slot.x, slot.y + ink_bottom * slot.h, slot.w, slot.h);
+            let seen_top = icon.y + ink_top * icon.h;
             let picked = win.selected.contains(&item.path);
-            if !layout.list && (picked || win.drop_on == Some(i)) {
-                let back = Rect::new(icon.x - SEL_PAD, icon.y - SEL_PAD, icon.w + 2.0 * SEL_PAD, icon.h + 2.0 * SEL_PAD);
-                grid.rects.push(rect(back, 6.0, pic_mark));
-            }
             let faded = cut.contains(&item.path);
             if let Some(layer) = win.layer_of(&item.icon) {
                 // (A file's own picture: as it is, whatever the palette.)
@@ -4627,27 +4724,10 @@ impl App {
                     continue;
                 }
                 let meta = win.meta.get(&item.path).copied().unwrap_or_default();
-                // (Selected: every word white on the accent.)
-                let white = picked.then_some([1.0, 1.0, 1.0, 1.0]);
                 if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
-                    let (text, picked_to, caret) = (rename.text.clone(), rename.picked, rename.caret);
-                    let mut measure = |t: &str| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(t, TEXT_PX, None));
-                    let (tw, mark_w, caret_x) = (measure(&text), measure(&text[..picked_to]), measure(&text[..caret]));
-                    let inner = tw.max(24.0);
-                    let field = Rect::new(name_x - 7.0, top - 2.0, inner + 14.0, TEXT_LINE + 4.0);
-                    grid.rects.push(rect(field, 7.0, pal.name_field));
-                    grid.rects.push(RectInst {
-                        border: 1.0,
-                        ..rect(field, 7.0, pal.name_rim)
-                    });
-                    if mark_w > 0.0 {
-                        grid.rects.push(rect(Rect::new(name_x, top + 1.0, mark_w, TEXT_LINE - 2.0), 2.0, pal.name_mark));
-                    }
-                    grid.rects.push(rect(Rect::new(name_x + caret_x, top + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
-                    grid.labels.push(Label {
-                        cache: false,
-                        ..label(&text, (name_x, top), inner + 2.0, false, false)
-                    });
+                    // (Left-aligned in a list, where the name was.)
+                    let typed = Typed::of(rename, &mut |t| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(t, TEXT_PX, None)));
+                    typed.draw(&mut grid, name_x, top, (TEXT_PX, TEXT_LINE), (ground, hair, pal.accent, ink));
                 } else if let Some(renderer) = win.renderer.as_mut() {
                     // (A thing found below is named with its folder.)
                     let full = if i >= win.deep_from {
@@ -4658,10 +4738,13 @@ impl App {
                     let name = crate::desktop::fit_label(&full, name_w, &mut |t| {
                         renderer.measure_text(t, TEXT_PX, None)
                     });
-                    grid.labels.push(Label {
-                        color: white,
-                        ..label(&name, (name_x, top), name_w + 2.0, false, faded)
-                    });
+                    // (Selected: the name in its own soft box too, a step darker.)
+                    if picked {
+                        let nw = renderer.measure_text(&name, TEXT_PX, None).min(name_w);
+                        let r = Rect::new(name_x - NAME_PAD.0, top - NAME_PAD.1, nw + 2.0 * NAME_PAD.0, TEXT_LINE + 2.0 * NAME_PAD.1);
+                        grid.rects.push(rect(r, 4.0, name_mark));
+                    }
+                    grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, faded));
                 }
                 if let Some(end) = size_end {
                     let words = if item.kind == Kind::File || item.kind == Kind::Launcher {
@@ -4670,16 +4753,10 @@ impl App {
                         "—".to_owned()
                     };
                     let tw = win.renderer.as_mut().map_or(0.0, |r| r.measure_text(&words, TEXT_PX, None));
-                    grid.labels.push(Label {
-                        color: white,
-                        ..label(&words, (end - tw, top), tw + 4.0, false, true)
-                    });
+                    grid.labels.push(label(&words, (end - tw, top), tw + 4.0, false, true));
                 }
                 if let (Some(x), Some(when)) = (date_x, crate::desktop_props::date_text(meta.modified)) {
-                    grid.labels.push(Label {
-                        color: white,
-                        ..label(&when, (x, top), LIST_DATE_W, false, true)
-                    });
+                    grid.labels.push(label(&when, (x, top), LIST_DATE_W, false, true));
                 }
                 continue;
             }
@@ -4705,83 +4782,95 @@ impl App {
                     });
                 }
             }
-            if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
-                // The field: a dark pill around what is typed, where the
-                // name stood — its stem washed as it opens (the ending stays
-                // out of it), a caret where the typing goes.
-                let (cx, top) = (cell.x + cell.w / 2.0, icon.y + icon.h + LABEL_GAP);
-                let (text, picked_to, caret) = (rename.text.clone(), rename.picked, rename.caret);
-                let mut measure = |t: &str| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(t, LABEL_FONT_PX, None));
-                let (tw, mark_w, caret_x) = (measure(&text), measure(&text[..picked_to]), measure(&text[..caret]));
-                let inner = tw.max(24.0);
-                // (Kept inside the field: a long name does not run off its edge.)
-                let field = Rect::new(name_field_x(&layout, cx, inner), top - 2.0, inner + 14.0, LABEL_LINE_PX + 4.0);
-                let cx = field.x + field.w / 2.0;
-                grid.rects.push(rect(field, 7.0, pal.name_field));
-                grid.rects.push(RectInst {
-                    border: 1.0,
-                    ..rect(field, 7.0, pal.name_rim)
-                });
-                if mark_w > 0.0 {
-                    grid.rects.push(rect(
-                        Rect::new(cx - tw / 2.0, top + 1.0, mark_w, LABEL_LINE_PX - 2.0),
-                        2.0,
-                        pal.name_mark,
-                    ));
-                }
-                grid.rects.push(rect(
-                    Rect::new(cx - tw / 2.0 + caret_x, top + 2.0, 1.0, LABEL_LINE_PX - 4.0),
-                    0.0,
-                    ink,
-                ));
-                grid.labels.push(Label {
-                    font_px: LABEL_FONT_PX,
-                    line_px: LABEL_LINE_PX,
-                    cache: false,
-                    ..label(&text, (cx, top), inner + 2.0, true, false)
-                });
-                continue;
-            }
-            let Some((first, second)) = win.names.1[i].as_ref() else {
-                continue;
-            };
-            if covered(Rect::new(
-                cell.x + 6.0,
-                icon.y + icon.h + LABEL_GAP,
-                cell.w - 12.0,
-                2.0 * LABEL_LINE_PX,
-            )) {
-                continue;
-            }
-            // Selected: the name in its own pill of the accent, hugging the
-            // words (both lines), white on it.
-            let top = icon.y + icon.h + LABEL_GAP;
-            if picked {
-                let lines: Vec<String> = [first, second].into_iter().filter(|l| !l.is_empty()).cloned().collect();
-                let widest = lines
-                    .iter()
-                    .map(|l| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(l, LABEL_FONT_PX, None)))
-                    .fold(0.0, f32::max)
-                    .min(label_w);
-                let pill = Rect::new(
-                    cell.x + cell.w / 2.0 - widest / 2.0 - NAME_PAD.0,
+            // SELECTED, the mockup's "one soft box" (Max, 2026-10-21): ONE
+            // soft box over the picture AND its name, hugging this thing (a
+            // one-line name's box is not stretched to its neighbours'), the
+            // name in its own box of the same soft colour on it — a step
+            // darker; no accent. A folder a drag would be let go into wears it
+            // too. The name stands about 3 px under what the picture shows.
+            let top = slot.y + slot.h + LABEL_GAP;
+            let cx = cell.x + cell.w / 2.0;
+            let typing_here = win
+                .rename
+                .as_ref()
+                .filter(|r| r.path == item.path)
+                .map(|r| Typed::of(r, &mut |t| win.renderer.as_mut().map_or(0.0, |rd| rd.measure_text(t, LABEL_FONT_PX, None))));
+            let lines: Vec<String> = win.names.1[i]
+                .as_ref()
+                .map(|(a, b)| [a, b].into_iter().filter(|l| !l.is_empty()).cloned().collect())
+                .unwrap_or_default();
+            let name_box = match &typing_here {
+                // (A name being typed: its field, kept inside the field.)
+                Some(t) => Rect::new(
+                    name_field_x(&layout, cx, t.width()),
                     top - NAME_PAD.1,
-                    widest + 2.0 * NAME_PAD.0,
-                    lines.len() as f32 * LABEL_LINE_PX + 2.0 * NAME_PAD.1,
-                );
-                grid.rects.push(rect(pill, 4.0, pal.accent));
+                    t.width() + 2.0 * NAME_PAD.0,
+                    LABEL_LINE_PX + 2.0 * NAME_PAD.1,
+                ),
+                None => {
+                    let widest = lines
+                        .iter()
+                        .map(|l| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(l, LABEL_FONT_PX, None)))
+                        .fold(0.0, f32::max)
+                        .min(label_w);
+                    Rect::new(
+                        cx - widest / 2.0 - NAME_PAD.0,
+                        top - NAME_PAD.1,
+                        widest + 2.0 * NAME_PAD.0,
+                        lines.len().max(1) as f32 * LABEL_LINE_PX + 2.0 * NAME_PAD.1,
+                    )
+                }
+            };
+            if picked || win.drop_on == Some(i) {
+                let w = slot.w.max(name_box.w) + 2.0 * SEL_PAD;
+                // (Rows stand close: under a selected thing whose two-line
+                // name's box reaches into this row, this box begins below it.)
+                let above = i
+                    .checked_sub(layout.cols)
+                    .filter(|&j| win.items.get(j).is_some_and(|it| win.selected.contains(&it.path)))
+                    .map_or(f32::MIN, |j| {
+                        let n = win.names.1.get(j).and_then(Option::as_ref).map_or(1, |(_, b)| if b.is_empty() { 1 } else { 2 });
+                        top - layout.ch + n as f32 * LABEL_LINE_PX + NAME_PAD.1 + SEL_PAD + 2.0
+                    });
+                let y = (seen_top - SEL_TOP).max(above);
+                let outer = Rect::new(cx - w / 2.0, y, w, name_box.y + name_box.h + SEL_PAD - y);
+                // (Unlit: the dark look's light would shade its foot black.)
+                grid.rects.push(RectInst {
+                    glass: crate::content::UNLIT,
+                    ..rect(outer, 9.0, pic_mark)
+                });
+                if typing_here.is_none() {
+                    grid.rects.push(rect(name_box, 4.0, name_mark));
+                }
             }
-            for (n, line) in [first, second].into_iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+            if let Some(typed) = typing_here {
+                // (Centred under the picture, where the name was.)
+                typed.draw(
+                    &mut grid,
+                    name_box.x + NAME_PAD.0,
+                    top,
+                    (LABEL_FONT_PX, LABEL_LINE_PX),
+                    (ground, hair, pal.accent, ink),
+                );
+                continue;
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            if covered(Rect::new(cell.x + 6.0, top, cell.w - 12.0, 2.0 * LABEL_LINE_PX)) {
+                continue;
+            }
+            let deep = i >= win.deep_from;
+            for (n, line) in lines.iter().enumerate() {
                 grid.labels.push(Label {
                     font_px: LABEL_FONT_PX,
                     line_px: LABEL_LINE_PX,
-                    color: picked.then_some([1.0, 1.0, 1.0, 1.0]),
                     ..label(
                         line,
-                        (cell.x + cell.w / 2.0, top + n as f32 * LABEL_LINE_PX),
+                        (cx, top + n as f32 * LABEL_LINE_PX),
                         label_w,
                         true,
-                        faded || (n == 1 && i >= win.deep_from),
+                        faded || (n == 1 && deep),
                     )
                 });
             }
@@ -7053,14 +7142,29 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_says_how_much_of_its_square_is_empty() {
+        let n = crate::apps::ICON_SIZE as usize;
+        let mut px = vec![0u8; n * n * 4];
+        // (Ink from a quarter down to the middle: a wide photo, say.)
+        for y in n / 4..n / 2 {
+            for x in 0..n {
+                px[(y * n + x) * 4 + 3] = 255;
+            }
+        }
+        let (top, bottom) = ink_rows(&px);
+        assert!((top - 0.25).abs() < 0.01 && (bottom - (0.5 - 1.0 / n as f32)).abs() < 0.01);
+        assert_eq!(ink_rows(&vec![0u8; n * n * 4]), (0.0, 0.0));
+    }
+
+    #[test]
     fn a_typed_names_field_stays_inside_the_field() {
         let l = Layout::of((920.0, 600.0), 1.0, false, 1.0, SIDE_W);
         // (Centred under its cell where there is room; else pushed in.)
         let mid = l.body.x + l.body.w / 2.0;
-        assert!((name_field_x(&l, mid, 100.0) - (mid - 57.0)).abs() < 0.01);
+        assert!((name_field_x(&l, mid, 100.0) - (mid - 55.0)).abs() < 0.01);
         assert!(name_field_x(&l, l.body.x, 300.0) >= l.body.x);
         let right = name_field_x(&l, l.body.x + l.body.w, 300.0);
-        assert!(right + 314.0 <= l.body.x + l.body.w);
+        assert!(right + 310.0 <= l.body.x + l.body.w);
     }
 
     #[test]
