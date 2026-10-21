@@ -31,7 +31,11 @@
 //! no call until it leaves the strip; else it is a call — even when the
 //! pointer has gone on across meanwhile (it does not stop at a shared edge:
 //! it grazes the strip and falls through, and calling the dock is what it
-//! went down there for; then "I can't call the dock from the TV").
+//! went down there for; then "I can't call the dock from the TV") — unless
+//! by then it is already well on into the other screen (`FELL_THROUGH`):
+//! that was a pass, quick and straight on to somewhere there (Max: "on the
+//! TV I come down fast to the bottom of the built-in, the dock shows up as
+//! if I came from above").
 
 use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -126,6 +130,21 @@ const CROSSED: Duration = Duration::from_millis(400);
 /// screen, waits for it to come back up onto it.
 const COME_BACK: Duration = Duration::from_millis(1000);
 
+/// How far past the touched screen's edge the pointer may be when a touch
+/// is told apart, logical px, and still have meant the edge (an overshoot,
+/// not a pass on to the other screen).
+const FELL_THROUGH: f64 = 80.0;
+
+/// How far the pointer at `at` (global logical) is past `m`'s edge on `side`
+/// (≤ 0: on that screen's side of it).
+fn beyond(m: &crate::hypr::MonitorInfo, side: Side, at: (f64, f64)) -> f64 {
+    match side {
+        Side::Bottom => at.1 - (m.y + m.h),
+        Side::Left => m.x - at.0,
+        Side::Right => at.0 - (m.x + m.w),
+    }
+}
+
 /// A touch waiting to be told apart: on the dock's own strip, or on the edge
 /// of another screen.
 #[derive(Clone, PartialEq)]
@@ -158,9 +177,9 @@ pub(crate) struct DockScreens {
     /// When the compositor last moved its focus to each screen
     /// (`focusedmon`: the pointer crossing over is one).
     focused: Vec<(String, Instant)>,
-    /// A touch waiting `CROSS_WAIT` to be told apart, and the visit it was
-    /// made in.
-    touch: Option<(Touch, u64)>,
+    /// A touch waiting `CROSS_WAIT` to be told apart, the visit it was made
+    /// in and the screen it was on.
+    touch: Option<(Touch, u64, Option<String>)>,
     /// The pointer came over from another screen and is still on the strip
     /// or the edge: not a call until it leaves.
     passing: bool,
@@ -716,7 +735,11 @@ impl App {
         if self.dock_screens.passing || self.dock_screens.touch.is_some() {
             return;
         }
-        let waiting = (touch, self.dock_screens.visit);
+        let screen = match &touch {
+            Touch::Dock => self.dock_screen_name(),
+            Touch::Edge(output) => self.output_state.info(output).and_then(|i| i.name),
+        };
+        let waiting = (touch, self.dock_screens.visit, screen);
         self.dock_screens.touch = Some(waiting.clone());
         let armed = self.loop_handle.insert_source(Timer::from_duration(CROSS_WAIT), move |_, _, app: &mut App| {
             if app.dock_screens.touch.as_ref() == Some(&waiting) {
@@ -743,17 +766,32 @@ impl App {
 
     /// A touch told apart: the pointer came over from the other screen
     /// (passing), or it went to the edge on this one (a call).
-    fn dock_touch_judged(&mut self, (touch, visit): (Touch, u64)) {
-        let screen = match &touch {
-            Touch::Dock => self.dock_screen_name(),
-            Touch::Edge(output) => self.output_state.info(output).and_then(|i| i.name),
-        };
+    fn dock_touch_judged(&mut self, (touch, visit, screen): (Touch, u64, Option<String>)) {
+        // (The dock went elsewhere meanwhile — called on another screen.)
+        if touch == Touch::Dock && (self.dock_screens.moving.is_some() || self.dock_screen_name() != screen) {
+            return;
+        }
         let ago = self.dock_screens.focused.iter().find(|(name, _)| Some(name) == screen.as_ref()).map(|(_, at)| at.elapsed());
         if came_over(ago) {
             info!("dock: the pointer came over to {} from another screen: not a call", screen.unwrap_or_default());
             // (Until it leaves — if it has not already.)
             self.dock_screens.passing = visit == self.dock_screens.visit;
             return;
+        }
+        // Gone on across already: an overshoot, or a pass on to somewhere
+        // on the other screen — told by how far on it already is.
+        let gone = visit != self.dock_screens.visit;
+        if gone {
+            let side = self.dock_side();
+            let past = screen.as_deref().and_then(|name| {
+                let all = crate::hypr::all_monitors();
+                let m = all.iter().find(|m| m.name == name)?;
+                Some(beyond(m, side, crate::hypr::cursor_pos()?))
+            });
+            if past.is_some_and(|past| past > FELL_THROUGH) {
+                info!("dock: the pointer went on through {} to another screen: not a call", screen.unwrap_or_default());
+                return;
+            }
         }
         match touch {
             Touch::Dock => {
@@ -765,9 +803,9 @@ impl App {
             }
             Touch::Edge(output) => self.dock_edge_called(output),
         }
-        // Gone on across already: it goes again unless the pointer comes
-        // back up onto it (its enter keeps it).
-        if visit != self.dock_screens.visit && self.config.input.autohide {
+        // Gone on across (an overshoot): it goes again unless the pointer
+        // comes back up onto it (its enter keeps it).
+        if gone && self.config.input.autohide {
             self.schedule_hide_after(COME_BACK);
         }
     }
@@ -990,6 +1028,22 @@ mod tests {
         assert!(!came_over(Some(ms(5000))));
         // Nothing known: a call, as on a lone screen.
         assert!(!came_over(None));
+    }
+
+    #[test]
+    fn how_far_past_the_edge_the_pointer_fell() {
+        // Max's TV over the laptop: its bottom edge is y = 0.
+        let tv = mon("HDMI-A-1", -24.0, -1080.0, 2048.0, 1080.0);
+        // Grazed on the way down to the laptop's bottom: far on already.
+        assert!(beyond(&tv, Side::Bottom, (600.0, 400.0)) > FELL_THROUGH);
+        // An overshoot of the edge it meant: a little way on.
+        assert!(beyond(&tv, Side::Bottom, (600.0, 30.0)) <= FELL_THROUGH);
+        // Back up on the TV.
+        assert!(beyond(&tv, Side::Bottom, (600.0, -40.0)) < 0.0);
+        // Sideways: a screen's left edge, the pointer gone on to the left.
+        let laptop = mon("eDP-1", 0.0, 0.0, 2000.0, 1250.0);
+        assert_eq!(beyond(&laptop, Side::Left, (-300.0, 500.0)), 300.0);
+        assert_eq!(beyond(&laptop, Side::Right, (2010.0, 500.0)), 10.0);
     }
 
     #[test]
