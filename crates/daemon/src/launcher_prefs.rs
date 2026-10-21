@@ -160,15 +160,15 @@ impl App {
         self.config.input.intellihide && !self.settings.launcher_away
     }
 
-    /// STAY AWAY turned on: a dock parked in view because nothing covered
-    /// it goes (unless the pointer is on it — it leaves when the pointer
-    /// does); turned off, its place is judged again and a free one brings
-    /// the dock back to park.
+    /// STAY AWAY turned on: the dock goes AT ONCE (Max, 2026-10-21: "as soon
+    /// as I toggle it, now it waits until I close the box") — the box it was
+    /// picked in with it, wherever the pointer is; turned off, its place is
+    /// judged again and a free one brings the dock back to park.
     fn stay_away_changed(&mut self) {
         self.zone_free = false;
         if self.settings.launcher_away {
-            if self.ui.target() == crate::state::Target::Dock && self.pointer_pos.is_none() {
-                self.hide_deadline = None;
+            self.hide_deadline = None;
+            if self.ui.target() != crate::state::Target::Hidden {
                 self.handle_command(waverunner_proto::Command::Hide);
             }
         } else {
