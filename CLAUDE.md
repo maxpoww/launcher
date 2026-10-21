@@ -878,27 +878,44 @@ The big daemon files are cohesive but long — go straight to the function:
   window: the desktop's cell with TWO lines of name (`two_lines`), row by row (`Layout`: `cell`,
   `index_at`, `in_view`, `reveal`), scrolling THE CARD'S WAY (Max, 2026-10-14; `filer_scroll` / `filer_fling`, the card's own numbers: a step ×2.4, fingers followed step for step, a wheel's notch eased at 24, a fast scroll let go of gliding on at 4.5 for its speed × 0.32), only what is
   on screen laid out and holding a texture layer (`filer_sync_icons`; thumbnails ride the Files
-  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). THE PILLS (Max, 2026-10-17, the
-  approved mockup https://claude.ai/artifact/Ei5kCq1PFvnH1DowocvYzj): the field is the WHOLE
-  window and four pills float over it (one `GridContent` drawn after the field; `pill()` = a soft
-  shadow of stacked rings, the places' colour, a 6 % white rim): the PLACES a tall pill at the left
-  (`places_box`: the rail wide, as tall as its places, centred in the field's height, scrolling
-  inside when the window is short), opening wider OVER the field with their names on hover
-  (`side_follow`, `side_t`); the PATH a pill centred at the top (`hits.path`: dim steps, the folder
-  in ink) out of which SEARCH and LIST slide on hover, the list a beat later (`tools_open/t`,
-  `tool_boxes`; `Spot::Find`/`View`) — search turns the path into the FIELD ("Search in
-  <folder>", Escape or a click away while empty puts it back), the lit one is SUNKEN; the SCROLL a
-  44×140 pill at the right travelling from `BAR_TOP` to the bottom by the scroll fraction, held to
-  drag (`Win::bar_hold`, `Spot::Bar`), faint and inert when nothing scrolls; the MODE a circle
-  above the places (`mode_boxes`, `Spot::Mode`): on hover it says "Files" and the other circle
-  comes out, a click on that one swaps them — MEDIA shows only pictures and videos (`Win::media`,
-  `is_media`, in `show_found`). Symbols are CARVED: the pill's colour pressed in (`carve`, k in the
-  mockup's sRGB alpha; icons tinted with `ring = -1.3`); the place shown is a sunken square. The
-  grid stands between `FIELD_AIR` (52, never narrower than the rail) on each side, the same air
-  both sides; the list's rows run the window's width with a ZEBRA (`Palette::zebra`) and their
-  words `LIST_AIR` in. A name under a pill is left out (`covered`: the renderer paints every grid's
-  words in one late pass). Rig: `files mode media|files`, `files tools|side|modes open|close`,
-  `files where path|bar|mode <n>`. BACK AND FORWARD ARE ON THE WINDOW'S BAR (Max, 2026-10-14: "como las webapps"): each window is TAGGED `golem-files-<id>` (xdg-toplevel-tag, `Filer::tags`) and its history is published to `$XDG_RUNTIME_DIR/waverunner-files-nav` (`filer_note_nav`, the webapps' `seam/nav` format: `<tag> <back 0|1> <fwd 0|1>`); waveview ≥ 2.18 draws the arrows only while there is somewhere to go and a click sends the window Alt+←/→. Keys and the mouse's side buttons as ever. `..` is the FIRST PLACE, a folder like the others right above Home (`UP`, `with_up`: the folder this one is in, per window; a click goes up leaving this folder selected, a drop on it takes things OUT of the folder; NONE at the root; in a window too narrow for the places it stands in the head, `Spot::Up`)
+  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). THE CHROME — "A · Unified" (Max, 2026-10-21: "is
+  perfect! build it to the real golem files"; mockup https://claude.ai/artifact/DudbvDzykY1oVnMnmn7dvW,
+  `filer/chrome.rs`; it REPLACED the floating pills of 2026-10-17): a standard file manager's frame.
+  THE SIDEBAR on the page's own colour, one hairline at its right, no shadow, no light (`content::UNLIT`
+  — the dark look's night light crushed a near-black panel to black): 48 px of carved SYMBOLS at rest;
+  the pointer on it opens it to 200 OVER the files after `SIDE_WAIT` (120 ms; `Win::side_wait`,
+  `filer_side_wait`), names and the section headings fading in, leaving closes it; the PIN (11 px, top
+  right, only while open; white when on, a dark hairline edge in the light) keeps it open BESIDE the
+  files (`settings.files_pinned`, `filer_pin`, `Win::field_left`). At its top the two MODES (Files ·
+  Media): at rest only the one in use, open both as halves, the one in use sunken; MEDIA shows only
+  pictures and videos (`Win::media`, `is_media`, in `show_found`). Then FAVOURITES (Home under the
+  owner's name, their folders, `~/Phones`, the bookmarks) and LOCATIONS (other disks, what is plugged
+  in, the Bin) — `places()`, `Place::gap` = Locations' first. No `..` any more. Symbols are CARVED
+  (`chrome::tones`): light = the ground pressed in (`carve`: 42 %, the current place a 16 % sunken square
+  with its symbol at 55 %); dark = light greys toward the ink (the look's own). THE TOP LINE (32 px,
+  `HEAD_H`, page colour, no line under it): the TABS (`Win::tabs`, `chrome::Tab`: each its folder and
+  its own back/forward; the current one's live in `dir`/`back`/`forward` — the title bar's arrows act on
+  it): the current one is the way here (`crumbs`; the first step the home's name with no icon, the
+  others with a folder), ✎ and × at its end on hover; the others are dimmed CHIPS (× on hover, middle
+  click closes); + opens Home right of the current (`filer_tab_new/take/close`, Ctrl+T, Ctrl+W closes a
+  tab while there are others, Ctrl+Tab); widths EASE (`Win::tab_w`) so a tab folds into its chip. ✎
+  (or Ctrl+L, or `/`/`~` typed) turns the CURRENT tab's path into a field its width (`Win::go_to`,
+  `edit_w`): Enter goes (`filer_go_typed`, a file → its folder with it selected; nothing there → red),
+  Escape, ✎ again or a press anywhere off the tab closes it. At its right end: sort (`filer_sort_menu`:
+  Name · Date Modified · Size · Kind, Ascending · Descending — `Action::SortBy/SortDir`, `SORT_MENU`;
+  `SortKey::Kind`; Name descending turns the folder's own order round) · i · grid | list · search (a
+  170 px field slides out between the view and the magnifier, `Win::find_t`). Buttons 22×20, 12 px
+  symbols — the mockup's own strokes written as SVGs into `~/.cache/waverunner/files-glyphs/` once
+  (`chrome::write_glyphs`, `glyph`) and read by the icon loader by path, washed with their colour
+  (`symbol`: icon.wgsl's ghost, ring -1.17). THE i CARD (`Win::info_on`, `chrome::Info`, read off the
+  loop by `filer_info_due` whenever the selection changes — `info_key`): preview, name, kind, Contains or
+  Size (+ bytes), Modified, Where, Opens with (`quicklook::default_app` → the dock's index); its foot
+  "N items, X available" / "n of N selected, X available". Solid (no blur to frost it), names under it
+  left out (`covered`). The grid and the list begin at `field_left`; the list's rows are rounded zebra
+  stripes `LIST_AIR` in. Rig: `files side open|close`, `pin on|off`, `info on|off`, `tab new|close
+  [n]|take <n>`, `pencil`, `sortmenu` (then `pick <row>`), `mode media|files`, `files where
+  grid|list|find|seek|sort|info|card|pin|pencil|add|current|tab <n>|tabx <n>|mode <n>|side`; a real
+  pointer in a nested rig: `hyprctl dispatch 'hl.dsp.cursor.move({ x = …, y = … })'`. BACK AND FORWARD ARE ON THE WINDOW'S BAR (Max, 2026-10-14: "como las webapps"): each window is TAGGED `golem-files-<id>` (xdg-toplevel-tag, `Filer::tags`) and its history is published to `$XDG_RUNTIME_DIR/waverunner-files-nav` (`filer_note_nav`, the webapps' `seam/nav` format: `<tag> <back 0|1> <fwd 0|1>`); waveview ≥ 2.18 draws the arrows only while there is somewhere to go and a click sends the window Alt+←/→. Keys and the mouse's side buttons as ever.
   (`crumbs`: from Home, a stick or a phone, else `/`; the first steps give way in a narrow
   window). Side: `places` (Home, the owner's folders under their names on disk from
   `user-dirs.dirs`, `~/Phones`, what is plugged in — `Desktop::volumes`, refreshed from
@@ -980,18 +997,17 @@ The big daemon files are cohesive but long — go straight to the function:
   folder (`EDGE_ZONE`, `filer_edge_tick`). ARCHIVES: "Extract here" on one, "Compress" on any
   selection = File Roller (`file-roller --extract-here` / `--add`, `Action::Extract|Compress`,
   `is_archive`). `menu_rows` takes an `Asked`. THE LIST (`settings.files_list`, one
-  choice for every window; the path's list pill or Ctrl+1 / Ctrl+2, `filer_set_list`): a
+  choice for every window; the top line's grid | list or Ctrl+1 / Ctrl+2, `filer_set_list`): a
   `Layout` of ONE column whose cell is a row (`Layout::of(…, list)`, `LIST_ROW`), so the pointer,
   the keys, the band, drags and make-room know rows with no code of their own (`slot_at` gives
   how far DOWN a row); only the drawing differs (`icon_in`, `columns`: name · size · date, the
-  last two only where there is room; `Win::meta`, read with the listing). It has no strip of
-  column names since the pills (2026-10-17); `files sort` orders by one (`Win::sort`, `sorted`: size/date in THIS window,
-  folders first; Name = the folder's own order) — while ordered by size or date no room is made
-  for a drag. SEARCH (JUST TYPING — the first letter brings the field out, the clipboard box's way; also the
-  magnifier, or Ctrl+F): a field at the head's right, the folder showing
+  last two only where there is room; `Win::meta`, read with the listing). No strip of column
+  names: the top line's sort menu orders (`Win::sort`, `sorted`: in THIS window, folders first; Name =
+  the folder's own order) — while ordered by anything but Name no room is made for a drag. SEARCH (JUST TYPING — the first letter brings the field out, the clipboard box's way; also the
+  magnifier, or Ctrl+F): the field at the top line's right end, the folder showing
   only what holds the words (`Win::find`, `Win::all`, `found`, `filer_find`; Escape puts it
   away, Enter opens the first found, the walking keys go on to what is found); not into
-  sub-folders. The head's icons are the bar's font (`options::NERD`). Rig: `files view
+  sub-folders. Rig: `files view
   list|icons`, `sort name|size|date [up]`, `find <words>|-`. SHIFT with a click or an
   arrow selects from where the selection began (`Win::anchor`, `select_to`, `span`). A drag HELD
   on a folder `SPRING` opens it under the drag (`Win::spring`, a timer from `filer_drag_over`).
