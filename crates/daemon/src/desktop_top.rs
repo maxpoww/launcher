@@ -155,7 +155,9 @@ impl App {
             ink,
             wash: self.options_hover_wash(),
             radius: crate::clipboard::BOX_RADIUS,
-            glass: 0.0,
+            // (Flat, as every menu: the dark look's night light sank their
+            // lower rows toward black.)
+            glass: crate::content::UNLIT,
             accent: MenuPaint::accent_now(),
         }
     }

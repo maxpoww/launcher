@@ -119,9 +119,11 @@ pub(super) struct Info {
 // ── the chrome's own symbols ────────────────────────────────────────────
 
 /// The symbols the chrome wears (the shell's own set: `glyphs.rs`).
-const CHROME: [&str; 21] = [
+const CHROME: [&str; 26] = [
     "clock", "pin", "files", "media", "sort", "info", "grid", "list", "search", "pen", "x", "plus",
     "chev", "folder", "undo", "rename", "trash", "newf", "copy", "open", "dup",
+    // (The selection pill's: there at once when it rises.)
+    "move", "openwith", "usb", "more", "paste",
 ];
 
 /// The icon key of symbol `name`.
@@ -149,6 +151,16 @@ pub(super) fn icon_keys(win: &Win) -> Vec<String> {
     }
     if let Some(info) = win.info.as_ref().filter(|_| win.info_on) {
         keys.push(info.icon.clone());
+    }
+    if let Some(view) = win.pill_view.as_ref() {
+        for part in &view.parts {
+            if let PillPart::Button { icon, .. } = part {
+                let key = glyph(icon);
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
     }
     if let Some(menu) = win.menu.as_ref() {
         for name in menu.glyphs() {
@@ -407,10 +419,16 @@ impl App {
             hits.side = Rect::default();
             hits.mode = [Rect::default(); 2];
         }
-        // The history over all of it (the words under it left out: words
-        // are painted last of all).
+        // The selection pill over the files, and the history over all of
+        // it (the words under either left out: words are painted last).
+        let mut covers = Vec::new();
+        if let Some(pill) = self.filer_pill(win, pal, hits, dt, &mut moving) {
+            covers.push((pill, hits.pill));
+        }
         if let Some(hist) = self.filer_history(win, pal, hits) {
-            let panel = hits.hist;
+            covers.push((hist, hits.hist));
+        }
+        for (cover, panel) in covers {
             let under = |l: &Label| {
                 let r = Rect::new(l.pos.0, l.pos.1, l.max_w, l.line_px);
                 r.x < panel.x + panel.w
@@ -421,7 +439,7 @@ impl App {
             for g in &mut grids {
                 g.labels.retain(|l| !under(l));
             }
-            grids.push(hist);
+            grids.push(cover);
         }
         // (A word's own clip stands in for its grid's: keep both — the open
         // sidebar covers the top line's left, and the words are painted last.)
@@ -1644,6 +1662,403 @@ impl App {
                 clip: Some(panel),
                 ..words(&under, (tx, ty + 17.0), room + 2.0, 10.5, dim)
             });
+        }
+        Some(g)
+    }
+}
+
+// ── the selection pill ──────────────────────────────────────────────────
+
+/// What a button of the selection pill does.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PillAct {
+    /// What the menu's row of that action does, on the selection.
+    Act(Action),
+    /// Opens the menu over the pill (on its Open with page).
+    More,
+    OpenWith,
+    /// Lets go of the selection.
+    Clear,
+    /// The clipboard's files here; or forgotten.
+    Paste,
+    Forget,
+}
+
+/// One part of the pill after its words: a rule, or a button (its symbol,
+/// its words — none: a round one — what it does, and whether it can now).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PillPart {
+    Rule,
+    Button {
+        icon: &'static str,
+        words: String,
+        act: PillAct,
+        off: bool,
+    },
+}
+
+/// What the pill shows: its words (the first strong, the rest dim), then
+/// its parts.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PillView {
+    pub(crate) bold: String,
+    pub(crate) dim: String,
+    pub(crate) parts: Vec<PillPart>,
+}
+
+/// How long a finished thing is said in the pill.
+pub(super) const FLASH: Duration = Duration::from_millis(2600);
+/// The pill: its height, its air at the left (and the right), its words'
+/// size, a button's height, a symbol, the most its strong words take.
+const PILL_H: f32 = 34.0;
+const PILL_LEFT: f32 = 14.0;
+const PILL_RIGHT: f32 = 5.0;
+const PILL_PX: f32 = 12.0;
+const PILL_BTN: f32 = 24.0;
+const PILL_ICON: f32 = 13.0;
+const PILL_NAME: f32 = 220.0;
+/// At most this many buttons with words (Max: "for kids and grandmas").
+const PILL_WORDS: usize = 5;
+
+/// What the pill says of the selection: “name” and its size, or "5
+/// selected" and how many folders and how much.
+fn pill_words(sel: &[&Item], meta: &HashMap<String, Meta>) -> (String, String) {
+    let bytes: u64 = sel
+        .iter()
+        .filter(|it| it.kind == Kind::File)
+        .map(|it| meta.get(&it.path).map_or(0, |m| m.size))
+        .sum();
+    let dirs = sel.iter().filter(|it| it.kind == Kind::Folder).count();
+    let mut bits = Vec::new();
+    if sel.len() > 1 && dirs > 0 {
+        bits.push(if dirs == 1 {
+            tr("1 folder").to_owned()
+        } else {
+            fill(tr("{n} folders"), &[("n", &dirs)])
+        });
+    }
+    if bytes > 0 {
+        bits.push(crate::desktop_props::size_text(bytes));
+    }
+    let first = match sel {
+        [one] => format!("“{}”", one.name),
+        _ => fill(tr("{n} selected"), &[("n", &sel.len())]),
+    };
+    (first, bits.join(" · "))
+}
+
+impl App {
+    /// What window `win`'s selection pill shows now: a line said a moment
+    /// ago; else the selection and what can be done with it; else the files
+    /// on the clipboard, to be put here. Nothing: no pill.
+    fn filer_pill_view(&self, win: &Win) -> Option<PillView> {
+        if let Some((said, _)) = win.flash.as_ref().filter(|(_, at)| at.elapsed() < FLASH) {
+            return Some(PillView {
+                bold: said.clone(),
+                dim: String::new(),
+                parts: Vec::new(),
+            });
+        }
+        let button = |icon, words: &str, act| PillPart::Button {
+            icon,
+            words: words.to_owned(),
+            act,
+            off: false,
+        };
+        let round = |icon, act| PillPart::Button {
+            icon,
+            words: String::new(),
+            act,
+            off: false,
+        };
+        let sel: Vec<&Item> = win
+            .items
+            .iter()
+            .filter(|it| win.selected.contains(&it.path))
+            .collect();
+        if !sel.is_empty() {
+            let (bold, dim) = pill_words(&sel, &win.meta);
+            let mut parts = vec![PillPart::Rule];
+            // In the bin only what it is, and ×.
+            if win.in_bin() == InBin::No {
+                let one = sel.len() == 1;
+                let file = one && sel[0].kind == Kind::File;
+                let smart = self.filer_smart(win, &sel).bar;
+                let mut words = Vec::new();
+                if let Some((icon, label, action)) = smart.as_ref() {
+                    parts.push(button(icon, label, PillAct::Act(*action)));
+                    parts.push(PillPart::Rule);
+                }
+                words.push(button("copy", tr("Copy"), PillAct::Act(Action::Copy)));
+                words.push(button("move", tr("Move"), PillAct::Act(Action::Cut)));
+                if one {
+                    words.push(button("rename", tr("Rename"), PillAct::Act(Action::Rename)));
+                }
+                if file && smart.is_none() {
+                    words.push(button("openwith", tr("Open with"), PillAct::OpenWith));
+                }
+                if !one && win.put_here() {
+                    words.push(button(
+                        "newf",
+                        tr("New folder"),
+                        PillAct::Act(Action::NewFolderWith),
+                    ));
+                }
+                if let Some((stick, _)) = self.one_stick(Some(&win.dir)) {
+                    let words_to = fill(tr("Copy to {stick}"), &[("stick", &stick)]);
+                    words.push(button("usb", &words_to, PillAct::Act(Action::CopyToStick)));
+                }
+                words.truncate(PILL_WORDS - usize::from(smart.is_some()));
+                parts.extend(words);
+                if !sel
+                    .iter()
+                    .any(|it| crate::trash::protected(Path::new(&it.path)))
+                {
+                    parts.push(round("trash", PillAct::Act(Action::MoveToBin)));
+                }
+                parts.push(round("more", PillAct::More));
+                parts.push(PillPart::Rule);
+            }
+            parts.push(round("x", PillAct::Clear));
+            return Some(PillView { bold, dim, parts });
+        }
+        let (paths, cut) = self.clipboard_files()?;
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        if self.filer.clip_forgot.as_ref() == Some(&names) {
+            return None;
+        }
+        let bold = match paths.as_slice() {
+            [one] => format!("“{}”", file_name(one)),
+            _ => fill(tr("{n} items"), &[("n", &paths.len())]),
+        };
+        let (dim, icon, words) = if cut {
+            (tr("to move"), "move", tr("Move here"))
+        } else {
+            (tr("copied"), "paste", tr("Copy here"))
+        };
+        Some(PillView {
+            bold,
+            dim: dim.to_owned(),
+            parts: vec![
+                PillPart::Rule,
+                PillPart::Button {
+                    icon,
+                    words: words.to_owned(),
+                    act: PillAct::Paste,
+                    off: !win.put_here(),
+                },
+                PillPart::Rule,
+                round("x", PillAct::Forget),
+            ],
+        })
+    }
+
+    /// THE SELECTION PILL (Max, 2026-10-21, mockups v48–v49): floating 14 px
+    /// above the foot of the files, centred on them, in the menus' paint
+    /// with a hairline and a soft shadow; it rises and fades in. With a
+    /// selection: what it is, then Copy · Move · Rename · Open with · New
+    /// folder · Copy to <stick> (five with words at most), the bin, ⋯ (the
+    /// right-click's menu, upward) and ×. After a Copy or a Move the files
+    /// wait in it to be put somewhere ("3 items copied · Copy here · ×"); a
+    /// finished thing is said in it for a moment.
+    pub(super) fn filer_pill(
+        &mut self,
+        win: &mut Win,
+        pal: &Palette,
+        hits: &mut Hits,
+        dt: f32,
+        moving: &mut bool,
+    ) -> Option<GridContent> {
+        hits.pill = Rect::default();
+        hits.pill_btns.clear();
+        let view = self.filer_pill_view(win);
+        win.pill_on = view.is_some();
+        let (t, m) = crate::animation::ease_toward(
+            win.pill_t,
+            if view.is_some() { 1.0 } else { 0.0 },
+            dt,
+            TAB_RATE,
+            0.004,
+        );
+        win.pill_t = t;
+        *moving |= m;
+        if view.is_some() {
+            win.pill_view = view;
+        } else if t < 0.01 {
+            win.pill_view = None;
+        }
+        let view = win.pill_view.clone()?;
+        let e = smooth(t);
+        let (w, h) = win.virt();
+        let left = win.field_left().max(win.side_now());
+        // Its width: the words (the strong ones at most `PILL_NAME`), the
+        // rules, the buttons.
+        let px = PILL_PX;
+        // (A name is cut at `PILL_NAME`; a line said alone has the room.)
+        let name_max = if view.parts.is_empty() { w } else { PILL_NAME };
+        let bold_w = measure(win, &view.bold, px, Some(crate::content::FONT_BOLD)).min(name_max);
+        let dim_w = if view.dim.is_empty() {
+            0.0
+        } else {
+            7.0 + measure(win, &view.dim, px, None)
+        };
+        let widths: Vec<f32> = view
+            .parts
+            .iter()
+            .map(|p| match p {
+                PillPart::Rule => 9.0,
+                PillPart::Button { words, .. } if words.is_empty() => PILL_BTN,
+                PillPart::Button { words, .. } => {
+                    9.0 + PILL_ICON + 6.0 + measure(win, words, px, None) + 9.0
+                }
+            })
+            .collect();
+        let right = if view.parts.is_empty() {
+            PILL_LEFT
+        } else {
+            PILL_RIGHT
+        };
+        let parts_w: f32 = widths.iter().sum::<f32>() + 2.0 * widths.len() as f32;
+        // (A few pixels to spare: the words are fitted with a little slack.)
+        let words_w = bold_w + 4.0 + dim_w + if view.parts.is_empty() { 0.0 } else { 6.0 };
+        let room = (w - left - 32.0).max(120.0);
+        let width = (PILL_LEFT + words_w + parts_w + right).min(room);
+        let cx = left + (w - left) / 2.0;
+        let pill = Rect::new(
+            (cx - width / 2.0).round(),
+            (h - 14.0 - PILL_H + (1.0 - e) * 10.0).round(),
+            width,
+            PILL_H,
+        );
+        let paint = self.filer_panel_paint(pill, pal.ground);
+        let fill = paint.fill;
+        let ink = paint.ink;
+        let dark = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] < 0.18;
+        let toward = if dark {
+            [1.0, 1.0, 1.0, 1.0]
+        } else {
+            [0.0, 0.0, 0.0, 1.0]
+        };
+        let a = |c: [f32; 4], k: f32| [c[0], c[1], c[2], c[3] * k * e];
+        let mut g = GridContent {
+            clip: Rect::new(pill.x - 30.0, pill.y - 20.0, pill.w + 60.0, pill.h + 50.0),
+            ..Default::default()
+        };
+        // A soft shadow under it, its fill, a hairline.
+        for k in 1..=5 {
+            let k = k as f32;
+            let grow = 2.4 * k;
+            let s = Rect::new(
+                pill.x - grow,
+                pill.y - grow + 6.0,
+                pill.w + 2.0 * grow,
+                pill.h + 2.0 * grow,
+            );
+            g.rects.push(rect(
+                s,
+                PILL_H / 2.0 + grow,
+                [0.0, 0.0, 0.0, 0.026 * (1.0 - k / 6.0) * e],
+            ));
+        }
+        g.rects.push(RectInst {
+            glass: paint.glass,
+            ..rect(pill, PILL_H / 2.0, a(fill, 1.0))
+        });
+        // (Its lines and symbols as solid steps from its fill toward the
+        // ink: laid on with a see-through ink they came out bright in the
+        // dark.)
+        let line = mix(fill, ink, 0.14);
+        g.rects.push(RectInst {
+            border: 1.0,
+            ..rect(pill, PILL_H / 2.0, a(line, 1.0))
+        });
+        let cy = pill.y + PILL_H / 2.0;
+        let text_y = cy - (px + 4.0) / 2.0;
+        // The words: the strong ones fitted, the rest dim after them.
+        let mut x = pill.x + PILL_LEFT;
+        let gap = if view.parts.is_empty() { 0.0 } else { 6.0 };
+        let bold_room = (pill.w - PILL_LEFT - right - parts_w - dim_w - gap)
+            .min(name_max + 4.0)
+            .max(30.0);
+        let shown = crate::desktop::fit_label(&view.bold, bold_room, &mut |t| {
+            measure(win, t, px, Some(crate::content::FONT_BOLD))
+        });
+        g.labels.push(Label {
+            clip: Some(pill),
+            family: Some(crate::content::FONT_BOLD),
+            cache: false,
+            ..words(&shown, (x, text_y), bold_room + 2.0, px, a(ink, 1.0))
+        });
+        x += measure(win, &shown, px, Some(crate::content::FONT_BOLD)).min(bold_room);
+        if !view.dim.is_empty() {
+            x += 7.0;
+            g.labels.push(Label {
+                clip: Some(pill),
+                cache: false,
+                ..words(&view.dim, (x, text_y), dim_w + 2.0, px, a(ink, 0.5))
+            });
+            x += dim_w - 7.0;
+        }
+        x += 6.0;
+        // The buttons, each its band under the pointer.
+        for (part, bw) in view.parts.iter().zip(&widths) {
+            match part {
+                PillPart::Rule => {
+                    g.rects.push(rect(
+                        Rect::new(x + 4.0, cy - 7.0, 1.0, 14.0),
+                        0.0,
+                        a(line, 1.0),
+                    ));
+                }
+                PillPart::Button {
+                    icon,
+                    words: label,
+                    act,
+                    off,
+                } => {
+                    let r = Rect::new(x, cy - PILL_BTN / 2.0, *bw, PILL_BTN);
+                    let n = hits.pill_btns.len();
+                    let k = if *off { 0.4 } else { 1.0 };
+                    if win.hover == Spot::Pill(n) && !off {
+                        g.rects
+                            .push(rect(r, PILL_BTN / 2.0, a(mix(fill, toward, 0.07), 1.0)));
+                    }
+                    let icon_at = if label.is_empty() {
+                        square(mid(r), PILL_ICON)
+                    } else {
+                        square((r.x + 9.0 + PILL_ICON / 2.0, cy), PILL_ICON)
+                    };
+                    symbol(
+                        &mut g,
+                        win,
+                        &glyph(icon),
+                        icon_at,
+                        a(mix(fill, ink, 0.55), k),
+                    );
+                    if !label.is_empty() {
+                        g.labels.push(Label {
+                            clip: Some(pill),
+                            cache: false,
+                            ..words(
+                                label,
+                                (r.x + 9.0 + PILL_ICON + 6.0, text_y),
+                                r.w,
+                                px,
+                                a(ink, k),
+                            )
+                        });
+                    }
+                    hits.pill_btns
+                        .push((if *off { Rect::default() } else { r }, act.clone()));
+                }
+            }
+            x += bw + 2.0;
+        }
+        if e > 0.5 {
+            hits.pill = pill;
         }
         Some(g)
     }

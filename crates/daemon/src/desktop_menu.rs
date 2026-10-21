@@ -833,6 +833,9 @@ pub(crate) struct Menu {
     pub t: f32,
     /// Coming back from the Properties box: the shape it shrinks from.
     pub grow_from: Option<Rect>,
+    /// It hangs UP from its foot (the selection pill's ⋯): a new page
+    /// keeps the foot where it is.
+    pub up: bool,
 }
 
 impl Menu {
@@ -877,6 +880,7 @@ impl Menu {
             pressed: None,
             t: 0.0,
             grow_from: None,
+            up: false,
         }
     }
 
@@ -884,9 +888,13 @@ impl Menu {
     /// that fits them, kept on the surface.
     fn set_rows(&mut self, rows: Vec<Row>) {
         let (width, height) = (width_of(&rows), height_of(&rows));
+        let foot = self.rect.y + self.rect.h;
         self.rows = rows;
         self.rect.w = width;
         self.rect.h = height;
+        if self.up {
+            self.rect.y = (foot - height).max(0.0);
+        }
         self.rect.x = self.rect.x.min((self.room.0 - width).max(0.0));
         self.rect.y = self.rect.y.min((self.room.1 - height).max(0.0));
         self.hover = None;

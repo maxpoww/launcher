@@ -1139,5 +1139,14 @@
   "New folder with items": "Carpeta nueva con elementos",
   "copy": "copia",
   "Duplicated “{name}”": "“{name}” duplicado",
-  "Duplicated {n} items": "{n} elementos duplicados"
+  "Duplicated {n} items": "{n} elementos duplicados",
+  "1 folder": "1 carpeta",
+  "{n} folders": "{n} carpetas",
+  "{n} selected": "{n} seleccionados",
+  "to move": "para mover",
+  "copied": "copiados",
+  "Move here": "Mover aquí",
+  "Copy here": "Copiar aquí",
+  "Sent “{name}” to {to}": "“{name}” enviado a {to}",
+  "Sent {n} items to {to}": "{n} elementos enviados a {to}"
 }

@@ -62,6 +62,7 @@ use crate::{launch, App};
 mod chrome;
 mod history;
 mod recent;
+mod smart;
 
 pub(crate) use history::say_quietly;
 
@@ -78,6 +79,9 @@ const MIN_SIZE: (u32, u32) = (380, 260);
 /// on its left, sort · i · grid/list · search at its right end, on the
 /// page's own colour with no line under it (`filer/chrome.rs`).
 const HEAD_H: f32 = 32.0;
+/// The room the selection pill takes under the last row (the mockup's
+/// 60 px of padding).
+const PILL_ROOM: f32 = 60.0;
 /// The places' column at rest (the tests' places).
 #[cfg(test)]
 const SIDE_W: f32 = PLACE_ICON + 2.0 * RAIL_AIR;
@@ -396,6 +400,8 @@ enum Spot {
     Undo,
     HistRow(usize),
     HistUndo(usize),
+    /// The selection pill's `n`th button.
+    Pill(usize),
     /// A part of the chrome that takes the pointer and does nothing (the
     /// sidebar's ground, the search field, the i card).
     Chrome,
@@ -423,6 +429,9 @@ pub(crate) struct Layout {
     /// keep their size. A point is brought into the field by [`Self::inward`]
     /// and out of it by [`Self::outward`].
     pub zoom: f32,
+    /// Room under the last row (the selection pill floats there), in the
+    /// field's own size.
+    pub foot: f32,
 }
 
 impl Layout {
@@ -456,6 +465,7 @@ impl Layout {
                 ch: LIST_ROW,
                 list,
                 zoom,
+                foot: 0.0,
             };
         }
         // As many columns as fit, the room left shared between them: the
@@ -473,6 +483,7 @@ impl Layout {
             ch,
             list,
             zoom,
+            foot: 0.0,
         }
     }
 
@@ -539,7 +550,7 @@ impl Layout {
     }
 
     pub fn max_scroll(&self, n: usize) -> f32 {
-        (self.content_h(n) - self.body.h).max(0.0)
+        (self.content_h(n) + self.foot - self.body.h).max(0.0)
     }
 
     /// The item whose cell is under `pos`, the field scrolled by `scroll`.
@@ -1313,6 +1324,9 @@ struct Hits {
     hist: Rect,
     hist_undo: Vec<(Rect, usize)>,
     hist_rows: Vec<(Rect, usize)>,
+    /// THE SELECTION PILL, and its buttons.
+    pill: Rect,
+    pill_btns: Vec<(Rect, chrome::PillAct)>,
 }
 
 /// One window.
@@ -1429,6 +1443,13 @@ struct Win {
     hist_first: f32,
     /// When the history up was last read against the disk.
     hist_read: Option<Instant>,
+    /// THE SELECTION PILL (`chrome::filer_pill`): how far it is in (0..1),
+    /// what it shows (kept while it goes), whether it is wanted (the files
+    /// then get room under their last row); a line it says for a moment.
+    pill_t: f32,
+    pill_view: Option<chrome::PillView>,
+    pill_on: bool,
+    flash: Option<(String, Instant)>,
     /// Where this window was before a drag held on folders (or on `..`) took
     /// it elsewhere, and how long its way back was then. Let go here, it STAYS
     /// where the things were let go and its way back is that one folder (Max,
@@ -1581,7 +1602,11 @@ impl Win {
     }
 
     fn layout(&self, icon_scale: f32) -> Layout {
-        Layout::of(self.virt(), icon_scale, self.list, self.zoom, self.field_left())
+        let mut layout = Layout::of(self.virt(), icon_scale, self.list, self.zoom, self.field_left());
+        if self.pill_on {
+            layout.foot = PILL_ROOM / layout.zoom;
+        }
+        layout
     }
 
     /// The window's size (the field has a zoom of its own: `Layout::zoom`).
@@ -1708,6 +1733,7 @@ impl Win {
             || at.1 < HEAD_H
             || (self.info_on && self.hits.card.contains(at))
             || (self.hist_open && self.hits.hist.contains(at))
+            || self.hits.pill.contains(at)
     }
 
     /// Whether a point the pointer gave is over the field.
@@ -1752,6 +1778,14 @@ impl Win {
         let h = &self.hits;
         if h.up.contains(pos) {
             return Spot::Up;
+        }
+        // (The selection pill floats over the files.)
+        if h.pill.contains(pos) {
+            return h
+                .pill_btns
+                .iter()
+                .position(|(r, _)| r.contains(pos))
+                .map_or(Spot::Chrome, Spot::Pill);
         }
         // (The history stands over everything but the menus.)
         if self.hist_open && h.hist.contains(pos) {
@@ -1881,6 +1915,9 @@ pub(crate) struct Filer {
     /// take it for real).
     rig_drag: bool,
     orders: Orders,
+    /// The files on the clipboard the pill was told to forget (its ×):
+    /// neither offered here nor drawn faded while they are what is there.
+    pub clip_forgot: Option<Vec<String>>,
     /// A drag of ours came over the DOCK while still in hand (set at its
     /// enter there, taken at the drop): the bin may take it.
     pub over_dock: bool,
@@ -1906,6 +1943,7 @@ impl Filer {
             dnd: None,
             rig_drag: false,
             orders: Orders::default(),
+            clip_forgot: None,
             live: Default::default(),
             over_dock: false,
         }
@@ -2621,6 +2659,10 @@ impl App {
             hist_open: false,
             hist_first: 0.0,
             hist_read: None,
+            pill_t: 0.0,
+            pill_view: None,
+            pill_on: false,
+            flash: None,
             sprung_from: None,
             up_hold: None,
             reveal: None,
@@ -3222,6 +3264,15 @@ impl App {
         win.armed = None;
         // (A point of the field: the menu stands where it is drawn.)
         let at = win.layout(icon_scale).outward(at);
+        // What this kind of thing is for, right after Open (not in the bin).
+        let mut ctx = ctx;
+        if let Some(win) = self.filer.win(id).filter(|w| w.in_bin() == InBin::No) {
+            let sel: Vec<&Item> = win.items.iter().filter(|it| win.selected.contains(&it.path)).collect();
+            ctx.smart = self.filer_smart(win, &sel).menu;
+        }
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
         win.menu = Some(Menu::new(ctx, item.filter(|_| path.is_some()), many, at, w, h));
         win.menu_path = path;
         win.props = None;
@@ -3410,6 +3461,94 @@ impl App {
         true
     }
 
+    /// A button of the selection pill.
+    fn filer_pill_act(&mut self, id: u32, act: chrome::PillAct) {
+        use chrome::PillAct;
+        match act {
+            PillAct::Act(action) => self.filer_act(id, action, None, (0.0, 0.0)),
+            PillAct::More => self.filer_pill_menu(id, false),
+            PillAct::OpenWith => self.filer_pill_menu(id, true),
+            PillAct::Clear => {
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.selected.clear();
+                }
+                self.filer_request_draw(id);
+            }
+            PillAct::Paste => self.filer_paste(id),
+            PillAct::Forget => {
+                self.filer.clip_forgot = self
+                    .clipboard_files()
+                    .map(|(paths, _)| paths.iter().map(|p| p.to_string_lossy().into_owned()).collect());
+                let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+                for w in ids {
+                    self.filer_request_draw(w);
+                }
+            }
+        }
+    }
+
+    /// The pill's ⋯: the right-click's own menu for the selection, hanging
+    /// UP from over the pill (`open_with`: turned to its Open with page).
+    /// Again while it is up: it goes.
+    fn filer_pill_menu(&mut self, id: u32, open_with: bool) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        if win.menu.is_some() {
+            win.menu = None;
+            win.menu_path = None;
+            return self.filer_request_draw(id);
+        }
+        let on = win
+            .cursor
+            .filter(|&i| win.items.get(i).is_some_and(|it| win.selected.contains(&it.path)))
+            .or_else(|| win.items.iter().position(|it| win.selected.contains(&it.path)));
+        let (pill, more) = (win.hits.pill, win.hits.pill_btns.iter().find(|(_, a)| *a == chrome::PillAct::More).map(|(r, _)| *r));
+        self.filer_open_menu(id, (0.0, 0.0), on);
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let w = win.virt().0;
+        if let Some(menu) = win.menu.as_mut() {
+            let right = more.map_or(pill.x + pill.w, |r| r.x + r.w + 6.0);
+            menu.rect.x = (right - menu.rect.w).clamp(4.0, (w - menu.rect.w - 4.0).max(4.0));
+            menu.rect.y = (pill.y - 10.0 - menu.rect.h).max(4.0);
+            menu.up = true;
+        }
+        if open_with {
+            self.filer_menu_apps(id);
+        }
+        self.filer_request_draw(id);
+    }
+
+    /// Say `said` in window `id`'s pill for a moment (a finished thing:
+    /// "Copied 3 items to KINGSTON").
+    pub(crate) fn filer_flash(&mut self, id: u32, said: String) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let at = Instant::now();
+        win.flash = Some((said, at));
+        self.filer_request_draw(id);
+        let timer = calloop::timer::Timer::from_duration(chrome::FLASH + Duration::from_millis(40));
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if let Some(win) = app.filer.win_mut(id).filter(|w| w.flash.as_ref().is_some_and(|(_, t)| *t == at)) {
+                win.flash = None;
+                app.filer_request_draw(id);
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// What a copy to `to` is said as: "Copied “x” to KINGSTON", "Copied 3
+    /// items to Pictures".
+    fn copied_words(made: &[PathBuf], to: &str) -> String {
+        match made {
+            [one] => fill(tr("Copied “{name}” to {to}"), &[("name", &file_name(one)), ("to", &to)]),
+            _ => fill(tr("Copied {n} items to {to}"), &[("n", &made.len()), ("to", &to)]),
+        }
+    }
+
     /// Back to the menu's first page.
     fn filer_menu_back(&mut self, id: u32) {
         let Some(win) = self.filer.win_mut(id) else {
@@ -3591,6 +3730,12 @@ impl App {
                 let cut = action == Action::Cut;
                 info!("files: {} {}", if cut { "cut" } else { "copied" }, selected.join(", "));
                 self.serve_files(&selected, cut);
+                // (They wait in the pill to be put somewhere: the selection goes.)
+                self.filer.clip_forgot = None;
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.selected.clear();
+                }
+                self.filer_request_draw(id);
             }
             Action::Paste => self.filer_paste(id),
             // A stick of the sidebar: its name is typed on its desktop icon.
@@ -3781,8 +3926,10 @@ impl App {
                 let now: Vec<String> = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
                 if cut {
                     // The same files where they are now, as a plain copy: a
-                    // second paste must not look for what has moved.
+                    // second paste must not look for what has moved — and
+                    // the pill offers them no more (a move is spent).
                     app.serve_files(&now, false);
+                    app.filer.clip_forgot = Some(now.clone());
                 }
                 if let Some(win) = app.filer.win_mut(id).filter(|w| w.dir == dir) {
                     win.reveal = now.first().cloned();
@@ -4853,7 +5000,15 @@ impl App {
         // What was CUT waits, faded, to be pasted somewhere (the clipboard's
         // newest thing is those files, to be moved).
         let cut: HashSet<String> = match self.clipboard_files() {
-            Some((paths, true)) => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            Some((paths, true)) => {
+                let names: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                // (Forgotten in the pill: not waiting any more.)
+                if self.filer.clip_forgot.as_ref() == Some(&names) {
+                    HashSet::new()
+                } else {
+                    names.into_iter().collect()
+                }
+            }
             _ => HashSet::new(),
         };
         let held = self.filer.drag.as_ref().filter(|d| !d.dropped);
@@ -4937,7 +5092,8 @@ impl App {
                     rect: icon,
                     layer: layer | picture,
                     // (Washed toward the ground it stands on.)
-                    tint: if faded { [ground[0], ground[1], ground[2], 0.6] } else { [0.0; 4] },
+                    // (At 45 %: what waits to be moved, the mockup's.)
+                    tint: if faded { [ground[0], ground[1], ground[2], 0.55] } else { [0.0; 4] },
                     // (-1.3: the wash alone — at -1.0 a tinted icon also
                     // wears the dock's "to the bin" can.)
                     ring: if faded { -1.3 } else { -1.0 },
@@ -5149,8 +5305,7 @@ impl App {
         // (The history stands over the files and words are painted last: a
         // word under it is left out — by the width it is drawn at, so a
         // list's names beside it stay.)
-        if hits.hist.w > 0.0 {
-            let panel = hits.hist;
+        for panel in [hits.hist, hits.pill].into_iter().filter(|p| p.w > 0.0) {
             if let Some(r) = win.renderer.as_mut() {
                 grid.labels.retain(|l| {
                     let w = r.measure_text(&l.text, l.font_px, l.family).min(l.max_w);
@@ -5243,7 +5398,7 @@ impl App {
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
             Spot::Place(_) | Spot::View(_) | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
             Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
-            Spot::Undo | Spot::HistUndo(_) => true,
+            Spot::Undo | Spot::HistUndo(_) | Spot::Pill(_) => true,
             Spot::Mode(n) => (n == 1) != win.media,
             Spot::Chrome | Spot::HistRow(_) => false,
         };
@@ -6419,6 +6574,16 @@ impl App {
                     app.filer_did(id, undo);
                 }
                 info!("files: {} thing(s) brought into {}", brought.len(), dir.display());
+                // A copy (to a stick, say) is said in the pill.
+                if !may_move && !brought.is_empty() {
+                    let to = app
+                        .desktop
+                        .volumes
+                        .iter()
+                        .find(|v| v.path == dir)
+                        .map_or_else(|| file_name(&dir), |v| v.name.clone());
+                    app.filer_flash(id, Self::copied_words(&brought, &to));
+                }
                 if let Some(then) = then.take() {
                     then();
                 }
@@ -6510,6 +6675,11 @@ impl App {
             }
             // The ↶ takes back the newest that can be; a row's Undo, its own.
             Spot::Undo => self.filer_undo(id),
+            Spot::Pill(n) => {
+                if let Some(act) = win.hits.pill_btns.get(n).map(|(_, a)| a.clone()) {
+                    self.filer_pill_act(id, act);
+                }
+            }
             Spot::HistUndo(k) => self.filer_undo_at(id, k),
             Spot::Chrome | Spot::HistRow(_) => win.click = None,
             Spot::Crumb(n) => {
@@ -7046,6 +7216,20 @@ impl App {
                 let said = self.filer_menu_row(id, row);
                 info!("files: pick {row}: {said}");
                 return said;
+            }
+            // `flash <words>`: said in the pill for a moment.
+            "flash" => self.filer_flash(id, rest.to_owned()),
+            // `pill <n>`: as a click on the pill's `n`th button.
+            "pill" => {
+                let act = rest
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| self.filer.win(id)?.hits.pill_btns.get(n).map(|(_, a)| a.clone()));
+                match act {
+                    Some(act) => self.filer_pill_act(id, act),
+                    None => return "pill <n>".to_owned(),
+                }
             }
             // `rows` logs the rows of the menu that is up.
             "rows" => {

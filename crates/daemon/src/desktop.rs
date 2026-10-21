@@ -3206,11 +3206,23 @@ impl App {
         }
         info!("send: {} file(s) → {}", paths.len(), target.name);
         let name = target.name.clone();
+        let sent: Vec<String> = paths.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
         self.desktop_off_loop(
             move || crate::desktop_send::send(&paths, &target),
             move |app, (said, made): (String, Vec<PathBuf>)| {
                 info!("send: {said}");
-                crate::desktop_send_notify(&said);
+                // Sent from a file window: said in its pill; from the
+                // desktop, as a notice.
+                match files {
+                    Some(id) => {
+                        let words = match sent.as_slice() {
+                            [one] => crate::i18n::fill(tr("Sent “{name}” to {to}"), &[("name", one), ("to", &name)]),
+                            _ => crate::i18n::fill(tr("Sent {n} items to {to}"), &[("n", &sent.len()), ("to", &name)]),
+                        };
+                        app.filer_flash(id, words);
+                    }
+                    None => crate::desktop_send_notify(&said),
+                }
                 if !made.is_empty() {
                     let undo = crate::filer::Undo::Copied(made);
                     match files {
