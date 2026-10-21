@@ -1891,7 +1891,16 @@ pub(crate) fn shell_plan(picked: &ColorChoice, system_dark: bool) -> ShellPlan {
 pub(crate) fn shell_plan_look(picked: &ColorChoice, dark: bool) -> ShellPlan {
     let want = picked.palette_id();
     let lv = Levels { dark, ..picked.levels(Surface::Shell, None, dark) };
-    if lv.tint == Some(0) {
+    if !lv.dark {
+        // THE LIGHT SHELL IS THE DESIGNED GLASS (Max, 2026-10-21: "the shell
+        // should not go white, we design the dark and light shell. and none
+        // of them were white"): in the Light look the shell reads the screen,
+        // as it was made to. A palette's light ground is the paper made for
+        // windows — Chartreuse #e3e5da, Golem's own #dcd9d1 — and painted on
+        // the shell it went white. (The palette still gives the shell its
+        // signal colours; the Dark look still wears the palette's ground.)
+        ShellPlan::Screen
+    } else if lv.tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
         // boxes "have a reddish ground" — they sampled a desert wallpaper):
         // Golem's own ground and ink, in the shell's Dark/Light.
@@ -3339,6 +3348,18 @@ mod tests {
             web_sat: 50,
             icons_sat: 50,
             pair: None,
+        }
+    }
+
+    #[test]
+    fn the_light_shell_is_the_designed_glass_never_a_palettes_paper() {
+        // (Max, 2026-10-21: "the shell should not go white".)
+        for palette in [GOLEM, "chartreuse"] {
+            for tint in [None, Some(0), Some(100)] {
+                let picked = ColorChoice { palette: Some(palette.to_owned()), shell_tint: tint, ..Default::default() };
+                assert!(matches!(shell_plan_look(&picked, false), ShellPlan::Screen), "{palette} at {tint:?}: the light shell reads the screen");
+                assert!(!matches!(shell_plan_look(&picked, true), ShellPlan::Screen), "{palette} at {tint:?}: the dark shell wears its ground");
+            }
         }
     }
 
