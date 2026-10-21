@@ -625,7 +625,10 @@ impl App {
                 hits.places.push(Rect::default());
                 continue;
             }
-            let here = (win.dir == place.path && place.name != UP) || win.drop_place == Some(n);
+            // (A place a drag is held on wears the box — and loses it for
+            // a blink just before it opens.)
+            let here = (win.dir == place.path && place.name != UP)
+                || (win.drop_place == Some(n) && win.place_blink != Some(n));
             if here {
                 list.rects.push(rect(row, 6.0, tones.sunk));
             } else if win.hover == Spot::Place(n) {

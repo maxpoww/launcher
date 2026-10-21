@@ -1528,6 +1528,10 @@ struct Win {
     /// A drag held on a folder: which, and since when — held long enough,
     /// the folder opens under it.
     spring: Option<(usize, Instant)>,
+    /// …and on a place of the sidebar (its number); the place blinking
+    /// just before it opens.
+    place_spring: Option<(usize, Instant)>,
+    place_blink: Option<usize>,
     /// Where this window was before a drag held on folders (or on `..`) took
     /// it elsewhere, and how long its way back was then. Let go here, it STAYS
     /// where the things were let go and its way back is that one folder (Max,
@@ -1959,6 +1963,9 @@ pub(crate) struct Filer {
     drag: Option<Lifted>,
     /// A drag over one of the windows.
     dnd: Option<Hovering>,
+    /// The rig's `files over`: a drag that is no Wayland one (the springs
+    /// take it for real).
+    rig_drag: bool,
     orders: Orders,
     /// What Ctrl+Z takes back, the newest last.
     undo: Vec<Undo>,
@@ -1985,6 +1992,7 @@ impl Filer {
             icons: None,
             drag: None,
             dnd: None,
+            rig_drag: false,
             orders: Orders::default(),
             undo: Vec::new(),
             live: Default::default(),
@@ -2696,6 +2704,8 @@ impl App {
             cursor: None,
             anchor: None,
             spring: None,
+            place_spring: None,
+            place_blink: None,
             sprung_from: None,
             up_hold: None,
             reveal: None,
@@ -5699,19 +5709,31 @@ impl App {
         let layout = win.layout(icon_scale);
         let at_win = (x, y);
         win.at_win = Some(at_win);
-        let waiting = win.side_wait.is_some();
-        if win.side_follow() {
-            win.dirty = true;
+        // THE SIDEBAR OPENS AT ONCE under a drag (Max, 2026-10-21: "the dirs
+        // open when i drag something on top"), and folds when it leaves it.
+        let mut side_moved = win.side_follow();
+        if win.side_wait.take().is_some() {
+            win.side_open = true;
+            side_moved = true;
         }
-        if !waiting && win.side_wait.is_some() {
-            self.filer_side_wait(id);
-        }
-        let Some(win) = self.filer.win_mut(id) else {
-            return;
-        };
         let at = if win.in_side(at_win) { at_win } else { layout.inward(at_win) };
         // Over the places: onto that place (the bin among them).
         let place = win.hits.places.iter().position(|r| r.contains(at));
+        // SPRING-LOADED PLACES: held on a folder place, the window opens it
+        // in this tab — after `SPRING`, a blink first (`filer_place_spring`).
+        // Not Recents (nothing goes in it), not the bin (a drop there
+        // throws away), not `..` (it climbs: `up_hold`), not the folder
+        // shown.
+        let springy = place.filter(|&n| {
+            win.places.get(n).is_some_and(|p| {
+                p.name != UP && p.path != recent::root() && !p.path.starts_with(bin_root()) && p.path != win.dir
+            })
+        });
+        let new_spring = (springy != win.place_spring.map(|(n, _)| n)).then_some(springy).flatten();
+        if springy != win.place_spring.map(|(n, _)| n) {
+            win.place_spring = springy.map(|n| (n, Instant::now()));
+            win.place_blink = None;
+        }
         // On `..`: held there, the window climbs (`filer_up_tick`).
         let on_up = place.and_then(|n| win.places.get(n)).is_some_and(|p| p.name == UP);
         let climb = on_up && win.up_hold.is_none();
@@ -5782,6 +5804,12 @@ impl App {
             win.gap = gap;
             self.filer_request_draw(id);
         }
+        if side_moved {
+            self.filer_request_draw(id);
+        }
+        if let Some(n) = new_spring {
+            self.filer_place_spring(id, n);
+        }
         if scrolls {
             self.filer_edge_tick(id);
         }
@@ -5799,7 +5827,7 @@ impl App {
                         .then(|| w.items.get(i).map(|it| PathBuf::from(&it.path)))
                         .flatten()
                 });
-                if let Some(dir) = open.filter(|_| app.filer.dnd_active()) {
+                if let Some(dir) = open.filter(|_| app.filer.dnd_active() || app.filer.rig_drag) {
                     info!("files: a drag held on {} opens it", dir.display());
                     if let Some(win) = app.filer.win_mut(id) {
                         // (Only the first: a drag through three folders goes
@@ -5813,6 +5841,55 @@ impl App {
                 calloop::timer::TimeoutAction::Drop
             });
         }
+    }
+
+    /// A drag held on place `n` of window `id`: once it has been held there
+    /// `SPRING`, the place BLINKS (its box goes, `BLINK`) and then opens in
+    /// this tab — the drag goes on over its files, to be held on a folder
+    /// there or let go. As the files' own spring, the window goes back to
+    /// where the drag began if it leaves without being let go.
+    fn filer_place_spring(&mut self, id: u32, n: usize) {
+        const BLINK: Duration = Duration::from_millis(110);
+        let held = move |app: &App| {
+            app.filer.win(id).is_some_and(|w| {
+                w.place_spring.is_some_and(|(m, since)| m == n && since.elapsed() >= SPRING - Duration::from_millis(30))
+                    && w.drop_place == Some(n)
+                    && (app.filer.dnd_active() || app.filer.rig_drag)
+            })
+        };
+        let timer = calloop::timer::Timer::from_duration(SPRING);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if !held(app) {
+                return calloop::timer::TimeoutAction::Drop;
+            }
+            if let Some(win) = app.filer.win_mut(id) {
+                win.place_blink = Some(n);
+            }
+            app.filer_request_draw(id);
+            let blink = calloop::timer::Timer::from_duration(BLINK);
+            let _ = app.loop_handle.insert_source(blink, move |_, _, app: &mut App| {
+                let ok = held(app);
+                let Some(win) = app.filer.win_mut(id) else {
+                    return calloop::timer::TimeoutAction::Drop;
+                };
+                win.place_blink = None;
+                let to = win.places.get(n).map(|p| p.path.clone()).filter(|_| ok);
+                if let Some(dir) = to {
+                    info!("files: a drag held on the place {} opens it", dir.display());
+                    // (Only the first: a drag through three folders goes back
+                    // to where it began.)
+                    if win.sprung_from.is_none() {
+                        win.sprung_from = Some((win.dir.clone(), win.back.len()));
+                    }
+                    win.place_spring = None;
+                    app.filer_go(id, dir);
+                } else {
+                    app.filer_request_draw(id);
+                }
+                calloop::timer::TimeoutAction::Drop
+            });
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// A drag held on `..` of window `id`: a level up once it has been held
@@ -5912,7 +5989,11 @@ impl App {
                 win.drop_on = None;
                 win.drop_place = None;
                 win.gap = None;
-        win.edge = 0.0;
+                win.edge = 0.0;
+                // (The sidebar a drag opened folds with it.)
+                win.place_spring = None;
+                win.place_blink = None;
+                win.side_open = false;
             }
             self.filer_request_draw(dnd.win);
         }
@@ -6998,14 +7079,20 @@ impl App {
                             let (x, y) = w.layout(icon_scale).outward((x, y));
                             (x, y)
                         });
+                        // (A rig's drag: the springs take it for a real one.)
+                        self.filer.rig_drag = true;
                         self.filer_drag_over(id, x, y);
                     }
                     _ => {
+                        self.filer.rig_drag = false;
                         if let Some(win) = self.filer.win_mut(id) {
                             win.gap = None;
-        win.edge = 0.0;
+                            win.edge = 0.0;
                             win.drop_on = None;
                             win.drop_place = None;
+                            win.place_spring = None;
+                            win.place_blink = None;
+                            win.side_open = false;
                         }
                         self.filer_request_draw(id);
                     }
