@@ -1087,16 +1087,36 @@ The big daemon files are cohesive but long — go straight to the function:
   a listing; a typed name keeps the file's REAL ending (`desktop::ending`: `tar.gz`, not the
   "2 final" of "v1.2 final"); a folder is only "arranged by hand" when a drop changed its order;
   throwing away, undo, put back, delete and empty run OFF the loop; a folder that changes while
-  it is read is read once more after (`Win::again`), not on every change. UNDO (Ctrl+Z, `filer_undo`): the last thirty things done in file windows
-  (`Filer::undo`, `Undo`, recorded by `filer_did`): a name goes back, things moved go back where
-  they were (`undo_of` tells a move from a copy by what was left behind), copies go to the bin,
-  what was thrown away comes back (`filer_bin` keeps its names in the bin), a new folder goes
-  while it is still empty — never over something that took a place since; what was done is said
-  as a notification (`take_back`). Not undone: a hand arrangement, an emptied bin, a delete for
-  good, what the dock's bin took. A PATH CAN BE TYPED (Ctrl+L, or a `/` or `~` typed —
+  it is read is read once more after (`Win::again`), not on every change. UNDO — THE ↶ AND ITS HISTORY (Max, 2026-10-21, mockup v47:
+  "good build it"; `filer/history.rs`, drawn in `filer/chrome.rs`): each WINDOW keeps what was done
+  in it (`Win::history`, a `history::Did` each — the `Undo`, what it is called, its symbol, the
+  folder, when; newest last, up to 100, gone with the window), recorded by `filer_did(id, …)` /
+  `filer_binned` (a thrown thing is named as it was, not by its name in the bin): a name goes back,
+  things moved go back where they were (`undo_of` tells a move from a copy by what was left
+  behind), copies go to the bin, what was thrown away comes back, a new folder goes while it is
+  still empty — never over something that took a place since (`take_back`; `can_undo` asks the
+  same of the disk, OFF the loop, at every listing, after each thing done or undone, and while the
+  history is drawn at most once a second — `filer_history_check`, `Did::can`). The ↶ stands LEFT of
+  sort, 12 px from it, only while something can be taken back: it slides out of nothing (its width
+  and its air, `Win::undo_t`) and away — never a dimmed button. A click on it or Ctrl+Z takes back
+  the newest that still can be (`filer_undo`). A RIGHT click opens the HISTORY under it, its right
+  end at the tools' end, in the menus' paint (unlit: the dark look's night light sank its lower
+  rows): a dim "History", then the rows newest first — the symbol, what was done
+  (`Renamed “README.txt” to “notes.txt”`, `Moved 3 items to the Bin`, `New folder “…”`, `Copied 2
+  items to Pictures`…, fitted), a dim line `<folder> · just now|3 min ago|1 h ago`, and a quiet
+  Undo (a step off the panel, the ink, no accent) — or "Undone" (the words struck through) or
+  "Can’t undo". A row's Undo takes back THAT one, an older one too, the newer staying
+  (`filer_undo_at`; marked at once, unmarked with a notice if it failed); the menu STAYS and
+  goes by itself with the last thing there is to take back; Escape or a press elsewhere puts it
+  away (a right press opens that menu instead); the wheel scrolls its rows (`hist_first`); words of
+  the files under it are left out by their drawn width (a list's names beside it stay). What was
+  taken back is said QUIETLY (a transient, low notice for 2.5 s). Not undone, not listed: a hand
+  arrangement, an emptied bin, a delete for good, what the dock's bin took. Rig: `files undo`,
+  `files hist [open|close|undo <row>]` (rows from the top; the reply/log is the history),
+  `files where undo|histrow <n>|histundo <n>`, `files rclick <x> <y>`. A PATH CAN BE TYPED (Ctrl+L, or a `/` or `~` typed —
   `Win::go_to`, drawn in the steps' place): Enter goes (`typed_place`; a file's folder comes up
   with the file selected), Tab finishes the name as far as one thing can be meant
-  (`complete_path`), Escape or a click leaves. Rig: `files undo`, `files path <text>`. NOT BUILT:
+  (`complete_path`), Escape or a click leaves. Rig: `files path <text>`. NOT BUILT:
   `inode/directory` + FileManager1. Not wired either: a dock tile / `.desktop` entry, `inode/directory`,
   FileManager1. Pointer-free: `waverunner-ctl files [<folder>]` opens a window; `files go
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
