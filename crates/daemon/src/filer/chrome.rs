@@ -244,7 +244,7 @@ fn linear(c: f32) -> f32 {
 }
 
 /// `a` `t` of the way to `b`, mixed as a page mixes them (in sRGB), solid.
-fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+pub(super) fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     let m = |x: f32, y: f32| linear(srgb(x) + (srgb(y) - srgb(x)) * t);
     [m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2]), 1.0]
 }

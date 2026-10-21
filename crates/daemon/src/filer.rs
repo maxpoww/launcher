@@ -141,6 +141,10 @@ const LIST_ICON: f32 = 20.0;
 const LIST_NAME_X: f32 = 38.0;
 const LIST_SIZE_W: f32 = 84.0;
 const LIST_DATE_W: f32 = 150.0;
+/// A selected thing's two marks (the mockup's): the air round its picture,
+/// and round its name in the accent's pill (sideways, up and down).
+const SEL_PAD: f32 = 4.0;
+const NAME_PAD: (f32, f32) = (5.0, 1.0);
 /// The air beside the grid (inside `PAD`) and beside a list's rows, and
 /// where a list's first row begins.
 const GRID_AIR: f32 = 10.0;
@@ -618,6 +622,28 @@ struct Press {
     /// Pressed on one of SEVERAL selected things: the group is kept for a
     /// drag, and only a plain click (no travel) leaves this one alone.
     of_group: bool,
+    /// What its release does, with no travel (a SECOND click on the one
+    /// thing selected — Finder's way, Max 2026-10-21): on its picture it
+    /// opens, on its name the name is typed.
+    then: Then,
+}
+
+/// What a second click on the one thing selected does when let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Then {
+    #[default]
+    Nothing,
+    Open,
+    Rename,
+}
+
+/// Which part of a thing the pointer is on: its picture, its name, or
+/// neither (a list row's size or date).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Picture,
+    Name,
+    Neither,
 }
 
 /// Files of a window in hand: a real Wayland drag of ours, as the desktop's
@@ -1070,9 +1096,12 @@ pub(crate) fn shown_places(asked: &Shown) -> Vec<(PathBuf, Option<PathBuf>)> {
 struct Rename {
     path: String,
     text: String,
-    /// The whole name is selected (as it opens): the first key replaces
-    /// it, a Backspace clears it.
-    all: bool,
+    /// How much of the name is selected from its start, in bytes: as it
+    /// opens, the STEM (the ending stays: Max, 2026-10-21, the mockup's
+    /// rename) — the first key replaces it, a Backspace clears it.
+    picked: usize,
+    /// Where the typing goes (a byte index of `text`).
+    caret: usize,
 }
 
 /// What a right click was made on: what its menu is made from.
@@ -1548,6 +1577,14 @@ struct Win {
     /// A thing whose name is to be typed as soon as it is listed (a folder
     /// just made).
     rename_next: Option<String>,
+    /// A second click on the selected thing's name: its name is typed
+    /// once the double click's time is out, unless another click came
+    /// (`filer_rename_soon`; the counter tells the waits apart).
+    rename_due: Option<u64>,
+    rename_seq: u64,
+    /// The thing a second click on its picture opened, and when (the next
+    /// click of a double click does not open it again).
+    opened: Option<(Instant, String)>,
 
     /// A row that cannot be undone was clicked once: the second click does it.
     armed: Option<Action>,
@@ -1848,6 +1885,28 @@ impl Win {
         layout
             .index_at(pos, self.scroll, self.items.len())
             .map_or(Spot::Nothing, Spot::Item)
+    }
+
+    /// Which part of thing `i` is at `at` (a point of the field): its
+    /// picture or its name — in a list, the icon or the name's words.
+    fn part_at(&mut self, i: usize, at: (f32, f32), layout: &Layout, icon_scale: f32) -> Part {
+        let mut cell = layout.cell(i);
+        cell.y -= self.scroll;
+        let icon = layout.icon_in(&cell, icon_scale);
+        if !layout.list {
+            return if at.1 <= icon.y + icon.h + SEL_PAD { Part::Picture } else { Part::Name };
+        }
+        let name_x = cell.x + LIST_NAME_X;
+        if at.0 < name_x - 4.0 {
+            return Part::Picture;
+        }
+        let name = self.items.get(i).map(|it| it.name.clone()).unwrap_or_default();
+        let w = self.renderer.as_mut().map_or(0.0, |r| r.measure_text(&name, TEXT_PX, None));
+        if at.0 <= name_x + w.min(cell.w - LIST_NAME_X) + 6.0 {
+            Part::Name
+        } else {
+            Part::Neither
+        }
     }
 
     fn select_only(&mut self, i: usize) {
@@ -2307,7 +2366,6 @@ pub(crate) struct Palette {
     pub ground: [f32; 4],
     pub side: [f32; 4],
     pub ink: [f32; 4],
-    pub selected: [f32; 4],
     pub band_fill: [f32; 4],
     pub band_line: [f32; 4],
     /// A name being typed: its field, its rim, the mark over what is selected.
@@ -2328,7 +2386,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
             ground: lift(dock, 0.0),
             side: lift(dock, 0.012),
             ink: dock_ink,
-            selected: [1.0, 1.0, 1.0, 0.16],
             band_fill: [1.0, 1.0, 1.0, 0.07],
             band_line: [1.0, 1.0, 1.0, 0.38],
             name_field: [0.0, 0.0, 0.0, 0.6],
@@ -2349,7 +2406,6 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
         ground: lin(theme.surface()),
         side: lin(theme.raised()),
         ink: lin(theme.ink()),
-        selected: [0.0, 0.0, 0.0, 0.11],
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
         name_field: lin(theme.bg()),
@@ -2419,6 +2475,13 @@ fn is_media(name: &str) -> bool {
     .iter()
     .any(|e| lower.ends_with(e))
         || crate::thumb_more::mime_of(&lower).is_some_and(|m| m.starts_with("image/") || m.starts_with("video/"))
+}
+
+/// Where a typed name's field begins (`w` its words' width): centred under
+/// its cell, but kept inside the field.
+fn name_field_x(layout: &Layout, cx: f32, w: f32) -> f32 {
+    let (lo, hi) = (layout.body.x + 2.0, layout.body.x + layout.body.w - 2.0);
+    (cx - w / 2.0 - 7.0).min(hi - w - 14.0).max(lo)
 }
 
 fn rect(rect: Rect, radius: f32, color: [f32; 4]) -> RectInst {
@@ -2591,6 +2654,9 @@ impl App {
             props: None,
             rename: None,
             rename_next: None,
+            rename_due: None,
+            rename_seq: 0,
+            opened: None,
             armed: None,
             asked: None,
             open_with: Vec::new(),
@@ -3687,9 +3753,15 @@ impl App {
         }
         // (A shortcut is renamed by its file, not its `Name=`.)
         let (path, text) = (item.path.clone(), file_name(Path::new(&item.path)));
+        let is_file = item.kind == Kind::File;
         info!("files: renaming {text}");
         win.select_only(i);
-        win.rename = Some(Rename { path, text, all: true });
+        // (A folder is named whole; a file's ending stays out of it.)
+        let stem = match crate::desktop::ending(&text).filter(|_| is_file) {
+            Some(end) => text.len() - end.len() - 1,
+            None => text.len(),
+        };
+        win.rename = Some(Rename { path, text, picked: stem, caret: stem });
         self.filer_request_draw(id);
     }
 
@@ -3746,22 +3818,57 @@ impl App {
             Keysym::Return | Keysym::KP_Enter => return self.filer_end_rename(id, true),
             Keysym::Escape => return self.filer_end_rename(id, false),
             Keysym::BackSpace => {
-                if rename.all {
-                    rename.text.clear();
-                    rename.all = false;
-                } else {
-                    rename.text.pop();
+                if rename.picked > 0 {
+                    rename.text.replace_range(..rename.picked, "");
+                    rename.caret = 0;
+                } else if let Some((at, _)) = rename.text[..rename.caret].char_indices().next_back() {
+                    rename.text.replace_range(at..rename.caret, "");
+                    rename.caret = at;
                 }
+                rename.picked = 0;
+            }
+            Keysym::Delete => {
+                if rename.picked > 0 {
+                    rename.text.replace_range(..rename.picked, "");
+                    rename.caret = 0;
+                } else if let Some(c) = rename.text[rename.caret..].chars().next() {
+                    rename.text.replace_range(rename.caret..rename.caret + c.len_utf8(), "");
+                }
+                rename.picked = 0;
+            }
+            Keysym::Left => {
+                rename.caret = if rename.picked > 0 {
+                    0
+                } else {
+                    rename.text[..rename.caret].char_indices().next_back().map_or(0, |(at, _)| at)
+                };
+                rename.picked = 0;
+            }
+            Keysym::Right => {
+                if rename.picked == 0 {
+                    rename.caret += rename.text[rename.caret..].chars().next().map_or(0, char::len_utf8);
+                }
+                rename.picked = 0;
+            }
+            Keysym::Home => {
+                rename.caret = 0;
+                rename.picked = 0;
+            }
+            Keysym::End => {
+                rename.caret = rename.text.len();
+                rename.picked = 0;
             }
             _ => {
                 let Some(text) = utf8.filter(|t| !ctrl && !t.is_empty() && !t.chars().any(char::is_control)) else {
                     return;
                 };
-                if rename.all {
-                    rename.text.clear();
-                    rename.all = false;
+                if rename.picked > 0 {
+                    rename.text.replace_range(..rename.picked, "");
+                    rename.caret = 0;
+                    rename.picked = 0;
                 }
-                rename.text.push_str(text);
+                rename.text.insert_str(rename.caret, text);
+                rename.caret += text.len();
             }
         }
         self.filer_request_draw(id);
@@ -3913,6 +4020,34 @@ impl App {
             }
         }
         self.filer_relayout(id);
+    }
+
+    /// A second click on the name of the one thing selected: once the
+    /// double click's time is out (another click meanwhile — a double click
+    /// — takes it back), its name is typed in place.
+    fn filer_rename_soon(&mut self, id: u32, i: usize) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some(path) = win.items.get(i).map(|it| it.path.clone()) else {
+            return;
+        };
+        win.rename_seq += 1;
+        let seq = win.rename_seq;
+        win.rename_due = Some(seq);
+        let timer = calloop::timer::Timer::from_duration(DOUBLE_CLICK);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            let ready = app.filer.win_mut(id).filter(|w| {
+                w.rename_due == Some(seq) && w.rename.is_none() && w.selected.len() == 1 && w.selected.contains(&path)
+            });
+            if let Some(win) = ready {
+                win.rename_due = None;
+                if let Some(i) = win.items.iter().position(|it| it.path == path) {
+                    app.filer_begin_rename(id, i);
+                }
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// Search window `id`'s folder for `find` (`Some("")`: the field out and
@@ -4277,6 +4412,13 @@ impl App {
         let icon_scale = self.icon_scale();
         let pal = self.filer_palette();
         let (ground, side_ground, ink) = (pal.ground, pal.side, pal.ink);
+        // (A selected picture's backdrop: black 7.5 % in the light, white
+        // 10 % in the dark — the mockup's, mixed as a page mixes them.)
+        let pic_mark = if pal.dark {
+            chrome::mix(ground, [1.0, 1.0, 1.0, 1.0], 0.10)
+        } else {
+            chrome::mix(ground, [0.0, 0.0, 0.0, 1.0], 0.075)
+        };
         let squircle = self.config.theme.icon_squircle;
         let Some(mut win) = self.filer.take(id) else {
             return;
@@ -4365,8 +4507,24 @@ impl App {
             Rect::new(bx + (r.x - bx) / z, by + (r.y - by) / z, r.w / z, r.h / z)
         };
         let cover = cover.map(into_field);
-        // (The i card over the files: a name under it is left out too.)
-        let over = [into_field(hits.card)];
+        // (The i card over the files: a name under it is left out too —
+        // and the field a name is typed in, wider than its cell: the names
+        // beside it.)
+        let typing: Option<(usize, Rect)> = win.rename.as_ref().and_then(|r| {
+            let i = win.items.iter().position(|it| it.path == r.path)?;
+            let mut cell = layout.cell(i);
+            cell.y -= win.scroll;
+            let (px, line) = if layout.list { (TEXT_PX, TEXT_LINE) } else { (LABEL_FONT_PX, LABEL_LINE_PX) };
+            let tw = win.renderer.as_mut().map_or(0.0, |rd| rd.measure_text(&r.text, px, None)).max(24.0);
+            let top = if layout.list {
+                cell.y + (cell.h - TEXT_LINE) / 2.0
+            } else {
+                layout.icon_in(&cell, icon_scale).y + layout.icon_in(&cell, icon_scale).h + LABEL_GAP
+            };
+            let x = if layout.list { cell.x + LIST_NAME_X - 7.0 } else { name_field_x(&layout, cell.x + cell.w / 2.0, tw) };
+            Some((i, Rect::new(x, top - 2.0, tw + 14.0, line + 4.0)))
+        });
+        let over = [into_field(hits.card), typing.map_or(Rect::default(), |(_, r)| r)];
         let meets = |c: &Rect, r: &Rect| r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h;
         let covered = |r: Rect| cover.is_some_and(|c| meets(&c, &r)) || over.iter().any(|c| c.w > 0.0 && meets(c, &r));
         // MAKE ROOM: what is in hand leaves its place, and while a drag is
@@ -4422,20 +4580,25 @@ impl App {
             if layout.list {
                 // A row: every other one a zebra stripe, a selected one lit
                 // across.
+                // (Selected: the accent across, its words white — the
+                // mockup's, Max 2026-10-21.)
                 let across = Rect::new(cell.x - PAD, cell.y, cell.w + 2.0 * PAD, cell.h);
                 if win.selected.contains(&item.path) || win.drop_on == Some(i) {
-                    grid.rects.push(rect(across, 5.0, pal.selected));
+                    grid.rects.push(rect(across, 5.0, pal.accent));
                 } else if i % 2 == 1 {
                     grid.rects.push(rect(across, 5.0, pal.zebra));
                 }
-            } else if win.selected.contains(&item.path) || win.drop_on == Some(i) {
-                grid.rects.push(rect(
-                    Rect::new(cell.x + 3.0, cell.y + 3.0, cell.w - 6.0, cell.h - 6.0),
-                    10.0,
-                    pal.selected,
-                ));
             }
             let icon = layout.icon_in(&cell, icon_scale);
+            // SELECTED, THE MOCKUP'S WAY (Max, 2026-10-21): two marks apart — a
+            // soft rounded backdrop behind the picture, and the name in a pill
+            // of the accent (drawn with the name, below). A folder a drag
+            // would be let go into wears the backdrop.
+            let picked = win.selected.contains(&item.path);
+            if !layout.list && (picked || win.drop_on == Some(i)) {
+                let back = Rect::new(icon.x - SEL_PAD, icon.y - SEL_PAD, icon.w + 2.0 * SEL_PAD, icon.h + 2.0 * SEL_PAD);
+                grid.rects.push(rect(back, 6.0, pic_mark));
+            }
             let faded = cut.contains(&item.path);
             if let Some(layer) = win.layer_of(&item.icon) {
                 // (A file's own picture: as it is, whatever the palette.)
@@ -4458,15 +4621,18 @@ impl App {
                 let (size_end, date_x) = layout.columns(&cell);
                 let name_x = cell.x + LIST_NAME_X;
                 let name_w = size_end.map_or(cell.x + cell.w, |x| x - LIST_SIZE_W) - name_x - 10.0;
-                if covered(Rect::new(name_x, top, cell.x + cell.w - name_x, TEXT_LINE)) {
+                // (The row whose name is being typed is not hidden by its own field.)
+                let own = typing.is_some_and(|(t, _)| t == i);
+                if !own && covered(Rect::new(name_x, top, cell.x + cell.w - name_x, TEXT_LINE)) {
                     continue;
                 }
                 let meta = win.meta.get(&item.path).copied().unwrap_or_default();
+                // (Selected: every word white on the accent.)
+                let white = picked.then_some([1.0, 1.0, 1.0, 1.0]);
                 if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
-                    let tw = win
-                        .renderer
-                        .as_mut()
-                        .map_or(0.0, |r| r.measure_text(&rename.text, TEXT_PX, None));
+                    let (text, picked_to, caret) = (rename.text.clone(), rename.picked, rename.caret);
+                    let mut measure = |t: &str| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(t, TEXT_PX, None));
+                    let (tw, mark_w, caret_x) = (measure(&text), measure(&text[..picked_to]), measure(&text[..caret]));
                     let inner = tw.max(24.0);
                     let field = Rect::new(name_x - 7.0, top - 2.0, inner + 14.0, TEXT_LINE + 4.0);
                     grid.rects.push(rect(field, 7.0, pal.name_field));
@@ -4474,13 +4640,13 @@ impl App {
                         border: 1.0,
                         ..rect(field, 7.0, pal.name_rim)
                     });
-                    if rename.all && tw > 0.0 {
-                        grid.rects.push(rect(Rect::new(name_x, top + 1.0, tw, TEXT_LINE - 2.0), 2.0, pal.name_mark));
+                    if mark_w > 0.0 {
+                        grid.rects.push(rect(Rect::new(name_x, top + 1.0, mark_w, TEXT_LINE - 2.0), 2.0, pal.name_mark));
                     }
-                    grid.rects.push(rect(Rect::new(name_x + tw + 1.0, top + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
+                    grid.rects.push(rect(Rect::new(name_x + caret_x, top + 2.0, 1.0, TEXT_LINE - 4.0), 0.0, ink));
                     grid.labels.push(Label {
                         cache: false,
-                        ..label(&rename.text, (name_x, top), inner + 2.0, false, false)
+                        ..label(&text, (name_x, top), inner + 2.0, false, false)
                     });
                 } else if let Some(renderer) = win.renderer.as_mut() {
                     // (A thing found below is named with its folder.)
@@ -4492,7 +4658,10 @@ impl App {
                     let name = crate::desktop::fit_label(&full, name_w, &mut |t| {
                         renderer.measure_text(t, TEXT_PX, None)
                     });
-                    grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, faded));
+                    grid.labels.push(Label {
+                        color: white,
+                        ..label(&name, (name_x, top), name_w + 2.0, false, faded)
+                    });
                 }
                 if let Some(end) = size_end {
                     let words = if item.kind == Kind::File || item.kind == Kind::Launcher {
@@ -4501,10 +4670,16 @@ impl App {
                         "—".to_owned()
                     };
                     let tw = win.renderer.as_mut().map_or(0.0, |r| r.measure_text(&words, TEXT_PX, None));
-                    grid.labels.push(label(&words, (end - tw, top), tw + 4.0, false, true));
+                    grid.labels.push(Label {
+                        color: white,
+                        ..label(&words, (end - tw, top), tw + 4.0, false, true)
+                    });
                 }
                 if let (Some(x), Some(when)) = (date_x, crate::desktop_props::date_text(meta.modified)) {
-                    grid.labels.push(label(&when, (x, top), LIST_DATE_W, false, true));
+                    grid.labels.push(Label {
+                        color: white,
+                        ..label(&when, (x, top), LIST_DATE_W, false, true)
+                    });
                 }
                 continue;
             }
@@ -4531,29 +4706,31 @@ impl App {
                 }
             }
             if let Some(rename) = win.rename.as_ref().filter(|r| r.path == item.path) {
-                // The field: a dark pill around what is typed, washed while
-                // all of it is selected, a caret after it (the desktop's).
+                // The field: a dark pill around what is typed, where the
+                // name stood — its stem washed as it opens (the ending stays
+                // out of it), a caret where the typing goes.
                 let (cx, top) = (cell.x + cell.w / 2.0, icon.y + icon.h + LABEL_GAP);
-                let tw = win
-                    .renderer
-                    .as_mut()
-                    .map_or(0.0, |r| r.measure_text(&rename.text, LABEL_FONT_PX, None));
+                let (text, picked_to, caret) = (rename.text.clone(), rename.picked, rename.caret);
+                let mut measure = |t: &str| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(t, LABEL_FONT_PX, None));
+                let (tw, mark_w, caret_x) = (measure(&text), measure(&text[..picked_to]), measure(&text[..caret]));
                 let inner = tw.max(24.0);
-                let field = Rect::new(cx - inner / 2.0 - 7.0, top - 2.0, inner + 14.0, LABEL_LINE_PX + 4.0);
+                // (Kept inside the field: a long name does not run off its edge.)
+                let field = Rect::new(name_field_x(&layout, cx, inner), top - 2.0, inner + 14.0, LABEL_LINE_PX + 4.0);
+                let cx = field.x + field.w / 2.0;
                 grid.rects.push(rect(field, 7.0, pal.name_field));
                 grid.rects.push(RectInst {
                     border: 1.0,
                     ..rect(field, 7.0, pal.name_rim)
                 });
-                if rename.all && tw > 0.0 {
+                if mark_w > 0.0 {
                     grid.rects.push(rect(
-                        Rect::new(cx - tw / 2.0, top + 1.0, tw, LABEL_LINE_PX - 2.0),
+                        Rect::new(cx - tw / 2.0, top + 1.0, mark_w, LABEL_LINE_PX - 2.0),
                         2.0,
                         pal.name_mark,
                     ));
                 }
                 grid.rects.push(rect(
-                    Rect::new(cx + tw / 2.0 + 1.0, top + 2.0, 1.0, LABEL_LINE_PX - 4.0),
+                    Rect::new(cx - tw / 2.0 + caret_x, top + 2.0, 1.0, LABEL_LINE_PX - 4.0),
                     0.0,
                     ink,
                 ));
@@ -4561,7 +4738,7 @@ impl App {
                     font_px: LABEL_FONT_PX,
                     line_px: LABEL_LINE_PX,
                     cache: false,
-                    ..label(&rename.text, (cx, top), inner + 2.0, true, false)
+                    ..label(&text, (cx, top), inner + 2.0, true, false)
                 });
                 continue;
             }
@@ -4576,13 +4753,32 @@ impl App {
             )) {
                 continue;
             }
+            // Selected: the name in its own pill of the accent, hugging the
+            // words (both lines), white on it.
+            let top = icon.y + icon.h + LABEL_GAP;
+            if picked {
+                let lines: Vec<String> = [first, second].into_iter().filter(|l| !l.is_empty()).cloned().collect();
+                let widest = lines
+                    .iter()
+                    .map(|l| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(l, LABEL_FONT_PX, None)))
+                    .fold(0.0, f32::max)
+                    .min(label_w);
+                let pill = Rect::new(
+                    cell.x + cell.w / 2.0 - widest / 2.0 - NAME_PAD.0,
+                    top - NAME_PAD.1,
+                    widest + 2.0 * NAME_PAD.0,
+                    lines.len() as f32 * LABEL_LINE_PX + 2.0 * NAME_PAD.1,
+                );
+                grid.rects.push(rect(pill, 4.0, pal.accent));
+            }
             for (n, line) in [first, second].into_iter().enumerate().filter(|(_, l)| !l.is_empty()) {
                 grid.labels.push(Label {
                     font_px: LABEL_FONT_PX,
                     line_px: LABEL_LINE_PX,
+                    color: picked.then_some([1.0, 1.0, 1.0, 1.0]),
                     ..label(
                         line,
-                        (cell.x + cell.w / 2.0, icon.y + icon.h + LABEL_GAP + n as f32 * LABEL_LINE_PX),
+                        (cell.x + cell.w / 2.0, top + n as f32 * LABEL_LINE_PX),
                         label_w,
                         true,
                         faded || (n == 1 && i >= win.deep_from),
@@ -5021,6 +5217,11 @@ impl App {
                 if let Some(win) = self.filer.win_mut(id) {
                     let press = win.press.take();
                     let banded = win.band.take().is_some();
+                    let then = press.as_ref().filter(|_| !banded).map_or(Then::Nothing, |p| p.then);
+                    let at = press
+                        .as_ref()
+                        .and_then(|p| p.path.as_ref())
+                        .and_then(|p| win.items.iter().position(|it| it.path == *p));
                     if let Some(i) = press
                         .filter(|p| p.of_group && !banded)
                         .and_then(|p| p.path)
@@ -5029,6 +5230,16 @@ impl App {
                         win.select_only(i);
                     }
                     self.filer_request_draw(id);
+                    match (then, at) {
+                        (Then::Open, Some(i)) => {
+                            if let Some(win) = self.filer.win_mut(id) {
+                                win.opened = win.items.get(i).map(|it| (Instant::now(), it.path.clone()));
+                            }
+                            self.filer_activate(id, i);
+                        }
+                        (Then::Rename, Some(i)) => self.filer_rename_soon(id, i),
+                        _ => {}
+                    }
                 }
             }
             return;
@@ -5036,6 +5247,8 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        // (A name waiting to be typed waits no more: another click came.)
+        win.rename_due = None;
         // A press anywhere puts the Properties box away and keeps a name
         // being typed.
         if win.props.take().is_some() {
@@ -5924,11 +6137,26 @@ impl App {
                     .click
                     .take()
                     .is_some_and(|(at, p)| p == path && now.duration_since(at) <= DOUBLE_CLICK);
-                if twice && !ctrl {
+                // (A second click that opened it already is not, with this
+                // one, a double click that opens it again.)
+                let opened = win
+                    .opened
+                    .as_ref()
+                    .is_some_and(|(t, p)| *p == path && now.duration_since(*t) <= DOUBLE_CLICK);
+                if twice && !ctrl && !opened {
                     self.filer_activate(id, i);
                     return;
                 }
                 win.click = Some((now, path.clone()));
+                // A SECOND click on the one thing selected (Finder's way, Max
+                // 2026-10-21): on its picture it opens, on its name the name is
+                // typed — both when let go without travel (`filer_button`).
+                let only = !ctrl && !shift && !opened && win.selected.len() == 1 && win.selected.contains(&path);
+                let then = match (only, win.part_at(i, at, &layout, icon_scale)) {
+                    (true, Part::Picture) => Then::Open,
+                    (true, Part::Name) => Then::Rename,
+                    _ => Then::Nothing,
+                };
                 // One of several selected: the group stays for a drag, and
                 // the release decides (see `filer_button`).
                 let of_group = !ctrl && !shift && win.selected.len() > 1 && win.selected.contains(&path);
@@ -5950,6 +6178,7 @@ impl App {
                     at,
                     serial,
                     of_group,
+                    then,
                 });
                 self.filer_request_draw(id);
             }
@@ -5977,6 +6206,7 @@ impl App {
                         at,
                         serial,
                         of_group: false,
+                        then: Then::Nothing,
                     });
                 }
                 if !ctrl && !win.selected.is_empty() {
@@ -6597,6 +6827,22 @@ impl App {
                 self.filer_request_draw(id);
             }
             "sortmenu" => self.filer_sort_menu(id),
+            "click" => {
+                // `click <x> <y>`: a left click at that point of the window
+                // (press and release, no travel), through the real code.
+                let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                let [x, y] = n[..] else {
+                    return "click <x> <y>".to_owned();
+                };
+                let icon_scale = self.icon_scale();
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.at_win = Some((x, y));
+                    win.ptr = Some(win.point((x, y), icon_scale));
+                }
+                self.filer_hover(id);
+                self.filer_button(id, 0x110, true, 0);
+                self.filer_button(id, 0x110, false, 0);
+            }
             "find" => self.filer_find(id, (rest != "-").then(|| rest.to_owned())),
             "sort" => {
                 // `sort name|size|date [up]`
@@ -6623,6 +6869,7 @@ impl App {
                         at: (x0, y0),
                         serial: 0,
                         of_group: false,
+                        then: Then::Nothing,
                     });
                     win.ptr = Some((x1, y1));
                 }
@@ -6803,6 +7050,17 @@ mod tests {
         assert_eq!(user_dir(text, home, "MUSIC"), None);
         assert_eq!(user_dir(text, home, "VIDEOS"), Some(PathBuf::from("/data/Videos")));
         assert_eq!(user_dir(text, home, "PICTURES"), None);
+    }
+
+    #[test]
+    fn a_typed_names_field_stays_inside_the_field() {
+        let l = Layout::of((920.0, 600.0), 1.0, false, 1.0, SIDE_W);
+        // (Centred under its cell where there is room; else pushed in.)
+        let mid = l.body.x + l.body.w / 2.0;
+        assert!((name_field_x(&l, mid, 100.0) - (mid - 57.0)).abs() < 0.01);
+        assert!(name_field_x(&l, l.body.x, 300.0) >= l.body.x);
+        let right = name_field_x(&l, l.body.x + l.body.w, 300.0);
+        assert!(right + 314.0 <= l.body.x + l.body.w);
     }
 
     #[test]
