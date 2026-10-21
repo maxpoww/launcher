@@ -95,6 +95,12 @@ const FADE_TICK: Duration = Duration::from_millis(16);
 /// The still is taken down by now whatever happened: a frozen picture left
 /// over the desktop would look like a hang.
 const HARD_CAP: Duration = Duration::from_millis(2000);
+/// THE SLOW DISSOLVE (`dissolve_slow`), for the light crossing between the
+/// looks: the apps' new look shows through the still as a light dims, never
+/// in one frame (Max, 2026-10-21: the terminal went white to black in half a
+/// second, "aggressive").
+const SLOW_HOLD: Duration = Duration::from_millis(300);
+const SLOW_FADE: Duration = Duration::from_millis(2500);
 
 /// What is done under the still.
 pub(crate) type Then = Box<dyn FnOnce(&mut App)>;
@@ -141,6 +147,8 @@ pub(crate) struct Dissolve {
     /// The scale `then` sets (the still's size after it is worked out from it).
     new_scale: f64,
     then: Option<Then>,
+    /// The light's slow pace (`SLOW_HOLD`, `SLOW_FADE`), not a scale's.
+    slow: bool,
     stage: Stage,
     frame: Option<ZwlrScreencopyFrameV1>,
     /// Whether the engine was told a capture of ours is running.
@@ -206,6 +214,16 @@ impl App {
     /// under a still of the screen, and dissolve to the result. Without the
     /// means to (or with motion reduced) `then` just runs.
     pub(crate) fn dissolve(&mut self, output_name: &str, new_scale: f64, then: Then) {
+        self.dissolve_paced(output_name, new_scale, then, false);
+    }
+
+    /// [`dissolve`] at the light's pace: held a moment longer for the apps
+    /// to take their new look under the still, then faded out slowly.
+    pub(crate) fn dissolve_slow(&mut self, output_name: &str, new_scale: f64, then: Then) {
+        self.dissolve_paced(output_name, new_scale, then, true);
+    }
+
+    fn dissolve_paced(&mut self, output_name: &str, new_scale: f64, then: Then, slow: bool) {
         // A second change while one dissolves: the first is finished at once.
         self.dissolve_end();
         let ready = !crate::animation::reduce_motion()
@@ -227,6 +245,7 @@ impl App {
             output,
             new_scale,
             then: Some(then),
+            slow,
             stage: Stage::Shooting,
             frame: Some(frame),
             capturing: true,
@@ -246,8 +265,9 @@ impl App {
                 app.dissolve_end();
             }
         });
-        self.dissolve_timer(id, HARD_CAP, |app| {
-            warn!("dissolve: still up after {HARD_CAP:?}; taking it down");
+        let cap = if slow { HARD_CAP + SLOW_HOLD + SLOW_FADE } else { HARD_CAP };
+        self.dissolve_timer(id, cap, move |app| {
+            warn!("dissolve: still up after {cap:?}; taking it down");
             app.dissolve_end();
         });
     }
@@ -426,7 +446,7 @@ impl App {
 
     /// The still is on the screen: make the change under it.
     pub(crate) fn dissolve_covered(&mut self) {
-        let (id, then) = {
+        let (id, then, slow) = {
             let Some(d) = self.dissolve.as_mut() else {
                 return;
             };
@@ -441,7 +461,7 @@ impl App {
                 viewport.set_destination(w, h);
                 layer.wl_surface().commit();
             }
-            (d.id, d.then.take())
+            (d.id, d.then.take(), d.slow)
         };
         if let Err(e) = self.conn.flush() {
             debug!("dissolve: flush failed: {e}");
@@ -453,7 +473,7 @@ impl App {
         if let Some(then) = then {
             then(self);
         }
-        self.dissolve_timer(id, HOLD, move |app| app.dissolve_fade(id));
+        self.dissolve_timer(id, if slow { SLOW_HOLD } else { HOLD }, move |app| app.dissolve_fade(id));
     }
 
     /// Fade the still out, a tick at a time, then take it down.
@@ -470,7 +490,8 @@ impl App {
                     now
                 }
             };
-            let t = from.elapsed().as_secs_f32() / FADE.as_secs_f32();
+            let fade = if d.slow { SLOW_FADE } else { FADE };
+            let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
             if let (true, Some(alpha), Some(layer)) = (t < 1.0, &d.alpha, &d.layer) {
                 alpha.set_multiplier((f64::from(opacity(t)) * f64::from(u32::MAX)) as u32);
                 layer.wl_surface().commit();

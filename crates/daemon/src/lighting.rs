@@ -470,6 +470,10 @@ pub(crate) struct Lighting {
     owed: Option<(bool, Instant)>,
     /// The owner came back while a look was owed: it goes with their settling.
     returned: bool,
+    /// The owner came back from away since the last look: the next is a
+    /// catch-up in front of them. (Not a dock start: a restart is not a
+    /// return, and a start already wears the sun's line — `lighting_wake`.)
+    back: bool,
 }
 
 impl Lighting {
@@ -488,6 +492,7 @@ impl Lighting {
             last_tick: None,
             owed: None,
             returned: false,
+            back: false,
         }
     }
 
@@ -587,8 +592,9 @@ impl App {
                 self.lighting_release_dissolved();
             }
         }
-        let catch_up = self.lighting.plan.first_look();
+        let catch_up = self.lighting.plan.first_look() && self.lighting.back;
         if self.lighting.plan.step(&facts) {
+            self.lighting.back = false;
             self.lighting_look(catch_up);
         }
     }
@@ -608,7 +614,11 @@ impl App {
         self.lighting.returned = false;
         hold(None);
         let _ = std::thread::Builder::new().name("ambient-look".into()).spawn(move || crate::controls::assert_dark(dark));
-        self.colors_apply(true);
+        if crate::look::dark() == dark {
+            self.colors_apply(true);
+        } else {
+            self.look_set(dark);
+        }
     }
 
     /// …under a still of the screen dissolving to the result (the scale
@@ -617,7 +627,7 @@ impl App {
         match crate::display::focused_screen() {
             Some((name, scale)) => {
                 debug!("lighting: the apps take the new look under a dissolve");
-                self.dissolve(&name, scale, Box::new(|app: &mut App| app.lighting_release()));
+                self.dissolve_slow(&name, scale, Box::new(|app: &mut App| app.lighting_release()));
             }
             None => self.lighting_release(),
         }
@@ -776,23 +786,30 @@ impl App {
     /// is kept; the apps, the web and the files take it at a quiet moment.
     fn lighting_finish(&mut self, to: u8) {
         let colours = self.lighting.fade.as_ref().is_some_and(|f| f.colours);
+        let from = self.lighting.fade.as_ref().map(|f| f.from);
         self.lighting.fade = None;
         SHOWN.store(NONE, Ordering::Relaxed);
         SUN.store(to, Ordering::Relaxed);
         let (dark, light) = palette::line_to(to);
         palette::tint::set_lighting(light);
         store(to);
-        // The look crossed: the dock's whole look turns now, at the END of
-        // its own fade. The programs' step is held for a moment already
-        // moving on the screen (`lighting_motion`), or goes with the fade
-        // when the owner is plainly there (no hold was taken).
+        // The look crossed. Held (the owner is at work): the dock's whole
+        // look turns now, at the END of its own fade, and the programs' step
+        // waits for a moment already moving on the screen
+        // (`lighting_motion`). Not held (the owner is plainly there for it):
+        // the dock's look and the programs' turn together under the SLOW
+        // dissolve — a light dimming, never a cut; held at the old look until
+        // the still is up.
         if colours && crate::look::dark() != dark {
+            self.lighting.owed = Some((dark, Instant::now()));
             if held().is_some() {
-                self.lighting.owed = Some((dark, Instant::now()));
+                self.look_set(dark);
             } else {
-                let _ = std::thread::Builder::new().name("ambient-look".into()).spawn(move || crate::controls::assert_dark(dark));
+                if let Some(f) = from {
+                    hold(Some(palette::line_to(f)));
+                }
+                self.lighting_release_dissolved();
             }
-            self.look_set(dark);
         }
         self.lighting.apply_pending = true;
         self.lighting_apply_if_due();
@@ -840,6 +857,7 @@ impl App {
         } else {
             let at = self.lighting.since_start();
             self.lighting.plan.back(at);
+            self.lighting.back = true;
             self.lighting.returned = self.lighting.owed.is_some();
         }
         debug!("lighting: owner {}", if away { "away" } else { "back" });
