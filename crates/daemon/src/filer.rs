@@ -4504,6 +4504,13 @@ impl App {
         } else {
             chrome::mix(ground, [0.0, 0.0, 0.0, 1.0], 0.04)
         };
+        // (A selected row's band over a stripe: the soft colour laid on it.)
+        let dark = pal.dark;
+        let band_on_stripe = if pal.dark {
+            chrome::mix(zebra, [1.0, 1.0, 1.0, 1.0], 0.10)
+        } else {
+            chrome::mix(zebra, [0.0, 0.0, 0.0, 1.0], 0.075)
+        };
         // (A selected name's own box: the same soft colour laid again on
         // the box under it — one step darker.)
         let name_mark = if pal.dark {
@@ -4668,6 +4675,21 @@ impl App {
         } else {
             view
         };
+        // THE LIST'S STRIPES (Max, 2026-10-21, the mockup's v44: "i like it,
+        // make it real"): square, edge to edge — from the sidebar to the
+        // window's right side (the grid's clip cuts them) — every other row
+        // slot from the first row TO THE BOTTOM of what is seen, past the
+        // last thing, scrolling with the rows: never a gap. The first row
+        // plain, the second striped. An empty folder has none.
+        let across = |y: f32| Rect::new(-2.0 * w, y, 5.0 * w, layout.ch);
+        if layout.list && !win.items.is_empty() {
+            let first = ((win.scroll - PAD) / layout.ch).floor().max(0.0) as usize;
+            let last = ((win.scroll + layout.body.h - PAD) / layout.ch).ceil().max(0.0) as usize;
+            for slot in (first..=last).filter(|s| s % 2 == 1) {
+                let y = layout.body.y + PAD + slot as f32 * layout.ch - win.scroll;
+                grid.rects.push(rect(across(y), 0.0, zebra));
+            }
+        }
         for i in view {
             let item = &win.items[i];
             if in_hand.contains(item.path.as_str()) {
@@ -4675,16 +4697,12 @@ impl App {
             }
             let mut cell = layout.cell_at(win.slide[i]);
             cell.y -= win.scroll;
-            if layout.list {
-                // A row: every other one a zebra stripe, a selected one in
-                // the soft selection colour across (Max, 2026-10-21: no
-                // accent — the words stay as they are).
-                let across = Rect::new(cell.x - PAD, cell.y, cell.w + 2.0 * PAD, cell.h);
-                if win.selected.contains(&item.path) || win.drop_on == Some(i) {
-                    grid.rects.push(rect(across, 5.0, pic_mark));
-                } else if i % 2 == 1 {
-                    grid.rects.push(rect(across, 5.0, zebra));
-                }
+            if layout.list && (win.selected.contains(&item.path) || win.drop_on == Some(i)) {
+                // A selected row: a square band of the soft selection colour
+                // across, over its stripe (no accent — the words stay as
+                // they are: Max, 2026-10-21).
+                let band = if i % 2 == 1 { band_on_stripe } else { pic_mark };
+                grid.rects.push(rect(across(cell.y), 0.0, band));
             }
             // The picture's space, and the picture SITTING ON ITS BOTTOM (Max,
             // 2026-10-21: the name about 3 px under what is seen): a folder's
@@ -4742,7 +4760,10 @@ impl App {
                     if picked {
                         let nw = renderer.measure_text(&name, TEXT_PX, None).min(name_w);
                         let r = Rect::new(name_x - NAME_PAD.0, top - NAME_PAD.1, nw + 2.0 * NAME_PAD.0, TEXT_LINE + 2.0 * NAME_PAD.1);
-                        grid.rects.push(rect(r, 4.0, name_mark));
+                        // (A step darker than the band it is on.)
+                        let under = if i % 2 == 1 { band_on_stripe } else { pic_mark };
+                        let step = if dark { ([1.0, 1.0, 1.0, 1.0], 0.10) } else { ([0.0, 0.0, 0.0, 1.0], 0.075) };
+                        grid.rects.push(rect(r, 4.0, chrome::mix(under, step.0, step.1)));
                     }
                     grid.labels.push(label(&name, (name_x, top), name_w + 2.0, false, faded));
                 }
