@@ -888,9 +888,20 @@ The big daemon files are cohesive but long — go straight to the function:
   right, only while open; white when on, a dark hairline edge in the light) keeps it open BESIDE the
   files (`settings.files_pinned`, `filer_pin`, `Win::field_left`). At its top the two MODES (Files ·
   Media): at rest only the one in use, open both as halves, the one in use sunken; MEDIA shows only
-  pictures and videos (`Win::media`, `is_media`, in `show_found`). Then FAVOURITES (Home under the
-  owner's name, their folders, `~/Phones`, the bookmarks) and LOCATIONS (other disks, what is plugged
-  in, the Bin) — `places()`, `Place::gap` = Locations' first. No `..` any more. Symbols are CARVED
+  pictures and videos (`Win::media`, `is_media`, in `show_found`). Then `..` (Max: "add the '..' place
+  too" — `with_up`, the first row over Favourites' heading: the folder this one is in; a click goes up
+  leaving this folder selected, a drop on it moves things up, held there with a drag it climbs —
+  `up_hold`; HIDDEN at the floor, as before: Home, a root, Recents), FAVOURITES (RECENTS — below —,
+  Home under the owner's name, their folders, `~/Phones`, the bookmarks) and LOCATIONS (other disks,
+  what is plugged in, the Bin) — `places()`, `Place::gap` = Locations' first. RECENTS
+  (`filer/recent.rs`, Max 2026-10-21): a place of no folder (`recent::root()` = `recent:///`, one of
+  the roots) listing the files of the freedesktop `recently-used.xbel` that are still there, newest
+  first, at most 100 (`recent::list`, read by `filer_list` like the bin's records; not watched — read
+  again when Files opens a file); every file Files opens (double click, Enter, Open with) is NOTED there
+  as GTK does (`filer_used` → `recent::note`, off the loop: the entry's times moved, or a new
+  `<bookmark>` with its kind and Golem Files as the app). Nothing is made, pasted or dropped into it
+  (`filer_act`, `filer_bring`, `filer_new_folder`, `filer_paste`; its ground has no menu); Delete
+  throws the REAL file away; the path line says "Recents"; rig `files go recents`. Symbols are CARVED
   (`chrome::tones`): light = the ground pressed in (`carve`: 42 %, the current place a 16 % sunken square
   with its symbol at 55 %); dark = light greys toward the ink (the look's own). THE TOP LINE (32 px,
   `HEAD_H`, page colour, no line under it): the TABS (`Win::tabs`, `chrome::Tab`: each its folder and
