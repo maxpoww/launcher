@@ -186,7 +186,7 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
 }
 
 /// The connected screens, or none when the compositor does not answer.
-fn monitors() -> Vec<Monitor> {
+pub(crate) fn monitors() -> Vec<Monitor> {
     hypr::monitors_json().map(|json| parse_monitors(&json)).unwrap_or_default()
 }
 

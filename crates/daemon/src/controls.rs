@@ -105,6 +105,11 @@ pub(crate) struct Group {
     /// left of the words and the whole is centred (the chosen app's
     /// `Colours ●  Dark · Light · Follow`), not at the box's left edge.
     pub hug: bool,
+    /// A WORD ROW (the Launcher page, 2026-10-20): its caption as the row's
+    /// name at the left, its words at the right end of the same line — the
+    /// way a switch row stands. (Each word is lit by its own `on`: several
+    /// may be, as the Other monitors are.)
+    pub labelled: bool,
 }
 
 /// THE PALETTE EDITOR (Max, 2026-10-16; the mockup's "+" tile): six places
@@ -531,6 +536,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Wallpaper"
             | "Colours"
             | "Tiles"
+            | "Launcher"
     )
 }
 
@@ -538,6 +544,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     // (Every key of the Colours box is the UI thread's: the palette is applied there.)
     key.starts_with("colors-")
+        || key.starts_with("launcher-")
         || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
@@ -626,7 +633,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false }
 }
 
 /// A letter of a choice pill's text, on average, and the air at each end,
@@ -637,7 +644,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -2084,6 +2091,52 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // come here as they are made (Max, 2026-10-14).
         "Tiles" => {
             view.subtitle = tr("How windows sit, stick and line up.").to_owned();
+        }
+        // THE DOCK AND ITS BOX (Max, 2026-10-20; `launcher_prefs.rs`): the
+        // dock's own choices, made on the UI thread (`launcher-*`).
+        "Launcher" => {
+            use crate::launcher_prefs::{Arrange, Side};
+            let s = crate::settings::Settings::load();
+            view.subtitle = tr("How the dock comes up and the box opens.").to_owned();
+            let mut away = on_off(Some("Stay away"), "launcher-away", s.launcher_away);
+            if let Some(on) = away.choices.first_mut() {
+                on.hint = Some(
+                    tr(match s.launcher_side {
+                        Side::Left => "Off the screen until you call it: Super, or the pointer at the left edge.",
+                        Side::Bottom => "Off the screen until you call it: Super, or the pointer at the bottom edge.",
+                        Side::Right => "Off the screen until you call it: Super, or the pointer at the right edge.",
+                    })
+                    .to_owned(),
+                );
+            }
+            view.groups.push(away);
+            view.groups.push(on_off(Some("Animated icons"), "launcher-motion", !s.launcher_still));
+            let sides = Side::ALL.iter().map(|&side| choice(tr(side.word()), side == s.launcher_side, side.value())).collect();
+            view.groups.push(Group { labelled: true, ..group(Some("Position"), "launcher-side", 0.0, sides) });
+            let ways = Arrange::ALL.iter().map(|&a| choice(tr(a.word()), a == s.launcher_arrange, a.value())).collect();
+            view.groups.push(Group { labelled: true, ..group(Some("Arrange apps"), "launcher-arrange", 0.0, ways) });
+            // Only with more than one monitor: the ones that are not the
+            // main one, each lit while the launcher is on it.
+            let others = crate::launcher_prefs::others(&crate::display::monitors());
+            if !others.is_empty() {
+                let screens = others
+                    .into_iter()
+                    .map(|(key, name, at)| {
+                        let at = match at {
+                            "above" => tr("above"),
+                            "below" => tr("below"),
+                            "left" => tr("left"),
+                            _ => tr("right"),
+                        };
+                        choice(format!("{name} ({at})"), !s.launcher_screens_off.contains(&key), key)
+                    })
+                    .collect();
+                view.groups.push(Group { labelled: true, ..group(Some("Other monitors"), "launcher-screen", 0.0, screens) });
+            }
+            view.groups.push(Group {
+                centred: true,
+                ..line(tr("Press Ctrl + or Ctrl − while the launcher is open to change the icon size.").to_owned())
+            });
         }
         "About Golem" => {
             view.subtitle = os_name();

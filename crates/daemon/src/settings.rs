@@ -62,6 +62,19 @@ pub(crate) struct Settings {
     /// The file manager's windows show a folder as a LIST (name, size,
     /// date) and not as icons.
     pub(crate) files_list: bool,
+    /// THE LAUNCHER PAGE (Max, 2026-10-20; `launcher_prefs.rs`). STAY AWAY:
+    /// the dock is always off the screen and comes only when called —
+    /// Super, or the pointer at its edge (no parking while nothing covers it).
+    pub(crate) launcher_away: bool,
+    /// The dock's moving icons stand still (Animated icons off).
+    pub(crate) launcher_still: bool,
+    /// The edge of the screen the dock stands on.
+    pub(crate) launcher_side: crate::launcher_prefs::Side,
+    /// How the Apps grid is ordered.
+    pub(crate) launcher_arrange: crate::launcher_prefs::Arrange,
+    /// The other monitors (by what they are known by, `Monitor::selector`)
+    /// the launcher is NOT on; a monitor seen for the first time has it.
+    pub(crate) launcher_screens_off: Vec<String>,
 }
 
 impl Settings {
