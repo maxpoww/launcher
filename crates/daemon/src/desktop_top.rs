@@ -59,6 +59,8 @@ pub(crate) struct Top {
     pub(crate) glyphs: std::collections::HashMap<String, Vec<u8>>,
     pub(crate) glyph_asked: std::collections::HashSet<String>,
     pub(crate) glyph_layers: Vec<String>,
+    /// Every symbol asked for once, ahead of the first menu.
+    pub(crate) glyphs_warm: bool,
 }
 
 impl App {
@@ -239,6 +241,28 @@ impl App {
                 if let Some(req) = crate::desktop::icon_request(&key) {
                     icons.request(req);
                 }
+            }
+        }
+    }
+
+    /// Every symbol asked of the desktop's resolver once, ahead of the
+    /// first menu: one asked for only as its menu opens comes a few frames
+    /// late, an empty gap where it belongs.
+    pub(crate) fn top_glyphs_warm(&mut self) {
+        let Some(icons) = self.desktop_icons.as_ref() else {
+            return;
+        };
+        if std::mem::replace(&mut self.desktop_top.glyphs_warm, true) {
+            return;
+        }
+        crate::glyphs::write_all();
+        for (name, _) in crate::glyphs::GLYPHS {
+            let key = crate::glyphs::key(name);
+            if self.desktop_top.glyphs.contains_key(&key) || !self.desktop_top.glyph_asked.insert(key.clone()) {
+                continue;
+            }
+            if let Some(req) = crate::desktop::icon_request(&key) {
+                icons.request(req);
             }
         }
     }

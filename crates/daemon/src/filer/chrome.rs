@@ -1944,7 +1944,7 @@ impl App {
         let px = PILL_PX;
         // (A name is cut at `PILL_NAME`; a line said alone has the room.)
         let name_max = if view.parts.is_empty() { w } else { PILL_NAME };
-        let bold_w = measure(win, &view.bold, px, Some(crate::content::FONT_BOLD)).min(name_max);
+        let bold_w = measure(win, &view.bold, px, Some(crate::content::FONT_MEDIUM)).min(name_max);
         let dim_w = if view.dim.is_empty() {
             0.0
         } else {
@@ -2022,22 +2022,24 @@ impl App {
         });
         let cy = pill.y + PILL_H / 2.0;
         let text_y = cy - (px + 4.0) / 2.0;
-        // The words: the strong ones fitted, the rest dim after them.
+        // The words: the first in full ink, a touch heavier where the font
+        // has a medium (the mockup's 500 — never bold), fitted; the rest dim
+        // after them.
         let mut x = pill.x + PILL_LEFT;
         let gap = if view.parts.is_empty() { 0.0 } else { 6.0 };
         let bold_room = (pill.w - PILL_LEFT - right - parts_w - dim_w - gap)
             .min(name_max + 4.0)
             .max(30.0);
         let shown = crate::desktop::fit_label(&view.bold, bold_room, &mut |t| {
-            measure(win, t, px, Some(crate::content::FONT_BOLD))
+            measure(win, t, px, Some(crate::content::FONT_MEDIUM))
         });
         g.labels.push(Label {
             clip: Some(pill),
-            family: Some(crate::content::FONT_BOLD),
+            family: Some(crate::content::FONT_MEDIUM),
             cache: false,
             ..words(&shown, (x, text_y), bold_room + 2.0, px, a(ink, 1.0))
         });
-        x += measure(win, &shown, px, Some(crate::content::FONT_BOLD)).min(bold_room);
+        x += measure(win, &shown, px, Some(crate::content::FONT_MEDIUM)).min(bold_room);
         if !view.dim.is_empty() {
             x += 7.0;
             g.labels.push(Label {
@@ -2259,6 +2261,41 @@ mod tests {
         assert_eq!(grouped(999), "999");
         assert_eq!(grouped(1000), "1,000");
         assert_eq!(grouped(2_456_789), "2,456,789");
+    }
+
+    /// The symbol names in `src` written right after `before` and right
+    /// before `after`.
+    fn names_between<'a>(src: &'a str, before: &str, after: &str) -> Vec<&'a str> {
+        src.match_indices(before)
+            .filter_map(|(at, _)| {
+                let rest = &src[at + before.len()..];
+                let end = rest.find(|c: char| !c.is_ascii_lowercase())?;
+                (end > 0 && rest[end..].starts_with(after)).then(|| &rest[..end])
+            })
+            .collect()
+    }
+
+    /// Every symbol the top line, the pill and a kind's actions wear is
+    /// one `glyphs.rs` has (one it has not is an empty gap by its words).
+    #[test]
+    fn every_symbol_worn_is_one_there_is() {
+        let known: Vec<&str> = crate::glyphs::GLYPHS.iter().map(|(n, _)| *n).collect();
+        let (chrome, smart) = (include_str!("chrome.rs"), include_str!("smart.rs"));
+        let mut worn: Vec<&str> = CHROME.to_vec();
+        for (before, after) in [("glyph(\"", "\")"), ("button(\"", "\""), ("round(\"", "\"")] {
+            worn.extend(names_between(chrome, before, after));
+        }
+        for src in [chrome, smart] {
+            worn.extend(names_between(src, "(\"", "\", tr("));
+        }
+        for name in [
+            "print", "extract", "pic", "rotate", "shuffle", "play", "slides", "usb",
+        ] {
+            assert!(worn.contains(&name), "the scan missed {name}");
+        }
+        for name in worn {
+            assert!(known.contains(&name), "no symbol {name}");
+        }
     }
 
     #[test]

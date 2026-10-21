@@ -198,10 +198,11 @@ fn shared_text() -> (SharedFonts, SharedSwash) {
     SHARED_TEXT.with(|t| {
         t.borrow_mut()
             .get_or_insert_with(|| {
-                let fonts = FontSystem::new_with_locale_and_db(
+                let mut fonts = FontSystem::new_with_locale_and_db(
                     crate::font_index::locale(),
                     crate::font_index::database(),
                 );
+                let _ = SANS_MEDIUM.set(sans_medium(&mut fonts));
                 (
                     std::rc::Rc::new(std::cell::RefCell::new(fonts)),
                     std::rc::Rc::new(std::cell::RefCell::new(SwashCache::new())),
@@ -3108,6 +3109,30 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
     }
 }
 
+/// The family the shell's words come out in, when it has a MEDIUM (500)
+/// face: [`crate::content::FONT_MEDIUM`] asks for it by its name. Without
+/// one, a weight of 500 is matched across every family — Golem's FreeSans
+/// has none, and the pill's name came out in JetBrains Mono's Medium — so
+/// those words stay regular.
+static SANS_MEDIUM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Which family a line of sans words is shaped in, if it has a Medium.
+fn sans_medium(fonts: &mut FontSystem) -> Option<String> {
+    let mut probe = TextBuffer::new(fonts, Metrics::new(12.0, 16.0));
+    probe.set_text(fonts, "Ag", Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+    probe.shape_until_scroll(fonts, false);
+    let id = probe.layout_runs().next()?.glyphs.first()?.font_id;
+    let db = fonts.db();
+    let family = db.face(id)?.families.first()?.0.clone();
+    let medium = db.faces().any(|f| {
+        f.weight.0 == 500
+            && f.style == glyphon::cosmic_text::fontdb::Style::Normal
+            && f.families.iter().any(|(name, _)| *name == family)
+    });
+    tracing::debug!("fonts: the words are {family}, with a medium: {medium}");
+    medium.then_some(family)
+}
+
 /// Resolve a `Label::family` into a glyphon family + weight.
 ///
 /// [`crate::content::FONT_BOLD`] is a sentinel, not a real family name: it
@@ -3116,6 +3141,10 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
 fn resolve_family(family: Option<&str>) -> (Family<'_>, Weight) {
     match family {
         Some(f) if f == crate::content::FONT_BOLD => (Family::SansSerif, Weight::BOLD),
+        Some(f) if f == crate::content::FONT_MEDIUM => match SANS_MEDIUM.get() {
+            Some(Some(name)) => (Family::Name(name), Weight::MEDIUM),
+            _ => (Family::SansSerif, Weight::NORMAL),
+        },
         Some(name) => (Family::Name(name), Weight::NORMAL),
         None => (Family::SansSerif, Weight::NORMAL),
     }

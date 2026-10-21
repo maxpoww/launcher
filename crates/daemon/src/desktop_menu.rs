@@ -1451,4 +1451,85 @@ mod tests {
         assert!(sort.contains(&Row::item("Size", "tick", Action::SortBy(2))));
         assert!(sort.contains(&Row::item("Descending", "tick", Action::SortDir(true))));
     }
+    /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one
+    /// it has not is an empty gap where the symbol belongs).
+    #[test]
+    fn every_row_wears_a_symbol_there_is() {
+        let ons = [
+            On::Ground,
+            On::File,
+            On::Archive,
+            On::App,
+            On::Folder,
+            On::Many,
+            On::Desk,
+            On::BinItem,
+            On::BinDeep,
+            On::BinGround,
+            On::BinPlace,
+            On::Stick,
+            On::Phone,
+            On::Place,
+        ];
+        let mut menus = Vec::new();
+        for on in ons {
+            for all in [false, true] {
+                for phone in [false, true] {
+                    let limits = Limits {
+                        debugging_off: all,
+                        not_allowed: all,
+                        no_files: all,
+                        old_camera: all,
+                    };
+                    menus.push(rows_for(&Ctx {
+                        on,
+                        n: 3,
+                        stick: all.then(|| "KINGSTON".into()),
+                        here: all,
+                        clip: all,
+                        desk: phone,
+                        untrusted: all,
+                        placed: all,
+                        system: !all,
+                        hidden: all,
+                        by_hand: all,
+                        terminal: all,
+                        undo: all.then(|| "Rename".into()),
+                        icons_hidden: all,
+                        moving: [None, Some(all)][usize::from(phone)],
+                        fixed: !all,
+                        bin_n: usize::from(all) * 4,
+                        volume: Volume {
+                            phone,
+                            closed: !all,
+                            camera: all,
+                            tether: all,
+                            limits,
+                        },
+                        smart: Vec::new(),
+                    }));
+                }
+            }
+        }
+        let names = vec!["Seam".to_owned()];
+        menus.push(open_with_rows(Some(&names)));
+        let targets = [(false, false), (true, false), (false, true)].map(|(phone, far)| Target {
+            name: "x".into(),
+            phone,
+            far,
+        });
+        menus.push(send_rows(&targets, true));
+        menus.push(sort_page(1, false));
+        let known: Vec<&str> = crate::glyphs::GLYPHS.iter().map(|(n, _)| *n).collect();
+        for rows in &menus {
+            for row in rows {
+                if let Row::Item { label, icon, .. } = row {
+                    assert!(
+                        icon.is_empty() || known.contains(icon),
+                        "{label}: no symbol {icon}"
+                    );
+                }
+            }
+        }
+    }
 }

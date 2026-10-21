@@ -391,6 +391,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_line_wears_a_symbol_there_is() {
+        let p = |s: &str| PathBuf::from(s);
+        let all = [
+            Undo::Renamed {
+                from: p("/h/a"),
+                to: p("/h/b"),
+            },
+            Undo::Moved(vec![(p("/h/a"), p("/h/d/a"))]),
+            Undo::Copied(vec![p("/h/a")]),
+            Undo::Binned(vec!["a".into()]),
+            Undo::Made(p("/h/d")),
+            Undo::Grouped {
+                folder: p("/h/d"),
+                moved: Vec::new(),
+            },
+            Undo::Wallpaper {
+                was: String::new(),
+                now: "/h/a.jpg".into(),
+            },
+            Undo::Rotated(vec![p("/h/a.jpg")]),
+        ];
+        for undo in all {
+            let sign = describe(&undo).1;
+            assert!(
+                crate::glyphs::GLYPHS.iter().any(|(n, _)| *n == sign),
+                "no symbol {sign}"
+            );
+        }
+    }
+
+    #[test]
     fn what_was_done_is_said_plainly() {
         let p = |s: &str| PathBuf::from(s);
         let said = |u: Undo| describe(&u).0;

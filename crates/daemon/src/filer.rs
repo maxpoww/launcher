@@ -1928,6 +1928,12 @@ pub(crate) struct Filer {
     /// The window the keyboard is on.
     pub keys: Option<u32>,
     icons: Option<crate::notif_icons::NotifIcons>,
+    /// THE SYMBOLS (`glyphs.rs`) every window may wear — a menu's, the
+    /// pill's — read ONCE for all of them as the first window opens, so a
+    /// menu has every symbol the moment it is up (asked for when first worn,
+    /// they came a frame or many too late).
+    glyphs: HashMap<String, Vec<u8>>,
+    glyphs_asked: bool,
     /// Files in hand, lifted from one of the windows.
     drag: Option<Lifted>,
     /// A drag over one of the windows.
@@ -1960,6 +1966,8 @@ impl Filer {
             next: 1,
             keys: None,
             icons: None,
+            glyphs: HashMap::new(),
+            glyphs_asked: false,
             drag: None,
             dnd: None,
             rig_drag: false,
@@ -2562,7 +2570,8 @@ impl App {
     /// Open a window on `dir` (Home when it is not a folder).
     pub(crate) fn filer_open(&mut self, dir: PathBuf) {
         let dir = if dir.is_dir() { dir } else { home() };
-        // (The chrome's symbols, written where the icon loader reads them.)
+        // (The chrome's symbols, written where the icon loader reads them, and
+        // read once for every window.)
         crate::glyphs::write_all();
         // Asked for from outside, under none of the roots (another app's
         // "show in folder"): this window's own root, down from there only.
@@ -2618,6 +2627,7 @@ impl App {
                 warn!("files: no icon resolver, names only");
             }
         }
+        self.filer_glyphs_warm();
         info!("files: window {id} on {}", dir.display());
         self.filer.put(Win {
             renderer: None,
@@ -4680,6 +4690,22 @@ impl App {
         }
     }
 
+    /// Every symbol read once, for all the windows (`Filer::glyphs`).
+    fn filer_glyphs_warm(&mut self) {
+        if self.filer.glyphs_asked {
+            return;
+        }
+        let Some(icons) = self.filer.icons.as_ref() else {
+            return;
+        };
+        self.filer.glyphs_asked = true;
+        for (name, _) in crate::glyphs::GLYPHS {
+            if let Some(req) = crate::desktop::icon_request(&crate::glyphs::key(name)) {
+                icons.request(req);
+            }
+        }
+    }
+
     /// The pictures on screen into the window's texture layers: uploaded
     /// where the pixels are in hand, asked for where not. A file that can
     /// have a picture of its own gets it from the Files thumbnailer.
@@ -4747,7 +4773,7 @@ impl App {
             if win.uploaded.iter().any(|u| u.as_deref() == Some(key)) {
                 continue;
             }
-            if let Some(chain) = win.chains.get(key) {
+            if let Some(chain) = win.chains.get(key).or_else(|| self.filer.glyphs.get(key)) {
                 if !win.ink.contains_key(key) {
                     if win.ink.len() > 4000 {
                         win.ink.clear();
@@ -4804,6 +4830,12 @@ impl App {
     /// The resolver answered: every window that asked for it files the
     /// pixels and draws.
     fn filer_on_icon(&mut self, res: crate::notif_icons::Resolved) {
+        // (A symbol: kept for every window.)
+        if crate::glyphs::is_key(&res.key) {
+            if let Some(chain) = res.chain.as_ref() {
+                self.filer.glyphs.insert(res.key.clone(), chain.clone());
+            }
+        }
         let mut redraw = Vec::new();
         for win in self.filer.wins.iter_mut() {
             if !win.pending.remove(&res.key) {

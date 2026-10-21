@@ -2509,6 +2509,7 @@ impl App {
             self.save_desktop_positions();
         }
         self.sync_desktop_input();
+        self.top_glyphs_warm();
         self.sync_desktop_icons();
         self.request_desktop_draw();
     }

@@ -149,6 +149,11 @@ pub struct ShadowInst {
 /// real family can collide).
 pub const FONT_BOLD: &str = "\u{1}bold";
 
+/// The same for MEDIUM (500): a touch heavier than the words around it
+/// (the Files pill's name). A sans with no medium face falls back to its
+/// regular one, never to bold.
+pub const FONT_MEDIUM: &str = "\u{1}medium";
+
 /// One text label.
 #[derive(Debug, Clone)]
 pub struct Label {
