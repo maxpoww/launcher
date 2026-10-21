@@ -2,14 +2,16 @@
 //! per case on the pill, two, even 3 on the context menu; only actions that
 //! just happen"). Songs and videos PLAY (and shuffle), photos make a
 //! SLIDESHOW, one photo becomes the WALLPAPER or is TURNED, documents
-//! PRINT. The pill shows one, first, in Open with's place; the menu up to
-//! three, right after Open; a folder that is mostly songs or photos (70 %
-//! of at least 3 files) gets its own by the ↶ (`filer_head`).
+//! PRINT — only while there is a printer (`print.rs`; office files only
+//! with LibreOffice too). The pill shows one, first, in Open with's place;
+//! the menu up to three, right after Open; a folder that is mostly songs or
+//! photos (70 % of at least 3 files) gets its own by the ↶ (`filer_head`).
 //!
 //! Playing and the slideshow are Quick Look's (`peek_slides.rs`): what
 //! is played goes through its player, a song after a song; the photos are
 //! shown full screen on black, the next every 2.8 s.
 
+use super::print::Can;
 use super::*;
 
 /// What a file is, as its actions see it.
@@ -18,7 +20,10 @@ pub(crate) enum Sort {
     Song,
     Video,
     Photo,
+    /// Printed as it is (PDF, text, PostScript).
     Doc,
+    /// Printed once LibreOffice has made it a PDF.
+    Office,
     Other,
 }
 
@@ -35,8 +40,21 @@ pub(crate) fn sort_of(name: &str) -> Sort {
         "jpg" | "jpeg" | "png" | "webp" | "gif" | "heic" | "heif" | "bmp" | "tif" | "tiff"
         | "avif" | "jxl" => Sort::Photo,
         "pdf" | "txt" | "md" | "ps" => Sort::Doc,
+        "doc" | "docx" | "odt" | "rtf" | "xls" | "xlsx" | "ods" | "ppt" | "pptx" | "odp" => {
+            Sort::Office
+        }
         _ => Sort::Other,
     }
+}
+
+/// Whether a file of `sort` can be printed here now.
+pub(crate) fn printable(sort: Sort, can: Can) -> bool {
+    can.print
+        && match sort {
+            Sort::Doc | Sort::Photo => true,
+            Sort::Office => can.office,
+            _ => false,
+        }
 }
 
 /// A folder that is mostly one kind of thing.
@@ -112,7 +130,8 @@ fn kind_of_folder(dir: &Path) -> Option<FolderKind> {
 
 /// The actions a selection is for: the pill's one (its symbol, its words,
 /// what it does) and the menu's.
-pub(super) struct Smart {
+#[derive(Debug)]
+pub(crate) struct Smart {
     pub(super) bar: Option<(&'static str, &'static str, Action)>,
     pub(super) menu: Vec<Row>,
 }
@@ -139,17 +158,59 @@ impl Smart {
     }
 }
 
+/// What files of these sorts are for, `can` being what this computer can
+/// do (`archive`: the one file is an archive) — the rules, apart from the
+/// disk.
+pub(crate) fn smart_files(sorts: &[Sort], archive: bool, can: Can) -> Smart {
+    let play = ("play", tr("Play"), Action::Play);
+    let shuffle = ("shuffle", tr("Shuffle"), Action::Shuffle);
+    let slides = ("slides", tr("Slideshow"), Action::Slideshow);
+    let rotate = ("rotate", tr("Rotate"), Action::Rotate);
+    let print = ("print", tr("Print"), Action::Print);
+    let all = |f: &dyn Fn(Sort) -> bool| !sorts.is_empty() && sorts.iter().all(|s| f(*s));
+    if all(&|s| matches!(s, Sort::Song | Sort::Video)) {
+        return if sorts.len() > 1 {
+            Smart::of(play, &[play, shuffle])
+        } else {
+            Smart::of(play, &[play])
+        };
+    }
+    // Photos keep their one on the pill; Print takes the menu's third
+    // place when there is a printer ("Slideshow from here" without one).
+    if all(&|s| s == Sort::Photo) {
+        return if sorts.len() == 1 {
+            let wall = ("pic", tr("Set as wallpaper"), Action::SetWallpaper);
+            let here = ("slides", tr("Slideshow from here"), Action::Slideshow);
+            Smart::of(wall, &[wall, rotate, if can.print { print } else { here }])
+        } else if can.print {
+            Smart::of(slides, &[slides, rotate, print])
+        } else {
+            Smart::of(slides, &[slides, rotate])
+        };
+    }
+    // Documents, and documents with photos: Print, when every one can be.
+    if all(&|s| printable(s, can)) {
+        return Smart::of(print, &[print]);
+    }
+    if archive && sorts.len() == 1 {
+        return Smart {
+            bar: Some(("extract", tr("Extract here"), Action::Extract)),
+            menu: Vec::new(),
+        };
+    }
+    Smart::none()
+}
+
 impl App {
     /// What `sel` (in window `win`) is for (the mockup's `smartFor`).
     pub(super) fn filer_smart(&self, win: &Win, sel: &[&Item]) -> Smart {
         if sel.is_empty() || win.in_bin() != InBin::No {
             return Smart::none();
         }
-        let play = ("play", tr("Play"), Action::Play);
-        let shuffle = ("shuffle", tr("Shuffle"), Action::Shuffle);
-        let slides = ("slides", tr("Slideshow"), Action::Slideshow);
         if let [one] = sel {
             if one.kind == Kind::Folder {
+                let shuffle = ("shuffle", tr("Shuffle"), Action::Shuffle);
+                let slides = ("slides", tr("Slideshow"), Action::Slideshow);
                 return match kind_of_folder(Path::new(&one.path)) {
                     Some(FolderKind::Play) => {
                         let all = ("play", tr("Play all"), Action::Play);
@@ -164,37 +225,8 @@ impl App {
             return Smart::none();
         }
         let sorts: Vec<Sort> = sel.iter().map(|it| sort_of(&it.name)).collect();
-        let all = |f: fn(Sort) -> bool| sorts.iter().all(|s| f(*s));
-        if all(|s| matches!(s, Sort::Song | Sort::Video)) {
-            return if sel.len() > 1 {
-                Smart::of(play, &[play, shuffle])
-            } else {
-                Smart::of(play, &[play])
-            };
-        }
-        if all(|s| s == Sort::Photo) {
-            let rotate = ("rotate", tr("Rotate"), Action::Rotate);
-            return if sel.len() == 1 {
-                let wall = ("pic", tr("Set as wallpaper"), Action::SetWallpaper);
-                let here = ("slides", tr("Slideshow from here"), Action::Slideshow);
-                Smart::of(wall, &[wall, rotate, here])
-            } else {
-                Smart::of(slides, &[slides, rotate])
-            };
-        }
-        if all(|s| s == Sort::Doc) {
-            let print = ("print", tr("Print"), Action::Print);
-            return Smart::of(print, &[print]);
-        }
-        if let [one] = sel {
-            if is_archive(&one.name) {
-                return Smart {
-                    bar: Some(("extract", tr("Extract here"), Action::Extract)),
-                    menu: Vec::new(),
-                };
-            }
-        }
-        Smart::none()
+        let archive = matches!(sel, [one] if is_archive(&one.name));
+        smart_files(&sorts, archive, self.filer.printers.can)
     }
 
     /// What the folder window `win` shows is mostly (the button by the ↶):
@@ -326,17 +358,27 @@ impl App {
                 );
             }
             Action::Print => {
-                let docs: Vec<PathBuf> = picked
+                let can = self.filer.printers.can;
+                let files: Vec<PathBuf> = picked
                     .into_iter()
-                    .filter(|p| sort_of(&file_name(p)) == Sort::Doc)
+                    .filter(|p| printable(sort_of(&file_name(p)), can))
                     .collect();
+                if files.is_empty() {
+                    return;
+                }
+                // (LibreOffice takes a while to make a PDF: said at once.)
+                if files.iter().any(|p| sort_of(&file_name(p)) == Sort::Office) {
+                    self.filer_flash(id, tr("Getting ready to print…").to_owned());
+                }
                 self.desktop_off_loop(
-                    move || print(&docs),
-                    move |app, said: Result<String, String>| {
-                        info!("files: print: {said:?}");
-                        match said {
-                            Ok(said) => app.filer_flash(id, said),
-                            Err(said) => say_quietly(said),
+                    move || super::print::print(&files),
+                    move |app, (said, failed): (Option<String>, Option<String>)| {
+                        info!("files: print: {said:?}, {failed:?}");
+                        if let Some(said) = said {
+                            app.filer_flash(id, said);
+                        }
+                        if let Some(failed) = failed {
+                            say_quietly(failed);
                         }
                     },
                 );
@@ -437,37 +479,6 @@ pub(crate) fn rotate(path: &Path, quarters: u32) -> bool {
     }
 }
 
-/// Print `docs` on the default printer (`lp`): what to say, or why not.
-fn print(docs: &[PathBuf]) -> Result<String, String> {
-    let none = || Err(tr("No printer is set up").to_owned());
-    if docs.is_empty() || !crate::launch::on_path("lp") {
-        return none();
-    }
-    let default = std::process::Command::new("lpstat")
-        .arg("-d")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    if !default.contains(':') || default.contains("no system default") {
-        return none();
-    }
-    let printed = docs
-        .iter()
-        .filter(|d| {
-            std::process::Command::new("lp")
-                .arg(d)
-                .status()
-                .is_ok_and(|s| s.success())
-        })
-        .count();
-    match (printed, docs) {
-        (0, _) => Err(tr("It could not be printed").to_owned()),
-        (_, [one]) => Ok(fill(tr("Printing “{name}”"), &[("name", &file_name(one))])),
-        (n, _) => Ok(fill(tr("Printing {n} documents"), &[("n", &n)])),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +503,89 @@ mod tests {
             None,
             "half is not mostly"
         );
+    }
+
+    /// The rules: a printer or none × LibreOffice or none × what is
+    /// selected → the pill's one and the menu's.
+    #[test]
+    fn print_is_offered_only_where_it_can_happen() {
+        use Action::*;
+        let said = |names: &[&str], print: bool, office: bool| {
+            let sorts: Vec<Sort> = names.iter().map(|n| sort_of(n)).collect();
+            let archive = matches!(names, [one] if is_archive(one));
+            let smart = smart_files(&sorts, archive, Can { print, office });
+            let menu: Vec<Action> = smart.menu.iter().filter_map(Row::action).collect();
+            (smart.bar.map(|(_, _, a)| a), menu)
+        };
+        for office in [false, true] {
+            // No printer: no Print anywhere; a document's pill falls back
+            // to Open with (nothing of its kind).
+            for names in [
+                &["letter.pdf"][..],
+                &["notes.txt", "readme.md"],
+                &["report.docx"],
+                &["a.jpg"],
+                &["a.jpg", "b.png"],
+                &["letter.pdf", "a.jpg"],
+                &["sheet.xlsx", "slides.pptx"],
+            ] {
+                let (bar, menu) = said(names, false, office);
+                assert_ne!(bar, Some(Print), "{names:?}");
+                assert!(!menu.contains(&Print), "{names:?}");
+            }
+            assert_eq!(said(&["letter.pdf"], false, office), (None, vec![]));
+            assert_eq!(
+                said(&["a.jpg"], false, office),
+                (Some(SetWallpaper), vec![SetWallpaper, Rotate, Slideshow])
+            );
+            assert_eq!(
+                said(&["a.jpg", "b.png"], false, office),
+                (Some(Slideshow), vec![Slideshow, Rotate])
+            );
+            // A printer: text documents, photos, and the two mixed.
+            for names in [
+                &["letter.pdf"][..],
+                &["notes.txt", "x.ps", "y.md"],
+                &["letter.pdf", "a.jpg"],
+            ] {
+                assert_eq!(
+                    said(names, true, office),
+                    (Some(Print), vec![Print]),
+                    "{names:?}"
+                );
+            }
+            assert_eq!(
+                said(&["a.jpg"], true, office),
+                (Some(SetWallpaper), vec![SetWallpaper, Rotate, Print])
+            );
+            assert_eq!(
+                said(&["a.jpg", "b.heic"], true, office),
+                (Some(Slideshow), vec![Slideshow, Rotate, Print])
+            );
+            // Never for what cannot be printed, mixed in or alone.
+            assert_eq!(
+                said(&["letter.pdf", "song.mp3"], true, office),
+                (None, vec![])
+            );
+            assert_eq!(said(&["song.mp3"], true, office), (Some(Play), vec![Play]));
+            assert_eq!(said(&["photos.tar.gz"], true, office).0, Some(Extract));
+        }
+        // Office files: a printer AND LibreOffice.
+        for names in [
+            &["report.docx"][..],
+            &["a.doc", "b.odt", "c.rtf"],
+            &["d.xls", "e.xlsx", "f.ods"],
+            &["g.ppt", "h.pptx", "i.odp"],
+            &["report.docx", "a.jpg", "letter.pdf"],
+        ] {
+            assert_eq!(
+                said(names, true, true),
+                (Some(Print), vec![Print]),
+                "{names:?}"
+            );
+            assert_eq!(said(names, true, false), (None, vec![]), "{names:?}");
+            assert_eq!(said(names, false, true), (None, vec![]), "{names:?}");
+        }
     }
 
     #[test]

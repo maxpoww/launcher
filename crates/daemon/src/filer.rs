@@ -61,6 +61,7 @@ use crate::{launch, App};
 
 mod chrome;
 mod history;
+mod print;
 mod recent;
 mod smart;
 
@@ -1934,6 +1935,8 @@ pub(crate) struct Filer {
     /// they came a frame or many too late).
     glyphs: HashMap<String, Vec<u8>>,
     glyphs_asked: bool,
+    /// What can be printed, as last asked (`print.rs`).
+    printers: print::Printers,
     /// Files in hand, lifted from one of the windows.
     drag: Option<Lifted>,
     /// A drag over one of the windows.
@@ -1968,6 +1971,7 @@ impl Filer {
             icons: None,
             glyphs: HashMap::new(),
             glyphs_asked: false,
+            printers: Default::default(),
             drag: None,
             dnd: None,
             rig_drag: false,
@@ -2628,6 +2632,8 @@ impl App {
             }
         }
         self.filer_glyphs_warm();
+        // (Is there a printer now: asked again as a window opens.)
+        self.filer_printers(true);
         info!("files: window {id} on {}", dir.display());
         self.filer.put(Win {
             renderer: None,
@@ -4906,6 +4912,8 @@ impl App {
 
     /// Draw one frame of window `id`.
     fn filer_draw(&mut self, id: u32) {
+        // (The printers asked again once their answer is old; never waited for.)
+        self.filer_printers(false);
         // (What the keys are on, and its neighbours, prepared for Quick Look.)
         if let Some((at, near)) = self.filer_peek_near(id) {
             self.peek_follow_keys(id, &at, near);
@@ -7292,6 +7300,10 @@ impl App {
             }
             // `flash <words>`: said in the pill for a moment.
             "flash" => self.filer_flash(id, rest.to_owned()),
+            "printers" => {
+                self.filer_printers(true);
+                return format!("{:?} (asking again)", self.filer.printers.can);
+            }
             // `pill <n>`: as a click on the pill's `n`th button.
             "pill" => {
                 let act = rest
