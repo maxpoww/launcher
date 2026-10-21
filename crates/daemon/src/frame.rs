@@ -186,6 +186,7 @@ impl App {
             self.controls_band,
             self.ui.open_trim(),
             self.control_rows(),
+            self.options_bar_h(),
         );
         // Search results split their partial rows about the titles.
         let centre_rows = !self.grid_resting();

@@ -6335,6 +6335,21 @@ impl App {
             return;
         }
         let target = self.ui.target();
+        // Beside a SIDE dock the vertical wheel runs along the column: it
+        // slides an overflowing dock's pins, and pages the open box; the
+        // open/close gesture is the side-scroll (`side_scroll`).
+        if self.dock_side() != launcher_prefs::Side::Bottom && target != Target::Open {
+            let layout = self.current_layout();
+            if let (Some(ov), Some(pos)) = (layout.dock_overflow, self.pointer_pos) {
+                if layout.on_dock(pos) {
+                    let slot_px = layout.dock_slots.get(ov.apps_slot).map_or(44.0, |r| r.h.max(1.0));
+                    self.dock_pin_target = (self.dock_pin_target + value as f32 / slot_px).clamp(0.0, ov.max_off);
+                    self.dock_hscroll_at = Some(Instant::now());
+                    self.schedule_frame();
+                }
+            }
+            return;
+        }
         match target {
             Target::Hidden | Target::Dock => {
                 // While hidden, only in-strip scroll may summon (stale
@@ -6428,6 +6443,11 @@ impl App {
         }
         // Mid-drag wheel events must not page (see `on_scroll`).
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
+            return;
+        }
+        // Beside a side dock the side-scroll opens and closes it.
+        if self.dock_side() != launcher_prefs::Side::Bottom {
+            self.side_scroll(value);
             return;
         }
         // On an overflowing dock a side-scroll slides the pins' window:

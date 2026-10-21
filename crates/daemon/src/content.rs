@@ -1416,6 +1416,9 @@ pub fn layout_on(
     controls_band: f32,
     trim: f32,
     control_rows: usize,
+    // How much of the screen's top the banner takes: a side dock stops
+    // under it.
+    top_reserved: f32,
 ) -> Layout {
     if side == Side::Bottom {
         return layout(
@@ -1438,6 +1441,7 @@ pub fn layout_on(
         controls_pill_h,
         controls_band,
         control_rows,
+        top_reserved,
         side == Side::Left,
     )
 }
@@ -1465,6 +1469,7 @@ fn layout_side(
     controls_pill_h: Option<f32>,
     controls_band: f32,
     control_rows: usize,
+    top_reserved: f32,
     left: bool,
 ) -> Layout {
     let (w, h) = surface;
@@ -1475,16 +1480,23 @@ fn layout_side(
     let band = config.window.input_bar_height as f32 * icon_scale;
     let gap = config.window.bottom_margin as f32 * icon_scale;
     let open_w = side_open_w(config, icon_scale);
+    // The dock's whole run (Max, 2026-10-21: "all the way to the bottom and
+    // the top, not over the banner"): from a gap under the banner to a gap
+    // off the screen's bottom; the column and the box centre on it.
+    let span_top = top_reserved + gap;
+    let span = (h - gap - span_top).max(band);
+    let mid = span_top + span / 2.0;
 
     // The column: square slots (a minimized window's picture fits its
     // square). A column longer than the screen holds OVERFLOWS as the
     // bottom row does (`layout`): the pins give way, sliding through a
     // window that ends at the Apps button, never the trio, the running or
-    // the minimized ones. (It keeps a band's room at each end, off the bar.)
+    // the minimized ones — only once the column runs the whole span, so the
+    // Apps button eats icons only when there is no room left.
     let n_normal = n_entries.saturating_sub(n_min);
     let pins = pins.min(n_normal);
     let others = (n_normal - pins + n_min) as f32 * dock_slot + if n_min > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
-    let budget = h - 4.0 * dock_pad - 2.0 * band;
+    let budget = span - 2.0 * dock_pad;
     let pin_room = ((budget - others) / dock_slot).floor();
     let pin_cap = (pin_room.max(1.0) as usize).min(pins.max(1));
     let overflow = pins > 0 && pin_room >= 1.0 && pins > pin_room as usize;
@@ -1497,7 +1509,7 @@ fn layout_side(
             (i as f32 + 1.0 - off).min(off + pin_cap as f32 - i as f32).clamp(0.0, 1.0)
         }
     };
-    let hard_cap = (((h - 2.0 * dock_pad) / dock_slot).floor() as usize).max(1);
+    let hard_cap = (((span - 2.0 * dock_pad) / dock_slot).floor() as usize).max(1);
     let n_normal_shown = if overflow { n_normal } else { n_normal.min(hard_cap) };
     let n_min_shown = if overflow {
         n_min
@@ -1511,18 +1523,27 @@ fn layout_side(
     let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
     let slot_len = |i: usize| if i < n_normal_shown { dock_slot * pin_f(i) } else { dock_slot };
     let row_len = (0..n_dock).map(slot_len).sum::<f32>() + dock_min_gap;
-    let basin_h = (row_len + 2.0 * (dock_pad + SIDE_BASIN_AIR * icon_scale)).min(h - 2.0 * gap);
+    let air = 2.0 * (dock_pad + SIDE_BASIN_AIR * icon_scale);
+    let basin_h = (row_len + air).min(span);
+    // The plate the box must hold when open: the normal icons only (the
+    // minimized ones hide as it opens), as at the bottom.
+    let open_plate = ((0..n_normal_shown).map(slot_len).sum::<f32>() + air).min(span);
 
-    // The open box's rows: as many as the screen holds, six at most; a
-    // search matching settings takes its band out of the rows shown.
+    // The open box's rows: six, or as many as a longer dock makes room for
+    // (Max, 2026-10-21: "the box should adapt to the size of the dock" — as
+    // the bottom box widens with a long dock and its sections gain
+    // columns, here the sections gain ROWS); never more than the span
+    // holds. A search matching settings takes its band out of the rows shown.
     let controls_drop = GRID_ICON_TOP * icon_scale + CONTROLS_EXTRA_DROP;
     let control_rows = control_rows.max(1);
     let controls_h = controls_pill_h.map_or(0.0, |ph| controls_band_h(icon_scale, ph) * control_rows as f32);
     let fixed = SIDE_TOP + SECTION_TITLE_H + LAST_SECTION_AIR + SEARCH_GAP + SEARCH_H + SIDE_BOTTOM;
-    let room = h - 2.0 * gap - fixed;
-    let fits = ((room / cell_h).max(1.0) as usize).clamp(1, SIDE_ROWS);
+    let room = span - fixed;
+    let wanted = ((open_plate - fixed) / cell_h).floor().max(SIDE_ROWS as f32) as usize;
+    let fits = ((room / cell_h).max(1.0) as usize).clamp(1, wanted);
     let rows = (((room - controls_h) / cell_h).max(1.0) as usize).clamp(1, fits);
-    let open_h = fixed + rows as f32 * cell_h + controls_band;
+    // As tall as its rows, and never shorter than the dock it carries.
+    let open_h = (fixed + rows as f32 * cell_h + controls_band).max(open_plate).min(span);
 
     // The card.
     let dock_extent = band + gap;
@@ -1531,13 +1552,13 @@ fn layout_side(
     let card_w = (extent - gap).max(band);
     let card_x = if left { extent - card_w } else { w - extent };
     let card_h = basin_h + (open_h - basin_h) * rise;
-    let card_top = (h - card_h) / 2.0;
+    let card_top = mid - card_h / 2.0;
 
     // The dock's band, on the card's far side.
     let band_x = if left { card_x + card_w - band } else { card_x };
     let slot_x = band_x + (band - dock_slot) / 2.0;
     let mut dock_slots = Vec::with_capacity(n_dock);
-    let mut y = (h - row_len) / 2.0;
+    let mut y = mid - row_len / 2.0;
     for i in 0..n_dock {
         if i == dock_min_start {
             y += dock_min_gap;
@@ -1560,7 +1581,7 @@ fn layout_side(
     } else {
         (card_x - full_x).max(0.0) * RIDE_PARALLAX
     };
-    let open_top = (h - open_h) / 2.0;
+    let open_top = mid - open_h / 2.0;
     let title_y = open_top + SIDE_TOP;
     let vp_y = title_y + SECTION_TITLE_H;
     let cols_of = |s: usize| if s == SECTION_APPS { SIDE_APPS_COLS } else { 1 };
@@ -5184,10 +5205,12 @@ mod tests {
     // ---- the dock on a side (Max, 2026-10-21) ----
 
     const SCREEN: (f32, f32) = (1440.0, 900.0);
+    /// The banner over a side dock's column.
+    const BANNER: f32 = 28.0;
 
     fn side_layout(side: Side, extent: f32, apps: usize, scroll: f32) -> Layout {
         let cfg = config();
-        layout_on(side, &cfg, 1.0, SCREEN, extent, 9, 0, 0, 0.0, &[], [apps, 6, 9], [scroll, 0.0, 0.0], false, (1.0, 1.0), None, 0.0, 0.0, 1)
+        layout_on(side, &cfg, 1.0, SCREEN, extent, 9, 0, 0, 0.0, &[], [apps, 6, 9], [scroll, 0.0, 0.0], false, (1.0, 1.0), None, 0.0, 0.0, 1, BANNER)
     }
 
     fn side_open(cfg: &Config) -> f32 {
@@ -5223,9 +5246,9 @@ mod tests {
         let docked = (cfg.window.input_bar_height + cfg.window.bottom_margin) as f32;
         let l = side_layout(Side::Left, docked, 0, 0.0);
         assert!((l.card_x - cfg.window.bottom_margin as f32).abs() < 0.01 && (l.card_w - cfg.window.input_bar_height as f32).abs() < 0.01);
-        // Centred down the screen, one slot under another.
+        // Centred on its run (under the banner to the bottom), one slot under another.
         let (first, last) = (l.dock_slots[0], l.dock_slots[8]);
-        assert!(((first.y + last.y + last.h) / 2.0 - SCREEN.1 / 2.0).abs() < 0.01);
+        assert!(((first.y + last.y + last.h) / 2.0 - (BANNER + SCREEN.1) / 2.0).abs() < 0.01);
         assert!(l.dock_slots.windows(2).all(|p| (p[1].y - p[0].y - DOCK_SLOT).abs() < 0.01 && p[0].x == p[1].x));
         // The screen's very edge is live, row by row.
         let mid = |s: Rect| (s.y + s.h / 2.0);
@@ -5234,6 +5257,23 @@ mod tests {
         // Hidden: off the screen to the left.
         let hidden = side_layout(Side::Left, 0.0, 0, 0.0);
         assert!(hidden.card_x + hidden.card_w <= 0.01);
+    }
+
+    #[test]
+    fn a_side_box_grows_with_a_long_dock() {
+        let cfg = config();
+        let open = side_open(&cfg);
+        // 16 icons: a column longer than the six rows' box.
+        let l = layout_on(Side::Left, &cfg, 1.0, SCREEN, open, 16, 0, 13, 0.0, &[], [60, 6, 9], [0.0; 3], false, (1.0, 1.0), None, 0.0, 0.0, 1, BANNER);
+        let first = l.dock_slots[0];
+        let last = l.dock_slots[15];
+        assert!(l.card_top <= first.y && l.card_top + l.card_h >= last.y + last.h, "the box holds its dock");
+        let apps = &l.sections[SECTION_APPS];
+        assert!(apps.rows > SIDE_ROWS, "the sections gain rows: {}", apps.rows);
+        assert_eq!(apps.cap, 3 * apps.rows);
+        // A short dock keeps the six.
+        let short = side_layout(Side::Left, open, 60, 0.0);
+        assert_eq!(short.sections[SECTION_APPS].rows, SIDE_ROWS);
     }
 
     #[test]
@@ -5264,11 +5304,13 @@ mod tests {
         let cfg = config();
         let docked = (cfg.window.input_bar_height + cfg.window.bottom_margin) as f32;
         // 40 pins and the trio: more than a 900 px column holds.
-        let l = layout_on(Side::Left, &cfg, 1.0, SCREEN, docked, 43, 0, 40, 0.0, &[], [0; 3], [0.0; 3], false, (1.0, 1.0), None, 0.0, 0.0, 1);
+        let l = layout_on(Side::Left, &cfg, 1.0, SCREEN, docked, 43, 0, 40, 0.0, &[], [0; 3], [0.0; 3], false, (1.0, 1.0), None, 0.0, 0.0, 1, BANNER);
         let ov = l.dock_overflow.expect("the pins overflow");
         assert_eq!(ov.apps_slot, 40);
         let last = l.dock_slots.last().unwrap();
-        assert!(l.dock_slots[0].y >= 0.0 && last.y + last.h <= SCREEN.1, "the column stays on the screen");
+        assert!(l.dock_slots[0].y >= BANNER && last.y + last.h <= SCREEN.1, "the column stays under the banner, on the screen");
+        // It runs the whole span before the Apps button eats a pin.
+        assert!(l.card_top <= BANNER + 8.0 + 0.01 && l.card_top + l.card_h >= SCREEN.1 - 8.0 - 0.01, "{} .. {}", l.card_top, l.card_top + l.card_h);
         assert!((l.dock_slots[40].h - DOCK_SLOT).abs() < 0.01, "the trio keeps its slots");
         // A folder on it opens as a column beside the band, centred on its icon.
         let anchor = l.dock_slots[3];

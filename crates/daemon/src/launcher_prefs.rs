@@ -204,6 +204,56 @@ impl App {
         self.schedule_frame();
     }
 
+    /// A side-scroll beside a SIDE dock (Max, 2026-10-21: "right to open
+    /// the left dock, scroll left to open the right dock"): away from the
+    /// dock's edge it summons and opens the box, as a scroll down opens the
+    /// bottom one; back toward the edge it closes the box to the dock. The
+    /// fingers' way: with natural scrolling the reported values run the
+    /// other way round (`input.natural_scroll`, as for the bottom dock).
+    pub(crate) fn side_scroll(&mut self, value: f64) {
+        use crate::state::Target;
+        use waverunner_proto::Command;
+        // An open box over the dock, or one in the grid, takes it to page.
+        if self.stack_open() {
+            self.box_page_scroll(value);
+            return;
+        }
+        let toward_edge = if self.dock_side() == Side::Left { -1.0 } else { 1.0 };
+        let natural = if self.config.input.natural_scroll { -1.0 } else { 1.0 };
+        // + = away from the edge: open.
+        let out = -value * toward_edge * natural;
+        let target = self.ui.target();
+        if target == Target::Hidden && !self.pointer_on_reveal_strip() {
+            return;
+        }
+        if target == Target::Open {
+            // (The rest of the gesture that opened it must not close it.)
+            if self.scroll.open_at.is_some_and(|t| t.elapsed() < crate::EXPAND_BLEED_COOLDOWN) {
+                return;
+            }
+            if self.control_panel {
+                return;
+            }
+        }
+        self.scroll.accum += out;
+        if self.scroll.accum >= crate::SCROLL_THRESHOLD {
+            self.scroll.accum = 0.0;
+            match target {
+                Target::Hidden => self.handle_command(Command::Show),
+                Target::Dock => {
+                    self.scroll.open_at = Some(std::time::Instant::now());
+                    self.handle_command(Command::Expand);
+                }
+                Target::Open => {}
+            }
+        } else if self.scroll.accum <= -crate::SCROLL_THRESHOLD {
+            self.scroll.accum = 0.0;
+            if target == Target::Open {
+                self.handle_command(Command::Collapse);
+            }
+        }
+    }
+
     /// The input region beside a side dock (see `sync_input_region`): a
     /// strip `extent` deep down the dock's edge, as long as the card is now
     /// — or the whole surface while a box or fast launch is up.
