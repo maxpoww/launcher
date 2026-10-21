@@ -4015,8 +4015,10 @@ impl App {
         let mut paint = self.desktop_panel_paint(rect);
         // (Golem Files keeps its menus' rules.) The menu is the SHELL's:
         // its colours and Dark/Light (Max, 2026-10-17), laid solid on the
-        // window.
+        // window — and unlit, as the History is (the dark look's night light
+        // sank its lower rows toward black).
         paint.rules = true;
+        paint.glass = crate::content::UNLIT;
         if crate::palette::shell().is_some() {
             paint.fill[3] = 1.0;
             return paint;

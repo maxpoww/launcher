@@ -1646,10 +1646,9 @@ impl App {
             clip: panel,
             ..Default::default()
         };
-        // (Unlit: the dark look's night light would sink its lower rows
-        // toward black.)
+        // (Unlit, as every menu of a file window: `filer_panel_paint`.)
         g.rects.push(RectInst {
-            glass: crate::content::UNLIT,
+            glass: paint.glass,
             ..rect(panel, paint.radius, fill)
         });
         g.labels.push(Label {

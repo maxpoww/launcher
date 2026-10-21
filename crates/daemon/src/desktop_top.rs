@@ -149,6 +149,7 @@ impl App {
             wash: self.options_hover_wash(),
             radius: crate::clipboard::BOX_RADIUS,
             rules: false,
+            glass: 0.0,
         }
     }
 

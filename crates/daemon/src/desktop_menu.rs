@@ -162,6 +162,10 @@ pub(crate) struct MenuPaint {
     /// The groups parted by a drawn rule (Golem Files' windows, untouched by
     /// the quiet pass) or by space alone (the desktop's — quiet, 2026-10-16).
     pub rules: bool,
+    /// The panel's `glass`: 0.0 (as every solid), or `content::UNLIT` in
+    /// Golem Files' windows — there the dark look's night light sank a
+    /// menu's lower rows toward black (Max, 2026-10-21: as the History).
+    pub glass: f32,
 }
 
 /// The rows for a right-click on an item (`on_item`) or on bare wallpaper.
@@ -497,7 +501,7 @@ impl Menu {
             rect: panel,
             radius: paint.radius,
             color: panel_fill,
-            glass: 0.0,
+            glass: paint.glass,
             border: 0.0,
         });
         for (i, (row, rect)) in self.rows.iter().zip(self.row_rects()).enumerate() {
@@ -784,6 +788,7 @@ mod tests {
         wash: [1.0, 1.0, 1.0, 0.1],
         radius: 10.0,
         rules: true,
+        glass: 0.0,
     };
 
     #[test]

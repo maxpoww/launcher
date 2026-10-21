@@ -410,7 +410,7 @@ impl Props {
             rect: panel,
             radius: paint.radius,
             color: [paint.fill[0], paint.fill[1], paint.fill[2], paint.fill[3] * panel_alpha],
-            glass: 0.0,
+            glass: paint.glass,
             border: 0.0,
         });
         // The lines sit where they will end up; the growing panel uncovers them.
@@ -493,6 +493,7 @@ mod tests {
         wash: [1.0, 1.0, 1.0, 0.1],
         radius: 10.0,
         rules: true,
+        glass: 0.0,
     };
 
     fn tmp(tag: &str) -> std::path::PathBuf {
