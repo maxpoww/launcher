@@ -825,6 +825,11 @@ impl App {
     /// gesture). `dragged_idx` is excluded as an anchor candidate so an
     /// item never anchors on itself. Caller refilters.
     fn place_in_grid_at_slot(&mut self, id: &str, dragged_idx: usize, slot: usize) {
+        // A grid arranged by use or by name: what is on screen becomes the
+        // order by hand, and the move is made in it.
+        if self.arrange_shown != crate::launcher_prefs::Arrange::Hand {
+            self.arrange_by_hand_from_view();
+        }
         let cap = self.apps_cap.max(1);
         // Resolve the drop against the *shifted* positions the make-room
         // previews — the dragged item's hole closed, the gap opened — so a

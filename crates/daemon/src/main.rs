@@ -997,6 +997,8 @@ fn main() -> anyhow::Result<()> {
         module_box_frame_pending: false,
         sunset_auto: false,
         settings: settings::Settings::load(),
+        arrange_shown: settings::Settings::load().launcher_arrange,
+        arrange_pending: None,
         action_tracks: action_track::load(),
         screen: screen::ScreenState::load(),
         cava_reveal: 0.0,
@@ -2376,6 +2378,12 @@ pub struct App {
     sunset_auto: bool,
     /// Golem's own settings — what the gear's pages set (see `settings.rs`).
     settings: settings::Settings,
+    /// The arrangement the Apps grid SHOWS (the Launcher page's Arrange
+    /// apps): it follows a pick once the box is open to see it, so the
+    /// icons glide to their places in front of the owner.
+    arrange_shown: launcher_prefs::Arrange,
+    /// An arrangement picked and waiting for the box to be open, and since when.
+    arrange_pending: Option<(launcher_prefs::Arrange, Instant)>,
     /// Offers Golem made and the user answered, keyed by the timestamp of the
     /// notification card that records each one. See `action_track.rs`: the card
     /// is the visible half, this is the memory behind it (what was offered, the
@@ -4872,6 +4880,17 @@ impl App {
                 // Packages installing in place ride the loose grid at
                 // their drop slot until the real app replaces them.
                 self.insert_pending_cells(&mut arranged, &mut slots);
+                // ARRANGE APPS by use or by name (the Launcher page): the
+                // grid shows them sorted, dense from the first cell; the
+                // order by hand stays underneath as it was (a drag in the
+                // grid takes the sorted one as the new order by hand —
+                // `place_in_grid_at_slot`).
+                let arrange = self.arrange_shown;
+                if arrange != launcher_prefs::Arrange::Hand {
+                    self.arrange_sorted(&mut arranged, arrange);
+                    slots = (0..arranged.len()).collect();
+                    page_map = (0..arranged.len().div_ceil(cap)).collect();
+                }
                 self.apps_page_map = page_map;
                 self.apps_span = slots.last().map_or(0, |s| s + 1);
                 self.apps_slots = slots;
@@ -5615,42 +5634,44 @@ impl App {
         match hit {
             Hit::DockIcon(slot) => {
                 if let Some(&entry_idx) = self.dock_order.get(slot) {
+                    // (Animated icons off: no icon turns as it is clicked.)
+                    let moves = self.icons_move();
                     // Seam's compass turns once round as it is clicked.
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == compass_icon::SEAM_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == compass_icon::SEAM_ID) {
                         self.compass.click();
                         self.dirty = true;
                     }
                     // WhatsApp's plate and phone turn round, each its own way.
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == whatsapp_icon::WHATSAPP_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == whatsapp_icon::WHATSAPP_ID) {
                         self.whatsapp.click();
                         self.dirty = true;
                     }
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == youtube_icon::YOUTUBE_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == youtube_icon::YOUTUBE_ID) {
                         self.youtube.click();
                         self.dirty = true;
                     }
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == ytmusic_icon::YTMUSIC_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == ytmusic_icon::YTMUSIC_ID) {
                         self.ytmusic.click();
                         self.dirty = true;
                     }
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == discord_icon::DISCORD_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == discord_icon::DISCORD_ID) {
                         self.discord.click();
                         self.dirty = true;
                     }
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == spotify_icon::SPOTIFY_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == spotify_icon::SPOTIFY_ID) {
                         self.spotify.click();
                         self.dirty = true;
                     }
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == google_icon::GOOGLE_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == google_icon::GOOGLE_ID) {
                         self.google.click();
                         self.dirty = true;
                     }
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == chrome_icon::CHROME_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == chrome_icon::CHROME_ID) {
                         self.chrome.click();
                         self.dirty = true;
                     }
                     // Golem Files' folders wave, back one first.
-                    if self.entries.get(entry_idx).is_some_and(|e| e.id == crate::filer::APP_ID) {
+                    if moves && self.entries.get(entry_idx).is_some_and(|e| e.id == crate::filer::APP_ID) {
                         self.files_hover.click();
                         self.dirty = true;
                     }

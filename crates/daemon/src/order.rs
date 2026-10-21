@@ -123,6 +123,21 @@ impl OrderDb {
         self.save();
     }
 
+    /// Take `shown` (the grid as it is on screen, sorted by use or by name)
+    /// as the order by hand, pages of `cap`; ids kept here that are not
+    /// shown (pinned or boxed apps) follow, in their old order. The
+    /// Launcher page's Arrange apps: a drag in a sorted grid starts from
+    /// what was seen.
+    pub fn take_order(&mut self, shown: &[String], cap: usize) {
+        let mut flat: Vec<String> = shown.iter().filter(|id| self.list.contains(id)).cloned().collect();
+        flat.extend(self.list.iter().filter(|id| !shown.contains(id)).cloned());
+        let mut list = PagedList::from_flat(flat);
+        list.pack(cap.max(1), |id| shown.iter().any(|s| s == id));
+        self.list = list;
+        info!("reorder: the grid as shown is the order by hand now");
+        self.save();
+    }
+
     /// Move `id` to the end of `page`, creating it as needed — the
     /// drop-on-a-fresh-page mutation.
     pub fn move_to_page_end(&mut self, id: &str, page: usize) {
@@ -189,5 +204,15 @@ mod tests {
             ["group:box-2".to_string()].into_iter().collect();
         d.forget_dead_boxes(&live);
         assert_eq!(d.pages(), &[vec!["a", "b", "group:box-2"]]);
+    }
+
+    #[test]
+    fn the_grid_as_shown_becomes_the_order_by_hand() {
+        let mut d = db();
+        d.sync(["zebra", "pinned", "apple", "kiwi"].into_iter());
+        // Shown sorted by name (the pinned app is not in the grid).
+        let shown: Vec<String> = ["apple", "kiwi", "zebra"].iter().map(|s| s.to_string()).collect();
+        d.take_order(&shown, 2);
+        assert_eq!(d.pages(), &[vec!["apple", "kiwi"], vec!["zebra", "pinned"]], "pages of two shown; the hidden id keeps a place after");
     }
 }

@@ -11,10 +11,12 @@
 //! thread ([`App::launcher_pick`]), saved, and the page read again.
 //!
 //! THE PAGE FIRST, THE FEATURES ONE BY ONE (Max, 2026-10-20: "we will work
-//! on the features later, first do the controls box"). In: Position (the
-//! side dock, `content::layout_side`) and Stay away (`intellihide`). Still
-//! only saved: Animated icons, Arrange apps, Other monitors (a first cut of
-//! the first two waits on the branch `launcher-features-wip`).
+//! on the features later, first do the controls box"). In, each shown live
+//! where it is seen: Position (the side dock, `content::layout_side`), Stay
+//! away (`intellihide`), Animated icons (`icons_move`; turned on, the icons
+//! play their turn — `icons_wave`) and Arrange apps (`arrange_shown`; the box
+//! opens and the icons glide to their places — `arrange_show`). Still only
+//! saved: Other monitors.
 //!
 //! THE BUILT-IN SCREEN ALWAYS HAS THE LAUNCHER, and the MAIN one when the
 //! built-in is off (a closed lid, a desktop with none). That is done, not
@@ -177,7 +179,7 @@ impl App {
     }
 
     /// A pick on the Launcher page (`launcher-*` keys, see `controls::read`):
-    /// saved, and Position and Stay away take effect at once.
+    /// saved, and each takes effect at once (shown where it is seen).
     pub(crate) fn launcher_pick(&mut self, key: &str, value: &str) {
         match key {
             "launcher-away" => {
@@ -188,6 +190,10 @@ impl App {
             "launcher-motion" => {
                 self.settings.launcher_still = value == "off";
                 self.settings.save();
+                // Turned on, the moving icons show it: each plays its turn.
+                if value == "on" {
+                    self.icons_wave();
+                }
             }
             "launcher-side" => {
                 if let Some(side) = Side::of(value) {
@@ -200,6 +206,7 @@ impl App {
                 if let Some(arrange) = Arrange::of(value) {
                     self.settings.launcher_arrange = arrange;
                     self.settings.save();
+                    self.arrange_show(arrange);
                 }
             }
             // A monitor's word: the launcher on it goes, or comes back.
@@ -215,6 +222,102 @@ impl App {
             _ => return,
         }
         info!("launcher: {key} = {value}");
+    }
+
+    /// The dock's moving icons move (Animated icons on).
+    pub(crate) fn icons_move(&self) -> bool {
+        !self.settings.launcher_still
+    }
+
+    /// ANIMATED ICONS turned on (Max, 2026-10-21: "when I turn on animations
+    /// I want to see the icons move"): every moving icon on the dock plays
+    /// its turn once, as a click plays it.
+    fn icons_wave(&mut self) {
+        self.compass.click();
+        self.whatsapp.click();
+        self.youtube.click();
+        self.ytmusic.click();
+        self.discord.click();
+        self.spotify.click();
+        self.google.click();
+        self.chrome.click();
+        self.files_hover.click();
+        self.dirty = true;
+        self.schedule_frame();
+    }
+
+    /// ARRANGE APPS picked (Max, 2026-10-21: "when I press organize by… I
+    /// want the box to open and see the icons organize live"): the box opens
+    /// on the apps — in place of the control panel it was picked in, or out
+    /// of the dock when it was the quick controls' box (which goes) — and
+    /// the grid takes the arrangement once it is up (`arrange_tick`), each
+    /// icon gliding to its new place.
+    fn arrange_show(&mut self, arrange: Arrange) {
+        use crate::state::Target;
+        self.arrange_pending = Some((arrange, std::time::Instant::now()));
+        if self.fast.open {
+            self.close_fast_launch();
+            // (Leaving the quick box arms the called dock's autohide, which
+            // would fold the box opened here: it is not hiding now.)
+            self.hide_deadline = None;
+        }
+        if self.ui.target() == Target::Open {
+            if self.control_panel {
+                self.control_panel = false;
+                self.control_panel_from_apps = false;
+                self.panel_reset_due = true;
+            }
+        } else {
+            self.handle_command(waverunner_proto::Command::Expand);
+        }
+        self.schedule_frame();
+    }
+
+    /// Land a picked arrangement once the apps are up and still (or after a
+    /// while regardless): the grid re-sorts, the icons glide there.
+    pub(crate) fn arrange_tick(&mut self) {
+        use crate::state::Target;
+        let Some((arrange, since)) = self.arrange_pending else { return };
+        let up = self.ui.target() == Target::Open && !self.control_panel && self.panel_mix <= 0.001 && !self.ui.is_animating();
+        if !up && since.elapsed() < std::time::Duration::from_millis(1500) {
+            self.dirty = true;
+            return;
+        }
+        self.arrange_pending = None;
+        // (A beat with the box at rest first, then the glide.)
+        if self.arrange_shown != arrange {
+            self.arrange_shown = arrange;
+            self.refilter();
+            self.dirty = true;
+        }
+    }
+
+    /// The Apps grid's cells (entry indices) sorted as `arrange` says: by
+    /// use, most used first, ties by name; or by name. By hand: as they are.
+    pub(crate) fn arrange_sorted(&self, cells: &mut [usize], arrange: Arrange) {
+        let name = |i: usize| self.entries.get(i).map(|e| e.name.to_lowercase()).unwrap_or_default();
+        match arrange {
+            Arrange::Use => cells.sort_by_cached_key(|&i| {
+                let uses = self.entries.get(i).map_or(0, |e| self.usage.count(&e.id));
+                (std::cmp::Reverse(uses), name(i))
+            }),
+            Arrange::Name => cells.sort_by_cached_key(|&i| name(i)),
+            Arrange::Hand => {}
+        }
+    }
+
+    /// A drag in a grid arranged by use or by name: the grid as it is on
+    /// screen becomes the order by hand, and Arrange apps turns to By hand.
+    pub(crate) fn arrange_by_hand_from_view(&mut self) {
+        let shown: Vec<String> = self.search.visible[crate::content::SECTION_APPS]
+            .iter()
+            .filter_map(|&i| self.entries.get(i).map(|e| e.id.clone()))
+            .collect();
+        self.order.take_order(&shown, self.apps_cap);
+        self.settings.launcher_arrange = Arrange::Hand;
+        self.settings.save();
+        self.arrange_shown = Arrange::Hand;
+        info!("launcher: a drag in the sorted grid — arranged by hand from here");
     }
 
     /// POSITION picked: the dock takes the new edge at once — its extents

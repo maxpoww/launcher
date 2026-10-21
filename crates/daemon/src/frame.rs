@@ -334,6 +334,8 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
+        // An arrangement picked on the Launcher page lands once its box is up.
+        self.arrange_tick();
         // ONE frame per compositor frame. A frame callback is still out: the
         // screen has not shown the last frame yet, so this one waits for the
         // callback (which draws whenever `dirty`). Drawing here anyway — as
@@ -1072,7 +1074,8 @@ impl App {
         let on_bin = matches!(self.hover, Some(content::Hit::DockIcon(slot))
             if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| groups::is_trash(&e.id)));
         let bin_now = crate::bin_motion::Inputs {
-            hover: on_bin && !bin_dragging,
+            // (Animated icons off: the bin still opens for what is carried to it.)
+            hover: on_bin && !bin_dragging && self.icons_move(),
             dragging: bin_dragging,
             over: over_trash && throwable,
             open: self.filer.showing_bin(),
@@ -1081,7 +1084,7 @@ impl App {
             self.dirty = true;
         }
         // Golem Files' launcher under the pointer (no drag): its folders out.
-        let on_files = self.gesture.dragging.is_none()
+        let on_files = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::filer::APP_ID));
         if self.files_hover.step(on_files, dt) {
@@ -1089,10 +1092,10 @@ impl App {
         }
         // The apps button: its pages turn under the pointer, its squares go
         // down while the grid is open (a frame for each place, its layer).
-        let on_apps = self.gesture.dragging.is_none()
+        let on_apps = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == apps::APPS_GRID_ID));
-        let grid_open = self.ui.target() == crate::state::Target::Open && !self.control_panel;
+        let grid_open = self.icons_move() && self.ui.target() == crate::state::Target::Open && !self.control_panel;
         // (Holding pins, the hover spits them first; the pages after.)
         let spat = self
             .layout_at(self.ui.extent())
@@ -1118,7 +1121,7 @@ impl App {
         // Seam's compass: the pointer coming on it swings its needle (the
         // plate the other way), a click turns it round; each pose's frame
         // put in its layer.
-        let on_seam = self.gesture.dragging.is_none()
+        let on_seam = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::compass_icon::SEAM_ID));
         if self.compass.step(on_seam, dt) {
@@ -1139,7 +1142,7 @@ impl App {
         }
         // WhatsApp: the pointer on it shakes the phone and turns the plate
         // (held), a click turns both round; each pose's frame in its layer.
-        let on_whatsapp = self.gesture.dragging.is_none()
+        let on_whatsapp = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::whatsapp_icon::WHATSAPP_ID));
         if self.whatsapp.step(on_whatsapp, dt) {
@@ -1160,7 +1163,7 @@ impl App {
         }
         // YouTube: a seek bar and a turning play under the pointer, a pause
         // swelling away on a click; each pose drawn as it comes.
-        let on_youtube = self.gesture.dragging.is_none()
+        let on_youtube = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::youtube_icon::YOUTUBE_ID));
         if self.youtube.step(on_youtube, dt) {
@@ -1180,7 +1183,7 @@ impl App {
         }
         // YouTube Music: the play swallows the ring under the pointer and
         // spits it out on a click; each pose drawn as it comes.
-        let on_ytmusic = self.gesture.dragging.is_none()
+        let on_ytmusic = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::ytmusic_icon::YTMUSIC_ID));
         if self.ytmusic.step(on_ytmusic, dt) {
@@ -1200,7 +1203,7 @@ impl App {
         }
         // Discord: Clyde tips and winks under the pointer, drops wide-eyed
         // and blinks on a click; each pose drawn as it comes.
-        let on_discord = self.gesture.dragging.is_none()
+        let on_discord = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::discord_icon::DISCORD_ID));
         if self.discord.step(on_discord, dt) {
@@ -1220,7 +1223,7 @@ impl App {
         }
         // Spotify: the lines swing round under the pointer, press and jump on
         // a click; each pose drawn as it comes.
-        let on_spotify = self.gesture.dragging.is_none()
+        let on_spotify = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::spotify_icon::SPOTIFY_ID));
         if self.spotify.step(on_spotify, dt) {
@@ -1240,7 +1243,7 @@ impl App {
         }
         // Google: the bar sweeps the G away and back under the pointer, the
         // G spins on a click; each pose drawn as it comes.
-        let on_google = self.gesture.dragging.is_none()
+        let on_google = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::google_icon::GOOGLE_ID));
         if self.google.step(on_google, dt) {
@@ -1260,7 +1263,7 @@ impl App {
         }
         // Chrome: the iris opens under the pointer, shuts and reopens on a
         // click; each opening drawn as it comes.
-        let on_chrome = self.gesture.dragging.is_none()
+        let on_chrome = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == crate::chrome_icon::CHROME_ID));
         if self.chrome.step(on_chrome, dt) {
@@ -1280,7 +1283,7 @@ impl App {
         }
         // The control panel's gears: they turn under the pointer, the frame
         // for each angle put in its layer.
-        let on_gears = self.gesture.dragging.is_none()
+        let on_gears = self.icons_move() && self.gesture.dragging.is_none()
             && matches!(self.hover, Some(content::Hit::DockIcon(slot))
                 if self.dock_order.get(slot).and_then(|&i| self.entries.get(i)).is_some_and(|e| e.id == apps::CONTROL_PANEL_ID));
         if self.gears_spin.step(on_gears, dt) {
