@@ -1155,7 +1155,25 @@ The big daemon files are cohesive but long — go straight to the function:
   · Copy here · ×", "“x” to move · Move here · ×" (greyed where nothing can be put: Recents, the bin, Media —
   `Win::put_here`); what waits to be moved is drawn at 45 %; × forgets them (`Filer::clip_forgot`), a move
   pasted is spent. Its symbols are the chrome's own (always in the window's layers). Rig: `files pill <n>`
-  (its nth button), `files flash <words>`. Rig: `files undo`,
+  (its nth button), `files flash <words>`. ACTIONS BY KIND (Max, 2026-10-21, mockup v51: "one action per case
+  on the pill, two, even 3 on the context menu; only actions that just happen"; `filer/smart.rs`, `sort_of` by
+  ending, `filer_smart`): songs/videos → Play (+ Shuffle for 2+); one photo → Set as wallpaper, Rotate, Slideshow
+  from here; photos → Slideshow, Rotate; a PDF or text → Print; an archive → Extract here (the pill only); a
+  folder that is mostly songs or photos (`folder_kind`: 70 % of at least 3 files, read once a change —
+  `kind_of_folder`) → Play all (+ Shuffle) / Slideshow. The pill wears ONE, first, in Open with's place; the menu
+  up to three, right after Open (`Ctx::smart`). BY THE ↶: the folder shown's own Play all / Slideshow (icon +
+  word, `filer_here_kind`, `Hits::here`), standing still left of sort — the ↶ slides in LEFT of it. What each
+  does (`filer_smart_act`): PLAY = Quick Look's player through a PLAYLIST (`peek_slides.rs`: `peek_playlist`,
+  each started by `peek_autoplay`, the next at its end — a song's mpv gone, a video's last frame; a song that
+  ends as it begins could not play: the playlist stops, it does not race on); SLIDESHOW = Quick Look full screen
+  on black (`Slides`, `slides_push`: the photo fitted, fading in over 0.45 s, the next every `SLIDE` 2.8 s, the
+  caption "name · 3 of 52 · ×"; the arrows or a click turn it, its × or Escape end it; "from here" starts at
+  that photo in the folder's order); SET AS WALLPAPER = the box's own pick (`controls::pick_wallpaper`),
+  undoable back to the one before (`Undo::Wallpaper`); ROTATE = a quarter clockwise and NEVER a pixel lost — a
+  JPEG by its EXIF orientation only (`exiftool`, else `jpegtran -perfect`), a PNG drawn again; undoable
+  (`Undo::Rotated`: three more quarters); its pictures made again (`thumb_stale`, `peek_forget`); PRINT = `lp`
+  to the default printer, "No printer is set up" said quietly when there is none (`lpstat -d`). Rig: `files
+  here` (the button by the ↶). Rig: `files undo`,
   `files hist [open|close|undo <row>]` (rows from the top; the reply/log is the history),
   `files where undo|histrow <n>|histundo <n>`, `files rclick <x> <y>`. A PATH CAN BE TYPED (Ctrl+L, or a `/` or `~` typed —
   `Win::go_to`, drawn in the steps' place): Enter goes (`typed_place`; a file's folder comes up
