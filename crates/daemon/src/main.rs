@@ -2974,7 +2974,12 @@ impl App {
     /// UiState dock / full extents for the current icon_size.
     fn scaled_extents(&self) -> (f32, f32) {
         let s = self.icon_scale();
-        let full = (self.config.window.height + self.config.window.bottom_margin) as f32 * s;
+        // (Beside a side dock the box opens across: its width.)
+        let full = if self.dock_side() == launcher_prefs::Side::Bottom {
+            (self.config.window.height + self.config.window.bottom_margin) as f32 * s
+        } else {
+            content::side_open_w(&self.config, s) + self.config.window.bottom_margin as f32 * s
+        };
         let dock =
             (self.config.window.input_bar_height + self.config.window.bottom_margin) as f32 * s;
         (dock, full)
@@ -3651,12 +3656,15 @@ impl App {
             let zone_w = self.config.window.width as f64;
             let zone_h =
                 (self.config.window.input_bar_height + self.config.window.bottom_margin) as f64;
-            let zone = (
-                mon.x + (mon.w - zone_w) / 2.0,
-                mon.y + mon.h - zone_h,
-                zone_w,
-                zone_h,
-            );
+            // Beside a side dock: the band down that edge, as long as the dock.
+            let zone = match self.dock_side() {
+                launcher_prefs::Side::Bottom => (mon.x + (mon.w - zone_w) / 2.0, mon.y + mon.h - zone_h, zone_w, zone_h),
+                side => {
+                    let len = (self.dock_basin_w as f64).clamp(zone_h, mon.h);
+                    let x = if side == launcher_prefs::Side::Left { mon.x } else { mon.x + mon.w - zone_h };
+                    (x, mon.y + (mon.h - len) / 2.0, zone_h, len)
+                }
+            };
             Ok(!hypr::zone_state(zone, mon.active_ws)?.occupied)
         })()
         .unwrap_or_else(|e| {
@@ -4975,7 +4983,7 @@ impl App {
                 let settled = self.layout_at(self.ui.extent_of(Target::Open));
                 let sec_l = &settled.sections[content::SECTION_APPS];
                 let pages = self.apps_span.div_ceil(self.apps_cap.max(1)).max(1);
-                let max_scroll = (pages - 1) as f32 * sec_l.viewport.w.max(1.0);
+                let max_scroll = (pages - 1) as f32 * sec_l.page_len().max(1.0);
                 let sec = &mut self.scroll.per[content::SECTION_APPS];
                 sec.target = sec.target.clamp(0.0, max_scroll);
                 sec.pos = sec.pos.clamp(0.0, max_scroll);
@@ -5471,9 +5479,7 @@ impl App {
                 self.dock_hover_since = None;
                 // Off the dock band altogether: the names go cold again.
                 let layout = self.current_layout();
-                let on_dock = self
-                    .pointer_pos
-                    .is_some_and(|(_, y)| y >= layout.card_top && y < layout.dock_hit_bottom);
+                let on_dock = self.pointer_pos.is_some_and(|p| layout.on_dock(p));
                 if !on_dock {
                     self.dock_names_warm = false;
                 }
@@ -6124,6 +6130,12 @@ impl App {
         if self.stack_open() || self.fast.open {
             extent = extent.max(self.buffer_size.1);
         }
+        // A SIDE dock: a strip down its edge, `extent` deep, as long as the
+        // card (the resting plate, or the box).
+        if self.dock_side() != launcher_prefs::Side::Bottom {
+            self.sync_side_input_region(extent);
+            return;
+        }
         // The surface is full output width, but the plate is centered and only
         // as wide as its content (grown for minimized tiles). Inset the region
         // to the plate's own bounds so the transparent sides stay click-through
@@ -6387,6 +6399,16 @@ impl App {
         if !self.config.input.edge_reveal {
             return false;
         }
+        // Beside a side dock: the strip down its edge.
+        let strip = self.config.input.edge_reveal_px as f32;
+        match self.dock_side() {
+            launcher_prefs::Side::Left => return self.pointer_pos.is_some_and(|(x, _)| x <= strip),
+            launcher_prefs::Side::Right => {
+                let w = self.buffer_size.0 as f32;
+                return self.pointer_pos.is_some_and(|(x, _)| x >= w - strip);
+            }
+            launcher_prefs::Side::Bottom => {}
+        }
         let strip_top = self.buffer_size.1 as f32 - self.config.input.edge_reveal_px as f32;
         self.pointer_pos.is_some_and(|(_, y)| y >= strip_top)
     }
@@ -6450,7 +6472,7 @@ impl App {
         // current layout has a tiny viewport and a bogus page count.
         let settled = self.layout_at(self.ui.extent_of(Target::Open));
         let sec_layout = &settled.sections[section];
-        let page_w = sec_layout.viewport.w.max(1.0);
+        let page_w = sec_layout.page_len().max(1.0);
         if self.scroll.per[section].turn(dir, wrap, sec_layout.n_pages, page_w) {
             self.update_hover();
             self.schedule_frame();

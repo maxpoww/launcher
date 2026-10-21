@@ -662,6 +662,21 @@ fn track_spans(w: f32, split: bool, mark: Option<f32>) -> Vec<(f32, f32)> {
 /// group, and the one laid beside it with its index.
 type RowSlider<'a> = (u8, &'a crate::controls::Group, Option<(u8, &'a crate::controls::Group)>);
 
+/// `text` in lines no wider than `room` (by `width`), broken between words.
+fn wrap_words(text: &str, room: f32, width: impl Fn(&str) -> f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if width(&format!("{line} {word}")) <= room => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
+}
+
 /// Whether a group is a SWITCH: on or off, nothing else.
 fn is_switch(g: &crate::controls::Group) -> bool {
     g.choices.len() == 2 && g.choices[0].value == "on" && g.choices[1].value == "off"
@@ -1682,14 +1697,19 @@ impl Panel {
     fn switch_row(&self, out: &mut OpenContent, y: f32, group: u8, name: &str, on: bool, hint: Option<&str>) -> f32 {
         let s = self.scale;
         let fw = self.key.0;
-        let h = if hint.is_some() { 46.0 } else { 34.0 } * s;
         let (left, right) = (2.0 * MARGIN * s, fw - 2.0 * MARGIN * s);
-        match hint {
-            Some(hint) => {
-                out.texts.push(Text { text: name.to_owned(), x: left, y: y + 4.0 * s, px: 14.0, alpha: 0.85, centered: false });
-                out.texts.push(Text { text: hint.to_owned(), x: left, y: y + 25.0 * s, px: 12.0, alpha: 0.55, centered: false });
+        // The hint keeps clear of the switch: in as many lines as it needs
+        // (a narrow box — beside a side dock — takes two).
+        let room = right - left - (SWITCH_W + 18.0) * s;
+        let lines = hint.map(|h| wrap_words(h, room, |t| crate::options::est_text_w(t, 12.0 * s))).unwrap_or_default();
+        let h = if lines.is_empty() { 34.0 * s } else { (30.0 + 16.0 * lines.len() as f32) * s };
+        if lines.is_empty() {
+            out.texts.push(Text { text: name.to_owned(), x: left, y: y + (h - 18.0 * s) / 2.0, px: 14.0, alpha: 0.85, centered: false });
+        } else {
+            out.texts.push(Text { text: name.to_owned(), x: left, y: y + 4.0 * s, px: 14.0, alpha: 0.85, centered: false });
+            for (k, line) in lines.into_iter().enumerate() {
+                out.texts.push(Text { text: line, x: left, y: y + (25.0 + 16.0 * k as f32) * s, px: 12.0, alpha: 0.55, centered: false });
             }
-            None => out.texts.push(Text { text: name.to_owned(), x: left, y: y + (h - 18.0 * s) / 2.0, px: 14.0, alpha: 0.85, centered: false }),
         }
         out.chips.push(Chip {
             rect: Rect::new(left - 6.0 * s, y, right - left + 12.0 * s, h),
@@ -4095,6 +4115,12 @@ impl App {
         let s = self.options_scale();
         // Sized for the untrimmed card: while it grows back from an apps
         // page's height the field keeps its size (no re-lay every frame).
+        // Beside a side dock: the box's room (the card less the band), centred.
+        if settled.sideways() {
+            let room = settled.box_area(dock_h);
+            let (w, h) = (room.w.min(FIELD_MAX.0 * s), room.h.min(FIELD_MAX.1 * s));
+            return Rect::new(room.x + (room.w - w) / 2.0, room.y + (room.h - h) / 2.0, w, h);
+        }
         let card_h = (settled.card_h + self.ui.open_trim() - dock_h).max(1.0);
         let w = settled.card_w.min(FIELD_MAX.0 * s);
         let h = card_h.min(FIELD_MAX.1 * s);

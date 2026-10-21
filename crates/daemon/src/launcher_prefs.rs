@@ -146,6 +146,11 @@ pub(crate) fn others(screens: &[Monitor]) -> Vec<(String, String, &'static str)>
 }
 
 impl App {
+    /// The screen's edge the dock stands on.
+    pub(crate) fn dock_side(&self) -> Side {
+        self.settings.launcher_side
+    }
+
     /// A pick on the Launcher page (`launcher-*` keys, see `controls::read`):
     /// saved, nothing more yet.
     pub(crate) fn launcher_pick(&mut self, key: &str, value: &str) {
@@ -162,6 +167,7 @@ impl App {
                 if let Some(side) = Side::of(value) {
                     self.settings.launcher_side = side;
                     self.settings.save();
+                    self.side_changed();
                 }
             }
             "launcher-arrange" => {
@@ -183,6 +189,48 @@ impl App {
             _ => return,
         }
         info!("launcher: {key} = {value}");
+    }
+
+    /// POSITION picked: the dock takes the new edge at once — its extents
+    /// (the box opens across beside a side dock), its input strip, its zone.
+    fn side_changed(&mut self) {
+        let (dock, full) = self.scaled_extents();
+        self.ui.set_extents(dock, full);
+        self.zone_free = false;
+        self.input_extent = None;
+        self.sync_input_region();
+        self.on_layout_changed();
+        self.dirty = true;
+        self.schedule_frame();
+    }
+
+    /// The input region beside a side dock (see `sync_input_region`): a
+    /// strip `extent` deep down the dock's edge, as long as the card is now
+    /// — or the whole surface while a box or fast launch is up.
+    pub(crate) fn sync_side_input_region(&mut self, extent: u32) {
+        let (sw, sh) = self.buffer_size;
+        let full = self.stack_open() || self.fast.open;
+        let rect = if full {
+            (0, 0, sw as i32, sh as i32)
+        } else {
+            let layout = self.layout_at(self.ui.extent_of(self.ui.target()).max(self.ui.extent()));
+            let (y, h) = (layout.card_top.floor() as i32, layout.card_h.ceil() as i32);
+            let e = extent.min(sw) as i32;
+            let x = if self.dock_side() == Side::Left { 0 } else { sw as i32 - e };
+            (x, y.max(0), e, h.min(sh as i32))
+        };
+        // (Kept as the extent/inset pair the bottom dock compares: the
+        // strip's depth and where it starts.)
+        let key = (rect.2 as u32, (rect.1.max(0) as u32) << 16 | rect.3.max(0) as u32);
+        if self.input_extent != Some(key.0) || self.input_inset != Some(key.1) {
+            match crate::surface::set_input_rect(&self.compositor, &self.layer, rect) {
+                Ok(()) => {
+                    self.input_extent = Some(key.0);
+                    self.input_inset = Some(key.1);
+                }
+                Err(e) => tracing::warn!("failed to set input region: {e:#}"),
+            }
+        }
     }
 }
 

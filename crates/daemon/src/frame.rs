@@ -72,7 +72,8 @@ impl App {
     /// height on the control panel; a box open in the grid gets its row's room; held
     /// while a drag is in hand so the grid doesn't move under it.
     pub(crate) fn apps_trim_target(&self) -> f32 {
-        if self.control_panel {
+        // (Beside a side dock the sections stand side by side: nothing to trim.)
+        if self.control_panel || self.dock_side() != crate::launcher_prefs::Side::Bottom {
             return 0.0;
         }
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
@@ -90,7 +91,7 @@ impl App {
         let room = layout.apps_full_h.min(layout.apps_avail - self.controls_band_target());
         let per_page = cols * rows;
         // (Pages wrap cyclically, so the pager's target can run past them.)
-        let page = self.scroll.per[content::SECTION_APPS].page(sec.viewport.w.max(1.0)) % sec.n_pages.max(1);
+        let page = self.scroll.per[content::SECTION_APPS].page(sec.page_len().max(1.0)) % sec.n_pages.max(1);
         // The last filled slot on that page sets the rows it needs.
         let slots: &[usize] = if self.grid_resting() { &self.apps_slots } else { &[] };
         let last = if slots.is_empty() {
@@ -160,7 +161,8 @@ impl App {
         // order): each shapes its variable-width tile. `dock_min_count` picks
         // up how many actually draw (0 while the launcher hides them).
         let min_aspects: Vec<f32> = self.minimized.iter().map(|w| w.aspect).collect();
-        let mut layout = content::layout(
+        let mut layout = content::layout_on(
+            self.dock_side(),
             &self.config,
             self.icon_scale(),
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
@@ -435,9 +437,7 @@ impl App {
                 self.dock_pin_off = 0.0;
             }
             Some(ov) => {
-                let on_dock = self
-                    .pointer_pos
-                    .is_some_and(|(_, y)| y >= pin_layout.card_top && y < pin_layout.dock_hit_bottom);
+                let on_dock = self.pointer_pos.is_some_and(|p| pin_layout.on_dock(p));
                 if !on_dock {
                     self.dock_pin_target = 0.0;
                 } else if self.hover == Some(content::Hit::DockIcon(ov.apps_slot)) {
@@ -912,13 +912,11 @@ impl App {
         let icon_scale = self.icon_scale();
         let mut mag_settling = false;
         for (i, slot) in mag_layout.dock_slots.iter().enumerate() {
-            let target = content::dock_mag_target(
-                *slot,
-                mag_layout.dock_hit_bottom,
-                mag_pointer,
-                icon_scale,
-                self.mag_amount,
-            );
+            let target = if mag_layout.sideways() {
+                content::dock_mag_target_side(*slot, mag_layout.dock_band, mag_pointer, icon_scale, self.mag_amount)
+            } else {
+                content::dock_mag_target(*slot, mag_layout.dock_hit_bottom, mag_pointer, icon_scale, self.mag_amount)
+            };
             let rate = if target > self.dock_mag[i] {
                 content::DOCK_MAG_GROW_RATE
             } else {

@@ -7,6 +7,8 @@
 use waverunner_core::index::AppEntry;
 use waverunner_core::Config;
 
+use crate::launcher_prefs::Side;
+
 /// Axis-aligned rectangle in surface coordinates (logical pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
@@ -24,6 +26,13 @@ impl Rect {
     /// Whether `pos` lies inside the rectangle.
     pub fn contains(&self, (px, py): (f32, f32)) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
+
+    /// What two rectangles share (empty — zero-sized — when nothing).
+    pub fn intersect(&self, o: &Rect) -> Rect {
+        let (x0, y0) = (self.x.max(o.x), self.y.max(o.y));
+        let (x1, y1) = ((self.x + self.w).min(o.x + o.w), (self.y + self.h).min(o.y + o.h));
+        Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
     }
 }
 
@@ -484,6 +493,25 @@ fn dock_dots(rects: &mut Vec<RectInst>, cx: f32, y: f32, n: usize, max_w: f32) {
         });
     }
 }
+/// [`dock_dots`] beside a side dock's icon: a column about `cy`, each dot
+/// centred on `x` (the icon's edge side, as under a bottom dock's icon).
+fn dock_dots_col(rects: &mut Vec<RectInst>, x: f32, cy: f32, n: usize, max_h: f32) {
+    if n == 0 {
+        return;
+    }
+    let step = (DOCK_DOT_R * 3.0).min(max_h / n as f32);
+    let first = cy - step * (n as f32 - 1.0) / 2.0;
+    for k in 0..n {
+        let y = first + step * k as f32;
+        rects.push(RectInst {
+            rect: Rect::new(x - DOCK_DOT_R, y - DOCK_DOT_R, DOCK_DOT_R * 2.0, DOCK_DOT_R * 2.0),
+            radius: DOCK_DOT_R,
+            color: DOCK_DOT_COLOR,
+            glass: 0.0,
+            border: 0.0,
+        });
+    }
+}
 /// Width (px) of the divider between the pinned and running-unpinned zones.
 const DOCK_DIVIDER_W: f32 = 1.5;
 /// Extra air before the minimized-window tiles, setting them off from the
@@ -574,6 +602,19 @@ pub(crate) fn dock_mag_target(
     1.0 + (dock_magnify - 1.0) * falloff(px - cx, DOCK_MAG_RADIUS) * fy * mag_amount.clamp(0.0, 1.0)
 }
 
+/// [`dock_mag_target`] beside a side dock: the wave runs down the column,
+/// live across the whole band (to the screen's edge while docked).
+pub(crate) fn dock_mag_target_side(slot: Rect, band: Rect, pointer: Option<(f32, f32)>, icon_scale: f32, mag_amount: f32) -> f32 {
+    let Some((px, py)) = pointer else {
+        return 1.0;
+    };
+    let cy = slot.y + slot.h / 2.0;
+    let d_out = (band.x - px).max(px - (band.x + band.w)).max(0.0);
+    let fx = falloff(d_out, DOCK_MAG_VRADIUS);
+    let dock_magnify = 1.0 + (DOCK_MAGNIFY - 1.0) * icon_scale;
+    1.0 + (dock_magnify - 1.0) * falloff(py - cy, DOCK_MAG_RADIUS) * fx * mag_amount.clamp(0.0, 1.0)
+}
+
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -627,9 +668,21 @@ pub struct SectionLayout {
     /// centre like the Controls row (see [`SectionLayout::row_shift`]).
     /// Off for the resting grid, which keeps the order Max arranged.
     pub centre_rows: bool,
+    /// The pages go DOWN, not across (a side dock's box — Max, 2026-10-21):
+    /// `scroll` is then along the height, a page `viewport.h` long.
+    pub vertical: bool,
 }
 
 impl SectionLayout {
+    /// A page's length along the way the pages go.
+    pub fn page_len(&self) -> f32 {
+        if self.vertical {
+            self.viewport.h
+        } else {
+            self.viewport.w
+        }
+    }
+
     /// How far right the row holding display cell `i` is drawn: a row that
     /// isn't full, while searching, centres on the viewport's centre (the
     /// title's) — the middle result under the title for an odd count, the
@@ -850,6 +903,46 @@ pub struct Layout {
     pub apps_avail: f32,
     /// How far the Controls band has opened (0..1): its row fades in with it.
     pub controls_k: f32,
+    /// The screen's edge the dock stands on (the Launcher page's Position):
+    /// at the bottom a row the box rises from; on a side a column, the box
+    /// growing out of that edge with the dock riding its far side
+    /// ([`layout_side`]).
+    pub side: Side,
+    /// Where the dock's icons are live (hover, click, magnification): the
+    /// dock's band, reaching the screen's edge while docked so the floating
+    /// gap reacts too.
+    pub dock_band: Rect,
+}
+
+impl Layout {
+    /// Whether the dock is a column on a side of the screen.
+    pub fn sideways(&self) -> bool {
+        self.side != Side::Bottom
+    }
+
+    /// A slot's start and length along the dock (across under a bottom
+    /// dock, down beside a side one).
+    pub fn slot_span(&self, r: &Rect) -> (f32, f32) {
+        if self.sideways() {
+            (r.y, r.h)
+        } else {
+            (r.x, r.w)
+        }
+    }
+
+    /// Whether `pos` is on the dock's live band.
+    pub fn on_dock(&self, pos: (f32, f32)) -> bool {
+        self.dock_band.contains(pos)
+    }
+
+    /// The box's room: the card less the dock's band (`band` its depth).
+    pub fn box_area(&self, band: f32) -> Rect {
+        match self.side {
+            Side::Bottom => Rect::new(self.card_x, self.card_top + band, self.card_w, (self.card_h - band).max(0.0)),
+            Side::Left => Rect::new(self.card_x, self.card_top, (self.card_w - band).max(0.0), self.card_h),
+            Side::Right => Rect::new(self.card_x + band, self.card_top, (self.card_w - band).max(0.0), self.card_h),
+        }
+    }
 }
 
 /// Compute the layout for the current animation state.
@@ -1201,6 +1294,7 @@ pub fn layout(
                     rows
                 },
             centre_rows: false,
+            vertical: false,
         }
     });
 
@@ -1271,6 +1365,263 @@ pub fn layout(
         apps_full_h: fits as f32 * grid_cell_h,
         apps_avail: avail,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
+        side: Side::Bottom,
+        dock_band: Rect::new(0.0, card_top, w, (dock_hit_bottom - card_top).max(0.0)),
+    }
+}
+
+/// THE BOX ON ITS SIDE (Max, 2026-10-21, the lab
+/// https://claude.ai/artifact/CxrYJqk12ekLbZTDzyz5mw: "it is gonna be the same
+/// all the same"): the Apps grid three across, every section six down —
+/// Apps keeps its 18 to a page, Install and Files their 6 — paged downwards.
+const SIDE_APPS_COLS: usize = 3;
+const SIDE_ROWS: usize = 6;
+/// The resting side dock hugs its icons: this much air past the dock's own
+/// padding at each end (a column as long as the bottom dock's basin is wide
+/// would run the screen's height).
+const SIDE_BASIN_AIR: f32 = 14.0;
+/// From the box's top to the titles' line, and under the search pill.
+const SIDE_TOP: f32 = GRID_TOP_GAP + 5.0;
+const SIDE_BOTTOM: f32 = 12.0;
+
+/// How wide the open box is beside a side dock: the dock's band, the
+/// padding, and Files · Install · Apps with the gaps between them (each
+/// section's page dots stand in the gap after it, the last one's in the
+/// padding).
+pub fn side_open_w(config: &Config, icon_scale: f32) -> f32 {
+    let band = config.window.input_bar_height as f32 * icon_scale;
+    let cell = GRID_CELL_W * icon_scale;
+    band + 2.0 * GRID_PAD_X + (2 + SIDE_APPS_COLS) as f32 * cell + 2.0 * SECTION_GAP
+}
+
+/// [`layout`] for the dock on `side`: at the bottom as it always was, on
+/// the left or right turned on its side ([`layout_side`]).
+#[allow(clippy::too_many_arguments)]
+pub fn layout_on(
+    side: Side,
+    config: &Config,
+    icon_scale: f32,
+    surface: (f32, f32),
+    extent: f32,
+    n_entries: usize,
+    n_min: usize,
+    pins: usize,
+    pin_off: f32,
+    min_aspects: &[f32],
+    n_visible: [usize; N_SECTIONS],
+    scroll: [f32; N_SECTIONS],
+    box_open: bool,
+    stretch: (f32, f32),
+    controls_pill_h: Option<f32>,
+    controls_band: f32,
+    trim: f32,
+    control_rows: usize,
+) -> Layout {
+    if side == Side::Bottom {
+        return layout(
+            config, icon_scale, surface, extent, n_entries, n_min, pins, pin_off, min_aspects, n_visible, scroll, box_open, stretch, controls_pill_h, controls_band, trim,
+            control_rows,
+        );
+    }
+    layout_side(
+        config,
+        icon_scale,
+        surface,
+        extent,
+        n_entries,
+        n_min,
+        n_visible,
+        scroll,
+        box_open,
+        controls_pill_h,
+        controls_band,
+        control_rows,
+        side == Side::Left,
+    )
+}
+
+/// [`layout`] for a dock on the LEFT or RIGHT edge. The same box turned on
+/// its side: the dock a column, centred on the screen's height; the card's
+/// edge side pinned a gap off the screen's edge, reaching `extent` in —
+/// resting it hugs the dock, opening it gathers to the box's height about
+/// the screen's middle, and the dock rides its FAR side (as at the bottom it
+/// rides the box's top). From the edge to the dock: Files, Install, Apps,
+/// their titles on one line at the top, the search pill at the bottom.
+#[allow(clippy::too_many_arguments)]
+fn layout_side(
+    config: &Config,
+    icon_scale: f32,
+    surface: (f32, f32),
+    extent: f32,
+    n_entries: usize,
+    n_min: usize,
+    n_visible: [usize; N_SECTIONS],
+    scroll: [f32; N_SECTIONS],
+    box_open: bool,
+    controls_pill_h: Option<f32>,
+    controls_band: f32,
+    control_rows: usize,
+    left: bool,
+) -> Layout {
+    let (w, h) = surface;
+    let dock_slot = DOCK_SLOT * icon_scale;
+    let dock_pad = DOCK_PAD_X * icon_scale;
+    let cell_w = GRID_CELL_W * icon_scale;
+    let cell_h = GRID_CELL_H * icon_scale;
+    let band = config.window.input_bar_height as f32 * icon_scale;
+    let gap = config.window.bottom_margin as f32 * icon_scale;
+    let open_w = side_open_w(config, icon_scale);
+
+    // The column: square slots (a minimized window's picture fits its
+    // square), as many as the screen's height holds.
+    let hard_cap = (((h - 2.0 * dock_pad) / dock_slot).floor() as usize).max(1);
+    let n_normal = n_entries.saturating_sub(n_min);
+    let n_normal_shown = n_normal.min(hard_cap);
+    let n_min_shown = if n_normal_shown == n_normal { n_min.min(hard_cap - n_normal_shown) } else { 0 };
+    let n_dock = n_normal_shown + n_min_shown;
+    let dock_min_start = if n_min_shown > 0 { n_normal_shown } else { usize::MAX };
+    let dock_min_gap = if n_min_shown > 0 { DOCK_MIN_GAP * icon_scale } else { 0.0 };
+    let row_len = n_dock as f32 * dock_slot + dock_min_gap;
+    let basin_h = (row_len + 2.0 * (dock_pad + SIDE_BASIN_AIR * icon_scale)).min(h - 2.0 * gap);
+
+    // The open box's rows: as many as the screen holds, six at most; a
+    // search matching settings takes its band out of the rows shown.
+    let controls_drop = GRID_ICON_TOP * icon_scale + CONTROLS_EXTRA_DROP;
+    let control_rows = control_rows.max(1);
+    let controls_h = controls_pill_h.map_or(0.0, |ph| controls_band_h(icon_scale, ph) * control_rows as f32);
+    let fixed = SIDE_TOP + SECTION_TITLE_H + LAST_SECTION_AIR + SEARCH_GAP + SEARCH_H + SIDE_BOTTOM;
+    let room = h - 2.0 * gap - fixed;
+    let fits = ((room / cell_h).max(1.0) as usize).clamp(1, SIDE_ROWS);
+    let rows = (((room - controls_h) / cell_h).max(1.0) as usize).clamp(1, fits);
+    let open_h = fixed + rows as f32 * cell_h + controls_band;
+
+    // The card.
+    let dock_extent = band + gap;
+    let full_extent = open_w + gap;
+    let rise = ((extent - dock_extent) / (full_extent - dock_extent).max(1.0)).clamp(0.0, 1.0);
+    let card_w = (extent - gap).max(band);
+    let card_x = if left { extent - card_w } else { w - extent };
+    let card_h = basin_h + (open_h - basin_h) * rise;
+    let card_top = (h - card_h) / 2.0;
+
+    // The dock's band, on the card's far side.
+    let band_x = if left { card_x + card_w - band } else { card_x };
+    let slot_x = band_x + (band - dock_slot) / 2.0;
+    let mut dock_slots = Vec::with_capacity(n_dock);
+    let mut y = (h - row_len) / 2.0;
+    for i in 0..n_dock {
+        if i == dock_min_start {
+            y += dock_min_gap;
+        }
+        dock_slots.push(Rect::new(slot_x, y, dock_slot, dock_slot));
+        y += dock_slot;
+    }
+    let docked = card_w <= band + 0.5;
+    let dock_band = match (docked, left) {
+        (true, true) => Rect::new(0.0, card_top, card_x + card_w, card_h),
+        (true, false) => Rect::new(card_x, card_top, w - card_x, card_h),
+        (false, _) => Rect::new(band_x, card_top, band, card_h),
+    };
+
+    // The sections stand where the open box has them and ride the card out
+    // of the edge (trailing it a touch, as at the bottom).
+    let full_x = if left { gap } else { w - gap - open_w };
+    let ride = if left {
+        -((full_x + open_w) - (card_x + card_w)).max(0.0) * RIDE_PARALLAX
+    } else {
+        (card_x - full_x).max(0.0) * RIDE_PARALLAX
+    };
+    let open_top = (h - open_h) / 2.0;
+    let title_y = open_top + SIDE_TOP;
+    let vp_y = title_y + SECTION_TITLE_H;
+    let cols_of = |s: usize| if s == SECTION_APPS { SIDE_APPS_COLS } else { 1 };
+    // From the screen's edge to the dock: Files, Install, Apps (Max).
+    let order: [usize; N_SECTIONS] = if left {
+        [SECTION_FILES, SECTION_INSTALL, SECTION_APPS]
+    } else {
+        [SECTION_APPS, SECTION_INSTALL, SECTION_FILES]
+    };
+    let mut xs = [0.0f32; N_SECTIONS];
+    let mut x = if left { full_x + GRID_PAD_X } else { full_x + band + GRID_PAD_X };
+    for &s in &order {
+        xs[s] = x + ride;
+        x += cols_of(s) as f32 * cell_w + SECTION_GAP;
+    }
+    let sections: [SectionLayout; N_SECTIONS] = std::array::from_fn(|s| {
+        let cols = cols_of(s);
+        let viewport = Rect::new(xs[s], vp_y, cols as f32 * cell_w, rows as f32 * cell_h);
+        let n_pages = if n_visible[s] == 0 { 0 } else { n_visible[s].div_ceil((cols * rows).max(1)).max(1) };
+        let total = n_pages as f32 * viewport.h;
+        SectionLayout {
+            title_pos: (viewport.x + viewport.w / 2.0, title_y),
+            viewport,
+            cols,
+            rows,
+            n_pages,
+            scroll: if total > 0.0 { scroll[s].rem_euclid(total) } else { 0.0 },
+            cells: n_visible[s],
+            cap: cols * fits,
+            centre_rows: false,
+            vertical: true,
+        }
+    });
+    let first = &sections[order[0]].viewport;
+    let last = &sections[order[N_SECTIONS - 1]].viewport;
+    let cx = (first.x + last.x + last.w) / 2.0;
+    let vp_bottom = vp_y + rows as f32 * cell_h;
+
+    // A search matching settings: their row(s) under the sections, as
+    // wide as the three.
+    let control_bands: Vec<((f32, f32), Rect)> = match controls_pill_h {
+        Some(ph) => {
+            let bh = controls_band_h(icon_scale, ph);
+            (0..control_rows)
+                .map(|r| {
+                    let ty = vp_bottom + DOT_ROOM + SECTION_GAP + r as f32 * bh;
+                    ((cx, ty), Rect::new(first.x, ty + SECTION_TITLE_H + controls_drop, last.x + last.w - first.x, ph))
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let search_y = open_top + open_h - SIDE_BOTTOM - SEARCH_H;
+    let search_box = Rect::new(cx - SEARCH_W_MIN / 2.0, search_y, SEARCH_W_MIN, SEARCH_H);
+    let search_btn = Rect::new(cx - SEARCH_BTN_W / 2.0, search_y, SEARCH_BTN_W, SEARCH_H);
+    let open_box = box_open.then(|| {
+        let vp = sections[SECTION_APPS].viewport;
+        let side = (OPEN_BOX_COLS as f32 * cell_h).min(vp.h).min(vp.w);
+        Rect::new(vp.x + (vp.w - side) / 2.0, vp.y, side, side)
+    });
+
+    Layout {
+        card_x,
+        card_w,
+        card_top,
+        card_h,
+        dock_hit_bottom: card_top + card_h,
+        dock_slots,
+        dock_min_start,
+        dock_min_gap,
+        dock_slot_f: vec![1.0; n_dock],
+        dock_overflow: None,
+        // (Along a side the plate's resting LENGTH: its height.)
+        dock_basin_w: basin_h,
+        sections,
+        search_box,
+        search_btn,
+        open_box,
+        open_box_grid: (OPEN_BOX_COLS, OPEN_BOX_COLS),
+        open_box_cap: OPEN_BOX_CAP,
+        open_box_scale: icon_scale,
+        open_box_text: 1.0,
+        apps_part: None,
+        control_bands,
+        controls: Vec::new(),
+        apps_full_h: fits as f32 * cell_h,
+        apps_avail: room,
+        controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
+        side: if left { Side::Left } else { Side::Right },
+        dock_band,
     }
 }
 
@@ -1280,7 +1631,7 @@ pub fn scroll_to_reveal(section: &SectionLayout, cell: usize) -> f32 {
     let cells_per_page = (section.cols * section.rows).max(1);
     let page = cell / cells_per_page;
     let max_page = section.n_pages.saturating_sub(1);
-    (page.min(max_page) as f32 * section.viewport.w).max(0.0)
+    (page.min(max_page) as f32 * section.page_len()).max(0.0)
 }
 
 /// The room a Controls row takes under Files: the gap, its title, the drop
@@ -1325,6 +1676,16 @@ pub(crate) fn controls_rects(row: Rect, widths: &[f32], gap: f32) -> Vec<Rect> {
 /// title line above and the gap (page dots) beneath, so wheel paging is
 /// forgiving about the exact pointer height.
 pub fn section_at(layout: &Layout, pos: (f32, f32)) -> Option<usize> {
+    // Side by side (a side dock): the column, its title over it and half
+    // the gap on each side.
+    if layout.sideways() {
+        return layout.sections.iter().position(|sec| {
+            pos.0 >= sec.viewport.x - SECTION_GAP / 2.0
+                && pos.0 < sec.viewport.x + sec.viewport.w + SECTION_GAP / 2.0
+                && pos.1 >= sec.viewport.y - SECTION_TITLE_H - TITLE_LINE_PX
+                && pos.1 < sec.viewport.y + sec.viewport.h + DOT_ROOM
+        });
+    }
     layout.sections.iter().position(|sec| {
         pos.1 >= sec.viewport.y - SECTION_TITLE_H
             && pos.1 < sec.viewport.y + sec.viewport.h + DOT_ROOM + SECTION_GAP
@@ -1441,7 +1802,16 @@ pub fn hit_test(
     // `dock_hit_bottom` — so a click/hover in the floating gap under an
     // icon (down to the very screen edge) still lands on it.
     let (px, py) = pos;
-    if py >= layout.card_top && py < layout.dock_hit_bottom {
+    if layout.sideways() {
+        // A side dock: its band, each icon's row across it.
+        if layout.on_dock(pos) {
+            for (i, slot) in layout.dock_slots.iter().enumerate() {
+                if py >= slot.y && py < slot.y + slot.h {
+                    return Some(Hit::DockIcon(i));
+                }
+            }
+        }
+    } else if py >= layout.card_top && py < layout.dock_hit_bottom {
         for (i, slot) in layout.dock_slots.iter().enumerate() {
             if px >= slot.x && px < slot.x + slot.w {
                 return Some(Hit::DockIcon(i));
@@ -1463,14 +1833,43 @@ pub fn hit_test(
     }
     for (s, sec) in layout.sections.iter().enumerate() {
         if sec.n_pages > 0 && sec.viewport.contains(pos) {
-            // Adjust for horizontal page scroll; pages wrap cyclically.
-            let adjusted_x = pos.0 - sec.viewport.x + sec.scroll;
-            let page_w = sec.viewport.w.max(1.0);
-            let page = (adjusted_x / page_w).floor() as usize % sec.n_pages.max(1);
             // Derive scaled cell dimensions from the already-scaled layout geometry.
             let cell_w = sec.viewport.w / sec.cols.max(1) as f32;
             // (Not viewport.h / rows: a trimmed Apps viewport is shorter.)
             let cell_h = cell_w * GRID_CELL_H / GRID_CELL_W;
+            // Pages going DOWN (a side dock's box): the page under the
+            // pointer, then its row and column as on a page across.
+            if sec.vertical {
+                let page_h = sec.viewport.h.max(1.0);
+                let adjusted_y = pos.1 - sec.viewport.y + sec.scroll;
+                let page = (adjusted_y / page_h).floor() as usize % sec.n_pages.max(1);
+                let in_page = adjusted_y - (adjusted_y / page_h).floor() * page_h;
+                let y = match layout.apps_part.filter(|_| s == SECTION_APPS) {
+                    Some(part) => match part.rest_y(sec.viewport.y, cell_h, sec.viewport.y + in_page) {
+                        Some(y) => y - sec.viewport.y,
+                        None => continue,
+                    },
+                    None => in_page,
+                };
+                let row = (y / cell_h).floor() as usize;
+                let row_start = page * sec.cols * sec.rows + row * sec.cols;
+                let col_f = (pos.0 - sec.viewport.x - sec.row_shift(row_start)) / cell_w;
+                let col = col_f.floor() as usize;
+                if col_f >= 0.0 && col < sec.cols && row < sec.rows {
+                    let i = page * sec.cols * sec.rows + row * sec.cols + col;
+                    if i < sec.cells {
+                        if s == SECTION_APPS {
+                            return apps_slots.iter().position(|&slot| slot == i).map(|j| Hit::GridCell(s, j));
+                        }
+                        return Some(Hit::GridCell(s, i));
+                    }
+                }
+                continue;
+            }
+            // Adjust for horizontal page scroll; pages wrap cyclically.
+            let adjusted_x = pos.0 - sec.viewport.x + sec.scroll;
+            let page_w = sec.viewport.w.max(1.0);
+            let page = (adjusted_x / page_w).floor() as usize % sec.n_pages.max(1);
             // Apps rows parted around an open box: back to where they rest.
             let y = match layout.apps_part.filter(|_| s == SECTION_APPS) {
                 Some(part) => match part.rest_y(sec.viewport.y, cell_h, pos.1) {
@@ -1832,6 +2231,17 @@ fn grow_bottom(r: Rect, scale: f32) -> Rect {
     Rect::new(r.x + r.w / 2.0 - w / 2.0, r.y + r.h - h, w, h)
 }
 
+/// [`grow_bottom`] for any dock: the icon grows away from the screen's edge
+/// its dock stands on, held at that edge.
+fn grow_from_edge(r: Rect, scale: f32, side: Side) -> Rect {
+    let (w, h) = (r.w * scale, r.h * scale);
+    match side {
+        Side::Bottom => grow_bottom(r, scale),
+        Side::Left => Rect::new(r.x, r.y + r.h / 2.0 - h / 2.0, w, h),
+        Side::Right => Rect::new(r.x + r.w - w, r.y + r.h / 2.0 - h / 2.0, w, h),
+    }
+}
+
 /// The Recycle Bin's metal figure: the can at `layer`, its lid at
 /// `layer + 1` (uploaded together, see `App::bin_layer`), the lid lifting
 /// a little as `react` (a drag toward the bin) rises.
@@ -1987,15 +2397,26 @@ pub fn scene(
     // this reveal region, whose top (the dock's underside) rises as the
     // box grows — so rows are exposed in place, never moved.
     let dock_h = config.window.input_bar_height as f32 * icon_scale;
-    let reveal_top = layout.card_top + dock_h;
-    let reveal_bottom = layout.card_top + card_h;
-    let reveal_rect = Rect::new(
-        layout.card_x,
-        reveal_top,
-        layout.card_w,
-        (reveal_bottom - reveal_top).max(0.0),
-    );
+    // A side dock: its box grows out of the edge, clipped on both axes to
+    // the card less the dock's band.
+    let side = layout.side;
+    let sideways = layout.sideways();
+    let reveal_rect = if sideways {
+        layout.box_area(dock_h)
+    } else {
+        Rect::new(
+            layout.card_x,
+            layout.card_top + dock_h,
+            layout.card_w,
+            (card_h - dock_h).max(0.0),
+        )
+    };
+    let reveal_top = reveal_rect.y;
+    let reveal_bottom = reveal_rect.y + reveal_rect.h;
     let reveal_clip = |r: Rect| -> Rect {
+        if sideways {
+            return r.intersect(&reveal_rect);
+        }
         let top = r.y.max(reveal_top);
         let bottom = (r.y + r.h).min(reveal_bottom);
         Rect::new(r.x, top, r.w, (bottom - top).max(0.0))
@@ -2039,12 +2460,13 @@ pub fn scene(
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let grow = if i >= layout.dock_min_start {
+            // (Beside a side dock a minimized window's tile is a square.)
+            let grow = if i >= layout.dock_min_start && !sideways {
                 (r.w - min_tile_pad).max(0.0)
             } else {
                 dock_icon * layout.dock_slot_f.get(i).copied().unwrap_or(1.0)
             };
-            r.w + grow * (dock_scales[i] - 1.0)
+            layout.slot_span(r).1 + grow * (dock_scales[i] - 1.0)
         })
         .collect();
     // Each magnified slot widens by the pixels its icon/thumbnail grew,
@@ -2054,7 +2476,9 @@ pub fn scene(
         // The minimized-tile gap is part of the row's visual width and sits
         // before `dock_min_start` — same offset layout() baked into the
         // hit-test slots, so drawn centers and hit-boxes stay aligned.
-        let mut x = (w - (total_vw + layout.dock_min_gap)) / 2.0;
+        // (Along a side dock: down the screen's middle.)
+        let mid = if sideways { surface.1 / 2.0 } else { w / 2.0 };
+        let mut x = mid - (total_vw + layout.dock_min_gap) / 2.0;
         let mut centers = Vec::with_capacity(dock_vw.len());
         for (i, &vw) in dock_vw.iter().enumerate() {
             if i == layout.dock_min_start {
@@ -2067,7 +2491,7 @@ pub fn scene(
     };
     // How much wider the magnified row is than its resting width. The row
     // is centered, so each of its outer edges travels half of this.
-    let row_base_total: f32 = layout.dock_slots.iter().map(|r| r.w).sum();
+    let row_base_total: f32 = layout.dock_slots.iter().map(|r| layout.slot_span(r).1).sum();
     let row_spread = (total_vw - row_base_total).max(0.0);
     // What the CARD takes of that travel — the same motion at
     // `DOCK_SPREAD_FOLLOW` of the reach.
@@ -2076,7 +2500,11 @@ pub fn scene(
     // `BASIN_MARGIN_X` a side, and a magnification tuned far past the
     // default would otherwise push the card's rounded corners off the
     // fixed-size surface and cut them square.
-    let card_spread = (row_spread * DOCK_SPREAD_FOLLOW).min((w - layout.card_w).max(0.0));
+    let card_spread = (row_spread * DOCK_SPREAD_FOLLOW).min(if sideways {
+        (surface.1 - layout.card_h).max(0.0)
+    } else {
+        (w - layout.card_w).max(0.0)
+    });
 
     // Card background: the AGUA silhouette — wide basin at rest,
     // gathered to the box width risen, spilling on the landing.
@@ -2087,11 +2515,13 @@ pub fn scene(
     // (left, right, top, bottom) offsets; positive = inward.
     // Combined with breath (uniform expansion from all edges).
     let (jl, jr, jt, jb) = card_push;
+    // (A side dock's card spreads along its height.)
+    let (spread_x, spread_y) = if sideways { (0.0, card_spread) } else { (card_spread, 0.0) };
     let card_rect = Rect::new(
-        layout.card_x - card_spread / 2.0 - breath_offset + jl,
-        layout.card_top - breath_offset + jt,
-        layout.card_w + card_spread + 2.0 * breath_offset - jl + jr,
-        card_h + 2.0 * breath_offset - jt + jb,
+        layout.card_x - spread_x / 2.0 - breath_offset + jl,
+        layout.card_top - spread_y / 2.0 - breath_offset + jt,
+        layout.card_w + spread_x + 2.0 * breath_offset - jl + jr,
+        card_h + spread_y + 2.0 * breath_offset - jt + jb,
     );
     // Subtle/macOS-dock rounding while docked, rounding up to the shared box
     // radius as the card opens — so the open card matches the folder boxes.
@@ -2171,13 +2601,15 @@ pub fn scene(
                 } else {
                     (left + right) / 2.0
                 };
+                // (Across a side dock's column: a short level line.)
+                let rect = if sideways {
+                    let inset = slot.w * 0.22;
+                    Rect::new(slot.x + inset, x_mid - DOCK_DIVIDER_W / 2.0, (slot.w - inset * 2.0).max(1.0), DOCK_DIVIDER_W)
+                } else {
+                    Rect::new(x_mid - DOCK_DIVIDER_W / 2.0, slot.y + inset, DOCK_DIVIDER_W, (slot.h - inset * 2.0).max(1.0))
+                };
                 scene.rects.push(RectInst {
-                    rect: Rect::new(
-                        x_mid - DOCK_DIVIDER_W / 2.0,
-                        slot.y + inset,
-                        DOCK_DIVIDER_W,
-                        (slot.h - inset * 2.0).max(1.0),
-                    ),
+                    rect,
                     radius: DOCK_DIVIDER_W / 2.0,
                     color: [fg[0], fg[1], fg[2], 0.22],
                     glass: 0.0,
@@ -2232,19 +2664,37 @@ pub fn scene(
         // hides them.
         // (Four at most: four means four or more — Max, 2026-10-16.)
         let windows = dock_running.get(slot).copied().unwrap_or(0).min(4);
-        dock_dots(&mut scene.rects, vcx, baseline + DOCK_DOT_R - DOCK_DOT_GAP, windows, dock_icon * 0.8);
+        // Beside a SIDE dock the icon stands on its slot's edge side (the
+        // screen's edge, as a bottom dock's on its baseline) and grows away
+        // from it; its dots down that side.
+        let edge_x = match side {
+            Side::Left => slot_rect.x + DOCK_BASELINE_PAD * icon_scale,
+            _ => slot_rect.x + slot_rect.w - DOCK_BASELINE_PAD * icon_scale,
+        };
+        if sideways {
+            let dot_x = if side == Side::Left { edge_x + DOCK_DOT_GAP } else { edge_x - DOCK_DOT_GAP };
+            dock_dots_col(&mut scene.rects, dot_x, vcx, windows, dock_icon * 0.8);
+        } else {
+            dock_dots(&mut scene.rects, vcx, baseline + DOCK_DOT_R - DOCK_DOT_GAP, windows, dock_icon * 0.8);
+        }
         let scale = dock_scales[slot];
-        let size = (dock_icon * scale).min(slot_rect.h.min(dock_slot) + MAGNIFY_HEADROOM) * shown;
+        let across = if sideways { slot_rect.w } else { slot_rect.h };
+        let size = (dock_icon * scale).min(across.min(dock_slot) + MAGNIFY_HEADROOM) * shown;
         // AGUA: the icon elongates/compresses vertically about its
         // baseline with the card's motion — a water drop on the bar
         // (amplified: at icon scale the raw factor reads as nothing).
         let drop = 1.0 + (stretch - 1.0) * DOCK_STRETCH_GAIN;
-        let icon_rect = Rect::new(
-            vcx - size / 2.0,
-            baseline - (size + lift(entry_idx)) * drop,
-            size,
-            size * drop,
-        );
+        let icon_rect = if sideways {
+            let x = if side == Side::Left { edge_x + lift(entry_idx) } else { edge_x - size - lift(entry_idx) };
+            Rect::new(x, vcx - size / 2.0, size, size)
+        } else {
+            Rect::new(
+                vcx - size / 2.0,
+                baseline - (size + lift(entry_idx)) * drop,
+                size,
+                size * drop,
+            )
+        };
         // A drag hovering this icon's center (a fold target) rings it.
         if drag.and_then(|d| d.over_dock) == Some(slot) {
             let hl = dock_highlight;
@@ -2277,13 +2727,16 @@ pub fn scene(
             let aspect = min_aspects.get(slot - layout.dock_min_start).copied().unwrap_or(1.0);
             let full_h = size * MIN_TILE_SCALE; // magnifies with `size`
             let (tile_w, tile_h) = min_tile_dims(aspect, full_h);
-            let icon_cy = baseline - (size + lift(entry_idx)) * drop / 2.0; // the pinned icon's vertical mid
-            let thumb = Rect::new(
-                vcx - tile_w / 2.0,
-                icon_cy - tile_h * drop / 2.0,
-                tile_w,
-                tile_h * drop,
-            );
+            let thumb = if sideways {
+                // Its square slot: a wide window fitted to its width.
+                let k = (size / tile_w.max(1.0)).min(1.0);
+                let (tw, th) = (tile_w * k, tile_h * k);
+                let (cx, cy) = (icon_rect.x + icon_rect.w / 2.0, icon_rect.y + icon_rect.h / 2.0);
+                Rect::new(cx - tw / 2.0, cy - th / 2.0, tw, th)
+            } else {
+                let icon_cy = baseline - (size + lift(entry_idx)) * drop / 2.0; // the pinned icon's vertical mid
+                Rect::new(vcx - tile_w / 2.0, icon_cy - tile_h * drop / 2.0, tile_w, tile_h * drop)
+            };
             // The thumbnail fills the rect UNPLATED: it is a picture, not a
             // glyph, so it keeps its true rectangular corners (the shader
             // skips the squircle for `layer >= thumb_base`).
@@ -2325,7 +2778,7 @@ pub fn scene(
         {
             // Its states (`bin_motion`): orange while something is in hand,
             // red and swollen over it, a rim while a file window is in it.
-            let rect = grow_bottom(icon_rect, bin.swell);
+            let rect = grow_from_edge(icon_rect, bin.swell, side);
             let tile = bin_tile_color(plate, bin.orange, bin.red);
             scene.rects.push(RectInst {
                 rect,
@@ -2474,10 +2927,14 @@ pub fn scene(
                 let letter: String = ch.to_uppercase().collect();
                 let font_px = (size * 0.46).clamp(10.0, 28.0);
                 let line_px = font_px * 1.3;
-                let icon_center_y = baseline - size / 2.0 - lift(entry_idx);
+                let (letter_x, icon_center_y) = if sideways {
+                    (icon_rect.x + icon_rect.w / 2.0, icon_rect.y + icon_rect.h / 2.0)
+                } else {
+                    (vcx, baseline - size / 2.0 - lift(entry_idx))
+                };
                 scene.labels.push(Label {
                     text: letter,
-                    pos: (vcx, icon_center_y - line_px / 2.0),
+                    pos: (letter_x, icon_center_y - line_px / 2.0),
                     max_w: size,
                     font_px,
                     line_px,
@@ -2565,11 +3022,17 @@ pub fn scene(
                     // Width from the same glyph-advance model truncate_label uses.
                     let pill_w = name.chars().count() as f32 * font_px * 0.52 + 16.0;
                     let pill_h = line_px + 6.0;
-                    let pill_y = (icon_top - 6.0 - pill_h).max(2.0);
+                    // Above a bottom dock's icon; beside a side dock's, on
+                    // the screen's side of it.
+                    let (pill_cx, pill_y) = match side {
+                        Side::Bottom => (vcx, (icon_top - 6.0 - pill_h).max(2.0)),
+                        Side::Left => (slot.x + DOCK_BASELINE_PAD * icon_scale + size + lift(entry_idx) + 6.0 + pill_w / 2.0, vcx - pill_h / 2.0),
+                        Side::Right => (slot.x + slot.w - DOCK_BASELINE_PAD * icon_scale - size - lift(entry_idx) - 6.0 - pill_w / 2.0, vcx - pill_h / 2.0),
+                    };
                     let mut bg = dock_bg;
                     bg[3] = bg[3].max(0.92);
                     scene.rects.push(RectInst {
-                        rect: Rect::new(vcx - pill_w / 2.0, pill_y, pill_w, pill_h),
+                        rect: Rect::new(pill_cx - pill_w / 2.0, pill_y, pill_w, pill_h),
                         radius: pill_h / 2.0,
                         color: bg,
                         glass: 0.0,
@@ -2577,7 +3040,7 @@ pub fn scene(
                     });
                     scene.labels.push(Label {
                         text: name,
-                        pos: (vcx, pill_y + (pill_h - line_px) / 2.0),
+                        pos: (pill_cx, pill_y + (pill_h - line_px) / 2.0),
                         max_w: pill_w,
                         font_px,
                         line_px,
@@ -2671,14 +3134,16 @@ pub fn scene(
     let apps_from = (scene.labels.len(), scene.rects.len(), scene.grids.len());
     let mut search_grid: Option<GridContent> = None;
     // The search pill belongs to both views: it stays through the push.
-    if layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale
+    // (Beside a side dock: once any of the box shows; the clip does the rest.)
+    if (sideways && reveal_rect.w > 1.0)
+        || (!sideways && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale)
     {
         let mut sgrid = GridContent {
             clip: reveal_rect,
             ..Default::default()
         };
         let boxx = layout.search_box;
-        let cx = w / 2.0;
+        let cx = boxx.x + boxx.w / 2.0;
         // One more pill: the control panel's middle layer (the OPTIONS bar
         // pill) — its wash, soft light and ink, its type, and its hover
         // (settles in, lifts 7%, the OPTIONS hover wash).
@@ -2816,7 +3281,8 @@ pub fn scene(
                     sec.viewport.x + sec.viewport.w / 2.0,
                     sec.viewport.y + sec.viewport.h / 2.0 - LABEL_LINE_PX / 2.0,
                 ),
-                max_w: 200.0,
+                // (A side dock's one-column section: within its column.)
+                max_w: if sec.vertical { sec.viewport.w + 2.0 * SECTION_GAP } else { 200.0 },
                 font_px: LABEL_FONT_PX + 2.0,
                 line_px: LABEL_LINE_PX + 2.0,
                 centered: true,
@@ -2830,7 +3296,9 @@ pub fn scene(
             continue;
         }
 
-        let page_w = sec.viewport.w;
+        // (A page's length along the way the pages go: across, or down
+        // beside a side dock.)
+        let page_w = sec.page_len();
         let cells_per_page = (sec.cols * sec.rows).max(1);
         let total_w = (sec.n_pages as f32 * page_w).max(1.0);
         // A cell's place comes from its display index — fractional
@@ -2847,6 +3315,12 @@ pub fn scene(
                 let rel = if rel0 >= page_w { rel0 - total_w } else { rel0 };
                 // Apps rows part around a box open in the grid.
                 let part = layout.apps_part.filter(|_| s == SECTION_APPS).map_or(0.0, |p| p.shift(row));
+                if sec.vertical {
+                    return (
+                        sec.viewport.x + col as f32 * grid_cell_w + sec.row_shift(i),
+                        sec.viewport.y + rel + row as f32 * grid_cell_h + part,
+                    );
+                }
                 (
                     sec.viewport.x + rel + col as f32 * grid_cell_w + sec.row_shift(i),
                     sec.viewport.y + row as f32 * grid_cell_h + part,
@@ -2877,7 +3351,12 @@ pub fn scene(
                 i as f32
             };
             let (cell_x, cell_y) = cell_pos(di);
-            if cell_x - sec.viewport.x <= -grid_cell_w || cell_x - sec.viewport.x >= page_w {
+            let off_page = if sec.vertical {
+                cell_y - sec.viewport.y <= -grid_cell_h || cell_y - sec.viewport.y >= page_w
+            } else {
+                cell_x - sec.viewport.x <= -grid_cell_w || cell_x - sec.viewport.x >= page_w
+            };
+            if off_page {
                 continue;
             }
             let cell = Rect::new(cell_x, cell_y, grid_cell_w, grid_cell_h);
@@ -3132,6 +3611,35 @@ pub fn scene(
         // Page indicator dots in the gap beneath the section — gated by
         // the reveal edge (they ride the same fixed layout as the grid,
         // so unclipped they would linger as a ghost once the box hides).
+        // Pages going down (beside a side dock): the dots stand in a column
+        // at the section's right, in the room before what comes next.
+        if sec.vertical {
+            let right = sec.viewport.x + sec.viewport.w;
+            let next = layout.sections.iter().map(|o| o.viewport.x).filter(|&x| x > right).fold(f32::MAX, f32::min);
+            let room = if next < f32::MAX { next - right } else { GRID_PAD_X };
+            let dot_x = right + room / 2.0;
+            let dot_cy = sec.viewport.y + sec.viewport.h / 2.0;
+            if sec.n_pages > 1 && reveal_rect.contains((dot_x, dot_cy)) {
+                let dot_r = 3.0;
+                let dot_spacing = 10.0;
+                let total = sec.n_pages as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
+                let page_frac = sec.scroll / page_w;
+                let hl = dock_highlight;
+                for p in 0..sec.n_pages {
+                    let y = dot_cy - total / 2.0 + p as f32 * dot_spacing + dot_r;
+                    let raw = (p as f32 - page_frac).abs();
+                    let dist = raw.min(sec.n_pages as f32 - raw).min(1.0);
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(dot_x - dot_r, y - dot_r, dot_r * 2.0, dot_r * 2.0),
+                        radius: dot_r,
+                        color: [hl[0], hl[1], hl[2], hl[3] * (1.0 - dist * 0.72)],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+            }
+            continue;
+        }
         let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0 - DOTS_RAISE;
         if sec.n_pages > 1 && (reveal_top..=reveal_bottom).contains(&dot_y) {
             let dot_r = 3.0;
@@ -3247,12 +3755,7 @@ pub fn scene(
     if m > 0.0005 {
         let dy = -m * travel;
         // Clip each piece where it is now, but never past the card.
-        let within = |c: Rect| -> Rect {
-            let c = Rect::new(c.x, c.y + dy, c.w, c.h);
-            let top = c.y.max(reveal_top);
-            let bottom = (c.y + c.h).min(reveal_bottom);
-            Rect::new(c.x, top, c.w, (bottom - top).max(0.0))
-        };
+        let within = |c: Rect| -> Rect { reveal_clip(Rect::new(c.x, c.y + dy, c.w, c.h)) };
         for l in &mut scene.labels[apps_from.0..] {
             l.pos.1 += dy;
             l.clip = l.clip.map(within);

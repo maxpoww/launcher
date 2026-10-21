@@ -299,6 +299,17 @@ pub fn set_on_demand(layer: &LayerSurface) {
 /// without this the transparent area above the dock would swallow clicks
 /// meant for windows behind it. `extent == 0` makes the whole surface
 /// click-through.
+/// The input region as one rectangle (a side dock's strip down its edge).
+pub fn set_input_rect(compositor: &CompositorState, layer: &LayerSurface, (x, y, w, h): (i32, i32, i32, i32)) -> anyhow::Result<()> {
+    let region = Region::new(compositor).map_err(|e| anyhow::anyhow!("cannot create input region: {e}"))?;
+    if w > 0 && h > 0 {
+        region.add(x, y, w, h);
+    }
+    layer.wl_surface().set_input_region(Some(region.wl_region()));
+    layer.commit();
+    Ok(())
+}
+
 pub fn set_input_extent(
     compositor: &CompositorState,
     layer: &LayerSurface,

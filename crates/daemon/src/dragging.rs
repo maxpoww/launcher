@@ -476,7 +476,7 @@ impl App {
         if !sec.viewport.contains(pos) || sec.n_pages == 0 {
             return None;
         }
-        let page_w = sec.viewport.w.max(1.0);
+        let page_w = sec.page_len().max(1.0);
         // The page is the pager's TARGET (where a turn is headed), not the
         // eased scroll's image: mid-flip the eased position still reads as
         // the outgoing page, so a drop right after an edge-hold page turn
