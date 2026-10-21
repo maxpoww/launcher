@@ -4452,8 +4452,7 @@ impl App {
             info!("quick controls: opening {label}");
             // The colours are set looking at the dock: a hidden one comes up
             // for as long as the box is open (Max, 2026-10-20).
-            if label == "Colours" && self.ui.target() == Target::Hidden {
-                self.handle_command(Command::Show);
+            if label == "Colours" && self.call_dock() {
                 DOCK_CALLED.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }

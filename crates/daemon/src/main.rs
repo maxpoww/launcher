@@ -3677,7 +3677,7 @@ impl App {
             if self.ui.target() == Target::Hidden && !self.dock_suppressed() {
                 self.handle_command(Command::Show);
             }
-        } else if self.ui.target() == Target::Dock && self.pointer_pos.is_none() {
+        } else if self.ui.target() == Target::Dock && self.pointer_pos.is_none() && !self.dock_held_up() {
             // A window moved in and the user isn't on the dock: dodge.
             self.handle_command(Command::Hide);
         }
@@ -3798,6 +3798,24 @@ impl App {
     /// clicks.
     fn dock_suppressed(&self) -> bool {
         self.overview_active || self.stage.is_on()
+    }
+
+    /// The Colours box is set looking at the dock (Max, 2026-10-20): while
+    /// it is open the dock stays up — no dodge, no autohide.
+    fn dock_held_up(&self) -> bool {
+        self.fast.boxed == Some("Colours")
+    }
+
+    /// Calls a hidden dock up beside the quick box, leaving the box open. A
+    /// `Show` through `handle_command` closes fast launch and the box with it
+    /// (2026-10-20: "no colours dont open", with the dock hidden).
+    pub(crate) fn call_dock(&mut self) -> bool {
+        if self.ui.target() != Target::Hidden || self.dock_suppressed() || !self.ui.apply(Command::Show) {
+            return false;
+        }
+        self.sync_surface_state();
+        self.schedule_frame();
+        true
     }
 
     /// Push the shell's arrangement to the Mind — the axis Max named alongside
@@ -6748,7 +6766,7 @@ impl App {
                     // out from under it.
                     // Nor from under a box left open over it.
                     // (Nor while the Colours box is open: it called the dock up to be seen.)
-                    if !app.stack_open() && app.fast.boxed != Some("Colours") && !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
+                    if !app.stack_open() && !app.dock_held_up() && !matches!(app.hover_at_pointer(), Some(Hit::DockIcon(_))) {
                         // Fully hide, or just fall back to the parked dock
                         // when the zone is free (intellihide).
                         app.dismiss();
