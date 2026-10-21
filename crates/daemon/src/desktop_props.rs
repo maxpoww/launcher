@@ -494,7 +494,6 @@ mod tests {
         wash: [1.0, 1.0, 1.0, 0.1],
         radius: 10.0,
         glass: 0.0,
-        accent: [0.0, 0.4, 1.0, 1.0],
     };
 
     fn tmp(tag: &str) -> std::path::PathBuf {

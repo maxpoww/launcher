@@ -160,7 +160,6 @@ impl App {
             // (Flat, as every menu: the dark look's night light sank their
             // lower rows toward black.)
             glass: crate::content::UNLIT,
-            accent: MenuPaint::accent_now(),
         }
     }
 

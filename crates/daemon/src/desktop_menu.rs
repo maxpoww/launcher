@@ -808,14 +808,33 @@ pub(crate) struct MenuPaint {
     /// Golem Files' windows — there the dark look's night light sank a
     /// menu's lower rows toward black (Max, 2026-10-21: as the History).
     pub glass: f32,
-    /// The row under the pointer: the accent, its words white.
-    pub accent: [f32; 4],
 }
 
 impl MenuPaint {
-    /// The accent the palette wears now (the desktop's menus).
-    pub fn accent_now() -> [f32; 4] {
-        lin(crate::palette::accent_srgb())
+    /// The row under the pointer: the panel a step darker in the light
+    /// (black 7.5 %), lighter in the dark (white 10 %) — the Files
+    /// selection's soft colour (the mockup's `--sel-soft`), mixed as a page
+    /// mixes them.
+    pub fn soft(&self) -> [f32; 4] {
+        let luma = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let (to, k) = if luma(self.ink) > luma(self.fill) {
+            (1.0, 0.10)
+        } else {
+            (0.0, 0.075)
+        };
+        let srgb = |v: f32| {
+            if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let m = |v: f32| {
+            let s = srgb(v);
+            s + (to - s) * k
+        };
+        let f = self.fill;
+        lin([m(f[0]), m(f[1]), m(f[2]), f[3]])
     }
 }
 
@@ -1004,7 +1023,6 @@ impl Menu {
             glass: paint.glass,
             border: 0.0,
         });
-        let white = [1.0, 1.0, 1.0, 1.0];
         let label = |text: &str,
                      pos: (f32, f32),
                      max_w: f32,
@@ -1066,25 +1084,21 @@ impl Menu {
                     danger,
                     off,
                 } => {
-                    // The row under the pointer: a band of the accent (red
-                    // for what cannot be undone), its words and symbol white.
-                    let hot = self.hover == Some(i) && !off;
-                    if hot {
+                    // The row under the pointer: a SOFT fill, at once (Max,
+                    // 2026-10-21: a QUIET hover, as macOS and Windows —
+                    // the accent band with white words flipping row to row
+                    // was the blink); its words and symbol keep their ink,
+                    // a red row its red.
+                    if self.hover == Some(i) && !off {
                         grid.rects.push(RectInst {
                             rect,
                             radius: ROW_RADIUS,
-                            color: fade(if *danger { red() } else { paint.accent }),
+                            color: fade(paint.soft()),
                             glass: 0.0,
                             border: 0.0,
                         });
                     }
-                    let base = if hot {
-                        white
-                    } else if *danger {
-                        red()
-                    } else {
-                        paint.ink
-                    };
+                    let base = if *danger { red() } else { paint.ink };
                     let k = if *off { OFF_INK } else { 1.0 };
                     let at = |a: f32| [base[0], base[1], base[2], base[3] * a * k];
                     let cy = rect.y + rect.h / 2.0;
@@ -1095,7 +1109,7 @@ impl Menu {
                             ICON,
                             ICON,
                         );
-                        symbol(&mut grid, icon, r, at(if hot { 1.0 } else { ICON_INK }));
+                        symbol(&mut grid, icon, r, at(ICON_INK));
                     }
                     let chev = turns_page(*action);
                     if chev {
@@ -1105,7 +1119,7 @@ impl Menu {
                             CHEV,
                             CHEV,
                         );
-                        symbol(&mut grid, "chev", r, at(if hot { 1.0 } else { 0.55 }));
+                        symbol(&mut grid, "chev", r, at(0.55));
                     }
                     let room = rect.w - TEXT_X - if chev { CHEV + 12.0 } else { 8.0 };
                     grid.labels.push(label(
@@ -1451,6 +1465,28 @@ mod tests {
         assert!(sort.contains(&Row::item("Size", "tick", Action::SortBy(2))));
         assert!(sort.contains(&Row::item("Descending", "tick", Action::SortDir(true))));
     }
+    /// The row under the pointer is the panel a soft step off: darker in
+    /// the light (black 7.5 %), lighter in the dark (white 10 %).
+    #[test]
+    fn the_hover_is_a_soft_step_of_the_panel() {
+        let paint = |fill: [f32; 4], ink: [f32; 4]| MenuPaint {
+            fill,
+            ink,
+            wash: [0.0; 4],
+            radius: 10.0,
+            glass: 0.0,
+        };
+        // #e8e5de with dark ink: #d7d4cd (each sRGB channel × 0.925).
+        let light = paint([0.807, 0.784, 0.73, 1.0], [0.01, 0.01, 0.01, 1.0]).soft();
+        let want = lin([0.8416, 0.8309, 0.8051, 1.0]);
+        for c in 0..3 {
+            assert!((light[c] - want[c]).abs() < 0.003, "{light:?} {want:?}");
+        }
+        // A near-black panel with light ink: a tenth of the way to white.
+        let dark = paint([0.01, 0.01, 0.01, 0.9], [0.9, 0.9, 0.9, 1.0]).soft();
+        assert!(dark[0] > 0.01 && dark[3] == 0.9);
+    }
+
     /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one
     /// it has not is an empty gap where the symbol belongs).
     #[test]
