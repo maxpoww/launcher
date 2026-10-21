@@ -455,9 +455,14 @@ The big daemon files are cohesive but long — go straight to the function:
   `show_main`; no flyouts); "…" = opens a window (Format…, Wallpapers…, Colours…, Display…,
   Configure…); RED only for what cannot be undone (Delete for good, Empty the bin, Format…). ⛔ NOTHING
   OPENS ON HOVER (Max: "i dont want the open on hover on the menus"): pages and Get info on a CLICK.
-  The look: rows 29 px, 14 px symbols at 75 % of the ink, the row under the pointer an ACCENT band with
-  white words (red for a red row), hairline rules between groups, the width the words want (214 at
-  least, `width_of`). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
+  The look: rows 29 px, 14 px symbols at 75 % of the ink, hairline rules between groups, the width the
+  words want (214 at least, `width_of`). THE ROW UNDER THE POINTER is a QUIET HOVER (Max, 2026-10-21, after
+  macOS and Windows: both are instant, and the blink was our accent band with white words flipping on every
+  row — a glide and then a crossfade of it were both taken back): a SOFT fill at once, the Files selection's
+  soft colour — the panel black 7.5 % in the light, white 10 % in the dark (`MenuPaint::soft`, the mockup's
+  `--sel-soft`) — at the row's radius; the words and symbol keep their ink, a red row its red; none on a
+  rule, a note or a row with nothing to do. No accent anywhere in a menu now (`MenuPaint` has none). The
+  selection pill's buttons were already the soft kind (the panel 7 % toward the ink, words unchanged). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
   `filer::copy_name`, undoable), Paste into folder, Select all, Copy to <the one stick plugged in>
   (`one_stick`), Send to › (a COPY now), New folder with these ("New folder with items", the selection
   moved in, its name typed; `Undo::Grouped`), Get info (Files: the i card; a place, the desktop: the
