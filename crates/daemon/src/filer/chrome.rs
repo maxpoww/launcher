@@ -64,6 +64,17 @@ const BTN_W: f32 = 22.0;
 const BTN_H: f32 = 20.0;
 const BTN_ICON: f32 = 12.0;
 const SEEK_W: f32 = 170.0;
+/// The ↶'s air before sort (it slides out of nothing to this).
+const UNDO_GAP: f32 = 12.0;
+/// THE HISTORY: its width (between), its most height, its air, its head,
+/// a row, a row's Undo.
+const HIST_MIN: f32 = 300.0;
+const HIST_MAX: f32 = 340.0;
+const HIST_H: f32 = 360.0;
+const HIST_PAD: f32 = 6.0;
+const HIST_HEAD: f32 = 24.0;
+const HIST_ROW: f32 = 41.0;
+const HIST_BTN_H: f32 = 21.0;
 /// THE i CARD.
 const CARD_W: f32 = 250.0;
 const CARD_TOP: f32 = 40.0;
@@ -109,7 +120,7 @@ pub(super) struct Info {
 
 /// The mockup's own symbols (16 units, strokes 1.35 wide), written once as
 /// SVG files that the icon loader reads by their path (`glyph`).
-const GLYPHS: [(&str, &str); 14] = [
+const GLYPHS: [(&str, &str); 20] = [
     (
         "clock",
         r#"<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.5"/>"#,
@@ -159,6 +170,31 @@ const GLYPHS: [(&str, &str); 14] = [
     (
         "folder",
         r#"<path d="M2 4.4c0-.6.4-1 1-1h3.2l1.4 1.5H13c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z"/>"#,
+    ),
+    // (The ↶ and its history's rows.)
+    (
+        "undo",
+        r#"<path d="M5.6 3.8 3 6.4 5.6 9"/><path d="M3.3 6.4h6.2a3.2 3.2 0 0 1 0 6.4H7.4"/>"#,
+    ),
+    (
+        "rename",
+        r#"<path d="M2.6 12.4V13.4h1l7.6-7.6-1-1zM10.2 3.8l1-1 2 2-1 1"/>"#,
+    ),
+    (
+        "trash",
+        r#"<path d="M2.8 4.4h10.4M6.2 4.4V2.8h3.6v1.6M4.2 4.4l.7 8.8h6.2l.7-8.8M6.8 6.8v4M9.2 6.8v4"/>"#,
+    ),
+    (
+        "newf",
+        r#"<path d="M2 4.4c0-.6.4-1 1-1h3.2l1.4 1.5H13c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z"/><path d="M8 7v4M6 9h4"/>"#,
+    ),
+    (
+        "copy",
+        r#"<rect x="5.2" y="5.2" width="8.4" height="8.4" rx="1.4"/><path d="M10.8 5.2V3.8c0-.8-.6-1.4-1.4-1.4H3.8c-.8 0-1.4.6-1.4 1.4v5.6c0 .8.6 1.4 1.4 1.4h1.4"/>"#,
+    ),
+    (
+        "move",
+        r#"<path d="M9.4 2.6h4v4M13.2 2.8 7.4 8.6M11.8 9.6v3.2c0 .6-.4 1-1 1H3.2c-.6 0-1-.4-1-1V5.2c0-.6.4-1 1-1h3.2"/>"#,
     ),
 ];
 
@@ -398,7 +434,7 @@ pub(super) fn info_key(win: &Win) -> String {
 }
 
 /// What a tab is called: its folder's name, or the place's it is.
-fn tab_name(dir: &Path, places: &[Place]) -> String {
+pub(super) fn tab_name(dir: &Path, places: &[Place]) -> String {
     places
         .iter()
         .find(|p| p.path == dir)
@@ -440,6 +476,16 @@ impl App {
         );
         win.find_t = t;
         moving |= m;
+        // The ↶ slides out while something can be taken back, and away.
+        let (t, m) = crate::animation::ease_toward(
+            win.undo_t,
+            if win.undoable() { 1.0 } else { 0.0 },
+            dt,
+            TAB_RATE,
+            0.004,
+        );
+        win.undo_t = t;
+        moving |= m;
         let side_w = win.side_now();
         let head = self.filer_head(win, pal, &tones, hits, side_w, dt, &mut moving);
         let card = self.filer_card(win, pal, &tones, hits);
@@ -450,6 +496,22 @@ impl App {
         } else {
             hits.side = Rect::default();
             hits.mode = [Rect::default(); 2];
+        }
+        // The history over all of it (the words under it left out: words
+        // are painted last of all).
+        if let Some(hist) = self.filer_history(win, pal, hits) {
+            let panel = hits.hist;
+            let under = |l: &Label| {
+                let r = Rect::new(l.pos.0, l.pos.1, l.max_w, l.line_px);
+                r.x < panel.x + panel.w
+                    && panel.x < r.x + r.w
+                    && r.y < panel.y + panel.h
+                    && panel.y < r.y + r.h
+            };
+            for g in &mut grids {
+                g.labels.retain(|l| !under(l));
+            }
+            grids.push(hist);
         }
         // (A word's own clip stands in for its grid's: keep both — the open
         // sidebar covers the top line's left, and the words are painted last.)
@@ -711,7 +773,16 @@ impl App {
         let at = |dx: f32| Rect::new(more - 107.0 + dx, cy - BTN_H / 2.0, BTN_W, BTN_H);
         let (sort, info, grid, list) = (at(0.0), at(23.0), at(54.0), at(77.0));
         let rules = [more - 107.0 + 49.0, more - 107.0 + 103.0];
-        let tools_left = more - 107.0 - 6.0;
+        // The ↶ left of sort: out of nothing (its width and its air) while
+        // something can be taken back.
+        let u = smooth(win.undo_t);
+        let undo = Rect::new(
+            sort.x - (BTN_W + UNDO_GAP) * u,
+            cy - BTN_H / 2.0,
+            BTN_W * u,
+            BTN_H,
+        );
+        let tools_left = undo.x - 6.0;
         for x in rules {
             g.rects
                 .push(rect(Rect::new(x, cy - 5.0, 1.0, 10.0), 0.0, tones.line));
@@ -738,6 +809,32 @@ impl App {
             Spot::Sort,
         );
         button(&mut g, win, info, "info", win.info_on, Spot::Info);
+        hits.undo = Rect::default();
+        if u > 0.01 {
+            // (Its symbol fades with it: it is not a dimmed button, it is
+            // there or it is not.)
+            let pointed = win.hover == Spot::Undo;
+            if win.hist_open {
+                g.rects.push(rect(undo, 6.0, faded(tones.field, u)));
+            } else if pointed {
+                g.rects.push(rect(undo, 6.0, faded(tones.hover, u)));
+            }
+            let c = if win.hist_open || pointed {
+                ink
+            } else {
+                tones.dim
+            };
+            symbol(
+                &mut g,
+                win,
+                &glyph("undo"),
+                square(mid(undo), BTN_ICON),
+                faded(c, u * u),
+            );
+            if win.undoable() {
+                hits.undo = undo;
+            }
+        }
         button(&mut g, win, grid, "grid", !win.list, Spot::View(false));
         button(&mut g, win, list, "list", win.list, Spot::View(true));
         button(&mut g, win, find, "search", win.find.is_some(), Spot::Find);
@@ -1463,6 +1560,191 @@ impl App {
                 app.filer_request_draw(id);
             },
         );
+    }
+}
+
+impl App {
+    /// THE HISTORY (`filer/history.rs`), under the ↶ and as far right as
+    /// the tools go, in the menus' paint: a dim "History", then what was
+    /// done here, newest first — its symbol, what it was, where and when,
+    /// and its Undo (or "Undone", its words struck through, or "Can't
+    /// undo"). As many rows as fit; the wheel shows the others.
+    fn filer_history(
+        &mut self,
+        win: &mut Win,
+        pal: &Palette,
+        hits: &mut Hits,
+    ) -> Option<GridContent> {
+        hits.hist = Rect::default();
+        hits.hist_undo.clear();
+        hits.hist_rows.clear();
+        if !win.hist_open || win.history.is_empty() {
+            return None;
+        }
+        let (w, h) = win.virt();
+        let top = HEAD_H / 2.0 + BTN_H / 2.0 + 4.0;
+        let room = (h - top - 10.0).min(HIST_H) - 2.0 * HIST_PAD - HIST_HEAD;
+        let len = win.history.len();
+        let rows = ((room / HIST_ROW).floor().max(1.0) as usize).min(len);
+        let first = (win.hist_first.max(0.0) as usize).min(len - rows);
+        win.hist_first = win.hist_first.min((len - rows) as f32);
+        // (What each row says, and what stands at its right: Undo, Undone,
+        // Can't undo.)
+        let shown: Vec<(usize, String, &'static str, String, bool, &'static str)> = (0..len)
+            .rev()
+            .skip(first)
+            .take(rows)
+            .map(|k| {
+                let d = &win.history[k];
+                let (right, button) = if d.done {
+                    (tr("Undone"), false)
+                } else if d.can {
+                    (tr("Undo"), true)
+                } else {
+                    (tr("Can’t undo"), false)
+                };
+                let under = format!("{} · {}", d.place, super::history::ago(d.at));
+                (k, d.text.clone(), d.sign, under, button, right)
+            })
+            .collect();
+        let right_w = |win: &mut Win, words: &str, button: bool| {
+            if button {
+                measure(win, words, 11.5, None) + 18.0
+            } else {
+                measure(win, words, 11.0, None) + 8.0
+            }
+        };
+        // As wide as its longest row wants, between the two widths.
+        let mut want: f32 = 0.0;
+        for (_, text, _, under, button, right) in &shown {
+            let words = measure(win, text, 12.0, None).max(measure(win, under, 10.5, None));
+            // (A few pixels to spare: the words are fitted with a little slack.)
+            want = want
+                .max(10.0 + 13.0 + 9.0 + words + 4.0 + 9.0 + right_w(win, right, *button) + 6.0);
+        }
+        let width = (want + 2.0 * HIST_PAD).clamp(HIST_MIN, HIST_MAX);
+        let panel = Rect::new(
+            w - 10.0 - width,
+            top,
+            width,
+            2.0 * HIST_PAD + HIST_HEAD + rows as f32 * HIST_ROW,
+        );
+        hits.hist = panel;
+        let paint = self.filer_panel_paint(panel, pal.ground);
+        let fill = paint.fill;
+        let ink = [paint.ink[0], paint.ink[1], paint.ink[2], 0.86];
+        let dim = [paint.ink[0], paint.ink[1], paint.ink[2], 0.5];
+        // (The menu's own fields: a step from what is under them, toward
+        // black in the light, toward white in the dark.)
+        let dark = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] < 0.18;
+        let toward = if dark {
+            [1.0, 1.0, 1.0, 1.0]
+        } else {
+            [0.0, 0.0, 0.0, 1.0]
+        };
+        let mut g = GridContent {
+            clip: panel,
+            ..Default::default()
+        };
+        // (Unlit: the dark look's night light would sink its lower rows
+        // toward black.)
+        g.rects.push(RectInst {
+            glass: crate::content::UNLIT,
+            ..rect(panel, paint.radius, fill)
+        });
+        g.labels.push(Label {
+            clip: Some(panel),
+            ..words(
+                tr("History"),
+                (panel.x + HIST_PAD + 10.0, panel.y + HIST_PAD + 4.0),
+                width - 2.0 * HIST_PAD - 20.0,
+                11.0,
+                dim,
+            )
+        });
+        let mut y = panel.y + HIST_PAD + HIST_HEAD;
+        for (k, text, sign, under, button, right) in shown {
+            let row = Rect::new(panel.x + HIST_PAD, y, width - 2.0 * HIST_PAD, HIST_ROW);
+            y += HIST_ROW;
+            hits.hist_rows.push((row, k));
+            let hot = matches!(win.hover, Spot::HistRow(n) | Spot::HistUndo(n) if n == k);
+            // (What lies under the row's button: the panel, or the row
+            // washed by the pointer.)
+            let mut ground = fill;
+            if hot {
+                g.rects.push(rect(row, 5.0, paint.wash));
+                let a = paint.wash[3];
+                for (c, wc) in ground.iter_mut().zip(paint.wash).take(3) {
+                    *c = *c * (1.0 - a) + wc * a;
+                }
+            }
+            let cy = row.y + HIST_ROW / 2.0;
+            symbol(
+                &mut g,
+                win,
+                &glyph(sign),
+                square((row.x + 10.0 + 6.5, cy), 13.0),
+                mix(ground, paint.ink, 0.5),
+            );
+            // At the right: its Undo, or what stands in its place.
+            let rw = right_w(win, right, button);
+            let rx = row.x + row.w - 6.0 - rw;
+            if button {
+                let b = Rect::new(rx, cy - HIST_BTN_H / 2.0, rw, HIST_BTN_H);
+                let pressed = win.hover == Spot::HistUndo(k);
+                g.rects.push(rect(
+                    b,
+                    5.0,
+                    mix(ground, toward, if pressed { 0.13 } else { 0.07 }),
+                ));
+                g.labels.push(Label {
+                    clip: Some(panel),
+                    ..words(
+                        right,
+                        (b.x + 9.0, cy - 15.5 / 2.0),
+                        rw,
+                        11.5,
+                        [paint.ink[0], paint.ink[1], paint.ink[2], 1.0],
+                    )
+                });
+                hits.hist_undo.push((b, k));
+            } else {
+                g.labels.push(Label {
+                    clip: Some(panel),
+                    ..words(right, (rx + 4.0, cy - 15.0 / 2.0), rw, 11.0, dim)
+                });
+            }
+            // The words: what was done (struck through once taken back),
+            // and under them where and when.
+            let done = !button && right == tr("Undone");
+            let tx = row.x + 10.0 + 13.0 + 9.0;
+            let room = (rx - 9.0 - tx).max(20.0);
+            let fitted =
+                crate::desktop::fit_label(&text, room, &mut |t| measure(win, t, 12.0, None));
+            let ty = row.y + 5.0;
+            g.labels.push(Label {
+                clip: Some(panel),
+                ..words(
+                    &fitted,
+                    (tx, ty),
+                    room + 2.0,
+                    12.0,
+                    if done { dim } else { ink },
+                )
+            });
+            if done {
+                let tw = measure(win, &fitted, 12.0, None).min(room);
+                g.rects
+                    .push(rect(Rect::new(tx, ty + 9.0, tw, 1.0), 0.0, dim));
+            }
+            let under =
+                crate::desktop::fit_label(&under, room, &mut |t| measure(win, t, 10.5, None));
+            g.labels.push(Label {
+                clip: Some(panel),
+                ..words(&under, (tx, ty + 17.0), room + 2.0, 10.5, dim)
+            });
+        }
+        Some(g)
     }
 }
 

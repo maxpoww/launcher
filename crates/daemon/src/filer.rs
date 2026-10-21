@@ -62,6 +62,7 @@ use crate::i18n::{fill, tr};
 use crate::{launch, App};
 
 mod chrome;
+mod history;
 mod recent;
 
 /// The windows' class: what the compositor, the dock and window memory
@@ -390,6 +391,11 @@ enum Spot {
     Info,
     View(bool),
     Find,
+    /// The ↶ (left of sort, while something can be taken back); a row of
+    /// its history, that row's Undo (by the row's number in the history).
+    Undo,
+    HistRow(usize),
+    HistUndo(usize),
     /// A part of the chrome that takes the pointer and does nothing (the
     /// sidebar's ground, the search field, the i card).
     Chrome,
@@ -1425,6 +1431,12 @@ struct Hits {
     list: Rect,
     seek: Rect,
     card: Rect,
+    /// The ↶, the history under it, and each row's Undo (the row's number
+    /// in the history) and the row itself.
+    undo: Rect,
+    hist: Rect,
+    hist_undo: Vec<(Rect, usize)>,
+    hist_rows: Vec<(Rect, usize)>,
 }
 
 /// One window.
@@ -1532,6 +1544,15 @@ struct Win {
     /// just before it opens.
     place_spring: Option<(usize, Instant)>,
     place_blink: Option<usize>,
+    /// THE HISTORY (`filer/history.rs`): what was done in this window, the
+    /// newest last, for as long as it is open; the ↶'s slide (0 away, 1
+    /// out); its menu up, and how far down its rows it is scrolled (in rows).
+    history: Vec<history::Did>,
+    undo_t: f32,
+    hist_open: bool,
+    hist_first: f32,
+    /// When the history up was last read against the disk.
+    hist_read: Option<Instant>,
     /// Where this window was before a drag held on folders (or on `..`) took
     /// it elsewhere, and how long its way back was then. Let go here, it STAYS
     /// where the things were let go and its way back is that one folder (Max,
@@ -1800,9 +1821,12 @@ impl Win {
     }
 
     /// Whether a point of the window is on the chrome: the sidebar, the top
-    /// line, the i card.
+    /// line, the i card, the history.
     fn on_chrome(&self, at: (f32, f32)) -> bool {
-        self.in_side(at) || at.1 < HEAD_H || (self.info_on && self.hits.card.contains(at))
+        self.in_side(at)
+            || at.1 < HEAD_H
+            || (self.info_on && self.hits.card.contains(at))
+            || (self.hist_open && self.hits.hist.contains(at))
     }
 
     /// Whether a point the pointer gave is over the field.
@@ -1848,6 +1872,14 @@ impl Win {
         if h.up.contains(pos) {
             return Spot::Up;
         }
+        // (The history stands over everything but the menus.)
+        if self.hist_open && h.hist.contains(pos) {
+            let at = |list: &[(Rect, usize)]| list.iter().find(|(r, _)| r.contains(pos)).map(|(_, k)| *k);
+            return at(&h.hist_undo)
+                .map(Spot::HistUndo)
+                .or_else(|| at(&h.hist_rows).map(Spot::HistRow))
+                .unwrap_or(Spot::Chrome);
+        }
         // (The card stands over the files: what is under it is not pointed at.)
         if self.info_on && h.card.contains(pos) {
             return Spot::Chrome;
@@ -1875,6 +1907,7 @@ impl Win {
             for (r, spot) in [
                 (h.tab_add, Spot::TabAdd),
                 (h.pencil, Spot::Pencil),
+                (h.undo, Spot::Undo),
                 (h.sort, Spot::Sort),
                 (h.info, Spot::Info),
                 (h.grid, Spot::View(false)),
@@ -1967,8 +2000,6 @@ pub(crate) struct Filer {
     /// take it for real).
     rig_drag: bool,
     orders: Orders,
-    /// What Ctrl+Z takes back, the newest last.
-    undo: Vec<Undo>,
     /// A drag of ours came over the DOCK while still in hand (set at its
     /// enter there, taken at the drop): the bin may take it.
     pub over_dock: bool,
@@ -1994,7 +2025,6 @@ impl Filer {
             dnd: None,
             rig_drag: false,
             orders: Orders::default(),
-            undo: Vec::new(),
             live: Default::default(),
             over_dock: false,
         }
@@ -2706,6 +2736,11 @@ impl App {
             spring: None,
             place_spring: None,
             place_blink: None,
+            history: Vec::new(),
+            undo_t: 0.0,
+            hist_open: false,
+            hist_first: 0.0,
+            hist_read: None,
             sprung_from: None,
             up_hold: None,
             reveal: None,
@@ -3096,6 +3131,8 @@ impl App {
         generation: u64,
         listed: Result<(Vec<Item>, HashMap<String, Meta>), std::io::Error>,
     ) {
+        // (The folder changed: what can still be taken back is read again.)
+        self.filer_history_check(id);
         let icon_scale = self.icon_scale();
         let (listed, meta) = match listed {
             Ok((items, meta)) => (Ok(items), meta),
@@ -3521,7 +3558,7 @@ impl App {
             }
             Action::MoveToBin => {
                 let paths: Vec<PathBuf> = selected.iter().map(PathBuf::from).collect();
-                self.filer_bin(&paths); // the folder's watch takes them off the window
+                self.filer_bin(id, &paths); // the folder's watch takes them off the window
             }
             // Archives are the system archiver's work (File Roller, which
             // Golem ships): it shows how far it is and asks what it must.
@@ -3623,7 +3660,7 @@ impl App {
             move |app, (brought, failed)| {
                 app.filer_say_failed(failed);
                 for undo in undo_of(&sources, &brought) {
-                    app.filer_did(undo);
+                    app.filer_did(id, undo);
                 }
                 info!(
                     "files: pasted {} into {} ({}; {failed} failed)",
@@ -3678,21 +3715,22 @@ impl App {
         Some(self.task_begin(&crate::i18n::fill(words, &[("what", &what), ("where", &place)])))
     }
 
-    /// Throw `paths` away, remembering their names in the bin so Ctrl+Z
-    /// can put them back.
-    fn filer_bin(&mut self, paths: &[PathBuf]) {
+    /// Throw `paths` away, remembering their names in the bin so window
+    /// `id`'s history can put them back.
+    fn filer_bin(&mut self, id: u32, paths: &[PathBuf]) {
         let paths = paths.to_vec();
         // (Off the loop: from another disk a thing is COPIED into the bin.)
         self.desktop_off_loop(
             move || {
                 let trash = crate::trash::Trash::home();
-                let mut names = Vec::new();
+                let (mut names, mut shown) = (Vec::new(), Vec::new());
                 let mut failed = 0usize;
                 for path in &paths {
                     match trash.trash(path) {
                         Ok(item) => {
                             info!("files: {} → Recycle Bin", path.display());
                             names.push(item.name);
+                            shown.push(file_name(path));
                         }
                         Err(e) => {
                             warn!("files: cannot throw {} away: {e}", path.display());
@@ -3700,11 +3738,11 @@ impl App {
                         }
                     }
                 }
-                (names, failed)
+                (names, shown, failed)
             },
-            |app, (names, failed): (Vec<String>, usize)| {
+            move |app, (names, shown, failed): (Vec<String>, Vec<String>, usize)| {
                 if !names.is_empty() {
-                    app.filer_did(Undo::Binned(names));
+                    app.filer_binned(id, names, &shown);
                 }
                 if failed > 0 {
                     let body = crate::i18n::fill(tr("{n} could not be moved to the bin"), &[("n", &failed)]);
@@ -3723,37 +3761,6 @@ impl App {
         for id in ids {
             self.filer_request_draw(id);
         }
-    }
-
-    /// Remember something done, for Ctrl+Z (the last thirty).
-    fn filer_did(&mut self, undo: Undo) {
-        self.filer.undo.push(undo);
-        if self.filer.undo.len() > 30 {
-            self.filer.undo.remove(0);
-        }
-    }
-
-    /// Ctrl+Z: take back the last thing done in a file window — a name, a
-    /// move, a copy, a throwing away, a new folder — and say so.
-    fn filer_undo(&mut self) {
-        let Some(undo) = self.filer.undo.pop() else {
-            let said = tr("Nothing to undo").to_owned();
-            std::thread::spawn(move || crate::desktop_send_notify(&said));
-            return;
-        };
-        info!("files: undo {undo:?}");
-        // (Off the loop: taking a move back across disks is a copy.)
-        self.desktop_off_loop(
-            move || take_back(undo).unwrap_or_else(|| tr("That could not be undone").to_owned()),
-            |app, said: String| {
-                std::thread::spawn(move || crate::desktop_send_notify(&said));
-                app.refilter();
-                let ids: Vec<u32> = app.filer.wins.iter().map(|w| w.id).collect();
-                for id in ids {
-                    app.filer_list(id);
-                }
-            },
-        );
     }
 
     /// Enter in the typed path: go to the folder it stands for (a file's
@@ -3816,7 +3823,7 @@ impl App {
         }
         info!("files: new folder {}", path.display());
         win.rename_next = Some(path.to_string_lossy().into_owned());
-        self.filer_did(Undo::Made(path));
+        self.filer_did(id, Undo::Made(path));
         self.filer_list(id);
     }
 
@@ -3865,7 +3872,7 @@ impl App {
         if let Some(new) = commit.then(|| crate::desktop::rename_file(&old, &name)).flatten() {
             // In a folder arranged by hand it keeps its place under its new name.
             let dir = win.dir.clone();
-            self.filer_did(Undo::Renamed {
+            self.filer_did(id, Undo::Renamed {
                 from: old.clone(),
                 to: new.clone(),
             });
@@ -4941,6 +4948,20 @@ impl App {
         }
         // (No scroll bars: Max, 2026-10-15, "get rid of the scrollbars".)
         zoom_grid(&mut grid, (layout.body.x, layout.body.y), layout.zoom);
+        // (The history stands over the files and words are painted last: a
+        // word under it is left out — by the width it is drawn at, so a
+        // list's names beside it stay.)
+        if hits.hist.w > 0.0 {
+            let panel = hits.hist;
+            if let Some(r) = win.renderer.as_mut() {
+                grid.labels.retain(|l| {
+                    let w = r.measure_text(&l.text, l.font_px, l.family).min(l.max_w);
+                    let x = if l.centered { l.pos.0 - w / 2.0 } else { l.pos.0 };
+                    let h = l.line_px * (l.text.lines().count().max(1) as f32);
+                    !(x < panel.x + panel.w && panel.x < x + w && l.pos.1 < panel.y + panel.h && panel.y < l.pos.1 + h)
+                });
+            }
+        }
         // (The files under the top line, beside the sidebar — as it is drawn
         // now: open over them, nothing of them shows through it.)
         let left = win.field_left().max(win.side_now());
@@ -4995,6 +5016,14 @@ impl App {
         // (The i card follows the selection: what it says is read anew when
         // that changed.)
         self.filer_info_due(id);
+        // (The history up says of each row whether it can still be taken
+        // back: read again as it is drawn, at most once a second.)
+        if let Some(win) = self.filer.win_mut(id).filter(|w| w.hist_open) {
+            if win.hist_read.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                win.hist_read = Some(Instant::now());
+                self.filer_history_check(id);
+            }
+        }
     }
 
     // ── the pointer ─────────────────────────────────────────────────────
@@ -5015,8 +5044,9 @@ impl App {
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
             Spot::Place(_) | Spot::View(_) | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
             Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
+            Spot::Undo | Spot::HistUndo(_) => true,
             Spot::Mode(n) => (n == 1) != win.media,
-            Spot::Chrome => false,
+            Spot::Chrome | Spot::HistRow(_) => false,
         };
         let shape = if goes { Shape::Pointer } else { Shape::Default };
         if self.cursor_now != Some(shape) {
@@ -5194,6 +5224,17 @@ impl App {
                     }
                     return;
                 }
+                // (Over the history: its rows, a notch or a row's height of
+                // the fingers a row.)
+                if let Some(win) = self
+                    .filer
+                    .win_mut(id)
+                    .filter(|w| w.hist_open && w.ptr.is_some_and(|p| w.hits.hist.contains(p)))
+                {
+                    win.hist_first = (win.hist_first + value as f32 / if win.finger { 41.0 } else { 15.0 }).max(0.0);
+                    self.filer_hover(id);
+                    return self.filer_request_draw(id);
+                }
                 // (Over the places: they scroll, not the field.)
                 if let Some(win) = self.filer.win_mut(id).filter(|w| w.at_win.is_some_and(|p| w.in_side(p))) {
                     let max = win.side_max();
@@ -5330,6 +5371,19 @@ impl App {
                 return;
             }
         }
+        // The history up: a press on it or on its ↶ is theirs (the click
+        // below); any other press puts it away — a right one opens the menu
+        // there instead.
+        if let Some(win) = self.filer.win_mut(id).filter(|w| w.hist_open && pressed) {
+            if !win.hits.hist.contains(at) && !win.hits.undo.contains(at) {
+                win.hist_open = false;
+                self.filer_request_draw(id);
+                if button != 0x111 {
+                    self.filer_hover(id);
+                    return;
+                }
+            }
+        }
         if !pressed {
             // The left button came up with nothing carried off: a band
             // ends where it is; a click on one of a group leaves that one.
@@ -5397,6 +5451,10 @@ impl App {
                     return;
                 };
                 let layout = win.layout(icon_scale);
+                // The ↶'s is its history.
+                if win.hits.undo.contains(at) {
+                    return self.filer_history_toggle(id);
+                }
                 // The menu belongs to the icons' field; of the places only
                 // the owner's own have one (to be taken out again).
                 if !win.on_chrome(at) {
@@ -6172,7 +6230,7 @@ impl App {
         // into its folder — the bin keeps a record of where each came from.
         if dir.starts_with(bin_root()) {
             let out: Vec<PathBuf> = paths.into_iter().filter(|p| !p.starts_with(bin_root())).collect();
-            self.filer_bin(&out);
+            self.filer_bin(id, &out);
             then();
             self.filer_list(id);
             return;
@@ -6215,7 +6273,7 @@ impl App {
             move |app, (brought, failed)| {
                 app.filer_say_failed(failed);
                 for undo in undo_of(&sources, &brought) {
-                    app.filer_did(undo);
+                    app.filer_did(id, undo);
                 }
                 info!("files: {} thing(s) brought into {}", brought.len(), dir.display());
                 if let Some(then) = then.take() {
@@ -6307,7 +6365,10 @@ impl App {
                 self.filer_hover(id);
                 self.filer_request_draw(id);
             }
-            Spot::Chrome => win.click = None,
+            // The ↶ takes back the newest that can be; a row's Undo, its own.
+            Spot::Undo => self.filer_undo(id),
+            Spot::HistUndo(k) => self.filer_undo_at(id, k),
+            Spot::Chrome | Spot::HistRow(_) => win.click = None,
             Spot::Crumb(n) => {
                 if let Some((_, path)) = win.hits.crumbs.get(n).cloned() {
                     self.filer_go(id, path);
@@ -6548,6 +6609,11 @@ impl App {
             return self.filer_rename_key(id, keysym, utf8);
         }
         // Escape puts away what is up before anything else.
+        if win.hist_open && keysym == Keysym::Escape {
+            win.hist_open = false;
+            self.filer_hover(id);
+            return self.filer_request_draw(id);
+        }
         if win.menu.is_some() || win.props.is_some() {
             if keysym == Keysym::Escape {
                 win.menu = None;
@@ -6665,7 +6731,7 @@ impl App {
                 }
             }
             Keysym::F5 => self.filer_list(id),
-            Keysym::z | Keysym::Z if ctrl => self.filer_undo(),
+            Keysym::z | Keysym::Z if ctrl => self.filer_undo(id),
             Keysym::l | Keysym::L if ctrl => {
                 // The way here, as a path to be typed over (the pencil's).
                 let mut text = win.typed_here();
@@ -6937,6 +7003,12 @@ impl App {
                     "find" => Some(mid(win.hits.find)),
                     "seek" => Some(mid(win.hits.seek)),
                     "sort" => Some(mid(win.hits.sort)),
+                    "undo" => Some(mid(win.hits.undo)),
+                    "histrow" => win.hits.hist_rows.get(n).map(|(r, _)| mid(*r)),
+                    "histundo" => {
+                        let k = win.history.len().checked_sub(n + 1);
+                        win.hits.hist_undo.iter().find(|(_, j)| Some(*j) == k).map(|(r, _)| mid(*r))
+                    }
                     "info" => Some(mid(win.hits.info)),
                     "card" => Some(mid(win.hits.card)),
                     "pin" => Some(mid(win.hits.pin)),
@@ -6959,7 +7031,26 @@ impl App {
                     None => format!("where nothing: {rest}"),
                 };
             }
-            "undo" => self.filer_undo(),
+            // `undo`: as Ctrl+Z; `hist open|close`, `hist undo <row>` (rows
+            // counted from the top, the newest first); `hist` alone logs it.
+            "undo" => self.filer_undo(id),
+            "hist" => {
+                let mut words = rest.split_whitespace();
+                match (words.next(), words.next().and_then(|w| w.parse::<usize>().ok())) {
+                    (Some("open"), _) if !self.filer.win(id).is_some_and(|w| w.hist_open) => self.filer_history_toggle(id),
+                    (Some("close"), _) if self.filer.win(id).is_some_and(|w| w.hist_open) => self.filer_history_toggle(id),
+                    (Some("undo"), Some(row)) => {
+                        let k = self.filer.win(id).and_then(|w| w.history.len().checked_sub(row + 1));
+                        if let Some(k) = k {
+                            self.filer_undo_at(id, k);
+                        }
+                    }
+                    _ => {}
+                }
+                let said = self.filer.win(id).map(history::state).unwrap_or_default();
+                info!("files: history of window {id}:\n{said}");
+                return said;
+            }
             "path" => {
                 // `path <text>`: as typed in the head, then Enter; `path? <text>`: Tab.
                 if let Some(win) = self.filer.win_mut(id) {
@@ -7018,9 +7109,10 @@ impl App {
                 self.filer_request_draw(id);
             }
             "sortmenu" => self.filer_sort_menu(id),
-            "click" => {
+            "click" | "rclick" => {
                 // `click <x> <y>`: a left click at that point of the window
-                // (press and release, no travel), through the real code.
+                // (press and release, no travel), through the real code;
+                // `rclick`, a right one.
                 let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
                 let [x, y] = n[..] else {
                     return "click <x> <y>".to_owned();
@@ -7031,8 +7123,9 @@ impl App {
                     win.ptr = Some(win.point((x, y), icon_scale));
                 }
                 self.filer_hover(id);
-                self.filer_button(id, 0x110, true, 0);
-                self.filer_button(id, 0x110, false, 0);
+                let button = if verb == "rclick" { 0x111 } else { 0x110 };
+                self.filer_button(id, button, true, 0);
+                self.filer_button(id, button, false, 0);
             }
             "find" => self.filer_find(id, (rest != "-").then(|| rest.to_owned())),
             "sort" => {

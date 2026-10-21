@@ -1078,5 +1078,18 @@
   "1 item": "1 elemento",
   "{size} ({bytes} bytes)": "{size} ({bytes} bytes)",
   "Bin": "Papelera",
-  "Recents": "Recientes"
+  "Recents": "Recientes",
+  "Renamed “{old}” to “{new}”": "Renombrado “{old}” a “{new}”",
+  "Moved “{name}” to the Bin": "“{name}” movido a la Papelera",
+  "Moved {n} items to the Bin": "{n} elementos movidos a la Papelera",
+  "New folder “{name}”": "Carpeta nueva “{name}”",
+  "Moved “{name}” to {to}": "“{name}” movido a {to}",
+  "Moved {n} items to {to}": "{n} elementos movidos a {to}",
+  "Copied “{name}” to {to}": "“{name}” copiado a {to}",
+  "Copied {n} items to {to}": "{n} elementos copiados a {to}",
+  "{n} min ago": "hace {n} min",
+  "{n} h ago": "hace {n} h",
+  "History": "Historial",
+  "Undone": "Deshecho",
+  "Can’t undo": "No se puede deshacer"
 }
