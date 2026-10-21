@@ -1167,5 +1167,7 @@
   "Undone: {n} turned back": "Deshecho: {n} girados de vuelta",
   "Wallpaper: “{name}”": "Fondo: “{name}”",
   "Rotated “{name}”": "“{name}” girado",
-  "Rotated {n} items": "{n} elementos girados"
+  "Rotated {n} items": "{n} elementos girados",
+  "Scanner found": "Escáner encontrado",
+  "{what}: installing Simple Scan to scan with.": "{what}: instalando Simple Scan para escanear."
 }

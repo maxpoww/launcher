@@ -33,6 +33,7 @@ mod desktop_phone;
 mod desktop_props;
 mod desktop_send;
 mod desktop_top;
+mod scanners;
 mod mounts;
 mod logging;
 mod lighting;
@@ -1314,6 +1315,19 @@ fn main() -> anyhow::Result<()> {
             }
         }) {
             warn!("cannot hear about plugged-in drives: {e}");
+        }
+    }
+
+    // A scanner found: an app to scan with, once (`scanners.rs`).
+    {
+        let (scan_tx, scan_rx) = calloop::channel::channel::<scanners::Scanner>();
+        scanners::spawn(scan_tx);
+        if let Err(e) = event_loop.handle().insert_source(scan_rx, |event, _, app: &mut App| {
+            if let calloop::channel::Event::Msg(found) = event {
+                app.on_scanner(found);
+            }
+        }) {
+            warn!("cannot hear about scanners: {e}");
         }
     }
 
