@@ -432,18 +432,21 @@ pub(crate) fn put_metered(
 
 /// Send `paths` to `place`; what to tell the owner when it is over. Runs
 /// for as long as the copy does: call it off the loop.
-pub(crate) fn send(paths: &[PathBuf], target: &Target) -> String {
+pub(crate) fn send(paths: &[PathBuf], target: &Target) -> (String, Vec<PathBuf>) {
     match &target.place {
+        // A COPY (Max, 2026-10-21: the menu's Send to; Move is its own row):
+        // what is sent stays here too.
         Place::Stick(dir) => {
-            let (brought, failed) = put(paths, dir, true);
+            let (brought, failed) = put(paths, dir, false);
             info!(
-                "desktop: {} moved to {} ({failed} failed)",
+                "desktop: {} copied to {} ({failed} failed)",
                 brought.len(),
                 dir.display()
             );
             // Not in the stick's cache only: on it, so it can be pulled.
             let _ = Command::new("sync").arg("-f").arg(dir).status();
-            outcome(brought.len(), failed, tr("moved to"), &target.name)
+            let said = outcome(brought.len(), failed, tr("sent to"), &target.name);
+            (said, brought)
         }
         Place::Device(id) => {
             let (mut sent, mut failed) = (0, 0);
@@ -474,7 +477,7 @@ pub(crate) fn send(paths: &[PathBuf], target: &Target) -> String {
                 }
             }
             info!("desktop: {sent} sent to {} ({failed} failed)", target.name);
-            outcome(sent, failed, tr("sent to"), &target.name)
+            (outcome(sent, failed, tr("sent to"), &target.name), Vec::new())
         }
     }
 }

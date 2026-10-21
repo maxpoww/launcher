@@ -118,106 +118,25 @@ pub(super) struct Info {
 
 // ── the chrome's own symbols ────────────────────────────────────────────
 
-/// The mockup's own symbols (16 units, strokes 1.35 wide), written once as
-/// SVG files that the icon loader reads by their path (`glyph`).
-const GLYPHS: [(&str, &str); 20] = [
-    (
-        "clock",
-        r#"<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.5"/>"#,
-    ),
-    (
-        "pin",
-        r#"<path d="M6 2.6h4M6.7 2.6l-.4 4L4.2 8.8h7.6L9.7 6.6l-.4-4M8 8.8v4.6"/>"#,
-    ),
-    (
-        "files",
-        r#"<path d="M2 4.4c0-.6.4-1 1-1h3.2l1.4 1.5H13c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z"/>"#,
-    ),
-    (
-        "media",
-        r#"<rect x="2" y="3.6" width="9.6" height="8.8" rx="1.4"/><path d="M13.8 5.6v6.6c0 .9-.6 1.6-1.5 1.6H5"/><path d="m5.8 6.3 2.8 1.7-2.8 1.7z"/>"#,
-    ),
-    (
-        "sort",
-        r#"<path d="M2.8 4.2h10.4M4.8 8h6.4M6.8 11.8h2.4"/>"#,
-    ),
-    (
-        "info",
-        r#"<circle cx="8" cy="8" r="5.6"/><path d="M8 7.2v3.8M8 5.1v.1"/>"#,
-    ),
-    (
-        "grid",
-        r#"<rect x="2.4" y="2.4" width="4.6" height="4.6" rx="1"/><rect x="9" y="2.4" width="4.6" height="4.6" rx="1"/><rect x="2.4" y="9" width="4.6" height="4.6" rx="1"/><rect x="9" y="9" width="4.6" height="4.6" rx="1"/>"#,
-    ),
-    (
-        "list",
-        r#"<path d="M5.6 4h8M5.6 8h8M5.6 12h8"/><circle cx="2.8" cy="4" r=".6"/><circle cx="2.8" cy="8" r=".6"/><circle cx="2.8" cy="12" r=".6"/>"#,
-    ),
-    (
-        "search",
-        r#"<circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3.4 3.4"/>"#,
-    ),
-    (
-        "pen",
-        r#"<path d="M5 11.2l.5-2.1 4-4a1.05 1.05 0 0 1 1.5 0l.1.1a1.05 1.05 0 0 1 0 1.5l-4 4z"/><path d="M8.7 6l1.5 1.5"/>"#,
-    ),
-    (
-        "x",
-        r#"<path stroke-width="1.8" d="m3 3 10 10M13 3 3 13"/>"#,
-    ),
-    ("plus", r#"<path d="M8 3v10M3 8h10"/>"#),
-    ("chev", r#"<path d="m5.5 3 5 5-5 5"/>"#),
-    (
-        "folder",
-        r#"<path d="M2 4.4c0-.6.4-1 1-1h3.2l1.4 1.5H13c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z"/>"#,
-    ),
-    // (The ↶ and its history's rows.)
-    (
-        "undo",
-        r#"<path d="M5.6 3.8 3 6.4 5.6 9"/><path d="M3.3 6.4h6.2a3.2 3.2 0 0 1 0 6.4H7.4"/>"#,
-    ),
-    (
-        "rename",
-        r#"<path d="M2.6 12.4V13.4h1l7.6-7.6-1-1zM10.2 3.8l1-1 2 2-1 1"/>"#,
-    ),
-    (
-        "trash",
-        r#"<path d="M2.8 4.4h10.4M6.2 4.4V2.8h3.6v1.6M4.2 4.4l.7 8.8h6.2l.7-8.8M6.8 6.8v4M9.2 6.8v4"/>"#,
-    ),
-    (
-        "newf",
-        r#"<path d="M2 4.4c0-.6.4-1 1-1h3.2l1.4 1.5H13c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z"/><path d="M8 7v4M6 9h4"/>"#,
-    ),
-    (
-        "copy",
-        r#"<rect x="5.2" y="5.2" width="8.4" height="8.4" rx="1.4"/><path d="M10.8 5.2V3.8c0-.8-.6-1.4-1.4-1.4H3.8c-.8 0-1.4.6-1.4 1.4v5.6c0 .8.6 1.4 1.4 1.4h1.4"/>"#,
-    ),
-    (
-        "move",
-        r#"<path d="M9.4 2.6h4v4M13.2 2.8 7.4 8.6M11.8 9.6v3.2c0 .6-.4 1-1 1H3.2c-.6 0-1-.4-1-1V5.2c0-.6.4-1 1-1h3.2"/>"#,
-    ),
+/// The symbols the chrome wears (the shell's own set: `glyphs.rs`).
+const CHROME: [&str; 21] = [
+    "clock", "pin", "files", "media", "sort", "info", "grid", "list", "search", "pen", "x", "plus",
+    "chev", "folder", "undo", "rename", "trash", "newf", "copy", "open", "dup",
 ];
 
-/// Where the symbols are written.
-fn glyph_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".cache"))
-        .join("waverunner/files-glyphs")
-}
-
-/// The icon key of the chrome's symbol `name`.
+/// The icon key of symbol `name`.
 pub(super) fn glyph(name: &str) -> String {
-    format!("asset:{}/{name}.svg", glyph_dir().display())
+    crate::glyphs::key(name)
 }
 
 /// Every symbol the chrome wears, for the window's icon layers.
 pub(super) fn glyph_keys() -> Vec<String> {
-    GLYPHS.iter().map(|(name, _)| glyph(name)).collect()
+    CHROME.iter().map(|name| glyph(name)).collect()
 }
 
 /// Every icon the chrome wears now, for the window's layers: its symbols,
-/// the folder of the steps and chips, a tab's place symbol, the i card's.
+/// the folder of the steps and chips, a tab's place symbol, the i card's,
+/// and those of the rows of a menu that is up.
 pub(super) fn icon_keys(win: &Win) -> Vec<String> {
     let mut keys = glyph_keys();
     keys.push("asset:folder".to_owned());
@@ -231,6 +150,14 @@ pub(super) fn icon_keys(win: &Win) -> Vec<String> {
     if let Some(info) = win.info.as_ref().filter(|_| win.info_on) {
         keys.push(info.icon.clone());
     }
+    if let Some(menu) = win.menu.as_ref() {
+        for name in menu.glyphs() {
+            let key = glyph(name);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
     keys
 }
 
@@ -240,23 +167,6 @@ fn symbolic(icon: &str) -> String {
         icon.to_owned()
     } else {
         format!("{icon}-symbolic")
-    }
-}
-
-/// Write the symbols where `glyph` says (only what is not there as it is).
-pub(super) fn write_glyphs() {
-    let dir = glyph_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    for (name, body) in GLYPHS {
-        let svg = format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"##
-        );
-        let path = dir.join(format!("{name}.svg"));
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(svg.as_str()) {
-            crate::persist::write_text("files-glyph", &path, &svg);
-        }
     }
 }
 
@@ -1380,11 +1290,16 @@ impl App {
 
     /// A new tab on Home, right of the current one, taken.
     pub(super) fn filer_tab_new(&mut self, id: u32) {
+        self.filer_tab_open(id, home());
+    }
+
+    /// A tab on `dir`, right of the current one ("Open in new tab").
+    pub(super) fn filer_tab_open(&mut self, id: u32, dir: PathBuf) {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         Self::filer_tab_keep(win);
-        let tab = Tab::new(win.tab_seq, home());
+        let tab = Tab::new(win.tab_seq, dir);
         win.tab_seq += 1;
         let at = (win.tab + 1).min(win.tabs.len());
         win.tabs.insert(at, tab);
@@ -1448,41 +1363,28 @@ impl App {
             return;
         };
         let (key, desc) = win.sort;
-        let tick = |on: bool, words: &str| format!("{}{words}", if on { "✓  " } else { "     " });
-        let mut rows: Vec<Row> = [
-            (SortKey::Name, tr("Name")),
-            (SortKey::Modified, tr("Date Modified")),
-            (SortKey::Size, tr("Size")),
-            (SortKey::Kind, tr("Kind")),
+        let key = [
+            SortKey::Name,
+            SortKey::Modified,
+            SortKey::Size,
+            SortKey::Kind,
         ]
-        .into_iter()
-        .enumerate()
-        .map(|(n, (k, words))| Row::Target {
-            label: tick(k == key, words),
-            action: Action::SortBy(n as u8),
-        })
-        .collect();
-        rows.push(Row::Sep);
-        rows.push(Row::Target {
-            label: tick(!desc, tr("Ascending")),
-            action: Action::SortDir(false),
-        });
-        rows.push(Row::Target {
-            label: tick(desc, tr("Descending")),
-            action: Action::SortDir(true),
-        });
+        .iter()
+        .position(|k| *k == key)
+        .unwrap_or(0);
+        let rows = crate::desktop_menu::sort_rows(key as u8, desc);
         let (w, h) = win.virt();
         let b = win.hits.sort;
+        let ctx = crate::desktop_menu::Ctx::default();
+        let mut menu = Menu::open(ctx, rows, None, false, (b.x, b.y + b.h), w, h);
         // (Its right edge under the button's: the menu opens leftward.)
-        let at = (b.x + b.w - crate::desktop_menu::WIDTH - 8.0, b.y + b.h);
-        let mut menu = Menu::open(None, false, at, w, h).with_rows(rows, h);
         menu.rect.x = (b.x + b.w - menu.rect.w).max(4.0);
         menu.rect.y = b.y + b.h + 4.0;
         win.selected.clear();
         win.menu = Some(menu);
         win.menu_path = Some(SORT_MENU.to_owned());
-        win.asked = None;
         win.props = None;
+        win.hist_open = false;
         self.filer_request_draw(id);
     }
 

@@ -75,6 +75,7 @@ mod font_index;
 mod fractional;
 mod gear;
 mod gear_pages;
+mod glyphs;
 mod frame;
 mod groups;
 mod hypr;

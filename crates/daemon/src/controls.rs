@@ -1557,6 +1557,8 @@ pub(crate) fn wallpaper_pause(paused: bool) {
 pub(crate) const HOLD_OVERVIEW: u8 = 1;
 pub(crate) const HOLD_FULLSCREEN: u8 = 2;
 pub(crate) const HOLD_SCREEN: u8 = 4;
+/// The owner held it from the desktop's menu ("Pause moving wallpaper").
+pub(crate) const HOLD_USER: u8 = 8;
 
 /// Whether the wallpaper is held now: a player started meanwhile is told
 /// so as soon as it listens.
@@ -1822,6 +1824,34 @@ pub(crate) fn pick_wallpaper(path: String) {
     if let Err(e) = spawned {
         warn!("controls: no thread for the wallpaper: {e}");
     }
+}
+
+/// The wallpaper now: the one being put up, else the one saved.
+pub(crate) fn wallpaper_now() -> Option<String> {
+    WALLPAPER_WANT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .or_else(|| GolemSettings::load().wallpaper)
+}
+
+/// THE DESKTOP'S "Next wallpaper" (Max, 2026-10-21, mockup v52: "just
+/// happens"): the picture after the one up now in Pictures/Wallpapers, round,
+/// put up as a pick of it in the Wallpaper box would be (it ends following
+/// the colours). Which one, if any.
+pub(crate) fn next_wallpaper() -> Option<String> {
+    let all = wallpaper_files();
+    if all.is_empty() {
+        return None;
+    }
+    let now = wallpaper_now();
+    let next = now
+        .and_then(|n| all.iter().position(|p| *p == n))
+        .map_or(0, |i| (i + 1) % all.len());
+    let path = all[next].clone();
+    let pick = path.clone();
+    crate::wall_follow::picked_other(move || pick_wallpaper(pick));
+    Some(path)
 }
 
 /// Whether a wallpaper is picked and not yet up and saved.

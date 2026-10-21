@@ -1603,6 +1603,13 @@ impl Renderer {
         self.upload_icon_array(layers as usize, 0, std::iter::empty());
     }
 
+    /// An icon array that may hold up to `cap` layers, made small and
+    /// grown as layers are written (a surface that may hold many pictures
+    /// and mostly holds a few).
+    pub fn alloc_icon_array_upto(&mut self, cap: u32) {
+        self.upload_icon_array(2, (cap as usize).saturating_sub(2), std::iter::empty());
+    }
+
     /// Shared core: (re)allocate the icon texture array with `count + reserved`
     /// layers, write each chain to its layer, and rebuild the sampler bind group.
     fn upload_icon_array<'a>(

@@ -525,6 +525,20 @@ impl App {
         self.pictures_warm();
     }
 
+    /// A setting in its box mid-screen, as the quick controls open it
+    /// (the desktop menu's "Wallpapers…", "Colours…", "Display…").
+    pub(crate) fn settings_box(&mut self, asked: &'static str) {
+        if !(self.fast.open && self.fast.controls) {
+            self.toggle_fast_controls();
+        }
+        crate::controls::start_tab_for(asked);
+        let label = crate::controls::box_of(asked);
+        let from = self.fast.pill_card;
+        self.fast.boxed = Some(label);
+        self.fast.enter = None;
+        self.quick_open(label, from);
+    }
+
     /// Super+Alt+Space: open the bubble, or close it if it is up.
     pub(crate) fn toggle_fast_launch(&mut self) {
         if self.fast.open && self.fast.controls {

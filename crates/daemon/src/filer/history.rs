@@ -76,8 +76,15 @@ fn describe(undo: &Undo) -> (String, &'static str) {
                     &[("n", &pairs.len()), ("to", &to)],
                 ),
             };
-            (text, "move")
+            (text, "open")
         }
+        Undo::Grouped { folder, moved } => (
+            fill(
+                tr("Put {n} items in “{name}”"),
+                &[("n", &moved.len()), ("name", &file_name(folder))],
+            ),
+            "newf",
+        ),
         Undo::Copied(copies) => {
             let to = copies.first().map(|c| folder(c)).unwrap_or_default();
             let text = match copies.as_slice() {
@@ -109,6 +116,9 @@ pub(super) fn can_undo(undo: &Undo, bin: &[crate::trash::TrashItem]) -> bool {
                 .any(|t| &t.name == n && !t.original_path.exists())
         }),
         Undo::Made(path) => std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_none()),
+        Undo::Grouped { moved, .. } => moved
+            .iter()
+            .any(|(from, now)| now.exists() && !from.exists()),
     }
 }
 
@@ -153,7 +163,7 @@ pub(super) fn state(win: &Win) -> String {
 
 /// Say quietly what was taken back: a passing notice, low and not kept
 /// with the others (the history says it already).
-fn say_quietly(body: String) {
+pub(crate) fn say_quietly(body: String) {
     let title = tr("Files");
     std::thread::spawn(move || {
         let _ = std::process::Command::new("busctl")
@@ -195,7 +205,7 @@ impl Win {
 
 impl App {
     /// Something was done in window `id`: it goes in its history.
-    pub(super) fn filer_did(&mut self, id: u32, undo: Undo) {
+    pub(crate) fn filer_did(&mut self, id: u32, undo: Undo) {
         let (text, sign) = describe(&undo);
         self.filer_did_said(id, undo, text, sign);
     }
@@ -207,7 +217,7 @@ impl App {
         self.filer_did_said(id, Undo::Binned(names), text, "trash");
     }
 
-    fn filer_did_said(&mut self, id: u32, undo: Undo, text: String, sign: &'static str) {
+    pub(super) fn filer_did_said(&mut self, id: u32, undo: Undo, text: String, sign: &'static str) {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };

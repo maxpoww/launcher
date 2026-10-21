@@ -376,6 +376,16 @@ pub(crate) struct DndIn {
     pub on_dock: bool,
 }
 
+/// Whose menu a Send to page is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendFor {
+    Desktop,
+    Files(u32),
+}
+
+/// How many things done the desktop keeps to take back.
+const KEEP_DONE: usize = 30;
+
 /// The desktop's state on the loop.
 #[derive(Default)]
 pub(crate) struct Desktop {
@@ -406,6 +416,16 @@ pub(crate) struct Desktop {
     /// answered yet.
     pub targets: Vec<crate::desktop_send::Target>,
     pub looking: bool,
+    /// Whose menu the Send to page was turned for (the desktop's, or a
+    /// file window's).
+    pub send_for: Option<SendFor>,
+    /// The apps of the menu's Open with page: name, command, in a terminal.
+    pub open_with: Vec<(String, String, bool)>,
+    /// What was done on the desktop, the newest last, each with its name —
+    /// what "Undo <it>" on the wallpaper's menu takes back (and Ctrl+Z).
+    pub history: Vec<(crate::filer::Undo, String)>,
+    /// The order its icons were last put in by Sort by (key, descending).
+    pub sort: (u8, bool),
     /// The phones being used as a camera: volume path → the pid of the
     /// scrcpy feeding the camera device (shared with its waiting thread).
     pub cameras: std::sync::Arc<std::sync::Mutex<HashMap<String, u32>>>,
@@ -2128,7 +2148,7 @@ pub(crate) fn scene(
     }
     // The menu, over everything.
     if let Some((menu, paint)) = live.menu {
-        menu.push(&mut scene, &paint);
+        menu.push(&mut scene, &paint, &|_| None);
     }
     if let Some((props, paint)) = live.props {
         props.push(&mut scene, &paint);
@@ -2591,6 +2611,10 @@ impl App {
     /// The resolver answered: file the pixels (a placeholder answer means
     /// the theme has no such icon — the name alone is shown) and draw.
     pub(crate) fn on_desktop_icon(&mut self, res: crate::notif_icons::Resolved) {
+        // (A symbol of the menus: the top surface's.)
+        if crate::glyphs::is_key(&res.key) {
+            return self.desktop_on_glyph(res.key, res.chain);
+        }
         self.desktop.pending.remove(&res.key);
         let Some(chain) = res.chain else {
             warn!("desktop: no icon for {}", res.key);
@@ -2646,51 +2670,199 @@ impl App {
         self.desktop.press = None;
         self.desktop.band = None;
         self.desktop.props = None;
+        crate::glyphs::write_all();
+        let ctx = self.desktop_menu_ctx(item);
         let (w, h) = self.desktop_size;
-        // Several selected (the clicked one among them): the group's menu.
-        let many = item.is_some() && self.desktop.selected.len() > 1;
-        let mut menu = Menu::open(item, many, at, w as f32, h as f32);
-        // On a plugged-in volume (alone): its own short menu.
-        let on_volume = item
-            .and_then(|i| self.desktop.items.get(i))
-            .is_some_and(|it| it.kind == Kind::Volume);
-        if on_volume && !many {
-            let phone = item
-                .and_then(|i| self.desktop.items.get(i))
-                .is_some_and(|it| self.desktop.volumes.iter().any(|v| v.phone && v.path.as_os_str() == it.path.as_str()));
-            let path = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()).unwrap_or_default();
-            // (Its lens, its picture and its flash are the bar's camera
-            // pill's: the menu only turns it on and off.)
-            let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path)
-                || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
-            let closed = self.desktop.volumes.iter().any(|v| v.closed && v.path.as_os_str() == path.as_str());
-            let tether = self.desktop.volumes.iter().any(|v| v.tether && v.path.as_os_str() == path.as_str());
-            // (What this phone cannot do here: the same answer the bar's
-            // phone pill works from, so the two never offer different things.)
-            let limits = self
-                .desktop
-                .volumes
-                .iter()
-                .find(|v| v.phone && v.path.as_os_str() == path.as_str())
-                .map(|v| self.phone_limits(v))
-                .unwrap_or_default();
-            let volume = crate::desktop_menu::Volume { phone, closed, camera, tether, limits };
-            menu = menu.for_volume(volume, h as f32);
-        }
-        // On a shortcut nothing vouches for: letting it run comes first.
-        let locked = item
-            .and_then(|i| self.desktop.items.get(i))
-            .is_some_and(|it| locked_shortcut(it).is_some());
-        if locked && !many {
-            menu = menu.with_allow(h as f32);
-        }
-        // On the wallpaper, with files on the clipboard: they can be put here.
-        if item.is_none() && self.clipboard_files().is_some() {
-            menu = menu.with_paste(h as f32);
-        }
+        let many = ctx.on == crate::desktop_menu::On::Many;
+        let mut menu = Menu::new(ctx, item, many, at, w as f32, h as f32);
         menu.hover = menu.hit(at);
         self.desktop.menu = Some(menu);
         self.request_desktop_draw();
+    }
+
+    /// What the desktop's menu is made from: the wallpaper's (`item` none),
+    /// a plugged-in volume's, or that of what stands on it.
+    fn desktop_menu_ctx(&self, item: Option<usize>) -> crate::desktop_menu::Ctx {
+        use crate::desktop_menu::{Ctx, On};
+        let clip = self.clipboard_files().is_some();
+        let Some(it) = item.and_then(|i| self.desktop.items.get(i)) else {
+            let now = crate::controls::wallpaper_now();
+            return Ctx {
+                on: On::Desk,
+                undo: self.desktop_undoable().map(|(_, what)| what),
+                clip,
+                icons_hidden: self.desktop.hidden,
+                moving: now
+                    .filter(|w| crate::controls::wallpaper_moves(w))
+                    .map(|_| self.wallpaper_held & crate::controls::HOLD_USER != 0),
+                ..Default::default()
+            };
+        };
+        let many = self.desktop.selected.len() > 1;
+        if it.kind == Kind::Volume && !many {
+            if let Some(v) = self.desktop.volumes.iter().find(|v| v.path.as_os_str() == it.path.as_str()) {
+                return Ctx {
+                    on: if v.phone { On::Phone } else { On::Stick },
+                    desk: true,
+                    volume: self.volume_ctx(v),
+                    ..Default::default()
+                };
+            }
+        }
+        let on = if many {
+            On::Many
+        } else {
+            match it.kind {
+                Kind::Folder | Kind::Volume => On::Folder,
+                Kind::Launcher => On::App,
+                _ if crate::filer::is_archive(&it.name) => On::Archive,
+                _ => On::File,
+            }
+        };
+        Ctx {
+            on,
+            n: self.desktop.selected.len(),
+            stick: self.one_stick(None).map(|(name, _)| name),
+            here: true,
+            clip,
+            desk: true,
+            untrusted: locked_shortcut(it).is_some(),
+            system: self.desktop.selected.iter().any(|p| crate::trash::protected(Path::new(p))),
+            ..Default::default()
+        }
+    }
+
+    /// The newest thing done on the desktop that can still be taken back,
+    /// and its name.
+    fn desktop_undoable(&self) -> Option<(usize, String)> {
+        self.desktop
+            .history
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, (undo, _))| crate::filer::can_take_back(undo))
+            .map(|(k, (_, what))| (k, what.clone()))
+    }
+
+    /// Something was done on the desktop, called `what`: kept to be taken
+    /// back.
+    pub(crate) fn desktop_did(&mut self, undo: crate::filer::Undo, what: String) {
+        self.desktop.history.push((undo, what));
+        if self.desktop.history.len() > KEEP_DONE {
+            self.desktop.history.remove(0);
+        }
+    }
+
+    /// Take back the newest thing done on the desktop that still can be
+    /// (the wallpaper's "Undo <it>", Ctrl+Z). Off the loop; said quietly.
+    pub(crate) fn desktop_undo(&mut self) {
+        let Some((k, _)) = self.desktop_undoable() else {
+            info!("desktop: nothing to undo");
+            return;
+        };
+        let (undo, what) = self.desktop.history.remove(k);
+        info!("desktop: undo {what} ({undo:?})");
+        self.desktop_off_loop(
+            move || crate::filer::take_back(undo),
+            |app, said: Option<String>| {
+                if let Some(said) = said {
+                    crate::filer::say_quietly(said);
+                }
+                app.refilter();
+                app.reload_desktop();
+            },
+        );
+    }
+
+    /// Row `row` of the desktop's menu was chosen: a page turns (the menu
+    /// stays), Get info grows out of it, anything else is done and the menu
+    /// goes. What it says, for the rig.
+    pub(crate) fn desktop_menu_row(&mut self, row: usize) -> String {
+        use crate::desktop_menu::Page;
+        let Some(menu) = self.desktop.menu.as_mut() else {
+            return "no menu is up".to_owned();
+        };
+        let Some(action) = menu.action(row) else {
+            return "no such row".to_owned();
+        };
+        let at = self.desktop.ptr;
+        match action {
+            Action::SendPage => {
+                self.send_targets_ask(SendFor::Desktop);
+                return "Send to".to_owned();
+            }
+            Action::OpenWith => {
+                self.desktop_menu_apps();
+                return "Open with".to_owned();
+            }
+            Action::SortPage => {
+                let (key, desc) = self.desktop.sort;
+                menu.turn(Page::Sort, crate::desktop_menu::sort_page(key, desc));
+                menu.hover = at.and_then(|p| menu.hit(p));
+                self.request_desktop_draw();
+                return "Sort by".to_owned();
+            }
+            Action::Back => {
+                menu.show_main();
+                menu.hover = at.and_then(|p| menu.hit(p));
+                self.request_desktop_draw();
+                return "Back".to_owned();
+            }
+            _ => {}
+        }
+        let Some(menu) = self.desktop.menu.take() else {
+            return "no menu is up".to_owned();
+        };
+        let (item, menu_at) = (menu.item, menu.at);
+        // Get info, on a click: the box grows out of the menu (Back leads
+        // to it again).
+        if action == Action::Properties {
+            if let Some(i) = item {
+                self.desktop_open_props(i, menu_at, Some(menu));
+            }
+            self.request_desktop_draw();
+            return "Get info".to_owned();
+        }
+        self.desktop_menu_act(action, item, menu_at);
+        self.request_desktop_draw();
+        format!("{action:?}")
+    }
+
+    /// The desktop menu's "Open with" page: the apps that say they open
+    /// this kind of file, asked off the loop.
+    fn desktop_menu_apps(&mut self) {
+        use crate::desktop_menu::{open_with_rows, Page};
+        let Some(path) = self
+            .desktop
+            .menu
+            .as_ref()
+            .and_then(|m| m.item)
+            .and_then(|i| self.desktop.items.get(i))
+            .map(|it| it.path.clone())
+        else {
+            return;
+        };
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            menu.turn(Page::OpenWith, open_with_rows(None));
+        }
+        self.request_desktop_draw();
+        let asked = path.clone();
+        self.desktop_off_loop(
+            move || crate::filer::apps_for(&asked),
+            move |app, ids: Vec<String>| {
+                let apps: Vec<(String, String, bool)> = ids
+                    .iter()
+                    .filter_map(|id| app.entries.iter().find(|e| &e.id == id))
+                    .map(|e| (e.name.clone(), e.exec.clone(), e.needs_terminal))
+                    .collect();
+                let names: Vec<String> = apps.iter().map(|(name, ..)| name.clone()).collect();
+                app.desktop.open_with = apps;
+                if let Some(menu) = app.desktop.menu.as_mut().filter(|m| m.page == Page::OpenWith) {
+                    menu.turn(Page::OpenWith, open_with_rows(Some(&names)));
+                }
+                app.request_desktop_draw();
+            },
+        );
     }
 
     /// What is plugged in changed (`mounts.rs`): its icons follow.
@@ -2936,9 +3108,11 @@ impl App {
         self.phone_pill_sync();
     }
 
-    /// Turn the menu to its "Move to" page: the sticks at once, the paired
-    /// devices when the service has answered (asked off the loop).
-    fn desktop_show_targets(&mut self) {
+    /// Turn a menu to its "Send to" page (`to`: whose): the sticks and
+    /// what stands on the desktop at once, the paired devices when the
+    /// service has answered (asked off the loop).
+    pub(crate) fn send_targets_ask(&mut self, to: SendFor) {
+        self.desktop.send_for = Some(to);
         self.desktop.targets = crate::desktop_send::sticks();
         // Everything mounted on the desktop is a place too — a phone above
         // all (Max, 2026-10-08: "my Pixel should appear there too, as any
@@ -2962,7 +3136,7 @@ impl App {
             }
         }
         self.desktop.looking = true;
-        self.desktop_fill_targets();
+        self.send_targets_fill();
         let (tx, rx) = calloop::channel::channel::<Vec<crate::desktop_send::Target>>();
         std::thread::spawn(move || {
             let _ = tx.send(crate::desktop_send::devices());
@@ -2975,37 +3149,97 @@ impl App {
                 app.desktop.targets.retain(|t| matches!(t.place, crate::desktop_send::Place::Stick(_)));
                 app.desktop.targets.extend(near);
                 app.desktop.targets.extend(far);
-                // Only if that page is still the one up.
-                if app.desktop.menu.as_ref().is_some_and(|m| m.targets) {
-                    app.desktop_fill_targets();
-                }
+                app.send_targets_fill();
             }
         });
         if waiting.is_err() {
             self.desktop.looking = false;
-            self.desktop_fill_targets();
+            self.send_targets_fill();
         }
     }
 
-    /// Write the "Move to" page from what is known now.
-    fn desktop_fill_targets(&mut self) {
-        let h = self.desktop_size.1 as f32;
-        let names = |far: bool| -> Vec<String> {
-            self.desktop
-                .targets
-                .iter()
-                .filter(|t| t.far == far)
-                .map(|t| t.name.clone())
-                .collect()
+    /// Write the "Send to" page from what is known now, on the menu it is
+    /// for — if that page is still the one up.
+    fn send_targets_fill(&mut self) {
+        use crate::desktop_menu::{send_rows, Page, Target};
+        let phones: Vec<PathBuf> = self.desktop.volumes.iter().filter(|v| v.phone).map(|v| crate::desktop_send::phone_dest(&v.path)).collect();
+        let targets: Vec<Target> = self
+            .desktop
+            .targets
+            .iter()
+            .map(|t| Target {
+                name: t.name.clone(),
+                phone: matches!(&t.place, crate::desktop_send::Place::Stick(p) if phones.contains(p)) || matches!(t.place, crate::desktop_send::Place::Device(_)) && !t.far,
+                far: t.far,
+            })
+            .collect();
+        let rows = send_rows(&targets, self.desktop.looking);
+        let turn = |menu: &mut Menu, at: Option<(f32, f32)>| {
+            if matches!(menu.page, Page::Main | Page::Send) {
+                menu.turn(Page::Send, rows.clone());
+                menu.hover = at.and_then(|p| menu.hit(p));
+            }
         };
-        let (near, far) = (names(false), names(true));
-        let looking = self.desktop.looking;
-        let at = self.desktop.ptr;
-        if let Some(menu) = self.desktop.menu.as_mut() {
-            menu.show_targets(&near, &far, looking, h);
-            menu.hover = at.and_then(|p| menu.hit(p));
+        let to = self.desktop.send_for;
+        match to {
+            Some(SendFor::Desktop) => {
+                let at = self.desktop.ptr;
+                if let Some(menu) = self.desktop.menu.as_mut() {
+                    turn(menu, at);
+                }
+                self.request_desktop_draw();
+            }
+            Some(SendFor::Files(id)) if self.filer_send_page(id, &rows) => self.filer_request_draw(id),
+            Some(SendFor::Files(_)) | None => {}
         }
-        self.request_desktop_draw();
+    }
+
+    /// Send `paths` to target `n` of the Send to page — a COPY: it stays
+    /// here too, and Undo takes the copies away again (into the bin). From
+    /// a file window (`files`), or the desktop.
+    pub(crate) fn send_to(&mut self, n: usize, paths: Vec<PathBuf>, files: Option<u32>) {
+        let Some(target) = self.desktop.targets.get(n).cloned() else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        info!("send: {} file(s) → {}", paths.len(), target.name);
+        let name = target.name.clone();
+        self.desktop_off_loop(
+            move || crate::desktop_send::send(&paths, &target),
+            move |app, (said, made): (String, Vec<PathBuf>)| {
+                info!("send: {said}");
+                crate::desktop_send_notify(&said);
+                if !made.is_empty() {
+                    let undo = crate::filer::Undo::Copied(made);
+                    match files {
+                        Some(id) => app.filer_did(id, undo),
+                        None => app.desktop_did(undo, crate::i18n::fill(tr("Send to {name}"), &[("name", &name)])),
+                    }
+                }
+                app.reload_desktop();
+            },
+        );
+    }
+
+    /// A stick's or a phone's row from a file window's sidebar: what its
+    /// icon on the desktop does.
+    pub(crate) fn desktop_volume_act(&mut self, action: Action, path: &Path, at: (f32, f32)) {
+        let Some(i) = self.desktop.items.iter().position(|it| it.kind == Kind::Volume && Path::new(&it.path) == path) else {
+            if action == Action::Eject {
+                self.desktop_eject(&path.to_string_lossy());
+            } else {
+                warn!("desktop: {} is not on the desktop: {action:?} cannot be done from here", path.display());
+            }
+            return;
+        };
+        self.desktop.selected.clear();
+        self.desktop.selected.insert(self.desktop.items[i].path.clone());
+        if action == Action::Rename {
+            return self.desktop_begin_rename(i);
+        }
+        self.desktop_menu_act(action, Some(i), at);
     }
 
     /// Put the clipboard's files on the desktop, around `at`: copied, or
@@ -3015,6 +3249,7 @@ impl App {
             return;
         };
         let dir = desktop_dir();
+        let sources = paths.clone();
         self.desktop_off_loop(
             move || crate::desktop_send::put(&paths, &dir, cut),
             move |app, (brought, failed)| {
@@ -3023,6 +3258,9 @@ impl App {
                     brought.len(),
                     if cut { "moved" } else { "copied" }
                 );
+                for undo in crate::filer::undo_of(&sources, &brought) {
+                    app.desktop_did(undo, tr("Paste").to_owned());
+                }
                 app.desktop_place_brought(&brought, Some(at));
                 if cut {
                     // The same files, where they are now, as a plain copy: a
@@ -3090,20 +3328,136 @@ impl App {
                     self.desktop_open_props(i, at, None);
                 }
             }
-            // (Turning the page is the release handler's: the menu stays up.)
-            Action::MoveTo | Action::Back => {}
-            // (The bin's rows are the file manager's: `filer.rs`.)
+            // (Turning the page is the row's own: `desktop_menu_row`.)
+            Action::Back | Action::OpenWith | Action::SendPage | Action::SortPage => {}
+            // (The bin's rows and the sidebar's are the file windows'.)
             Action::PutBack
             | Action::Erase
             | Action::EmptyBin
-            | Action::Extract
-            | Action::Compress
-            | Action::OpenWith
             | Action::AddPlace
             | Action::RemovePlace
             | Action::ToggleHidden
-            | Action::SortBy(_)
-            | Action::SortDir(_) => {}
+            | Action::OpenInTab => {}
+            Action::SortBy(_) | Action::SortDir(_) => self.desktop_sort(action),
+            // Archives are the system archiver's work (File Roller).
+            Action::Extract | Action::Compress => {
+                let files: Vec<String> = self.desktop_selected_paths().iter().map(|p| launch::shell_quote(p)).collect();
+                if files.is_empty() {
+                    return;
+                }
+                let exec = if action == Action::Extract {
+                    format!("file-roller --extract-here {}", files.join(" "))
+                } else {
+                    format!("file-roller --add {}", files.join(" "))
+                };
+                info!("desktop: {exec}");
+                if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+                    error!("desktop: the archiver could not be started: {e:#}");
+                }
+            }
+            Action::OpenApp(n) => {
+                let (Some((name, exec, terminal)), Some(path)) =
+                    (self.desktop.open_with.get(n).cloned(), item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()))
+                else {
+                    return;
+                };
+                info!("desktop: {path} opened with {name}");
+                let exec = format!("{exec} {}", launch::shell_quote(&path));
+                if let Err(e) = launch::launch(&exec, terminal, &self.config.launch.terminal) {
+                    error!("desktop: {name} could not be started: {e:#}");
+                }
+            }
+            Action::QuickLook => {
+                if let Some(path) = item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone()) {
+                    self.desktop.peek_on = Some(path);
+                    self.desktop_peek_open();
+                }
+            }
+            Action::SelectAll => {
+                self.desktop.selected = self
+                    .desktop
+                    .items
+                    .iter()
+                    .zip(&self.desktop.slots)
+                    .filter(|(_, slot)| slot.is_some())
+                    .map(|(it, _)| it.path.clone())
+                    .collect();
+            }
+            Action::Duplicate => {
+                let paths: Vec<PathBuf> = self.desktop_selected_paths().into_iter().map(PathBuf::from).collect();
+                self.desktop_off_loop(
+                    move || {
+                        paths
+                            .iter()
+                            .filter_map(|src| {
+                                let dest = crate::filer::copy_name(src.parent()?, &src.file_name()?.to_string_lossy(), src.is_dir());
+                                crate::desktop_send::copy_all_metered(src, &dest, None).ok().map(|()| dest)
+                            })
+                            .collect::<Vec<PathBuf>>()
+                    },
+                    |app, made: Vec<PathBuf>| {
+                        if !made.is_empty() {
+                            app.desktop_did(crate::filer::Undo::Copied(made), tr("Duplicate").to_owned());
+                        }
+                        app.reload_desktop();
+                    },
+                );
+            }
+            Action::PasteInto => {
+                let Some(dir) = item.and_then(|i| self.desktop.items.get(i)).map(|it| PathBuf::from(&it.path)) else {
+                    return;
+                };
+                let Some((paths, cut)) = self.clipboard_files() else {
+                    return;
+                };
+                let sources = paths.clone();
+                self.desktop_off_loop(
+                    move || crate::desktop_send::put(&paths, &dir, cut),
+                    move |app, (brought, _failed): (Vec<PathBuf>, usize)| {
+                        for undo in crate::filer::undo_of(&sources, &brought) {
+                            app.desktop_did(undo, tr("Paste into folder").to_owned());
+                        }
+                        if cut {
+                            let now: Vec<String> = brought.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                            app.serve_files(&now, false);
+                        }
+                        app.reload_desktop();
+                    },
+                );
+            }
+            Action::CopyToStick => {
+                let Some((name, stick)) = self.one_stick(None) else {
+                    return;
+                };
+                let paths: Vec<PathBuf> = self.desktop_selected_paths().into_iter().map(PathBuf::from).collect();
+                self.desktop_off_loop(
+                    move || crate::desktop_send::put(&paths, &stick, false),
+                    move |app, (made, failed): (Vec<PathBuf>, usize)| {
+                        let said = crate::i18n::fill(tr("Copied {n} to {stick}"), &[("n", &made.len()), ("stick", &name)]);
+                        info!("desktop: {said} ({failed} failed)");
+                        crate::filer::say_quietly(said);
+                        if !made.is_empty() {
+                            let what = crate::i18n::fill(tr("Copy to {stick}"), &[("stick", &name)]);
+                            app.desktop_did(crate::filer::Undo::Copied(made), what);
+                        }
+                    },
+                );
+            }
+            Action::NewFolderWith => self.desktop_group(at),
+            Action::Undo => self.desktop_undo(),
+            Action::ToggleIcons => self.desktop_toggle_hidden(),
+            Action::NextWallpaper => {
+                if let Some(next) = crate::controls::next_wallpaper() {
+                    info!("desktop: next wallpaper: {next}");
+                }
+            }
+            Action::Wallpapers => self.settings_box("Wallpaper"),
+            Action::Colours => self.settings_box("Colours"),
+            Action::Display => self.settings_box("Scale"),
+            Action::MovingWallpaper => {
+                let held = self.wallpaper_held & crate::controls::HOLD_USER != 0;
+                self.wallpaper_hold(crate::controls::HOLD_USER, !held);
+            }
             Action::Camera => self.desktop_camera_use(item),
             // (Pages of the bar's phone pill's box.)
             Action::CameraSettings | Action::HelpDebugging | Action::HelpFiles => self.phone_pill_show(action),
@@ -3219,32 +3573,10 @@ impl App {
                 }
             }
             Action::SendTo(n) => {
-                let Some(target) = self.desktop.targets.get(n).cloned() else {
-                    return;
-                };
                 let paths: Vec<PathBuf> =
                     self.desktop_selected_paths().into_iter().map(PathBuf::from).collect();
-                // (Only volumes were selected: nothing of the desktop's to send.)
-                if paths.is_empty() {
-                    return;
-                }
                 self.desktop.selected.clear();
-                info!("desktop: {} file(s) → {}", paths.len(), target.name);
-                // Off the loop: a copy to a stick takes as long as it takes.
-                let (tx, rx) = calloop::channel::channel::<String>();
-                std::thread::spawn(move || {
-                    let _ = tx.send(crate::desktop_send::send(&paths, &target));
-                });
-                let waiting = self.loop_handle.insert_source(rx, |event, _, app: &mut App| {
-                    if let calloop::channel::Event::Msg(said) = event {
-                        info!("desktop: {said}");
-                        crate::desktop_send_notify(&said);
-                        app.reload_desktop();
-                    }
-                });
-                if waiting.is_err() {
-                    warn!("desktop: cannot wait for the files to be sent");
-                }
+                self.send_to(n, paths, None);
             }
             Action::MoveToHome => {
                 // The selection leaves the desktop for the home folder (the
@@ -3268,16 +3600,23 @@ impl App {
                             // before the original goes (`put` sees to it).
                             let (brought, _) =
                                 crate::desktop_send::put(&[src.to_path_buf()], &home, true);
-                            if brought.is_empty() {
-                                warn!("desktop: cannot move {} home", src.display());
-                            } else {
-                                info!("desktop: {} → {}", src.display(), dest.display());
-                                moved.push(path);
+                            match brought.first() {
+                                None => warn!("desktop: cannot move {} home", src.display()),
+                                Some(now) => {
+                                    info!("desktop: {} → {}", src.display(), dest.display());
+                                    moved.push((path.clone(), now.clone()));
+                                }
                             }
                         }
                         moved
                     },
-                    |app, moved: Vec<String>| {
+                    |app, moved: Vec<(String, PathBuf)>| {
+                        let pairs: Vec<(PathBuf, PathBuf)> =
+                            moved.iter().map(|(from, now)| (PathBuf::from(from), now.clone())).collect();
+                        if !pairs.is_empty() {
+                            app.desktop_did(crate::filer::Undo::Moved(pairs), tr("Move to Home").to_owned());
+                        }
+                        let moved: Vec<String> = moved.into_iter().map(|(from, _)| from).collect();
                         for path in moved {
                             app.desktop.remembered.remove(&path);
                         }
@@ -3289,6 +3628,7 @@ impl App {
             Action::MoveToBin => {
                 // The selection goes (the clicked item is in it).
                 let paths: Vec<String> = self.desktop.selected.drain().collect();
+                let mut thrown = Vec::new();
                 for path in paths {
                     // A plugged-in volume dropped on the bin's row is let
                     // go, never thrown away with all that is on it.
@@ -3300,8 +3640,16 @@ impl App {
                         info!("desktop: {} → Recycle Bin", it.name);
                     }
                     self.desktop.remembered.remove(&path);
-                    self.trash_file(&path); // the folder watch takes it off the desktop
+                    // (The folder watch takes it off the desktop.)
+                    match crate::trash::Trash::home().trash(Path::new(&path)) {
+                        Ok(t) => thrown.push(t.name),
+                        Err(e) => warn!("desktop: failed to trash {path}: {e}"),
+                    }
                 }
+                if !thrown.is_empty() {
+                    self.desktop_did(crate::filer::Undo::Binned(thrown), tr("Move to bin").to_owned());
+                }
+                self.refilter();
             }
             Action::NewFolder => self.desktop_new_folder(at),
             Action::AllowRun => {
@@ -3415,6 +3763,98 @@ impl App {
         self.request_desktop_draw();
     }
 
+    /// "Sort by": the icons put in that order — folders first, then by the
+    /// key, one way or the other — as Clean up puts them in order of name;
+    /// what is plugged in keeps its place.
+    fn desktop_sort(&mut self, action: Action) {
+        let (mut key, mut desc) = self.desktop.sort;
+        match action {
+            Action::SortBy(k) => key = k,
+            Action::SortDir(d) => desc = d,
+            _ => return,
+        }
+        self.desktop.sort = (key, desc);
+        let meta: Vec<Option<std::fs::Metadata>> = self.desktop.items.iter().map(|it| std::fs::metadata(&it.path).ok()).collect();
+        let ending = |name: &str| ending(name).unwrap_or("").to_lowercase();
+        let mut order: Vec<usize> = (0..self.desktop.items.len()).collect();
+        let items = &self.desktop.items;
+        order.sort_by(|&a, &b| {
+            let (x, y) = (&items[a], &items[b]);
+            let folder = |it: &Item| !matches!(it.kind, Kind::Folder);
+            let by = match key {
+                1 => {
+                    let t = |m: &Option<std::fs::Metadata>| m.as_ref().and_then(|m| m.modified().ok());
+                    t(&meta[a]).cmp(&t(&meta[b]))
+                }
+                2 => {
+                    let n = |m: &Option<std::fs::Metadata>| m.as_ref().map_or(0, |m| if m.is_dir() { 0 } else { m.len() });
+                    n(&meta[a]).cmp(&n(&meta[b]))
+                }
+                3 => ending(&x.name).cmp(&ending(&y.name)),
+                _ => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| x.name.to_lowercase().cmp(&y.name.to_lowercase()));
+            folder(x).cmp(&folder(y)).then(if desc { by.reverse() } else { by })
+        });
+        let sorted: Vec<Item> = order.into_iter().map(|i| self.desktop.items[i].clone()).collect();
+        self.desktop.items = sorted;
+        let volumes: HashSet<String> = self.desktop.items.iter().filter(|it| it.kind == Kind::Volume).map(|it| it.path.clone()).collect();
+        self.desktop.remembered.retain(|path, _| volumes.contains(path));
+        self.save_desktop_positions();
+        info!("desktop: sorted by {key} ({})", if desc { "descending" } else { "ascending" });
+        self.relayout_desktop();
+    }
+
+    /// "New folder with these": a new folder where the menu was opened, the
+    /// selection moved into it and its name typed at once; Undo takes them
+    /// out again, and the folder with them.
+    fn desktop_group(&mut self, at: (f32, f32)) {
+        let paths = self.desktop_selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let dir = desktop_dir();
+        let base = tr("New folder with items");
+        let folder = (1..)
+            .map(|n| if n == 1 { dir.join(base) } else { dir.join(format!("{base} {n}")) })
+            .find(|p| !p.exists())
+            .unwrap_or_else(|| dir.join(base));
+        if let Err(e) = std::fs::create_dir(&folder) {
+            error!("desktop: cannot make {}: {e}", folder.display());
+            return;
+        }
+        let mut moved = Vec::new();
+        for path in &paths {
+            let from = PathBuf::from(path);
+            let Some(name) = from.file_name() else {
+                continue;
+            };
+            let to = folder.join(name);
+            match std::fs::rename(&from, &to) {
+                Ok(()) => {
+                    self.desktop.remembered.remove(path);
+                    moved.push((from, to));
+                }
+                Err(e) => warn!("desktop: cannot put {} in the new folder: {e}", from.display()),
+            }
+        }
+        info!("desktop: {} thing(s) put in {}", moved.len(), folder.display());
+        self.desktop_did(
+            crate::filer::Undo::Grouped { folder: folder.clone(), moved },
+            tr("New folder with these").to_owned(),
+        );
+        let key = folder.to_string_lossy().into_owned();
+        self.desktop.selected.clear();
+        if let Some(slot) = self.desktop.grid.nearest_free(at, &self.desktop.taken(None)) {
+            self.desktop.remembered.insert(key.clone(), slot);
+        }
+        self.save_desktop_positions();
+        self.reload_desktop();
+        if let Some(i) = self.desktop.items.iter().position(|it| it.path == key) {
+            self.desktop_begin_rename(i);
+        }
+    }
+
     /// A new, empty folder in the cell nearest `at`, named `untitled folder`
     /// (then `untitled folder 2`…), its name opened for typing.
     fn desktop_new_folder(&mut self, at: (f32, f32)) {
@@ -3439,6 +3879,7 @@ impl App {
             return;
         }
         info!("desktop: new folder {}", path.display());
+        self.desktop_did(crate::filer::Undo::Made(path.clone()), tr("New folder").to_owned());
         let key = path.to_string_lossy().into_owned();
         if let Some(slot) = self.desktop.grid.nearest_free(at, &self.desktop.taken(None)) {
             self.desktop.remembered.insert(key.clone(), slot);
@@ -3547,6 +3988,10 @@ impl App {
             return false;
         };
         let (old_key, new_key) = (it.path.clone(), new.to_string_lossy().into_owned());
+        self.desktop_did(
+            crate::filer::Undo::Renamed { from: PathBuf::from(&old_key), to: new.clone() },
+            tr("Rename").to_owned(),
+        );
         if let Some(slot) = self.desktop.remembered.remove(&old_key) {
             self.desktop.remembered.insert(new_key.clone(), slot);
             self.save_desktop_positions();
@@ -3746,6 +4191,7 @@ impl App {
             Keysym::c | Keysym::C if ctrl => self.desktop_menu_act(Action::Copy, None, at),
             Keysym::x | Keysym::X if ctrl => self.desktop_menu_act(Action::Cut, None, at),
             Keysym::v | Keysym::V if ctrl => self.desktop_paste(at),
+            Keysym::z | Keysym::Z if ctrl => self.desktop_undo(),
             Keysym::a | Keysym::A if ctrl => {
                 self.desktop.selected = self
                     .desktop
@@ -4289,29 +4735,7 @@ impl App {
                         let pressed = menu.pressed.take();
                         let under = self.desktop.ptr.and_then(|p| menu.hit(p));
                         if let Some(row) = pressed.filter(|r| Some(*r) == under) {
-                            if let Some(action) = menu.action(row) {
-                                // "Move to" and "Back" turn the page: the
-                                // menu stays up.
-                                match action {
-                                    Action::MoveTo => {
-                                        self.desktop_show_targets();
-                                        return;
-                                    }
-                                    Action::Back => {
-                                        let h = self.desktop_size.1 as f32;
-                                        let at = self.desktop.ptr;
-                                        menu.show_main(h);
-                                        menu.hover = at.and_then(|p| menu.hit(p));
-                                        self.request_desktop_draw();
-                                        return;
-                                    }
-                                    _ => {}
-                                }
-                                let (item, at) = (menu.item, menu.at);
-                                self.desktop.menu = None;
-                                self.desktop_menu_act(action, item, at);
-                                self.request_desktop_draw();
-                            }
+                            self.desktop_menu_row(row);
                         }
                         return;
                     }
@@ -4392,36 +4816,19 @@ impl App {
     /// wallpaper — a rubber band selecting what it touches.
     fn desktop_motion(&mut self, x: f32, y: f32) {
         self.desktop.ptr = Some((x, y));
+        // A menu or a box up has the pointer: only a menu's band follows
+        // it — nothing opens on hover (Max, 2026-10-21: "i dont want the
+        // open on hover on the menus").
         if let Some(menu) = self.desktop.menu.as_mut() {
-            // The menu has the pointer: only its hover follows it. Coming
-            // onto its last row, Properties, turns the menu into that box.
             let over = menu.hit((x, y));
             if over != menu.hover {
                 menu.hover = over;
-                let props = over.and_then(|r| menu.action(r)) == Some(Action::Properties);
-                if let (true, Some(i)) = (props, menu.item) {
-                    if let Some(menu) = self.desktop.menu.take() {
-                        self.desktop_open_props(i, (x, y), Some(menu));
-                    }
-                } else if over.and_then(|r| menu.action(r)) == Some(Action::Back) {
-                    // Coming onto Back turns the page back, as it does in
-                    // the Properties box (Max, 2026-10-08).
-                    let h = self.desktop_size.1 as f32;
-                    menu.show_main(h);
-                    menu.hover = menu.hit((x, y));
-                }
                 self.request_desktop_draw();
             }
             self.desktop_cursor();
             return;
         }
-        if let Some(props) = self.desktop.props.as_mut() {
-            // The Properties box: only its Back row answers the pointer,
-            // and coming onto it is enough — as coming onto Properties was
-            // (Max, 2026-10-08: "make back work also on hover").
-            if props.back_rect().is_some_and(|r| r.contains((x, y))) {
-                self.desktop_props_back((x, y));
-            }
+        if self.desktop.props.is_some() {
             self.desktop_cursor();
             return;
         }
@@ -5480,30 +5887,33 @@ impl App {
             return format!("{} task(s) of {secs} s and more", labels.len());
         }
         if let Some(rest) = what.strip_prefix("pick ") {
-            let Some(menu) = self.desktop.menu.take() else {
-                return "no menu is up".to_owned();
+            let Ok(row) = rest.trim().parse::<usize>() else {
+                return "pick <row>".to_owned();
             };
-            return match rest.trim().parse::<usize>().ok().and_then(|r| menu.action(r)) {
-                // The page turns and the menu stays, as under the pointer.
-                Some(Action::MoveTo) => {
-                    self.desktop.menu = Some(menu);
-                    self.desktop_show_targets();
-                    "MoveTo".to_owned()
-                }
-                Some(Action::Back) => {
-                    let mut menu = menu;
-                    menu.show_main(self.desktop_size.1 as f32);
-                    self.desktop.menu = Some(menu);
-                    self.request_desktop_draw();
-                    "Back".to_owned()
-                }
-                Some(action) => {
-                    self.desktop_menu_act(action, menu.item, menu.at);
-                    self.request_desktop_draw();
-                    format!("{action:?}")
-                }
-                None => "pick <row of an action>".to_owned(),
-            };
+            let said = self.desktop_menu_row(row);
+            info!("debug-desktop: pick {row}: {said}");
+            return said;
+        }
+        if what.trim() == "rows" {
+            let said = self.desktop.menu.as_ref().map_or_else(
+                || "no menu is up".to_owned(),
+                |m| {
+                    m.rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| match r {
+                            crate::desktop_menu::Row::Item { label, off, .. } => {
+                                format!("{i}: {label}{}", if *off { " (off)" } else { "" })
+                            }
+                            crate::desktop_menu::Row::Note(t) => format!("{i}: ({t})"),
+                            crate::desktop_menu::Row::Sep => format!("{i}: —"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+            );
+            info!("debug-desktop: menu rows:\n{said}");
+            return said;
         }
         match what.trim() {
             "hide" | "show" | "toggle" => {

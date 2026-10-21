@@ -52,6 +52,13 @@ pub(crate) struct Top {
     pub(crate) peek_edit_rev: u64,
     /// Which sharp part of a zoomed photo is in the layers.
     pub(crate) peek_detail_rev: u64,
+    /// THE MENUS' SYMBOLS (`glyphs.rs`): their pixels as the desktop's
+    /// resolver gave them, those asked for, and which layer holds which —
+    /// the first layers, lent while a menu is up (Quick Look, which uses
+    /// them too, is never up with a menu: each takes them back).
+    pub(crate) glyphs: std::collections::HashMap<String, Vec<u8>>,
+    pub(crate) glyph_asked: std::collections::HashSet<String>,
+    pub(crate) glyph_layers: Vec<String>,
 }
 
 impl App {
@@ -148,8 +155,8 @@ impl App {
             ink,
             wash: self.options_hover_wash(),
             radius: crate::clipboard::BOX_RADIUS,
-            rules: false,
             glass: 0.0,
+            accent: MenuPaint::accent_now(),
         }
     }
 
@@ -178,13 +185,71 @@ impl App {
     /// The menu and the box that are up, into `scene`.
     pub(crate) fn desktop_push_panels(&self, scene: &mut Scene) {
         if let Some(menu) = self.desktop.menu.as_ref() {
-            menu.push(scene, &self.desktop_panel_paint(menu.rect));
+            let layers = &self.desktop_top.glyph_layers;
+            let glyph = |name: &str| {
+                let key = crate::glyphs::key(name);
+                layers.iter().position(|k| *k == key).map(|l| l as u32)
+            };
+            menu.push(scene, &self.desktop_panel_paint(menu.rect), &glyph);
         }
         if let Some(props) = self.desktop.props.as_ref() {
             props.push(scene, &self.desktop_panel_paint(props.rect));
         }
         if let Some(config) = self.desktop.config.as_ref().filter(|c| !c.hosted) {
             config.push(scene, &self.desktop_panel_paint(config.rect));
+        }
+    }
+
+    /// The symbols of the menu that is up into the first layers: written
+    /// where their pixels are in hand, asked of the desktop's resolver where
+    /// not (`desktop_on_glyph` draws again when they come).
+    fn top_glyphs_sync(&mut self) {
+        let Some(menu) = self.desktop.menu.as_ref() else {
+            return;
+        };
+        let mut asked = Vec::new();
+        for name in menu.glyphs() {
+            let key = crate::glyphs::key(name);
+            if self.desktop_top.glyph_layers.contains(&key) {
+                continue;
+            }
+            let top = &mut self.desktop_top;
+            let (Some(chain), Some(renderer)) = (top.glyphs.get(&key), top.renderer.as_mut()) else {
+                if self.desktop_top.glyph_asked.insert(key.clone()) {
+                    asked.push(key);
+                }
+                continue;
+            };
+            if !top.peek_layers {
+                renderer.alloc_icon_array_upto(crate::quicklook::LAYERS);
+                top.peek_layers = true;
+            }
+            renderer.update_icon_layer(top.glyph_layers.len() as u32, chain);
+            top.glyph_layers.push(key);
+            // (Quick Look's pictures there are gone: written again when it is up.)
+            top.peek_tiles = None;
+            top.peek_soft = false;
+            top.peek_edit_rev = u64::MAX;
+            top.peek_detail_rev = u64::MAX;
+        }
+        if let Some(icons) = self.desktop_icons.as_ref() {
+            for key in asked {
+                if let Some(req) = crate::desktop::icon_request(&key) {
+                    icons.request(req);
+                }
+            }
+        }
+    }
+
+    /// The resolver answered for a symbol of the menus: kept, and drawn.
+    pub(crate) fn desktop_on_glyph(&mut self, key: String, chain: Option<Vec<u8>>) {
+        self.desktop_top.glyph_asked.remove(&key);
+        match chain {
+            Some(chain) => {
+                self.desktop_top.glyphs.insert(key, chain);
+                self.request_desktop_top_draw();
+            }
+            None => warn!("desktop: no picture for the symbol {key}"),
         }
     }
 
@@ -210,6 +275,13 @@ impl App {
             alpha: 1.0,
             ..Default::default()
         };
+        // (Quick Look and a menu are never up together: each has the first
+        // layers while it is.)
+        if self.peek.is_up() {
+            self.desktop_top.glyph_layers.clear();
+        } else {
+            self.top_glyphs_sync();
+        }
         self.desktop_push_panels(&mut scene);
         // (Quick Look over the menus: they are not up together.)
         self.peek_upload();

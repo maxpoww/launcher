@@ -714,9 +714,10 @@ impl App {
                 let limits = self.phone_limits(v);
                 let volume =
                     crate::desktop_menu::Volume { phone: true, closed: v.closed, camera, tether: v.tether, limits };
+                let ctx = crate::desktop_menu::Ctx { on: crate::desktop_menu::On::Phone, volume, ..Default::default() };
                 let mut lines = Vec::new();
                 let mut air = false;
-                for row in crate::desktop_menu::volume_rows(&volume) {
+                for row in crate::desktop_menu::rows_for(&ctx) {
                     let l = match row {
                         Row::Sep => {
                             air = true;
@@ -724,8 +725,7 @@ impl App {
                         }
                         // (Said, not left out: a row that is simply not
                         // there reads as something broken.)
-                        Row::Note(text) => Line { dim: true, ..line(crate::i18n::tr(text), "", Act::Nothing) },
-                        Row::Target { label, action } => line(&label, "", Act::Menu(action)),
+                        Row::Note(text) => Line { dim: true, ..line(&text, "", Act::Nothing) },
                         Row::Item { label, action, .. } => {
                             let act = match action {
                                 Action::Configure => Act::Turn(Page::Configure),
@@ -735,7 +735,7 @@ impl App {
                                 Action::HelpFiles => Act::Turn(Page::Files),
                                 other => Act::Menu(other),
                             };
-                            line(crate::i18n::tr(label), "", act)
+                            line(&label, "", act)
                         }
                     };
                     lines.push(Line { air, ..l });
