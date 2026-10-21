@@ -83,6 +83,7 @@ mod install;
 mod ipc;
 mod jelly;
 mod launch;
+mod launcher_prefs;
 mod managed;
 mod managed_webapps;
 mod minimized;

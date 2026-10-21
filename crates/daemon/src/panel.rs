@@ -69,7 +69,7 @@ type Item = (&'static str, u8, &'static str);
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [Item; 24] = [
+const SETTINGS: [Item; 25] = [
     // (name, first layer, search keywords: what else people call it or
     // look for it by). 5 near, 9 middle, 11 far.
     ("Resolution", 0, "display screen monitor size pixels"),
@@ -86,6 +86,8 @@ const SETTINGS: [Item; 24] = [
     // (Max, 2026-10-14: "a control called Tiles… we will start dumping
     // controls in there").
     ("Tiles", 1, "windows tiling tile floating snap magnets magnetism layout arrange side column"),
+    // The dock and its box (Max, 2026-10-20: "we will call it Launcher").
+    ("Launcher", 2, "dock launcher apps box hide hidden stay away position left right bottom side monitors screens displays animated icons motion arrange sort order"),
     ("Notifications", 1, "alerts do not disturb dnd messages"),
     ("Keyboard layout", 1, "input language typing keys"),
     ("Power mode", 1, "battery performance energy saver"),
@@ -1666,12 +1668,20 @@ impl Panel {
     }
 
     /// A SWITCH ROW from `y`: the name at the left, the switch at the
-    /// right; the whole row turns it.
-    fn switch_row(&self, out: &mut OpenContent, y: f32, group: u8, name: &str, on: bool) -> f32 {
+    /// right; the whole row turns it. A `hint` is a muted line under the
+    /// name (what the choice means: the Launcher's Stay away).
+    fn switch_row(&self, out: &mut OpenContent, y: f32, group: u8, name: &str, on: bool, hint: Option<&str>) -> f32 {
         let s = self.scale;
         let fw = self.key.0;
-        let (left, right, h) = (2.0 * MARGIN * s, fw - 2.0 * MARGIN * s, 34.0 * s);
-        out.texts.push(Text { text: name.to_owned(), x: left, y: y + (h - 18.0 * s) / 2.0, px: 14.0, alpha: 0.85, centered: false });
+        let h = if hint.is_some() { 46.0 } else { 34.0 } * s;
+        let (left, right) = (2.0 * MARGIN * s, fw - 2.0 * MARGIN * s);
+        match hint {
+            Some(hint) => {
+                out.texts.push(Text { text: name.to_owned(), x: left, y: y + 4.0 * s, px: 14.0, alpha: 0.85, centered: false });
+                out.texts.push(Text { text: hint.to_owned(), x: left, y: y + 25.0 * s, px: 12.0, alpha: 0.55, centered: false });
+            }
+            None => out.texts.push(Text { text: name.to_owned(), x: left, y: y + (h - 18.0 * s) / 2.0, px: 14.0, alpha: 0.85, centered: false }),
+        }
         out.chips.push(Chip {
             rect: Rect::new(left - 6.0 * s, y, right - left + 12.0 * s, h),
             text: String::new(),
@@ -1687,6 +1697,45 @@ impl Panel {
             hint: None,
             style: Style::Switch { on },
         });
+        y + h + 10.0 * s
+    }
+
+    /// A WORD ROW from `y` (`controls::Group::labelled`): the caption at
+    /// the left as a switch row's name, the words at the right end of the
+    /// same line, each lit by its own `on`. Words too long for the line go
+    /// under their name, centred, as any group's do.
+    fn word_row(&self, out: &mut OpenContent, y: f32, group: u8, g: &crate::controls::Group) -> f32 {
+        let s = self.scale;
+        let fw = self.key.0;
+        let (left, right, h) = (2.0 * MARGIN * s, fw - 2.0 * MARGIN * s, 34.0 * s);
+        let (letter, gap, word_h) = (7.4 * s, 22.0 * s, 26.0 * s);
+        let name = g.caption.clone().unwrap_or_default();
+        let widths: Vec<f32> = g.choices.iter().map(|c| c.text.chars().count().max(1) as f32 * letter + 4.0 * s).collect();
+        let words_w = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
+        let chips = || g.choices.iter().enumerate().map(|(ci, c)| (c.text.clone(), c.on, PanelAction::Pick { group, index: ci as u8 })).collect();
+        if left + crate::options::est_text_w(&name, 14.0 * s) + 28.0 * s + words_w > right {
+            let y = self.caption(out, y, name);
+            return self.flow_words(out, y, chips(), false);
+        }
+        out.texts.push(Text { text: name, x: left, y: y + (h - 18.0 * s) / 2.0, px: 14.0, alpha: 0.85, centered: false });
+        let mut x = right - words_w;
+        for ((text, on, action), w) in chips().into_iter().zip(widths) {
+            out.chips.push(Chip {
+                rect: Rect::new(x - gap / 2.0, y + (h - word_h) / 2.0, w + gap, word_h),
+                text,
+                on,
+                action,
+                image: None,
+                swatch: Vec::new(),
+                seg: false,
+                palette: false,
+                cell: false,
+                icon: None,
+                hint: None,
+                style: Style::Word { big: false },
+            });
+            x += w + gap;
+        }
         y + h + 10.0 * s
     }
 
@@ -2183,7 +2232,13 @@ impl Panel {
                 }
                 let on = g.choices.first().is_some_and(|c| c.on);
                 let name = g.caption.clone().unwrap_or_else(|| crate::i18n::tr("On").to_owned());
-                y = self.switch_row(&mut out, y, gi as u8, &name, on);
+                let hint = g.choices.first().and_then(|c| c.hint.as_deref());
+                y = self.switch_row(&mut out, y, gi as u8, &name, on, hint);
+                continue;
+            }
+            // A WORD ROW: its name at the left, the words at the right end.
+            if g.labelled && !g.choices.is_empty() {
+                y = self.word_row(&mut out, y, gi as u8, g);
                 continue;
             }
             // A CENTRED LINE TO READ (a section's reach, the chosen app's name):
@@ -2192,6 +2247,11 @@ impl Panel {
                 let text = g.caption.clone().unwrap_or_default();
                 out.texts.push(Text { text, x: self.key.0 / 2.0, y, px: 13.0, alpha: 0.6, centered: true });
                 y += 24.0 * s;
+                // (Last of all — the Launcher's Ctrl +/− line — it keeps a
+                // group's air under it: the closing hint sat on it.)
+                if gi + 1 == view.groups.len() {
+                    y += (GROUP_GAP - 8.0) * s;
+                }
                 continue;
             }
             if let Some(c) = &g.caption {
@@ -4410,6 +4470,7 @@ impl App {
                 }
             }
             k if k.starts_with("colors-") => self.colors_pick(key, &value),
+            k if k.starts_with("launcher-") => self.launcher_pick(key, &value),
             "dnd" => {
                 if self.notif_muted() != (value == "on") {
                     self.toggle_notif_mute();
@@ -4793,9 +4854,9 @@ mod tests {
     #[test]
     fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
         let p = panel();
-        assert_eq!(p.pills.len(), 24);
+        assert_eq!(p.pills.len(), 25);
         let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [5, 9, 10]);
+        assert_eq!(per_layer, [5, 9, 11]);
         assert_clean(&p, "at rest");
         // Up under the dock: the heap starts at the top gap.
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
@@ -4807,14 +4868,14 @@ mod tests {
         let mut p = panel();
         let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [9, 10, 5], "down: the near group goes to the back");
+        assert_eq!(counts(&p), [9, 11, 5], "down: the near group goes to the back");
         assert_clean(&p, "one step down");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [10, 5, 9]);
+        assert_eq!(counts(&p), [11, 5, 9]);
         assert_clean(&p, "two steps down");
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [5, 9, 10], "up undoes it");
+        assert_eq!(counts(&p), [5, 9, 11], "up undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
@@ -4919,10 +4980,10 @@ mod tests {
         assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
-        assert_eq!(layer_sizes(&p), [5, 9, 10], "the layers keep their sizes");
+        assert_eq!(layer_sizes(&p), [5, 9, 11], "the layers keep their sizes");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
-        assert_eq!(layer_sizes(&p), [5, 9, 10]);
+        assert_eq!(layer_sizes(&p), [5, 9, 11]);
         // Whoever it passed stepped back exactly one layer.
         let back: Vec<(&str, u8, u8)> = p
             .pills
@@ -5042,6 +5103,7 @@ mod tests {
             centred: false,
             grid_rows: None,
             hug: false,
+            labelled: false,
         }
     }
 
@@ -5192,6 +5254,34 @@ mod tests {
         let alone = switches[1].rect;
         assert!(alone.y > first.y + first.h);
         assert!((alone.x + alone.w / 2.0 - 480.0).abs() < 1.0, "centred: {alone:?}");
+    }
+
+    #[test]
+    fn a_word_row_has_its_name_at_the_left_and_its_words_at_the_right_end() {
+        let mut away = switch_group("launcher-away", "Stay away", false);
+        away.choices[0].hint = Some("Off the screen until you call it.".to_owned());
+        let side = crate::controls::Group {
+            labelled: true,
+            caption: Some("Position".to_owned()),
+            choices: vec![plain_choice("Left", false), plain_choice("Bottom", true), plain_choice("Right", false)],
+            ..plain_group("launcher-side")
+        };
+        let p = colours_open(vec![away, side], (960.0, 560.0));
+        let c = p.open_content("Colours").unwrap();
+        // The switch row's hint under its name.
+        let name = c.texts.iter().find(|x| x.text == "Stay away").unwrap();
+        let hint = c.texts.iter().find(|x| x.text.starts_with("Off the screen")).unwrap();
+        assert!(hint.y > name.y && (hint.x - name.x).abs() < 0.01);
+        // The words on one line, ending at the right margin; the name at the left.
+        let words: Vec<&Chip> = c.chips.iter().filter(|ch| matches!(ch.style, Style::Word { .. })).collect();
+        assert_eq!(words.len(), 3);
+        assert!(words.iter().all(|w| (w.rect.y - words[0].rect.y).abs() < 0.01), "one line");
+        let last = words[2].rect;
+        assert!((last.x + last.w - 11.0 - (960.0 - 2.0 * MARGIN)).abs() < 0.01, "ends at the right margin: {last:?}");
+        let label = c.texts.iter().find(|x| x.text == "Position").unwrap();
+        assert!((label.x - 2.0 * MARGIN).abs() < 0.01 && label.y > hint.y && label.y < last.y + last.h);
+        assert!(words[1].on && !words[0].on && !words[2].on);
+        assert_eq!(words[1].action, PanelAction::Pick { group: 1, index: 1 });
     }
 
     #[test]
