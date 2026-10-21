@@ -73,6 +73,11 @@ impl VeilLayer {
         self.layer.wl_surface()
     }
 
+    /// Its layer.
+    pub(crate) fn layer(&self) -> &LayerSurface {
+        &self.layer
+    }
+
     /// Let it go (the viewport first, then the surface).
     pub(crate) fn destroy(self) {
         self.viewport.destroy();

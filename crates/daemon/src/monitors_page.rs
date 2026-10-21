@@ -15,7 +15,11 @@
 //! monitor") — the picked screen's, live, through the display settings'
 //! own way ([`crate::display`]: a resolution is tried and goes back by
 //! itself unless kept; a scale is made under a dissolve), the page showing
-//! what the screen has.
+//! what the screen has; and THE ARRANGEMENT (Max, 2026-10-21: "now make
+//! the arrange work, drag and spin the real monitors"): a drop or a turn
+//! puts every screen where the drawing has it, turned as it has it, in one
+//! go, and saves those places and turns as the screens' own rules
+//! (`DisplayChoice::position`, `transform`), so they come back so.
 //!
 //! The arrangement is kept in the compositor's own terms: each screen's
 //! top-left corner in logical pixels (pixels over scale), as Hyprland
@@ -264,7 +268,8 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
                 builtin,
                 mode,
                 scale,
-                rot: placed.map_or(0, |p| p.rot),
+                // (Turned as the page put it, else as the compositor has it.)
+                rot: placed.map_or(u16::from(m.transform.min(3)) * 90, |p| p.rot),
                 at: placed.map_or(m.pos, |p| (p.x, p.y)),
                 sizes,
                 stops,
@@ -396,6 +401,7 @@ impl App {
     /// read again. Nothing is applied to the screens yet.
     pub(crate) fn monitors_pick(&mut self, key: &str, value: &str) {
         let monitors = crate::display::monitors();
+        let mut arranged = false;
         // RESOLUTION AND SCALE are the picked screen's own, applied live
         // (the display settings' way: tried and kept, or under a dissolve).
         if key == "monitors-mode" || key == "monitors-scale" {
@@ -429,6 +435,7 @@ impl App {
                                 let (x, y) = settle(b, &others, isolated);
                                 c.arrange.insert(sel.to_owned(), Placed { x, y, rot });
                                 c.picked = Some(sel.to_owned());
+                                arranged = true;
                             }
                         }
                         _ => {}
@@ -443,6 +450,70 @@ impl App {
             g.store();
         });
         info!("monitors: {key} = {value}");
+        if arranged {
+            self.monitors_arrange();
+        }
+    }
+
+    /// THE ARRANGEMENT, ON THE SCREENS: every screen put where the page has
+    /// it — the whole moved so the main screen is at 0,0 — and turned as it has it,
+    /// in one evaluation, then kept as the screens' own rules (their mode
+    /// and scale as they are) and the page's places made those.
+    pub(crate) fn monitors_arrange(&mut self) {
+        let monitors = crate::display::monitors();
+        let applied = GolemSettings::change(|g| {
+            if g.monitors.screens.as_deref() == Some("mirror") {
+                return None;
+            }
+            let screens = page_screens(&monitors, &g.monitors);
+            let boxes: Vec<(String, Box2, u16)> = screens.iter().map(|s| (s.sel.clone(), s.logical(), s.rot)).collect();
+            // The MAIN screen keeps the corner 0,0 (what makes it the main one
+            // with no built-in): the others stand where they are from it,
+            // left of it or above it below zero.
+            let main = crate::launcher_prefs::main_screen(&monitors).unwrap_or(0);
+            let (x0, y0) = boxes.get(main).map_or((0.0, 0.0), |(_, b, _)| (b.x, b.y));
+            let mut choices = Vec::new();
+            for ((sel, b, rot), m) in boxes.iter().zip(&monitors) {
+                let (x, y) = ((b.x - x0).round(), (b.y - y0).round());
+                let mut choice = g.displays.get(sel).cloned().unwrap_or(crate::display::DisplayChoice {
+                    mode: m.mode.rule(),
+                    scale: m.scale,
+                    position: None,
+                    transform: None,
+                });
+                choice.position = Some(format!("{}x{}", x as i64, y as i64));
+                choice.transform = Some((rot / 90 % 4) as u8);
+                g.monitors.arrange.insert(sel.clone(), Placed { x, y, rot: *rot });
+                choices.push((sel.clone(), choice));
+            }
+            if !crate::display::apply_all(&choices) {
+                return Some(false);
+            }
+            for (sel, choice) in choices {
+                g.displays.insert(sel, choice);
+            }
+            g.store();
+            Some(true)
+        });
+        match applied {
+            Some(true) => {
+                info!("monitors: the screens arranged as the page has them");
+                // The layers on the screens moved with them, once the
+                // compositor has moved the screens.
+                use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+                let armed = self.loop_handle.insert_source(Timer::from_duration(std::time::Duration::from_millis(120)), |_, _, app: &mut App| {
+                    app.nudge_layers();
+                    TimeoutAction::Drop
+                });
+                if armed.is_err() {
+                    self.nudge_layers();
+                }
+            }
+            Some(false) => tracing::warn!("monitors: the compositor did not take the arrangement"),
+            None => {}
+        }
+        // (The pages read the screens again once they have moved.)
+        self.monitors_read_soon(std::time::Duration::from_millis(400));
     }
 
     /// The Monitors page, when it is open, read again in `after`: the
@@ -480,8 +551,8 @@ impl App {
             g.store();
             info!("monitors: {sel} arranged at {x},{y}");
         });
-        let ui = self.ui_facts();
-        self.controls_send(crate::controls::ControlCommand::Read("Monitors", ui));
+        // …and the real screens moved so.
+        self.monitors_arrange();
     }
 }
 

@@ -405,6 +405,7 @@ mod tests {
             modes: vec![mode],
             focused: false,
             pos,
+            transform: 0,
         }
     }
 

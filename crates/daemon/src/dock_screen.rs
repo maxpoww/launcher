@@ -489,6 +489,11 @@ impl App {
         false
     }
 
+    /// The dock's layer and its edges' (`App::nudge_layers`).
+    pub(crate) fn dock_layers(&self) -> Vec<&LayerSurface> {
+        std::iter::once(&self.layer).chain(self.dock_screens.edges.iter().map(|e| &e.layer)).collect()
+    }
+
     /// Whether `surface` is an edge's.
     pub(crate) fn is_dock_edge(&self, surface: &WlSurface) -> bool {
         self.dock_screens.edges.iter().any(|e| e.layer.wl_surface() == surface)
@@ -640,6 +645,8 @@ impl App {
             let layer = edge_new(&self.compositor, &kit.shell, &self.qh, &output, side, depth, len);
             self.dock_screens.edges.push(Edge { layer, output, side, len, size: None, glow: false });
         }
+        // (A screen turned or resized: the edges kept are as long as it lets them.)
+        self.resize_edges();
     }
 }
 
@@ -727,6 +734,7 @@ mod tests {
             modes: Vec::new(),
             focused: false,
             pos,
+            transform: 0,
         }
     }
 

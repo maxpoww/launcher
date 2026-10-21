@@ -183,6 +183,32 @@ impl App {
             || self.shell_screens.remakes.iter().any(|r| r.part == part && r.hide)
     }
 
+    /// THE SCREENS MOVED (the Monitors page's arrangement): the compositor
+    /// moves a screen when its rule says so but leaves the layer surfaces on
+    /// it where they were (Hyprland 0.55: `hyprctl layers` still had them at
+    /// the old corner, and the shell drew a screen's width off). A layer
+    /// commit that names its margins has it lay out every layer of that
+    /// screen again — ours and the wallpaper's — so every one of ours says
+    /// its (unchanged, zero) margins once.
+    pub(crate) fn nudge_layers(&self) {
+        let mut layers: Vec<&LayerSurface> = [
+            self.options_layer.as_ref(),
+            self.deck_layer.as_ref(),
+            self.desktop_layer.as_ref(),
+            self.desktop_top.layer.as_ref(),
+            self.card_layer.as_ref(),
+            self.veil_layer.as_ref().map(|v| v.layer()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        layers.extend(self.dock_layers());
+        for layer in layers {
+            layer.set_margin(0, 0, 0, 0);
+            layer.commit();
+        }
+    }
+
     /// The bar's screen, by its connector name.
     pub(crate) fn bar_screen_name(&self) -> Option<String> {
         let output = self.shell_output.as_ref().or_else(|| self.part_output(Part::Options))?;

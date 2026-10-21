@@ -119,6 +119,9 @@ pub(crate) struct Monitor {
     pub focused: bool,
     /// Its top-left corner among the screens, in logical pixels.
     pub pos: (f64, f64),
+    /// How it is turned: the compositor's `transform` (0 as made, 1 a
+    /// quarter, 2 a half, 3 three quarters; 4–7 flipped).
+    pub transform: u8,
 }
 
 impl Monitor {
@@ -180,6 +183,7 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
                 modes,
                 focused: m["focused"].as_bool().unwrap_or(false),
                 pos: (m["x"].as_f64().unwrap_or(0.0), m["y"].as_f64().unwrap_or(0.0)),
+                transform: m["transform"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
             })
         })
         .collect()
@@ -321,10 +325,14 @@ pub(crate) struct DisplayChoice {
     /// `WxH@Hz`.
     pub mode: String,
     pub scale: f64,
-    /// Where it sits among the screens (`auto`, `0x0`…). Nothing sets it
-    /// yet; absent means `auto`.
+    /// Where it sits among the screens (`auto`, `0x0`…): set by the
+    /// Monitors page's arrangement; absent means `auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
+    /// How it is turned (the compositor's `transform`, 0–3): set by the
+    /// Monitors page's turning corners; absent means as made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<u8>,
 }
 
 /// The keyboard layout the owner chose, in xkb's names.
@@ -612,8 +620,14 @@ fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
     if !valid_position(position) {
         return None;
     }
+    // (Turned: said; as made: left out, as it always was.)
+    let transform = match choice.transform {
+        Some(t @ 0..=3) => format!(", transform = {t}"),
+        Some(_) => return None,
+        None => String::new(),
+    };
     Some(format!(
-        "hl.monitor({{ output = {}, mode = \"{}\", position = \"{position}\", scale = {scale} }})",
+        "hl.monitor({{ output = {}, mode = \"{}\", position = \"{position}\", scale = {scale}{transform} }})",
         lua_quote(selector),
         mode.rule(),
     ))
@@ -634,6 +648,29 @@ fn apply(selector: &str, choice: &DisplayChoice) -> bool {
             false
         }
     }
+}
+
+/// Put several screens' choices on the screens at once (one evaluation:
+/// an arrangement moves them together). Whether the compositor took them.
+pub(crate) fn apply_all(choices: &[(String, DisplayChoice)]) -> bool {
+    let mut lua = String::new();
+    for (selector, choice) in choices {
+        match monitor_rule(selector, choice) {
+            Some(rule) => {
+                lua.push_str(&rule);
+                lua.push(' ');
+            }
+            None => {
+                warn!("display: not a rule: {selector:?} {choice:?}");
+                return false;
+            }
+        }
+    }
+    let ok = !lua.is_empty() && hypr::eval_ok(&lua);
+    if !ok {
+        warn!("display: the compositor refused {lua}");
+    }
+    ok
 }
 
 /// A resolution being tried: on the screen, not saved.
@@ -787,8 +824,9 @@ impl App {
             return;
         }
         let selector = m.selector();
-        let position = GolemSettings::load().displays.get(&selector).and_then(|c| c.position.clone());
-        let choice = DisplayChoice { mode: m.mode.rule(), scale, position };
+        let saved = GolemSettings::load().displays.get(&selector).cloned();
+        let (position, transform) = saved.map_or((None, None), |c| (c.position, c.transform));
+        let choice = DisplayChoice { mode: m.mode.rule(), scale, position, transform };
         // The pill asked for is the lit one from the first frame drawn at
         // the new scale, not once the screen has been read back.
         self.settings_panel_mut().display_expect_scale(scale);
@@ -884,18 +922,19 @@ impl App {
         }
         let selector = m.selector();
         let saved = GolemSettings::load().displays.remove(&selector);
-        let position = saved.and_then(|c| c.position);
+        let (position, transform) = saved.map_or((None, None), |c| (c.position, c.transform));
         let wanted = DisplayChoice {
             mode: mode.rule(),
             // The same scale where the new size divides by it, else the
             // nearest that does.
             scale: nearest_clean(mode.w, mode.h, m.scale).unwrap_or(1.0),
             position: position.clone(),
+            transform,
         };
         // A second try on top of a first goes back to before the first.
         let previous = match self.display_pending.take() {
             Some(p) if p.selector == selector => p.previous,
-            _ => DisplayChoice { mode: m.mode.rule(), scale: m.scale, position },
+            _ => DisplayChoice { mode: m.mode.rule(), scale: m.scale, position, transform },
         };
         if !apply(&selector, &wanted) {
             return;
@@ -976,7 +1015,8 @@ impl App {
     /// `waverunner-ctl display …`: the settings without the panel (scripts,
     /// key bindings, and the way to see them work with no pointer).
     ///
-    /// `scale <n>` · `mode <WxH[@Hz]>` · `screen <n>` · `keep` · `back` · `reset` ·
+    /// `scale <n>` · `mode <WxH[@Hz]>` · `screen <n>` · `place <screen> <x> <y>` ·
+    /// `keep` · `back` · `reset` ·
     /// `show scale|resolution` (open the panel on that setting) · nothing:
     /// say what is on the screen.
     pub(crate) fn display_command(&mut self, args: &str) {
@@ -995,6 +1035,15 @@ impl App {
                 Ok(i) => self.display_pick_screen(i),
                 Err(_) => warn!("display: screen <n>"),
             },
+            // A screen of the Monitors page dropped at x y (logical px), as
+            // a drag would: `place EXT -1920 0`.
+            (Some("place"), Some(sel)) => {
+                let at: Vec<f64> = words.by_ref().filter_map(|w| w.parse().ok()).collect();
+                match at[..] {
+                    [x, y] => self.monitors_moved(sel, x, y),
+                    _ => warn!("display: place <screen> <x> <y>"),
+                }
+            }
             (Some("keep"), None) => self.keep_display(),
             (Some("back"), None) => self.revert_display(),
             (Some("reset"), None) => self.reset_display(),
@@ -1249,7 +1298,7 @@ mod tests {
         let mut store = GolemSettings::default();
         store.displays.insert(
             "desc:Apple Computer Inc Color LCD".to_owned(),
-            DisplayChoice { mode: "1440x900@60.00".to_owned(), scale: 1.25, position: None },
+            DisplayChoice { mode: "1440x900@60.00".to_owned(), scale: 1.25, position: None, transform: None },
         );
         let lua = store.lua();
         assert!(lua.lines().all(|l| l.starts_with("--") || l.starts_with("hl.monitor(") || l.starts_with("hl.config(")), "{lua}");
@@ -1267,11 +1316,24 @@ mod tests {
     }
 
     #[test]
+    fn an_arranged_screen_says_its_place_and_its_turn() {
+        let choice = DisplayChoice { mode: "3840x2160@60.00".to_owned(), scale: 1.0, position: Some("2000x0".to_owned()), transform: Some(1) };
+        let rule = monitor_rule("desc:SKYDATA S.P.A. TV MONITOR 0x00000001", &choice).unwrap();
+        assert!(rule.ends_with(r#"mode = "3840x2160@60.00", position = "2000x0", scale = 1, transform = 1 })"#), "{rule}");
+        // Left of the main screen: below zero.
+        let left = DisplayChoice { position: Some("-3840x0".to_owned()), transform: Some(0), ..choice.clone() };
+        assert!(monitor_rule("HDMI-A-1", &left).unwrap().contains(r#"position = "-3840x0", scale = 1, transform = 0"#));
+        // A turn that is not a quarter: no rule.
+        assert!(monitor_rule("HDMI-A-1", &DisplayChoice { transform: Some(9), ..choice }).is_none());
+    }
+
+    #[test]
     fn nothing_from_the_file_reaches_the_lua_unread() {
         let choice = |mode: &str, scale: f64, position: Option<&str>| DisplayChoice {
             mode: mode.to_owned(),
             scale,
             position: position.map(str::to_owned),
+            transform: None,
         };
         // A quote in a description stays inside its string.
         let rule = monitor_rule("desc:Evil \"}) os.exit() --\\", &choice("1440x900@60", 1.0, None)).unwrap();
