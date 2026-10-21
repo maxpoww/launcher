@@ -458,11 +458,14 @@ The big daemon files are cohesive but long — go straight to the function:
   The look: rows 29 px, 14 px symbols at 75 % of the ink, hairline rules between groups, the width the
   words want (214 at least, `width_of`). THE ROW UNDER THE POINTER is a QUIET HOVER (Max, 2026-10-21, after
   macOS and Windows: both are instant, and the blink was our accent band with white words flipping on every
-  row — a glide and then a crossfade of it were both taken back): a SOFT fill at once, the Files selection's
-  soft colour — the panel black 7.5 % in the light, white 10 % in the dark (`MenuPaint::soft`, the mockup's
-  `--sel-soft`) — at the row's radius; the words and symbol keep their ink, a red row its red; none on a
-  rule, a note or a row with nothing to do. No accent anywhere in a menu now (`MenuPaint` has none). The
-  selection pill's buttons were already the soft kind (the panel 7 % toward the ink, words unchanged). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
+  row — a glide and then a crossfade of it were both taken back): a SOFT TINT at once ("put at least some of
+  the colour on the selection") — the panel mixed toward the accent (`MenuPaint::accent`: the palette's, the
+  Files window's own) 16 % in the light, 22 % in the dark, toward the red on a red row 14 % / 20 % (`HOVER`,
+  `HOVER_RED`, `MenuPaint::hover`, mixed in sRGB, solid as the menu), and never so far that the row's words
+  read worse than 4.5 : 1 (or four fifths of what the bare panel gives): a very light accent in the dark stays
+  a tint; at the row's radius; the words and symbol keep their ink, a red row its red — never white; none on
+  a rule, a note or a row with nothing to do. The selection pill's buttons stay neutral (the panel 7 % toward
+  the ink). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
   `filer::copy_name`, undoable), Paste into folder, Select all, Copy to <the one stick plugged in>
   (`one_stick`), Send to › (a COPY now), New folder with these ("New folder with items", the selection
   moved in, its name typed; `Undo::Grouped`), Get info (Files: the i card; a place, the desktop: the
