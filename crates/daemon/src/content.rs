@@ -1392,6 +1392,9 @@ const SIDE_BOTTOM: f32 = 12.0;
 /// tall, the icons closer across (Max, 2026-10-21: "the horizontal gaps
 /// between the icons should be less — but not the gap between sections").
 pub const SIDE_CELL_W: f32 = GRID_CELL_H;
+/// How far past its section's edge a side box's page dots stand (their
+/// centres): by their own column, as a bottom section's sit just under it.
+const SIDE_DOTS_OFF: f32 = 4.0;
 
 /// How wide the open box is beside a side dock: the dock's band, the
 /// padding, and Files · Install · Apps with the gaps between them (each
@@ -3746,17 +3749,13 @@ pub fn scene(
         // Pages going down (beside a side dock): the dots stand in a column
         // on the box's own side of the section (Max, 2026-10-21): at its
         // left when the box is on the left, at its right when it is on the
-        // right, in the room between it and its neighbour (or the card's edge).
+        // right — right by its own column, not out in the gap ("they are the
+        // apps dots": as under a bottom section, just past its edge).
         if sec.vertical {
-            let (left_edge, right) = (sec.viewport.x, sec.viewport.x + sec.viewport.w);
             let dot_x = if layout.side == Side::Left {
-                let prev = layout.sections.iter().map(|o| o.viewport.x + o.viewport.w).filter(|&x| x < left_edge).fold(f32::MIN, f32::max);
-                let room = if prev > f32::MIN { left_edge - prev } else { GRID_PAD_X };
-                left_edge - room / 2.0
+                sec.viewport.x - SIDE_DOTS_OFF
             } else {
-                let next = layout.sections.iter().map(|o| o.viewport.x).filter(|&x| x > right).fold(f32::MAX, f32::min);
-                let room = if next < f32::MAX { next - right } else { GRID_PAD_X };
-                right + room / 2.0
+                sec.viewport.x + sec.viewport.w + SIDE_DOTS_OFF
             };
             let dot_cy = sec.viewport.y + sec.viewport.h / 2.0;
             if sec.n_pages > 1 && reveal_rect.contains((dot_x, dot_cy)) {
