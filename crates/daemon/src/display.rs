@@ -657,6 +657,11 @@ pub(crate) struct DisplayView {
     pub sizes: Vec<(u32, u32)>,
     /// The refresh rates of the current resolution, ascending.
     pub rates: Vec<f64>,
+    /// THE SCREENS (Max, 2026-10-21: "add monitors to the scale and
+    /// resolution pages"): every screen, by selector and name, in the
+    /// compositor's order — the page sets `target`'s. Empty with one.
+    pub screens: Vec<(String, String)>,
+    pub target: String,
 }
 
 impl DisplayView {
@@ -674,6 +679,8 @@ impl DisplayView {
             stops: scale_stops(m.mode.w, m.mode.h, m.scale),
             sizes,
             rates,
+            screens: Vec::new(),
+            target: m.selector(),
         }
     }
 
@@ -690,11 +697,14 @@ impl App {
         self.display_target_of(None)
     }
 
-    /// The screen known as `sel` (`Monitor::selector`: the Monitors page's
-    /// picked one), else the one in use.
+    /// The screen known as `sel` (`Monitor::selector`), else the one picked
+    /// — on the Monitors page, or the Scale and Resolution pages' screens —
+    /// else the one in use.
     fn display_target_of(&self, sel: Option<&str>) -> Option<Monitor> {
         let mut all = monitors();
-        if let Some(i) = sel.and_then(|sel| all.iter().position(|m| m.selector() == sel)) {
+        let picked = GolemSettings::load().monitors.picked;
+        let want = sel.map(str::to_owned).or(picked);
+        if let Some(i) = want.and_then(|sel| all.iter().position(|m| m.selector() == sel)) {
             return Some(all.swap_remove(i));
         }
         match all.iter().position(|m| m.focused) {
@@ -705,7 +715,29 @@ impl App {
 
     /// What the open display setting shows, read from the screen now.
     pub(crate) fn display_view(&self) -> Option<DisplayView> {
-        self.display_target().as_ref().map(DisplayView::of)
+        let mut view = self.display_target().as_ref().map(DisplayView::of)?;
+        let all = monitors();
+        if all.len() > 1 {
+            view.screens = all.iter().map(|m| (m.selector(), m.title())).collect();
+        }
+        Some(view)
+    }
+
+    /// The screen at `index` of a Scale or Resolution page's screens picked:
+    /// the pages (and the Monitors page) set it from now on.
+    pub(crate) fn display_pick_screen(&mut self, index: usize) {
+        let Some(m) = monitors().into_iter().nth(index) else {
+            return;
+        };
+        info!("display: setting {} now", m.name);
+        GolemSettings::change(|store| {
+            store.monitors.picked = Some(m.selector());
+            store.save();
+        });
+        self.settings_panel_mut().display_refresh_at(Instant::now());
+        self.quick.display_refresh_at(Instant::now());
+        self.monitors_read_soon(Duration::from_millis(1));
+        self.schedule_frame();
     }
 
     /// Seconds a tried resolution still has, if one is being tried.
@@ -944,7 +976,7 @@ impl App {
     /// `waverunner-ctl display …`: the settings without the panel (scripts,
     /// key bindings, and the way to see them work with no pointer).
     ///
-    /// `scale <n>` · `mode <WxH[@Hz]>` · `keep` · `back` · `reset` ·
+    /// `scale <n>` · `mode <WxH[@Hz]>` · `screen <n>` · `keep` · `back` · `reset` ·
     /// `show scale|resolution` (open the panel on that setting) · nothing:
     /// say what is on the screen.
     pub(crate) fn display_command(&mut self, args: &str) {
@@ -957,6 +989,11 @@ impl App {
             (Some("mode"), Some(text)) => match Mode::parse(text) {
                 Some(mode) => self.set_display_mode(mode.w, mode.h, (mode.hz > 0.0).then_some(mode.hz)),
                 None => warn!("display: not a mode: {text:?}"),
+            },
+            // The screen the pages set, by its place among them (from 0).
+            (Some("screen"), Some(n)) => match n.parse::<usize>() {
+                Ok(i) => self.display_pick_screen(i),
+                Err(_) => warn!("display: screen <n>"),
             },
             (Some("keep"), None) => self.keep_display(),
             (Some("back"), None) => self.revert_display(),

@@ -570,6 +570,8 @@ pub(crate) enum PanelAction {
     /// A choice of one of the other settings ([`crate::controls`]): the
     /// group it is in and its place there.
     Pick { group: u8, index: u8 },
+    /// The screen a Scale or Resolution page sets: its place among them.
+    Target(u8),
 }
 
 /// One choice of an open setting: a floating pill, lit when it is the one
@@ -2667,6 +2669,18 @@ impl Panel {
             return Some(out);
         };
         let mut y = top;
+        // THE SCREENS (Max, 2026-10-21: "add monitors to the scale and
+        // resolution pages"): with more than one, their names first, the one
+        // the page sets lit — the Monitors page's picked screen.
+        if v.screens.len() > 1 {
+            let chips = v
+                .screens
+                .iter()
+                .enumerate()
+                .map(|(i, (sel, title))| (title.clone(), *sel == v.target, PanelAction::Target(i as u8)))
+                .collect();
+            y = self.flow_words(&mut out, y, chips, false) + 6.0 * s;
+        }
         if label == "Scale" {
             let (lw, lh) = v.looks_like();
             out.subtitle = crate::i18n::fill(tr("{0} · looks like {lw} × {lh}"), &[("0", &v.screen), ("lw", &lw), ("lh", &lh)]);
@@ -4637,6 +4651,7 @@ impl App {
                 Some(PanelAction::Keep) => self.keep_display(),
                 Some(PanelAction::Revert) => self.revert_display(),
                 Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, false),
+                Some(PanelAction::Target(i)) => self.display_pick_screen(usize::from(i)),
                 None => {}
             }
             self.schedule_frame();
@@ -5150,6 +5165,7 @@ impl App {
                 Some(PanelAction::Keep) => self.keep_display(),
                 Some(PanelAction::Revert) => self.revert_display(),
                 Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, quick),
+                Some(PanelAction::Target(i)) => self.display_pick_screen(usize::from(i)),
                 None => {}
             }
             self.schedule_frame();
@@ -5175,6 +5191,7 @@ impl App {
                 PanelAction::Keep => self.keep_display(),
                 PanelAction::Revert => self.revert_display(),
                 PanelAction::Pick { group, index } => self.control_pick(group, index, true),
+                PanelAction::Target(i) => self.display_pick_screen(usize::from(i)),
             },
             // On no choice: the box's own empty space closes it, as its
             // last line says (Max, 2026-10-14: "the box says click empty
@@ -5467,6 +5484,22 @@ mod tests {
         assert!(p.open.is_none(), "folded back and gone");
     }
 
+    #[test]
+    fn with_two_screens_the_scale_page_names_them_the_one_it_sets_lit() {
+        let mut p = display_open("Scale", 1.0);
+        if let Some(v) = p.display.as_mut() {
+            v.screens = vec![("eDP-1".to_owned(), "Built-in screen".to_owned()), ("desc:TV".to_owned(), "TV MONITOR".to_owned())];
+            v.target = "desc:TV".to_owned();
+        }
+        let c = p.open_content("Scale").unwrap();
+        let names: Vec<&Chip> = c.chips.iter().filter(|ch| matches!(ch.action, PanelAction::Target(_))).collect();
+        assert_eq!(names.len(), 2);
+        assert!(!names[0].on && names[1].on, "the TV is the one set");
+        assert_eq!(names[1].action, PanelAction::Target(1));
+        let scales: Vec<&Chip> = c.chips.iter().filter(|ch| matches!(ch.action, PanelAction::Scale(_))).collect();
+        assert!(scales.iter().all(|ch| ch.rect.y > names[0].rect.y + names[0].rect.h), "the screens come first");
+    }
+
     /// The panel with `label` open and the MacBook's screen read into it.
     fn display_open(label: &'static str, scale: f64) -> Panel {
         let mut p = panel();
@@ -5482,6 +5515,8 @@ mod tests {
             stops: crate::display::scale_stops(1440, 900, scale),
             sizes: vec![(1440, 900), (1280, 800), (1024, 640)],
             rates: vec![60.0],
+            screens: Vec::new(),
+            target: String::new(),
         }));
         for _ in 0..40 {
             p.step(1.0 / 60.0, None);

@@ -209,6 +209,8 @@ pub(crate) struct PageScreen {
     pub at: (f64, f64),
     pub sizes: Vec<(u32, u32)>,
     pub stops: Vec<f64>,
+    /// The one in use (the compositor's focus).
+    pub focused: bool,
 }
 
 impl PageScreen {
@@ -266,6 +268,7 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
                 at: placed.map_or(m.pos, |p| (p.x, p.y)),
                 sizes,
                 stops,
+                focused: m.focused,
             }
         })
         .collect()
@@ -287,13 +290,14 @@ fn keep_together(screens: &mut [PageScreen], isolated: bool) {
     }
 }
 
-/// The screen picked in the drawing: the saved one, else the built-in,
-/// else the first.
+/// The screen picked in the drawing: the saved one (here, or on the Scale
+/// and Resolution pages), else the one in use, as those pages set it.
 fn picked<'a>(screens: &'a [PageScreen], choice: &MonitorsChoice) -> Option<&'a PageScreen> {
     choice
         .picked
         .as_ref()
         .and_then(|p| screens.iter().find(|s| &s.sel == p))
+        .or_else(|| screens.iter().find(|s| s.focused))
         .or_else(|| screens.iter().find(|s| s.builtin))
         .or(screens.first())
 }
