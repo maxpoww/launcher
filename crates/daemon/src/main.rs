@@ -3809,10 +3809,11 @@ impl App {
         self.overview_active || self.stage.is_on()
     }
 
-    /// The Colours box is set looking at the dock (Max, 2026-10-20): while
-    /// it is open the dock stays up — no dodge, no autohide.
+    /// The Colours box is set looking at the dock (Max, 2026-10-20), and so
+    /// is the Launcher box (2026-10-21): while one is open the dock stays up
+    /// — no dodge, no autohide (`panel::calls_dock`).
     fn dock_held_up(&self) -> bool {
-        self.fast.boxed == Some("Colours")
+        self.fast.boxed.is_some_and(crate::panel::calls_dock)
     }
 
     /// Calls a hidden dock up beside the quick box, leaving the box open. A

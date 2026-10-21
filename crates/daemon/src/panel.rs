@@ -165,7 +165,7 @@ static DOCK_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 /// The settings whose box calls a hidden dock up while it is open: what
 /// they set is seen on the dock.
-fn calls_dock(label: &str) -> bool {
+pub(crate) fn calls_dock(label: &str) -> bool {
     matches!(label, "Colours" | "Launcher")
 }
 
