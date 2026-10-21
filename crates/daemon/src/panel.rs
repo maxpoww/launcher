@@ -159,9 +159,15 @@ const QUICK_FOOT: f32 = 44.0;
 const QUICK_MIN_H: f32 = 170.0;
 /// The share of the screen a setting made of pictures takes.
 const QUICK_WHOLE: f32 = 0.955;
-/// The Colours box called a hidden dock up (`quick_open`): it hides again
-/// when the box is left.
+/// The Colours or the Launcher box called a hidden dock up (`quick_open`):
+/// it hides again when the box is left.
 static DOCK_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The settings whose box calls a hidden dock up while it is open: what
+/// they set is seen on the dock.
+fn calls_dock(label: &str) -> bool {
+    matches!(label, "Colours" | "Launcher")
+}
 
 /// The Colours box's width: a little less than the wallpapers' (Max,
 /// 2026-10-20: "make the box a little smaller").
@@ -4581,8 +4587,10 @@ impl App {
             self.settings_panel_mut().note_use(label);
             info!("quick controls: opening {label}");
             // The colours are set looking at the dock: a hidden one comes up
-            // for as long as the box is open (Max, 2026-10-20).
-            if label == "Colours" && self.call_dock() {
+            // for as long as the box is open (Max, 2026-10-20). So is the
+            // dock itself, in the Launcher box (Max, 2026-10-21: "so I see
+            // it when I'm controlling it").
+            if calls_dock(label) && self.call_dock() {
                 DOCK_CALLED.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -4705,9 +4713,9 @@ impl App {
 
     /// The quick box of `label` was left.
     pub(crate) fn quick_left(&mut self, label: &'static str) {
-        // The dock the Colours box called goes back to hiding (as it does
-        // when the pointer leaves it: unless the pointer is on it).
-        if label == "Colours" && DOCK_CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        // The dock the Colours or Launcher box called goes back to hiding (as
+        // it does when the pointer leaves it: unless the pointer is on it).
+        if calls_dock(label) && DOCK_CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.schedule_autohide();
         }
         // (The wallpapers are on the Colours box's Wallpaper tab.)
