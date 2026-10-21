@@ -773,6 +773,10 @@ const ICON_INK: f32 = 0.75;
 const NOTE_INK: f32 = 0.5;
 const LINE_INK: f32 = 0.12;
 const OFF_INK: f32 = 0.38;
+/// How far the row under the pointer is tinted toward the accent, in the
+/// light and in the dark; toward the red on a red row.
+const HOVER: (f32, f32) = (0.16, 0.22);
+const HOVER_RED: (f32, f32) = (0.14, 0.20);
 
 /// A colour given in sRGB, as the renderer takes it.
 fn lin(c: [f32; 4]) -> [f32; 4] {
@@ -808,19 +812,27 @@ pub(crate) struct MenuPaint {
     /// Golem Files' windows — there the dark look's night light sank a
     /// menu's lower rows toward black (Max, 2026-10-21: as the History).
     pub glass: f32,
+    /// What the row under the pointer is tinted with (`MenuPaint::hover`).
+    pub accent: [f32; 4],
 }
 
 impl MenuPaint {
-    /// The row under the pointer: the panel a step darker in the light
-    /// (black 7.5 %), lighter in the dark (white 10 %) — the Files
-    /// selection's soft colour (the mockup's `--sel-soft`), mixed as a page
-    /// mixes them.
-    pub fn soft(&self) -> [f32; 4] {
+    /// The accent the palette wears now (the desktop's menus).
+    pub fn accent_now() -> [f32; 4] {
+        lin(crate::palette::accent_srgb())
+    }
+
+    /// The row under the pointer: the panel tinted `k` of the way toward
+    /// `tint` (`k_dark` in the dark), mixed as a page mixes them — and
+    /// never so far that `ink`, the row's words as they are, reads much
+    /// less well on it than on the panel (a very light accent in the dark
+    /// stays a tint: at least 4.5 : 1, or four fifths of what the panel
+    /// gives when that is less).
+    pub fn hover(&self, tint: [f32; 4], k: f32, k_dark: f32, ink: [f32; 4]) -> [f32; 4] {
         let luma = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-        let (to, k) = if luma(self.ink) > luma(self.fill) {
-            (1.0, 0.10)
-        } else {
-            (0.0, 0.075)
+        let contrast = |a: [f32; 4], b: [f32; 4]| {
+            let (x, y) = (luma(a) + 0.05, luma(b) + 0.05);
+            x.max(y) / x.min(y)
         };
         let srgb = |v: f32| {
             if v <= 0.003_130_8 {
@@ -829,12 +841,18 @@ impl MenuPaint {
                 1.055 * v.powf(1.0 / 2.4) - 0.055
             }
         };
-        let m = |v: f32| {
-            let s = srgb(v);
-            s + (to - s) * k
-        };
         let f = self.fill;
-        lin([m(f[0]), m(f[1]), m(f[2]), f[3]])
+        let at = |k: f32| {
+            let m = |i: usize| srgb(f[i]) + (srgb(tint[i]) - srgb(f[i])) * k;
+            lin([m(0), m(1), m(2), f[3]])
+        };
+        let floor = 4.5_f32.min(contrast(ink, f) * 0.8);
+        let dark = luma(self.ink) > luma(f);
+        let mut k = if dark { k_dark } else { k };
+        while k > 0.0 && contrast(ink, at(k)) < floor {
+            k -= 0.01;
+        }
+        at(k.max(0.0))
     }
 }
 
@@ -1084,21 +1102,28 @@ impl Menu {
                     danger,
                     off,
                 } => {
-                    // The row under the pointer: a SOFT fill, at once (Max,
-                    // 2026-10-21: a QUIET hover, as macOS and Windows —
-                    // the accent band with white words flipping row to row
-                    // was the blink); its words and symbol keep their ink,
+                    // The row under the pointer: a SOFT TINT of the accent
+                    // (red for what cannot be undone), at once (Max,
+                    // 2026-10-21: a QUIET hover, as macOS and Windows — the
+                    // accent band with white words flipping row to row was
+                    // the blink — "but put at least some of the colour on
+                    // the selection"); its words and symbol keep their ink,
                     // a red row its red.
+                    let base = if *danger { red() } else { paint.ink };
                     if self.hover == Some(i) && !off {
+                        let fill = if *danger {
+                            paint.hover(red(), HOVER_RED.0, HOVER_RED.1, base)
+                        } else {
+                            paint.hover(paint.accent, HOVER.0, HOVER.1, base)
+                        };
                         grid.rects.push(RectInst {
                             rect,
                             radius: ROW_RADIUS,
-                            color: fade(paint.soft()),
+                            color: fade(fill),
                             glass: 0.0,
                             border: 0.0,
                         });
                     }
-                    let base = if *danger { red() } else { paint.ink };
                     let k = if *off { OFF_INK } else { 1.0 };
                     let at = |a: f32| [base[0], base[1], base[2], base[3] * a * k];
                     let cy = rect.y + rect.h / 2.0;
@@ -1465,26 +1490,43 @@ mod tests {
         assert!(sort.contains(&Row::item("Size", "tick", Action::SortBy(2))));
         assert!(sort.contains(&Row::item("Descending", "tick", Action::SortDir(true))));
     }
-    /// The row under the pointer is the panel a soft step off: darker in
-    /// the light (black 7.5 %), lighter in the dark (white 10 %).
+    /// The row under the pointer is the panel tinted toward the accent —
+    /// and a light accent in the dark stays a tint the words read on.
     #[test]
-    fn the_hover_is_a_soft_step_of_the_panel() {
+    fn the_hover_is_a_soft_tint_the_words_still_read_on() {
         let paint = |fill: [f32; 4], ink: [f32; 4]| MenuPaint {
             fill,
             ink,
             wash: [0.0; 4],
             radius: 10.0,
             glass: 0.0,
+            accent: [0.0; 4],
         };
-        // #e8e5de with dark ink: #d7d4cd (each sRGB channel × 0.925).
-        let light = paint([0.807, 0.784, 0.73, 1.0], [0.01, 0.01, 0.01, 1.0]).soft();
-        let want = lin([0.8416, 0.8309, 0.8051, 1.0]);
+        let luma = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let contrast = |a: [f32; 4], b: [f32; 4]| {
+            let (x, y) = (luma(a) + 0.05, luma(b) + 0.05);
+            x.max(y) / x.min(y)
+        };
+        // The light: #e8e5de toward #8148b3 by 16 % (in sRGB) = #d7cbd5.
+        let ink = lin([0.11, 0.11, 0.11, 1.0]);
+        let light = paint(lin([0.91, 0.898, 0.871, 1.0]), ink);
+        let got = light.hover(lin([0.506, 0.282, 0.702, 1.0]), 0.16, 0.22, ink);
+        let want = lin([0.8454, 0.8, 0.8439, 1.0]);
         for c in 0..3 {
-            assert!((light[c] - want[c]).abs() < 0.003, "{light:?} {want:?}");
+            assert!((got[c] - want[c]).abs() < 0.004, "{got:?} {want:?}");
         }
-        // A near-black panel with light ink: a tenth of the way to white.
-        let dark = paint([0.01, 0.01, 0.01, 0.9], [0.9, 0.9, 0.9, 1.0]).soft();
-        assert!(dark[0] > 0.01 && dark[3] == 0.9);
+        // The dark, a lavender accent: a tint, the light ink still at 4.5 : 1
+        // or more.
+        let ink = lin([0.9, 0.9, 0.92, 1.0]);
+        let dark = paint(lin([0.07, 0.07, 0.08, 1.0]), ink);
+        let lavender = lin([0.85, 0.72, 1.0, 1.0]);
+        let got = dark.hover(lavender, 0.16, 0.22, ink);
+        assert!(luma(got) > luma(dark.fill), "it is tinted");
+        assert!(contrast(ink, got) >= 4.5, "{}", contrast(ink, got));
+        // Even asked for far too much, it stops where the words still read.
+        let got = dark.hover(lavender, 0.9, 0.9, ink);
+        assert!(contrast(ink, got) >= 4.5 && luma(got) > luma(dark.fill));
+        assert_eq!(got[3], 1.0);
     }
 
     /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one

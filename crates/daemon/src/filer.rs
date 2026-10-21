@@ -4411,6 +4411,8 @@ impl App {
         // window — and unlit, as the History is (the dark look's night light
         // sank its lower rows toward black).
         paint.glass = crate::content::UNLIT;
+        // (The row under the pointer is tinted with the window's own accent.)
+        paint.accent = self.filer_palette().accent;
         if crate::palette::shell().is_some() {
             paint.fill[3] = 1.0;
             return paint;
