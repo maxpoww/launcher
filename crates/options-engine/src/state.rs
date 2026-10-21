@@ -361,6 +361,147 @@ pub struct BluetoothState {
     pub device: String,
 }
 
+/// Printing: the printers CUPS has, and the prints it is working on.
+///
+/// Its own [`Layer::Printing`]: a machine with no CUPS (Golem's lean build)
+/// and a scheduler that does not answer leave it dark — "no printers" is only
+/// said when CUPS says it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrintingState {
+    /// Every printer (queue) CUPS has, in its order.
+    pub printers: Vec<Printer>,
+    /// The prints not finished yet (waiting, held, printing, stopped), oldest
+    /// first — then each one that just ended, for a short while, so whoever
+    /// shows a print can show how it ended.
+    pub jobs: Vec<PrintJob>,
+}
+
+impl PrintingState {
+    /// The printer every app prints to unless told otherwise.
+    pub fn default_printer(&self) -> Option<&Printer> {
+        self.printers.iter().find(|p| p.default)
+    }
+    /// A printer by its queue name.
+    pub fn printer(&self, name: &str) -> Option<&Printer> {
+        self.printers.iter().find(|p| p.name == name)
+    }
+}
+
+/// A printer: a CUPS queue and what its device says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Printer {
+    /// The queue's name (`DeskJet-1200-series`): what every request names.
+    pub name: String,
+    /// What it is called for people (`HP DeskJet 1200 series`).
+    pub info: String,
+    /// Make and model, as its driver says.
+    pub model: String,
+    pub location: String,
+    /// How it is reached (`hp:/usb/…`, `ipp://…`, `dnssd://…`).
+    pub uri: String,
+    pub state: PrinterState,
+    /// Whether it takes new prints (a printer can be paused and still take
+    /// them, to print when it is taken up again).
+    pub accepting: bool,
+    /// The default printer.
+    pub default: bool,
+    /// The reasons it gives for its state (RFC 8011 keywords, `none` left
+    /// out): `media-empty-error`, `marker-supply-low-warning`, `paused`…
+    pub reasons: Vec<String>,
+    /// The last line its driver or CUPS wrote about it.
+    pub message: String,
+    /// What stops it printing, if anything.
+    pub problem: Option<PrinterProblem>,
+    /// Ink or toner, when the printer tells (many do not over USB).
+    pub markers: Vec<Marker>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrinterState {
+    #[default]
+    Idle,
+    Printing,
+    /// Paused: prints wait for it.
+    Stopped,
+}
+
+/// What stops a printer: the few things a person can do something about,
+/// and the rest as the printer named it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrinterProblem {
+    NoPaper,
+    PaperJam,
+    NoInk,
+    DoorOpen,
+    /// Off, unplugged, or not answering.
+    Offline,
+    /// Paused by hand (prints wait until it is taken up again).
+    Paused,
+    /// Any other error, by the printer's keyword (`fuser-over-temp`).
+    Other(String),
+}
+
+/// One ink or toner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    pub name: String,
+    /// `#RRGGBB` (several, run together, for a tri-colour cartridge).
+    pub color: String,
+    /// Percent left, when the printer gives a number.
+    pub level: Option<u8>,
+    /// `ink-cartridge`, `toner`…
+    pub kind: String,
+}
+
+/// A print.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrintJob {
+    /// CUPS's job id.
+    pub id: u32,
+    /// The queue it prints on.
+    pub printer: String,
+    /// What it is called (the file's or the document's name).
+    pub title: String,
+    pub user: String,
+    pub state: JobState,
+    /// Its reasons (`job-printing`, `printer-stopped`, `job-canceled-by-user`…).
+    pub reasons: Vec<String>,
+    /// The printer's last line while this printed.
+    pub message: String,
+    /// Sheets out of the printer so far.
+    pub sheets_done: u32,
+    /// Pages in all, when CUPS knows (often it does not).
+    pub pages: Option<u32>,
+    /// When it was sent (Unix seconds).
+    pub created: u64,
+    /// When it ended (Unix seconds), once it has.
+    pub finished: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JobState {
+    #[default]
+    Pending,
+    Held,
+    Printing,
+    /// Its printer stopped while it printed (paused, off, an error).
+    Stopped,
+    Canceled,
+    /// Failed.
+    Aborted,
+    Completed,
+}
+
+impl JobState {
+    /// Whether it has ended, one way or another.
+    pub fn ended(self) -> bool {
+        matches!(
+            self,
+            JobState::Canceled | JobState::Aborted | JobState::Completed
+        )
+    }
+}
+
 /// NixOS deploy state: is the system we're *running* the system we last *built*?
 ///
 /// Both flags default to `false` — the healthy, in-sync case, and also the
@@ -430,6 +571,10 @@ pub enum Layer {
     /// presence). Its own layer so an unresolvable location leaves it dark
     /// rather than asserting "daytime".
     Daylight,
+    /// Layer 4 (part) — printing, from CUPS. Its own layer so a machine with
+    /// no CUPS, or a scheduler that does not answer, leaves it dark rather
+    /// than asserting "no printers".
+    Printing,
     /// Layer 4 (part) — Bluetooth, over BlueZ. Its own layer because an absent
     /// adapter, a stopped `bluetoothd` and "nothing is paired" are three
     /// different answers, and only the last one is knowledge.
@@ -460,6 +605,8 @@ pub struct Health {
     pub notifications: LayerHealth,
     pub daylight: LayerHealth,
     pub bluetooth: LayerHealth,
+    #[serde(default)]
+    pub printing: LayerHealth,
 }
 
 impl Health {
@@ -474,6 +621,7 @@ impl Health {
             Layer::Notifications => &mut self.notifications,
             Layer::Daylight => &mut self.daylight,
             Layer::Bluetooth => &mut self.bluetooth,
+            Layer::Printing => &mut self.printing,
         }
     }
 
@@ -541,6 +689,9 @@ pub struct ContextState {
     pub network: NetworkState,
     /// Bluetooth: adapter present/powered, and what is connected.
     pub bluetooth: BluetoothState,
+    /// Printers and prints, from CUPS.
+    #[serde(default)]
+    pub printing: PrintingState,
     pub hypr_submap: String,
     pub active_layout: String,
     pub is_screencasting: bool,

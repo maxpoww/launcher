@@ -56,6 +56,7 @@
 mod child;
 mod collector;
 mod collectors;
+pub mod cups;
 mod engine;
 mod message;
 mod mind;
@@ -64,6 +65,7 @@ mod state;
 
 pub use child::die_with_parent;
 pub use collectors::daylight::sun_elevation_deg;
+pub use collectors::printing::PrintingCollector;
 pub use collector::{Collector, CollectorFuture};
 pub use engine::Engine;
 pub use message::{ContextDelta, Update};
@@ -74,7 +76,8 @@ pub use mind::{
 pub use self_capture::{begin_self_capture, end_self_capture};
 pub use state::{
     ActiveWindow, AppInternalContext, AudioSink, AudioState, BehavioralMetrics, BluetoothState,
-    ContextState, DaylightState, DeployHealth, GitContext, Health, Layer, LayerHealth, NetworkLink,
-    NetworkState, NotificationContext, PlaybackState, Playing, PlayingSource, SystemMetrics,
-    TextSelection, WindowInfo,
+    ContextState, DaylightState, DeployHealth, GitContext, Health, JobState, Layer, LayerHealth,
+    Marker, NetworkLink, NetworkState, NotificationContext, PlaybackState, Playing, PlayingSource,
+    PrintJob, Printer, PrinterProblem, PrinterState, PrintingState, SystemMetrics, TextSelection,
+    WindowInfo,
 };

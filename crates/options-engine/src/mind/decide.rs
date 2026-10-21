@@ -313,6 +313,7 @@ fn layer_alive(ctx: &ContextState, layer: Layer) -> bool {
         Layer::Notifications => ctx.health.notifications.alive,
         Layer::Daylight => ctx.health.daylight.alive,
         Layer::Bluetooth => ctx.health.bluetooth.alive,
+        Layer::Printing => ctx.health.printing.alive,
     }
 }
 

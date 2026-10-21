@@ -17,5 +17,6 @@ pub(crate) mod gpu;
 pub mod hyprland;
 pub mod media;
 pub mod notifications;
+pub mod printing;
 pub mod selection;
 pub mod system;

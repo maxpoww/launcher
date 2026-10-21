@@ -8,8 +8,8 @@
 
 use crate::state::{
     ActiveWindow, AppInternalContext, AudioSink, AudioState, BluetoothState, DaylightState,
-    DeployHealth, GitContext, Layer, NetworkState, NotificationContext, Playing, SystemMetrics,
-    TextSelection, WindowInfo,
+    DeployHealth, GitContext, Layer, NetworkState, NotificationContext, Playing, PrintingState,
+    SystemMetrics, TextSelection, WindowInfo,
 };
 
 /// A partial change to the context. Only the variants the current collectors
@@ -71,6 +71,8 @@ pub enum ContextDelta {
     Network(NetworkState),
     /// Bluetooth adapter + connection state, from BlueZ.
     Bluetooth(BluetoothState),
+    /// Printers and prints, from CUPS.
+    Printing(PrintingState),
 }
 
 /// A message from a collector to the aggregator: either a data change or a

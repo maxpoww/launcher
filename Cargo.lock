@@ -1336,6 +1336,7 @@ name = "options-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-core",
  "libc",
  "serde",
  "serde_json",

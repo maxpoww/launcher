@@ -39,7 +39,8 @@ impl Engine {
     /// Start the engine with only the collectors the shell DRAWS from: the
     /// focused window and window list (window pill, playing box), metrics,
     /// battery and network (gear readout, battery alarm), media and audio
-    /// (now-playing cluster, volume), Bluetooth (readout).
+    /// (now-playing cluster, volume), Bluetooth (readout), printing (CUPS
+    /// signals; a look a minute when nothing prints).
     ///
     /// The other seven (git, bridge, selection, deploy, notifications,
     /// downloads, daylight) feed fields nothing on screen reads — the night
@@ -54,6 +55,7 @@ impl Engine {
             Box::new(crate::collectors::media::MediaCollector::new()),
             Box::new(crate::collectors::audio::AudioCollector::new()),
             Box::new(crate::collectors::bluetooth::BluetoothCollector::new()),
+            Box::new(crate::collectors::printing::PrintingCollector::new()),
         ])
     }
 
@@ -119,6 +121,7 @@ fn default_collectors() -> Vec<Box<dyn Collector>> {
         Box::new(crate::collectors::downloads::DownloadsCollector::new()),
         Box::new(crate::collectors::daylight::DaylightCollector::new()),
         Box::new(crate::collectors::bluetooth::BluetoothCollector::new()),
+        Box::new(crate::collectors::printing::PrintingCollector::new()),
     ]
 }
 
@@ -221,6 +224,7 @@ fn apply(state: &mut ContextState, delta: ContextDelta) {
         ContextDelta::Daylight(d) => state.daylight = d,
         ContextDelta::Network(n) => state.network = n,
         ContextDelta::Bluetooth(b) => state.bluetooth = b,
+        ContextDelta::Printing(p) => state.printing = p,
     }
 }
 
