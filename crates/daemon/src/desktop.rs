@@ -2473,7 +2473,9 @@ impl App {
             .and_then(|i| i.logical_size)
             .map(|(_, h)| h as f32)
             .or_else(|| self.output_logical_height());
-        self.icon_scale_for(screen_h) * self.desktop_zoom()
+        // (At the main screen's size: the dock bigger on another screen
+        // leaves the desktop as it was.)
+        self.icon_scale_for(screen_h, self.icon_size_home) * self.desktop_zoom()
     }
 
     pub(crate) fn relayout_desktop(&mut self) {

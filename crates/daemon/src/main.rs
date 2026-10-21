@@ -827,6 +827,7 @@ fn main() -> anyhow::Result<()> {
         ),
         config,
         icon_size: load_icon_size(),
+        icon_size_home: load_icon_size(),
         buffer_size: (0, 0),
         scale_factor: 1,
         last_frame: None,
@@ -1084,7 +1085,7 @@ fn main() -> anyhow::Result<()> {
     // Reconcile the Wayland surface size and UiState extents with the
     // persisted icon_size (main() computed them assuming scale 1.0).
     if app.icon_size != 1 {
-        app.apply_icon_size_change();
+        app.refresh_scaled_geometry();
     }
 
     // Own the newest clip up front so it's pasteable from a fresh session (our
@@ -1872,6 +1873,9 @@ pub struct App {
     config: Config,
     /// Icon-size level (0–3). Ctrl+Plus/Minus cycles through ICON_SCALES.
     icon_size: usize,
+    /// The main screen's dock size (what the desktop's icons follow, and a
+    /// screen the dock has no size of its own on starts at).
+    icon_size_home: usize,
     /// Current buffer size in physical pixels, from `configure`.
     buffer_size: (u32, u32),
     scale_factor: i32,
@@ -2955,14 +2959,16 @@ impl App {
     /// distinct AND fits. Every extent and surface size derives from this one
     /// value, so the fit belongs here.
     pub fn icon_scale(&self) -> f32 {
-        self.icon_scale_for(self.dock_screen_h())
+        self.icon_scale_for(self.dock_screen_h(), self.icon_size)
     }
 
-    /// [`Self::icon_scale`] on a screen `screen_h` tall (logical px): the
-    /// dock's is the dock's screen, the desktop's its own.
-    pub(crate) fn icon_scale_for(&self, screen_h: Option<f32>) -> f32 {
+    /// [`Self::icon_scale`] at size `level` on a screen `screen_h` tall
+    /// (logical px): the dock's on its screen, the desktop's on its own at
+    /// the main screen's level.
+    pub(crate) fn icon_scale_for(&self, screen_h: Option<f32>, level: usize) -> f32 {
         let levels = &content::ICON_SCALES;
-        let requested = levels[self.icon_size];
+        let level = level.min(levels.len() - 1);
+        let requested = levels[level];
         let base_full = (self.config.window.height + self.config.window.bottom_margin) as f32;
         let Some(h) = screen_h else {
             return requested;
@@ -2978,7 +2984,7 @@ impl App {
             .min(largest)
             .max(content::OPEN_FIT_FLOOR);
         let lo = smallest.min(cap);
-        let t = self.icon_size as f32 / (levels.len() - 1) as f32;
+        let t = level as f32 / (levels.len() - 1) as f32;
         lo + (cap - lo) * t
     }
 
@@ -3041,16 +3047,33 @@ impl App {
         let (_, h) = self.scaled_surface_size();
         self.layer.set_size(0, h); // full width (compositor fills via left+right anchor)
         self.layer.wl_surface().commit();
+        // (Drawn at the new size now: a surface as tall as before gets no
+        // configure to draw it.)
+        self.dirty = true;
+        self.schedule_frame();
     }
 
-    /// Resize the Wayland surface and update animation extents after an icon_size change.
+    /// Resize the Wayland surface and update animation extents after an
+    /// icon_size change, and keep it — for the screen the dock is on.
     fn apply_icon_size_change(&mut self) {
+        self.resize_for_icon_size();
+        self.keep_dock_size();
+    }
+
+    /// The surface and extents for the current icon_size, drawn now: a
+    /// size whose surface stays as tall (the screen's height, on a tall
+    /// screen always) gets no configure to draw it, and showed only at the
+    /// next frame (Max, 2026-10-21, on the TV: "I press, and after it jumps").
+    fn resize_for_icon_size(&mut self) {
         let (dock_extent, full_extent) = self.scaled_extents();
         self.ui.set_extents(dock_extent, full_extent);
         let (_, h) = self.scaled_surface_size();
         self.layer.set_size(0, h); // full width (compositor fills via left+right anchor)
         self.layer.wl_surface().commit();
-        save_icon_size(self.icon_size);
+        self.input_extent = None;
+        self.sync_input_region();
+        self.dirty = true;
+        self.schedule_frame();
     }
 
     /// Entry point for IPC commands (called from ipc.rs) and for
@@ -8394,7 +8417,7 @@ fn blend_hits(webapps: Vec<usize>, pkgs: Vec<usize>) -> Vec<usize> {
     out
 }
 
-fn save_icon_size(size: usize) {
+pub(crate) fn save_icon_size(size: usize) {
     let path = persist::data_path("ui_state.json");
     persist::write_json("ui_state", &path, &size);
 }

@@ -214,6 +214,39 @@ impl App {
         self.dock_screen_size().map(|(w, _)| w).or_else(|| self.output_logical_width())
     }
 
+    /// The dock's size on the screen it is on: its own (`dock_sizes`), else
+    /// the main screen's. Set, not yet applied (the caller lays out).
+    fn dock_size_here(&mut self) {
+        let level = self
+            .dock_screen_selector()
+            .and_then(|s| self.settings.dock_sizes.get(&s).copied())
+            .unwrap_or(self.icon_size_home);
+        self.icon_size = level.min(crate::content::ICON_SCALES.len() - 1);
+    }
+
+    /// What the dock's screen is known by (`Monitor::selector`).
+    fn dock_screen_selector(&self) -> Option<String> {
+        let name = self.dock_screen_name()?;
+        crate::display::monitors().into_iter().find(|m| m.name == name).map(|m| m.selector())
+    }
+
+    /// A Ctrl +/− level picked: kept for the dock's screen; on the main one
+    /// (or the only one) it is the main screen's size too.
+    pub(crate) fn keep_dock_size(&mut self) {
+        let two = self.output_state.outputs().nth(1).is_some();
+        let home = !two || self.main_output().is_none_or(|m| self.dock_screens.output.as_ref() == Some(&m));
+        if home {
+            self.icon_size_home = self.icon_size;
+            crate::save_icon_size(self.icon_size);
+        }
+        if two {
+            if let Some(sel) = self.dock_screen_selector() {
+                self.settings.dock_sizes.insert(sel, self.icon_size);
+                self.settings.save();
+            }
+        }
+    }
+
     /// What the OPTIONS bar takes off the top of the dock's screen: nothing on
     /// a screen it is not on.
     pub(crate) fn dock_top_reserved(&self) -> f32 {
@@ -367,6 +400,8 @@ impl App {
         if m.output.is_some() {
             self.dock_screens.output = m.output;
         }
+        // Its size on this screen (laid out just below).
+        self.dock_size_here();
         self.dock_screens.then = m.then;
         // A frame asked of the old surface never comes; its input region,
         // keyboard and pointer went with it.
@@ -397,6 +432,9 @@ impl App {
         }
         let first = self.dock_screens.output.is_none();
         self.dock_screens.output = Some(output.clone());
+        if self.output_state.outputs().nth(1).is_some() {
+            self.dock_size_here();
+        }
         // At START it is on the main screen, as the rest of the shell is
         // (`shell_screens.rs`), wherever the focus was; from then on it
         // follows the calls.

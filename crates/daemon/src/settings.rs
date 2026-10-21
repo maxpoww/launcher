@@ -78,6 +78,11 @@ pub(crate) struct Settings {
     /// The other monitors (by what they are known by, `Monitor::selector`)
     /// the launcher is NOT on; a monitor seen for the first time has it.
     pub(crate) launcher_screens_off: Vec<String>,
+    /// THE DOCK'S SIZE PER SCREEN (Max, 2026-10-21: "I want a bigger dock
+    /// on the TV, but then I come back to my laptop and the dock is huge"):
+    /// the Ctrl +/− level picked on each screen, by `Monitor::selector`. A
+    /// screen not in it has the main screen's (`ui_state.json`).
+    pub(crate) dock_sizes: std::collections::BTreeMap<String, usize>,
 }
 
 impl Settings {
