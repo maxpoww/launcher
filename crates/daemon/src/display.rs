@@ -687,7 +687,16 @@ impl DisplayView {
 impl App {
     /// The screen a display setting is about: the one in use.
     fn display_target(&self) -> Option<Monitor> {
+        self.display_target_of(None)
+    }
+
+    /// The screen known as `sel` (`Monitor::selector`: the Monitors page's
+    /// picked one), else the one in use.
+    fn display_target_of(&self, sel: Option<&str>) -> Option<Monitor> {
         let mut all = monitors();
+        if let Some(i) = sel.and_then(|sel| all.iter().position(|m| m.selector() == sel)) {
+            return Some(all.swap_remove(i));
+        }
         match all.iter().position(|m| m.focused) {
             Some(i) => Some(all.swap_remove(i)),
             None => all.into_iter().next(),
@@ -711,6 +720,8 @@ impl App {
     fn display_changed(&mut self) {
         self.settings_panel_mut().display_refresh_at(Instant::now() + SETTLE);
         self.quick.display_refresh_at(Instant::now() + SETTLE);
+        // (The Monitors page reads the screens again too.)
+        self.monitors_read_soon(SETTLE);
         self.schedule_frame();
     }
 
@@ -719,7 +730,13 @@ impl App {
     /// [`crate::transition`]): every client redraws at the new scale on its
     /// own frame, and shown bare that reads as the screen jumping.
     pub(crate) fn set_display_scale(&mut self, want: f64) {
-        let Some(m) = self.display_target() else {
+        self.set_display_scale_on(None, want);
+    }
+
+    /// [`Self::set_display_scale`] on the screen known as `sel` (the
+    /// Monitors page's picked one; `None`: the one in use).
+    pub(crate) fn set_display_scale_on(&mut self, sel: Option<&str>, want: f64) {
+        let Some(m) = self.display_target_of(sel) else {
             warn!("display: no screen to scale");
             return;
         };
@@ -809,7 +826,13 @@ impl App {
     /// ([`Self::keep_display`]). `hz`: the refresh rate wanted, else the one
     /// nearest the current.
     pub(crate) fn set_display_mode(&mut self, w: u32, h: u32, hz: Option<f64>) {
-        let Some(m) = self.display_target() else {
+        self.set_display_mode_on(None, w, h, hz);
+    }
+
+    /// [`Self::set_display_mode`] on the screen known as `sel` (the
+    /// Monitors page's picked one; `None`: the one in use).
+    pub(crate) fn set_display_mode_on(&mut self, sel: Option<&str>, w: u32, h: u32, hz: Option<f64>) {
+        let Some(m) = self.display_target_of(sel) else {
             warn!("display: no screen to set");
             return;
         };
@@ -861,6 +884,19 @@ impl App {
             warn!("display: cannot arm the keep timer ({e}), going back now");
             self.revert_display();
             return;
+        }
+        // The seconds left are counted down where it is asked (the
+        // Resolution page, the Monitors page): a frame each second.
+        let tick = self.loop_handle.insert_source(Timer::from_duration(Duration::from_secs(1)), move |_, _, app: &mut App| {
+            if app.display_pending.as_ref().is_none_or(|p| p.deadline != deadline) {
+                return TimeoutAction::Drop;
+            }
+            app.dirty = true;
+            app.schedule_frame();
+            TimeoutAction::ToDuration(Duration::from_secs(1))
+        });
+        if let Err(e) = tick {
+            warn!("display: cannot count the seconds down ({e})");
         }
         self.display_changed();
     }

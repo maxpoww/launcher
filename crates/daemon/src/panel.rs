@@ -2520,6 +2520,19 @@ impl Panel {
             // A WORD ROW: its name at the left, the words at the right end.
             if g.labelled && !g.choices.is_empty() {
                 y = self.word_row(&mut out, y, gi as u8, g);
+                // (A screen's resolution being tried, on the Monitors page:
+                // kept, or it goes back by itself.)
+                if g.key == "monitors-mode" {
+                    if let Some(left) = self.keep_left {
+                        let text = crate::i18n::fill(tr("Keep this resolution? Going back in {0} s"), &[("0", &format!("{:.0}", left.ceil().max(1.0)))]);
+                        y = self.caption(&mut out, y, text);
+                        let chips = vec![
+                            (tr("Keep").to_owned(), true, PanelAction::Keep),
+                            (tr("Go back").to_owned(), false, PanelAction::Revert),
+                        ];
+                        y = self.flow(&mut out, y, 120.0, chips);
+                    }
+                }
                 continue;
             }
             // A CENTRED LINE TO READ (a section's reach, the chosen app's name):

@@ -10,7 +10,12 @@
 //!
 //! THE PAGE FIRST, THE FEATURES ONE BY ONE (the Launcher page's way, Max
 //! 2026-10-20): every choice here is SAVED (`settings.json`'s `monitors`,
-//! [`MonitorsChoice`]) and drawn, nothing is applied to the screens yet.
+//! [`MonitorsChoice`]) and drawn. Applied so far: RESOLUTION AND SCALE, per
+//! screen (Max, 2026-10-21: "now make resolution and scale work per
+//! monitor") — the picked screen's, live, through the display settings'
+//! own way ([`crate::display`]: a resolution is tried and goes back by
+//! itself unless kept; a scale is made under a dissolve), the page showing
+//! what the screen has.
 //!
 //! The arrangement is kept in the compositor's own terms: each screen's
 //! top-left corner in logical pixels (pixels over scale), as Hyprland
@@ -44,9 +49,6 @@ pub(crate) struct MonitorsChoice {
     pub picked: Option<String>,
     /// Each screen's place, by selector.
     pub arrange: BTreeMap<String, Placed>,
-    /// Each screen's resolution (`WxH`) and scale, by selector.
-    pub modes: BTreeMap<String, String>,
-    pub scales: BTreeMap<String, f64>,
     /// Screens: `extend` (absent), `mirror`, `isolated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screens: Option<String>,
@@ -200,7 +202,7 @@ pub(crate) struct PageScreen {
     pub title: String,
     pub short: String,
     pub builtin: bool,
-    /// Its resolution and scale (the page's, else the compositor's).
+    /// Its resolution and scale, as the compositor has them.
     pub mode: (u32, u32),
     pub scale: f64,
     pub rot: u16,
@@ -226,13 +228,9 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
         .map(|m| {
             let sel = m.selector();
             let builtin = crate::launcher_prefs::built_in(m);
-            let mode = choice
-                .modes
-                .get(&sel)
-                .and_then(|s| s.split_once('x'))
-                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
-                .unwrap_or((m.mode.w, m.mode.h));
-            let scale = choice.scales.get(&sel).copied().unwrap_or(m.scale);
+            // (What the screen has: these two are applied, not only saved.)
+            let mode = (m.mode.w, m.mode.h);
+            let scale = m.scale;
             let placed = choice.arrange.get(&sel).copied();
             // The sizes: the one in use and the biggest few others.
             let mut sizes: Vec<(u32, u32)> = Vec::new();
@@ -273,6 +271,22 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
         .collect()
 }
 
+/// Screens whose places were saved but whose sizes have changed since (a
+/// new resolution or scale) are laid against the others again, so the
+/// drawing never shows two overlapping, or (Extend) one standing apart:
+/// the first screen stays, each other is settled in turn.
+fn keep_together(screens: &mut [PageScreen], isolated: bool) {
+    for i in 1..screens.len() {
+        let others: Vec<Box2> = screens.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| o.logical()).collect();
+        let b = screens[i].logical();
+        let touching = magnet(b, &others, 1.0, if isolated { ISOLATED_GAP } else { 0.0 }).2.is_some();
+        let overlaps = others.iter().any(|o| b.overlaps(o));
+        if overlaps || (!isolated && !touching) {
+            screens[i].at = settle(b, &others, isolated);
+        }
+    }
+}
+
 /// The screen picked in the drawing: the saved one, else the built-in,
 /// else the first.
 fn picked<'a>(screens: &'a [PageScreen], choice: &MonitorsChoice) -> Option<&'a PageScreen> {
@@ -301,7 +315,10 @@ fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice
 pub(crate) fn view(view: &mut ControlView) {
     let saved = GolemSettings::load().monitors;
     let monitors = crate::display::monitors();
-    let screens = page_screens(&monitors, &saved);
+    let mut screens = page_screens(&monitors, &saved);
+    if !saved.arrange.is_empty() && saved.screens.as_deref() != Some("mirror") {
+        keep_together(&mut screens, saved.screens.as_deref() == Some("isolated"));
+    }
     view.subtitle = tr("How your screens work together.").to_owned();
     let Some(p) = picked(&screens, &saved) else {
         view.subtitle = tr("No screen to set.").to_owned();
@@ -375,10 +392,26 @@ impl App {
     /// read again. Nothing is applied to the screens yet.
     pub(crate) fn monitors_pick(&mut self, key: &str, value: &str) {
         let monitors = crate::display::monitors();
+        // RESOLUTION AND SCALE are the picked screen's own, applied live
+        // (the display settings' way: tried and kept, or under a dissolve).
+        if key == "monitors-mode" || key == "monitors-scale" {
+            let saved = GolemSettings::load().monitors;
+            let screens = page_screens(&monitors, &saved);
+            let Some(sel) = picked(&screens, &saved).map(|p| p.sel.clone()) else { return };
+            info!("monitors: {key} = {value} on {sel}");
+            if key == "monitors-mode" {
+                let size = value.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)));
+                if let Some((w, h)) = size {
+                    self.set_display_mode_on(Some(&sel), w, h, None);
+                }
+            } else if let Ok(s) = value.parse::<f64>() {
+                self.set_display_scale_on(Some(&sel), s);
+            }
+            return;
+        }
         GolemSettings::change(|g| {
             let c = &mut g.monitors;
             let screens = page_screens(&monitors, c);
-            let picked = picked(&screens, c).map(|p| p.sel.clone());
             let isolated = c.screens.as_deref() == Some("isolated");
             match key {
                 "monitors-arrange" => {
@@ -397,21 +430,6 @@ impl App {
                         _ => {}
                     }
                 }
-                "monitors-mode" | "monitors-scale" => {
-                    let Some(sel) = picked else { return };
-                    if key == "monitors-mode" {
-                        c.modes.insert(sel.clone(), value.to_owned());
-                    } else if let Ok(s) = value.parse::<f64>() {
-                        c.scales.insert(sel.clone(), s);
-                    }
-                    // A new size: laid against the others again.
-                    let screens = page_screens(&monitors, c);
-                    if let Some(s) = screens.iter().find(|s| s.sel == sel) {
-                        let others: Vec<Box2> = screens.iter().filter(|o| o.sel != sel).map(PageScreen::logical).collect();
-                        let (x, y) = settle(s.logical(), &others, isolated);
-                        c.arrange.insert(sel, Placed { x, y, rot: s.rot });
-                    }
-                }
                 "monitors-screens" => c.screens = (value != "extend").then(|| value.to_owned()),
                 "monitors-options" => c.options = (value != "main").then(|| value.to_owned()),
                 "monitors-dock" => c.dock = (value != "follows").then(|| value.to_owned()),
@@ -421,6 +439,24 @@ impl App {
             g.store();
         });
         info!("monitors: {key} = {value}");
+    }
+
+    /// The Monitors page, when it is open, read again in `after`: the
+    /// compositor takes a moment to make a change of resolution or scale.
+    pub(crate) fn monitors_read_soon(&mut self, after: std::time::Duration) {
+        use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+        let open = |p: &crate::panel::Panel| p.open_control_label() == Some("Monitors");
+        if !open(self.settings_panel()) && !open(&self.quick) {
+            return;
+        }
+        let armed = self.loop_handle.insert_source(Timer::from_duration(after), |_, _, app: &mut App| {
+            let ui = app.ui_facts();
+            app.controls_send(crate::controls::ControlCommand::Read("Monitors", ui));
+            TimeoutAction::Drop
+        });
+        if let Err(e) = armed {
+            tracing::warn!("monitors: cannot read the page again ({e})");
+        }
     }
 
     /// A screen dragged in the drawing and let go at `(x, y)` (logical px):
