@@ -1427,6 +1427,12 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         if name == "monitoradded" || name == "monitorremoved" {
                             app.monitors_plugged();
                         }
+                        // A screen gone, with the lid shut and the built-in
+                        // off: on again AT ONCE, not one screen left lit.
+                        // (And a config read again forgets the built-in off.)
+                        if name == "monitorremoved" || name == "configreloaded" {
+                            app.monitors_lid();
+                        }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
                             relevant = true;
@@ -1779,6 +1785,18 @@ pub fn eval(lua: &str) {
 /// what [`crate::display`] reads a screen's modes and scale from.
 pub fn monitors_json() -> Option<serde_json::Value> {
     serde_json::from_str(&request("j/monitors").ok()?).ok()
+}
+
+/// Every screen the compositor knows, those turned off too (`disabled`).
+pub fn monitors_all_json() -> Option<serde_json::Value> {
+    serde_json::from_str(&request("j/monitors all").ok()?).ok()
+}
+
+/// The names of the switches the compositor sees (a laptop's "Lid Switch").
+pub fn switch_names() -> Vec<String> {
+    reply_json("j/devices")
+        .and_then(|d| Some(d["switches"].as_array()?.iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect()))
+        .unwrap_or_default()
 }
 
 /// One of the compositor's config values as text (`j/getoption`): its

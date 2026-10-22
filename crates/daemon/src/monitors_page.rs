@@ -547,12 +547,20 @@ fn keep_together(screens: &mut [PageScreen], isolated: bool) {
 
 /// Every screen's place as the drawing has it now, kept: once the page has
 /// arranged one, it has them all.
-/// From the MAIN screen's corner (`main`), so places kept in another room
-/// — the main screen drawn elsewhere there — still mean the same.
+/// In the frame the places are kept in, so places kept in another room —
+/// or while another screen was the main one (the lid shut) — still mean the
+/// same: a screen drawn now that has a place already (the main one first)
+/// keeps it and the others are put from it; none has one, from the main
+/// screen's corner.
 fn keep_places(c: &mut MonitorsChoice, screens: &[PageScreen], main: usize) {
-    let origin = screens.get(main).map_or((0.0, 0.0), |m| m.at);
+    let kept = std::iter::once(main).chain(0..screens.len()).find_map(|i| {
+        let s = screens.get(i)?;
+        let p = c.places.get(&s.sel)?;
+        Some((p.x - s.at.0, p.y - s.at.1))
+    });
+    let shift = kept.unwrap_or_else(|| screens.get(main).map_or((0.0, 0.0), |m| (-m.at.0, -m.at.1)));
     for s in screens {
-        c.places.insert(s.sel.clone(), Placed { x: s.at.0 - origin.0, y: s.at.1 - origin.1, rot: s.rot });
+        c.places.insert(s.sel.clone(), Placed { x: s.at.0 + shift.0, y: s.at.1 + shift.1, rot: s.rot });
     }
 }
 
@@ -598,6 +606,24 @@ struct Before {
 
 fn turn_trial_path() -> std::path::PathBuf {
     crate::display::golem_path("turn-trial.json")
+}
+
+/// THE LID ("Lid closed" on the page, on unless switched off): shut while
+/// another screen is on, the built-in is turned OFF — it stayed lit behind
+/// the lid, and the bar, the desktop and the dock's home with it, on a
+/// screen nobody could see — and everything goes to the other screen (what
+/// was on a screen that goes is made again on the main one:
+/// `shell_screens`); opened, it is on again as it was set. Never saved: a
+/// login with the lid open has it on. The lid is READ (the kernel's
+/// `/proc/acpi/button/lid/*/state`; `WAVERUNNER_LID_STATE` names another
+/// file, for a rig) — the compositor's switch binds (`lid_binds`) only say
+/// when to look.
+fn lid_closed() -> Option<bool> {
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().map(|s| s.contains("closed"));
+    if let Some(p) = std::env::var_os("WAVERUNNER_LID_STATE") {
+        return read(std::path::Path::new(&p));
+    }
+    std::fs::read_dir("/proc/acpi/button/lid").ok()?.flatten().find_map(|e| read(&e.path().join("state")))
 }
 
 /// The words of a three-way row, and which value each sends.
@@ -670,15 +696,19 @@ pub(crate) fn view(view: &mut ControlView) {
         .map(|&st| choice(format!("{}%", (st * 100.0).round() as u32), (st - p.scale).abs() < 1e-4, format!("{st}")))
         .collect();
     view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Scale"), "monitors-scale", stops) });
-    if !many {
-        return;
+    if many {
+        view.groups.push(words("Screens", "monitors-screens", &SCREENS, saved.screens.as_deref().unwrap_or("extend")));
+        if !mirrored {
+            view.groups.push(words("Options", "monitors-options", &WHERE, options));
+            view.groups.push(words("Dock", "monitors-dock", &WHERE, dock));
+        }
     }
-    view.groups.push(words("Screens", "monitors-screens", &SCREENS, saved.screens.as_deref().unwrap_or("extend")));
-    if !mirrored {
-        view.groups.push(words("Options", "monitors-options", &WHERE, options));
-        view.groups.push(words("Dock", "monitors-dock", &WHERE, dock));
-    }
-    if screens.iter().any(|s| s.builtin) {
+    // (With another screen to go to — or the built-in OFF just now, shut,
+    // the TV the one screen on: when this is wanted most.)
+    let lid = lid_closed().is_some();
+    let inside_on = screens.iter().any(|s| s.builtin);
+    let shown = if inside_on { many } else { lid };
+    if shown {
         let mut lid = crate::controls::on_off_of(Some("Lid closed"), "monitors-lid", !saved.lid_keeps_built_in);
         if let Some(on) = lid.choices.first_mut() {
             on.hint = Some(tr("The built-in turns off and everything goes to the other screen.").to_owned());
@@ -764,6 +794,9 @@ impl App {
             g.store();
         });
         info!("monitors: {key} = {value}");
+        if key == "monitors-lid" {
+            self.monitors_lid();
+        }
         if arranged {
             self.monitors_arrange();
         }
@@ -803,6 +836,75 @@ impl App {
         });
         if let Err(e) = tick {
             tracing::warn!("monitors: cannot count the turn's seconds down ({e})");
+        }
+    }
+
+    /// THE LID, looked at (see `lid_closed`): the built-in off while it is
+    /// shut and another screen is on, on otherwise.
+    pub(crate) fn monitors_lid(&mut self) {
+        let Some(closed) = lid_closed() else {
+            return;
+        };
+        let Some(json) = crate::hypr::monitors_all_json() else {
+            return;
+        };
+        let off: Vec<String> = json
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["disabled"].as_bool() == Some(true))
+            .filter_map(|m| m["name"].as_str().map(str::to_owned))
+            .collect();
+        let all = crate::display::parse_monitors(&json);
+        let built_in = crate::launcher_prefs::built_in;
+        let Some(inside) = all.iter().find(|m| built_in(m)) else {
+            return;
+        };
+        let inside_off = off.contains(&inside.name);
+        let others_on = all.iter().filter(|m| !built_in(m) && !off.contains(&m.name)).count();
+        let keeps = GolemSettings::load().monitors.lid_keeps_built_in;
+        let want_off = closed && !keeps && others_on > 0;
+        if want_off && !inside_off {
+            info!("monitors: the lid shut, another screen on: {} off", inside.name);
+            crate::display::set_screen_on(inside, false, None);
+        } else if !want_off && inside_off {
+            info!("monitors: {} on again (lid {}, {} other screen(s))", inside.name, if closed { "shut" } else { "open" }, others_on);
+            if others_on == 0 {
+                // ⚠ NO SCREEN ON (the other one unplugged with the lid shut,
+                // or a wake with it gone): a rule turning a screen on is not
+                // taken then — Hyprland 0.55.4 left it off, or CRASHED on it
+                // (rig, 2026-10-22: SEGV in aquamarine's idle dispatch). Its
+                // config read again brings it on, with its own rule (the
+                // shell puts back what a reload undoes: `SCREEN_DRIFT`).
+                static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+                let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
+                    return;
+                }
+                *last = Some(std::time::Instant::now());
+                crate::hypr::reload_config();
+                return;
+            }
+            let saved = GolemSettings::load().displays.get(&inside.selector()).cloned();
+            crate::display::set_screen_on(inside, true, saved.as_ref());
+        }
+    }
+
+    /// The compositor tells of the lid: a switch bind of each lid it sees
+    /// (made again at every start; the dock is told, and looks).
+    pub(crate) fn lid_binds(&self) {
+        let Some(ctl) = crate::hypr::ctl_program() else {
+            return;
+        };
+        let mut lua = String::new();
+        for name in crate::hypr::switch_names().into_iter().filter(|n| n.to_lowercase().contains("lid")) {
+            for how in ["on", "off"] {
+                let key = format!("switch:{how}:{name}").replace('"', "");
+                lua.push_str(&format!("hl.unbind(\"{key}\") hl.bind(\"{key}\", hl.dsp.exec_cmd(\"{} display lid\"), {{ locked = true }}) ", ctl.display()));
+            }
+        }
+        if !lua.is_empty() && !crate::hypr::eval_ok(&lua) {
+            tracing::warn!("monitors: the lid's binds were refused: {lua}");
         }
     }
 
@@ -909,6 +1011,8 @@ impl App {
         use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
         self.monitors_part_twins();
         let armed = self.loop_handle.insert_source(Timer::from_duration(std::time::Duration::from_millis(700)), |_, _, app: &mut App| {
+            // (A screen plugged in with the lid shut: the built-in goes off.)
+            app.monitors_lid();
             app.monitors_keep_arranged();
             TimeoutAction::Drop
         });
@@ -1197,6 +1301,34 @@ mod tests {
         let laptop = Box2 { x: 0.0, y: 0.0, w: 381.0, h: 238.125 };
         let (_, y) = settle(Box2 { x: -200.0, y: -230.0, w: 338.67, h: 190.5 }, &[laptop], false);
         assert_eq!(y, -190.5);
+    }
+
+    #[test]
+    fn places_stay_in_one_frame_whatever_screens_are_drawn() {
+        // Kept at home: the laptop at 419,0, the TV centred over it.
+        let mut c = MonitorsChoice::default();
+        c.places.insert("laptop".into(), Placed { x: 419.0, y: 0.0, rot: 0 });
+        c.places.insert("tv".into(), Placed { x: 14.0, y: -650.0, rot: 0 });
+        // In the office, the laptop and a monitor at its right, drawn from
+        // the compositor (the laptop at 0,0 there).
+        let mut s = vec![
+            page("laptop", (3200, 2000), 1.6, (340.0, 220.0), (0.0, 0.0)),
+            page("office", (1920, 1080), 1.0, (530.0, 300.0), (2000.0, 0.0)),
+        ];
+        s[0].at = (0.0, 0.0);
+        s[1].at = (340.0, 0.0);
+        keep_places(&mut c, &s, 0);
+        let at = |c: &MonitorsChoice, k: &str| (c.places[k].x, c.places[k].y);
+        assert_eq!(at(&c, "laptop"), (419.0, 0.0), "the laptop keeps its place");
+        assert_eq!(at(&c, "office"), (759.0, 0.0), "the monitor put from it");
+        assert_eq!(at(&c, "tv"), (14.0, -650.0), "the TV, not here, still over the laptop");
+        // The lid shut at home: the TV alone is drawn, the main one; it
+        // keeps its place too.
+        let mut tv = vec![page("tv", (4096, 2160), 2.0, (1150.0, 650.0), (-24.0, -1080.0))];
+        tv[0].at = (0.0, 0.0);
+        keep_places(&mut c, &tv, 0);
+        assert_eq!(at(&c, "tv"), (14.0, -650.0));
+        assert_eq!(at(&c, "laptop"), (419.0, 0.0));
     }
 
     #[test]

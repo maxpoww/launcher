@@ -1411,6 +1411,9 @@ fn main() -> anyhow::Result<()> {
     app.monitors_part_twins();
     // (A screen's turn tried when the last session ended, never kept.)
     app.monitors_turn_left_over();
+    // THE LID: told of by the compositor, looked at now.
+    app.lid_binds();
+    app.monitors_lid();
     // The palette: the shell wears it, the apps get its files — at the light
     // the sun asks for now, where Ambient is on.
     app.lighting_wake();

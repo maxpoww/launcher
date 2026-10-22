@@ -159,6 +159,9 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
         .as_array()
         .into_iter()
         .flatten()
+        // (Not a screen of the owner's: the compositor's stand-in while no
+        // screen is on, a nested compositor's own window.)
+        .filter(|m| m["name"].as_str().is_some_and(|n| !stand_in(n)))
         .filter_map(|m| {
             let (w, h) = (m["width"].as_u64()?, m["height"].as_u64()?);
             let mode = Mode {
@@ -200,6 +203,14 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
         })
         .collect();
     with_twins(all)
+}
+
+/// Whether output `name` is no screen of the owner's: Hyprland's FALLBACK
+/// (put up while no screen is on — with the lid shut it was counted as
+/// "another screen" and the built-in went off again), or the window a
+/// nested compositor draws in (`WAYLAND-1`, `X11-1`).
+pub(crate) fn stand_in(name: &str) -> bool {
+    name.starts_with("FALLBACK") || name.starts_with("WAYLAND-") || name.starts_with("X11-")
 }
 
 /// The screens, those that say they are the same as another connected one
@@ -697,6 +708,23 @@ fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
     ))
 }
 
+/// Turn screen `m` off or on (the lid, `monitors_page`). On, it takes its
+/// own rule again (`saved`) — a rule without `disabled = false` leaves it
+/// off (probed in the rig, 2026-10-22).
+pub(crate) fn set_screen_on(m: &Monitor, on: bool, saved: Option<&DisplayChoice>) -> bool {
+    let mut lua = format!("hl.monitor({{ output = {}, disabled = {} }}) ", lua_quote(&m.name), !on);
+    if on {
+        if let Some(rule) = saved.and_then(|c| monitor_rule(&m.name, c)) {
+            lua.push_str(&rule);
+        }
+    }
+    let ok = hypr::eval_ok(&lua);
+    if !ok {
+        warn!("display: the compositor refused {lua}");
+    }
+    ok
+}
+
 /// Put a choice on the screen now.
 fn apply(selector: &str, choice: &DisplayChoice) -> bool {
     match monitor_rule(selector, choice) {
@@ -1152,6 +1180,19 @@ impl App {
                 Some(mode) => self.set_display_mode(mode.w, mode.h, (mode.hz > 0.0).then_some(mode.hz)),
                 None => warn!("display: not a mode: {text:?}"),
             },
+            // The lid moved (the compositor's switch binds, `monitors_page`):
+            // looked at now, and again in a moment (the kernel's word may
+            // come a little after the switch's).
+            (Some("lid"), None) => {
+                self.monitors_lid();
+                let again = self.loop_handle.insert_source(Timer::from_duration(Duration::from_secs(1)), |_, _, app: &mut App| {
+                    app.monitors_lid();
+                    TimeoutAction::Drop
+                });
+                if let Err(e) = again {
+                    warn!("display: cannot look at the lid again ({e})");
+                }
+            }
             // The screen the pages set, by its place among them (from 0).
             (Some("screen"), Some(n)) => match n.parse::<usize>() {
                 Ok(i) => self.display_pick_screen(i),
