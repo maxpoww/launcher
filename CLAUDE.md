@@ -393,6 +393,35 @@ The big daemon files are cohesive but long — go straight to the function:
   transfer for the photos kind into `<folder>/Photos`; an older import's `~/Pictures/<phone>` is
   adopted there by a rename (`adopt_pictures`). Pointer-free: `debug-desktop "config <n>|sync|kind
   <i>|every|charging|after|clean|really|notnow|apply|cancel|name <text>"`.
+- PRINTING AND SCANNING (2026-10-21/22; Golem's system side is `desktop/printing.nix`): the engine
+  speaks CUPS itself — `options-engine/src/cups.rs`, IPP over the scheduler's socket (401 → asked again
+  with `PeerCred <user>`; an answer read to its length, CUPS keeps a connection open after a 401):
+  snapshot, a job, cancel/restart, pause/resume, default, a printer's IPP `*-default`s (colour,
+  quality, media, sides — CUPS maps them onto the driver), print a file or bytes, delete, the ended
+  prints since a time — and `collectors/printing.rs` (`Layer::Printing`, in `start_shell`) follows it
+  through a CUPS `dbus://` subscription (org.cups.cupsd.Notifier signals wake a look; 3 s / 60 s
+  timer behind it; a print that left the list is asked how it ended and kept 60 s). ⚠ CUPS's
+  `job-media-sheets-completed` is pages RENDERED, not out of the printer: no percentage anywhere.
+  `printing.rs`: every unfinished print is a task on the TASK PILL ("Printing x", "Waiting to print
+  x", or what stops its printer — "… is out of paper / off / paused"); `Task::number` Some("") = no
+  number, the fill whole at its end; the pill's Cancel cancels the print (`printing_task_cancelled`);
+  a failed one is a notice. `printers_page.rs` = Controls → PRINTERS: the status line (with the ink),
+  section words Printers · Scanners once a scanner is there, the printer chooser with several,
+  Colour / Quality / Paper / Both sides, its prints (Cancel; the last hour's ended: Print again) as
+  many as the box has room for (`PAGE_ROWS`: the page does not scroll), Remove (asked) · Pause|Resume
+  · Make default · Test page (Golem's own, Latin-1 PostScript), and a field "Add a printer by its
+  address" (Enter → `lpadmin -m everywhere` on ipp://a/ipp/print, ipps://, /ipp; named after its
+  make and model). Print-time problems are said only while a print is on its way (CUPS kept "printing
+  job 0, out of paper" after a cancel). INK of an HP that does not tell CUPS: Golem's
+  `golem-printer-ink` (HPLIP's device code with D-Bus off — hp-levels starts a tray icon and an
+  update check), off the worker, 10 min, never while a print holds the printer. `scanners.rs`: the
+  watcher keeps the scanners SANE lists (`known`, `look_now`; webcams and SANE's test device out
+  unless `WAVERUNNER_SCANNER_TEST`), the first ever installs Simple Scan once; Scan = `simple-scan
+  <device>`. Rig: `CUPS_SERVER=/run/host/run/cups/cups.sock DBUS_SYSTEM_BUS_ADDRESS=unix:path=
+  /run/host/run/dbus/system_bus_socket` (+ host bin on PATH for lpadmin/golem-printer-ink), `display
+  show printers`, `display pick <g> <i>`, `display type <text>|enter`; the engine alone:
+  `cargo run -p options-engine --example printing [cancel|restart|resume|pause|default|options|set|print …]`;
+  CUPS answers as a driverless printer at ipp://localhost:631/printers/<queue> (an add to test with).
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

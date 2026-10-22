@@ -44,6 +44,7 @@ pub(crate) const CREATE_PRINTER_SUBSCRIPTIONS: u16 = 0x0016;
 pub(crate) const CANCEL_SUBSCRIPTION: u16 = 0x001B;
 const CUPS_GET_PRINTERS: u16 = 0x4002;
 const CUPS_ADD_MODIFY_PRINTER: u16 = 0x4003;
+const CUPS_DELETE_PRINTER: u16 = 0x4004;
 const CUPS_SET_DEFAULT: u16 = 0x400A;
 
 // --- tags ------------------------------------------------------------------
@@ -794,6 +795,14 @@ pub fn print_bytes(printer: &str, data: Vec<u8>, title: &str) -> Result<u32, Cup
         .and_then(|g| g.int("job-id"))
         .and_then(|n| u32::try_from(n).ok())
         .ok_or(CupsError::Garbled)
+}
+
+/// Take a printer away (its queue, and the prints waiting in it).
+pub fn delete_printer(name: &str) -> Result<(), CupsError> {
+    let mut req = Request::new(CUPS_DELETE_PRINTER);
+    req.attr(URI, "printer-uri", &[&format!("ipp://localhost/printers/{name}")]);
+    req.attr(NAME, "requesting-user-name", &[&user()]);
+    send_ok("/admin/", &req).map(|_| ())
 }
 
 /// Stop a printer taking up its prints (they wait for it).

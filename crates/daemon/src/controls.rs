@@ -174,6 +174,11 @@ fn field(key: &'static str, shown: &str, hint: &str, width: f32) -> Group {
     Group { field: true, ..group(None, key, width, vec![choice(text, on, "__focus")]) }
 }
 
+/// [`field`], for the pages built in their own modules.
+pub(crate) fn field_of(key: &'static str, shown: &str, hint: &str, width: f32) -> Group {
+    field(key, shown, hint, width)
+}
+
 /// The keys a field can be, and the text it starts with when clicked.
 pub(crate) fn field_start(key: &str) -> Option<(&'static str, String)> {
     match key {
@@ -181,6 +186,8 @@ pub(crate) fn field_start(key: &str) -> Option<(&'static str, String)> {
         "colors-edit-hex" => EDITOR.lock().ok()?.as_ref().map(|_| ("colors-edit-hex", String::new())),
         "colors-edit-name" => Some(("colors-edit-name", EDITOR.lock().ok()?.as_ref()?.name.clone())),
         "colors-apps-find" => Some(("colors-apps-find", APPS_FIND.lock().ok()?.clone())),
+        // (The Printers page's address: typed afresh each time.)
+        "printers-add" => Some(("printers-add", String::new())),
         _ => None,
     }
 }
@@ -203,6 +210,7 @@ pub(crate) fn field_typed(key: &str, text: &str, done: bool) {
                 }
             }
         }
+        "printers-add" if done => crate::printers_page::add_typed(text),
         "colors-edit-name" if done => {
             if let Ok(mut g) = EDITOR.lock() {
                 if let Some(e) = g.as_mut() {
@@ -557,6 +565,15 @@ pub(crate) fn spawn(events: Sender<ControlEvent>) -> ControlsHandle {
     ControlsHandle { tx }
 }
 
+/// Read `label` again from a thread of a page's own that finished later (a
+/// printer's ink, a printer added): through the worker, as after a pick. The
+/// view goes to the page only if it is still open.
+pub(crate) fn read_again(label: &'static str) {
+    if let Some(tx) = TO_WORKER.get().and_then(|m| m.lock().ok()) {
+        let _ = tx.send(ControlCommand::Read(label, UiFacts::default()));
+    }
+}
+
 /// The settings this module gives real content. (Scale and Resolution are
 /// [`crate::display`]'s.)
 pub(crate) fn is_control(label: &str) -> bool {
@@ -596,6 +613,7 @@ pub(crate) fn ui_key(key: &str) -> bool {
     key.starts_with("colors-")
         || key.starts_with("launcher-")
         || key.starts_with("monitors-")
+        || matches!(key, "printers-add" | "printers-scan-app")
         || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"

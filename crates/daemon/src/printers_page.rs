@@ -15,20 +15,66 @@
 //! On the controls' worker (`controls::read` / `apply`): every reading and
 //! change is one IPP request to CUPS (`options_engine::cups`). The page is
 //! read again whenever the Brain's printing changes while it is open.
+//!
+//! THEN (2026-10-22, Max: "do this"): the INK of a printer that does not
+//! tell CUPS — an HP over USB — read by Golem's `golem-printer-ink` (HPLIP's
+//! own device code) off the worker, kept ten minutes, never while a print
+//! holds the printer; the SCANNERS there are (`scanners.rs`'s watcher), each
+//! with Scan, or Install Simple Scan; ADD A PRINTER BY ITS ADDRESS — a field
+//! whose Enter tries the address the driverless way every printer made since
+//! about 2013 speaks (IPP Everywhere: `lpadmin -m everywhere` on
+//! ipp://<address>/ipp/print, then ipps://, then /ipp), the printer then
+//! called what it says it is; and REMOVE, asked once.
 
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use options_engine::cups::{self, Default as Want};
 use options_engine::{JobState, Printer, PrintingState};
 use tracing::{info, warn};
 
-use crate::controls::{group_of, line_of, on_off_of, Choice, ControlView, Group};
+use crate::controls::{field_of, group_of, line_of, on_off_of, Choice, ControlView, Group};
 use crate::i18n::{fill, tr};
 use crate::printing::{printer_name, problem_words, title_of};
 
 /// The printer the page is about (its queue's name), once one was picked
 /// or read.
 static PICKED: Mutex<Option<String>> = Mutex::new(None);
+
+/// THE INK of the printers that do not tell CUPS: each reading by the
+/// printer's device address — when, and what (`None`: it did not answer) —
+/// and whether one is being taken.
+type InkReading = (String, Instant, Option<Vec<(u32, u8)>>);
+static INK: Mutex<Vec<InkReading>> = Mutex::new(Vec::new());
+static INK_ASKING: AtomicBool = AtomicBool::new(false);
+/// Golem's program that reads it (`desktop/printing.nix`).
+const INK_PROGRAM: &str = "golem-printer-ink";
+/// How long a reading stands; one that failed is tried again sooner.
+const INK_FRESH: Duration = Duration::from_secs(600);
+const INK_AGAIN: Duration = Duration::from_secs(60);
+const INK_PATIENCE: Duration = Duration::from_secs(40);
+
+/// The scanners' list older than this: the watcher is asked for a look.
+const SCANNERS_OLD: Duration = Duration::from_secs(120);
+
+/// ADDING A PRINTER BY ITS ADDRESS: what the page says about it.
+#[derive(Debug, Clone, PartialEq)]
+enum Adding {
+    Trying(String),
+    Failed(String),
+}
+static ADDING: Mutex<Option<Adding>> = Mutex::new(None);
+/// How long `lpadmin` may try one address (it asks the printer itself).
+const ADD_PATIENCE: Duration = Duration::from_secs(30);
+
+/// THE PAGE'S TWO SECTIONS, once there are scanners (the page does not
+/// scroll): the printers, or the scanners.
+static ON_SCANNERS: AtomicBool = AtomicBool::new(false);
+
+/// The printer asked about being removed (the second click removes it).
+static REMOVING: Mutex<Option<String>> = Mutex::new(None);
 
 /// The papers offered (PWG names), in this order, when the printer takes
 /// them; the one it is set to is always there.
@@ -41,7 +87,12 @@ const PAPERS: [(&str, &str); 4] = [
 
 /// How far back the page shows the prints that ended, and how many of them.
 const RECENT_SECS: u64 = 3600;
-const RECENT_SHOWN: usize = 3;
+const RECENT_SHOWN: usize = 1;
+/// The most prints listed (the page does not scroll): the ones on their way
+/// first, the ended after them.
+const PRINTS_SHOWN: usize = 3;
+/// The rows a page holds in the smallest box (a 1440×900 screen's).
+const PAGE_ROWS: usize = 8;
 
 /// IPP's print qualities.
 const QUALITIES: [(i32, &str); 3] = [(3, "Draft"), (4, "Normal"), (5, "Best")];
@@ -97,8 +148,48 @@ fn how(state: &PrintingState, p: &Printer) -> String {
     }
 }
 
-/// The page (`controls::read("Printers")`, on the controls' worker).
+/// The page (`controls::read("Printers")`, on the controls' worker): the
+/// printer, then the scanners, then a printer added by its address.
 pub(crate) fn view(view: &mut ControlView) {
+    let scanners = scanners_known();
+    let on_scanners = !scanners.is_empty() && ON_SCANNERS.load(Ordering::Relaxed);
+    // (The status line is the printer's either way: read first, then the
+    // section words go on top of what it made.)
+    let mut printers = ControlView { label: view.label, ..Default::default() };
+    printer_part(&mut printers, !scanners.is_empty());
+    view.subtitle = printers.subtitle;
+    if !scanners.is_empty() {
+        let tabs = vec![choice(tr("Printers"), !on_scanners, "printers"), choice(tr("Scanners"), on_scanners, "scanners")];
+        view.groups.push(Group { centred: true, ..group_of(None, "printers-tab", tabs) });
+    }
+    if on_scanners {
+        scanner_part(view, scanners);
+    } else {
+        view.groups.extend(printers.groups);
+        add_part(view);
+    }
+}
+
+/// The scanners the watcher has found; a fresh look asked for when that is
+/// old, or there has been none yet (the watcher's first waits for the start
+/// to settle: now, since someone is looking).
+fn scanners_known() -> Vec<crate::scanners::Scanner> {
+    match crate::scanners::known() {
+        Some((found, age)) => {
+            if age > SCANNERS_OLD {
+                crate::scanners::look_now();
+            }
+            found
+        }
+        None => {
+            crate::scanners::look_now();
+            Vec::new()
+        }
+    }
+}
+
+/// The printer the page is about, its prints and what can be done to it.
+fn printer_part(view: &mut ControlView, tabs: bool) {
     if !cups::present() {
         view.subtitle = tr("This computer has no printing.").to_owned();
         return;
@@ -121,18 +212,26 @@ pub(crate) fn view(view: &mut ControlView) {
     view.subtitle = how(&state, p);
     // WHICH ONE, with several.
     if state.printers.len() > 1 {
-        let names = state.printers.iter().map(|o| choice(printer_name(&state, &o.name), o.name == p.name, o.name.clone())).collect();
+        let names = state.printers.iter().map(|o| choice(short(&printer_name(&state, &o.name)), o.name == p.name, o.name.clone())).collect();
         view.groups.push(words("Printer", "printers-pick", names));
-        view.groups.push(on_off_of(Some("Default"), "printers-default", p.default));
     }
-    // ITS INK, when it says.
-    let ink: Vec<String> = p
+    // ITS INK: what it tells CUPS, else what Golem reads from it.
+    let printing = state.jobs.iter().any(|j| j.printer == p.name && !j.state.ended());
+    let mut ink: Vec<String> = p
         .markers
         .iter()
         .filter_map(|m| m.level.map(|l| format!("{} {l}%", m.name)))
         .collect();
+    if ink.is_empty() {
+        ink = hp_ink(p, printing)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(kind, level)| format!("{} {level}%", tr(ink_name(kind))))
+            .collect();
+    }
+    // (On the status line: the page does not scroll, and a row is dear.)
     if !ink.is_empty() {
-        view.groups.push(Group { centred: true, ..line_of(ink.join("  ·  ")) });
+        view.subtitle = format!("{}  ·  {}", view.subtitle, ink.join("  ·  "));
     }
     // WHAT A PRINT GETS unless its app asks otherwise.
     match cups::defaults(&p.name) {
@@ -176,7 +275,11 @@ pub(crate) fn view(view: &mut ControlView) {
         .map_or(0, |d| d.as_secs().saturating_sub(RECENT_SECS));
     let ended = cups::ended_since(hour_ago).unwrap_or_default();
     let recent = ended.iter().filter(|j| j.printer == p.name).take(RECENT_SHOWN);
-    for j in state.jobs.iter().filter(|j| j.printer == p.name).chain(recent) {
+    // As many as the box has rows left for (the section words, the address
+    // field and the buttons still to come), and the one printing at least.
+    let used = view.groups.len() + usize::from(tabs) + 2;
+    let room = PAGE_ROWS.saturating_sub(used).clamp(1, PRINTS_SHOWN);
+    for j in state.jobs.iter().filter(|j| j.printer == p.name).chain(recent).take(room) {
         let (state_word, act) = match j.state {
             JobState::Pending => ("waiting", Some(("Cancel", "cancel"))),
             JobState::Held => ("on hold", Some(("Cancel", "cancel"))),
@@ -194,17 +297,273 @@ pub(crate) fn view(view: &mut ControlView) {
             view.groups.push(Group { caption: Some(caption), ..words("Print", "printers-job", choices) });
         }
     }
-    // WHAT CAN BE DONE TO IT.
+    // WHAT CAN BE DONE TO IT: removing it is asked once.
+    let asked = REMOVING.lock().ok().and_then(|r| r.clone()).is_some_and(|r| r == p.name);
+    if asked {
+        view.groups.push(Group {
+            centred: true,
+            ..line_of(fill(tr("Remove {printer}? Its waiting prints go with it."), &[("printer", &printer_name(&state, &p.name))]))
+        });
+        view.groups.push(Group {
+            buttons: true,
+            ..group_of(None, "printers-remove", vec![choice(tr("Keep"), false, "keep"), choice(tr("Remove"), false, "yes")])
+        });
+        return;
+    }
     let pause = if p.state == options_engine::PrinterState::Stopped {
         choice(tr("Resume"), false, "resume")
     } else {
         choice(tr("Pause"), false, "pause")
     };
-    view.groups.push(Group { buttons: true, ..group_of(None, "printers-do", vec![pause, choice(tr("Test page"), false, "test")]) });
+    let mut acts = vec![choice(tr("Remove"), false, "remove"), pause];
+    if state.printers.len() > 1 && !p.default {
+        acts.push(choice(tr("Make default"), false, "default"));
+    }
+    acts.push(choice(tr("Test page"), false, "test"));
+    view.groups.push(Group { buttons: true, ..group_of(None, "printers-do", acts) });
+}
+
+/// A name cut to what a row of names can hold.
+fn short(name: &str) -> String {
+    const MOST: usize = 24;
+    if name.chars().count() <= MOST {
+        return name.to_owned();
+    }
+    let cut: String = name.chars().take(MOST - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// What a driverless printer says it is, made a name: its make and model
+/// without what CUPS adds ("Deskjet 1200 Series, hpcups 3.26.4 - IPP
+/// Everywhere" → "Deskjet 1200 Series").
+fn model_name(model: &str) -> String {
+    let m = model.split(" - IPP Everywhere").next().unwrap_or(model);
+    m.split(", ").next().unwrap_or(m).trim().to_owned()
+}
+
+/// HP's kinds of ink (HPLIP's agent types, base/codes.py), as the page
+/// names them.
+fn ink_name(kind: u32) -> &'static str {
+    match kind {
+        1 => "Black",
+        2 => "Colour",
+        3 => "Photo",
+        4 => "Cyan",
+        5 => "Magenta",
+        6 => "Yellow",
+        17 => "Light grey",
+        18 | 24 => "Grey",
+        20 => "Photo black",
+        21 => "Matte black",
+        22 => "Light cyan",
+        23 => "Light magenta",
+        _ => "Ink",
+    }
+}
+
+/// `golem-printer-ink`'s lines: `<kind> TAB <percent>`, anything else left out.
+fn parse_ink(out: &str) -> Vec<(u32, u8)> {
+    out.lines()
+        .filter_map(|l| {
+            let (kind, level) = l.split_once('\t')?;
+            Some((kind.trim().parse().ok()?, level.trim().parse::<u8>().ok()?.min(100)))
+        })
+        .collect()
+}
+
+/// The ink of an HP printer (it does not tell CUPS) as last read — and a new
+/// reading begun, off the worker, when that one is old and no print holds
+/// the printer. The page is read again when it comes.
+fn hp_ink(p: &Printer, printing: bool) -> Option<Vec<(u32, u8)>> {
+    if !p.uri.starts_with("hp:") {
+        return None;
+    }
+    let (fresh, levels) = INK
+        .lock()
+        .ok()
+        .and_then(|ink| {
+            ink.iter().find(|(u, ..)| *u == p.uri).map(|(_, at, l)| {
+                let lasts = if l.is_some() { INK_FRESH } else { INK_AGAIN };
+                (at.elapsed() < lasts, l.clone())
+            })
+        })
+        .unwrap_or((false, None));
+    if !fresh && !printing && crate::launch::on_path(INK_PROGRAM) && !INK_ASKING.swap(true, Ordering::AcqRel) {
+        let uri = p.uri.clone();
+        let spawned = std::thread::Builder::new().name("printer-ink".into()).spawn(move || {
+            let read = read_ink(&uri);
+            info!("printers: ink of {uri}: {read:?}");
+            if let Ok(mut ink) = INK.lock() {
+                ink.retain(|(u, ..)| *u != uri);
+                ink.push((uri, Instant::now(), read));
+            }
+            INK_ASKING.store(false, Ordering::Release);
+            crate::controls::read_again("Printers");
+        });
+        if spawned.is_err() {
+            INK_ASKING.store(false, Ordering::Release);
+        }
+    }
+    levels
+}
+
+/// Run `golem-printer-ink` on a printer's address, `INK_PATIENCE` at most.
+fn read_ink(uri: &str) -> Option<Vec<(u32, u8)>> {
+    let out = run_for(Command::new(INK_PROGRAM).arg(uri), INK_PATIENCE)?;
+    let levels = parse_ink(&out);
+    (!levels.is_empty()).then_some(levels)
+}
+
+/// A program's output if it ends well within `patience` (else it is ended).
+fn run_for(cmd: &mut Command, patience: Duration) -> Option<String> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let reader = child.stdout.take().map(|mut o| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut o, &mut text);
+            text
+        })
+    });
+    let start = Instant::now();
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if start.elapsed() < patience => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    let text = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    ok.then_some(text)
+}
+
+/// A scanner as people call it: SANE's words less its plumbing
+/// ("eSCL Canon MF240 ip=192.168.1.40" → "Canon MF240").
+fn scanner_name(what: &str) -> String {
+    let mut w = what.split(" ip=").next().unwrap_or(what).trim();
+    for lead in ["eSCL ", "WSD "] {
+        w = w.strip_prefix(lead).unwrap_or(w);
+    }
+    w.replace('_', " ")
+}
+
+/// The scanners there are, each with what scans with it.
+fn scanner_part(view: &mut ControlView, found: Vec<crate::scanners::Scanner>) {
+    let app = crate::scanners::SCAN_PROGRAMS.iter().any(|p| crate::launch::on_path(p));
+    for s in found {
+        let act = if app { choice(tr("Scan"), false, s.device.clone()) } else { choice(tr("Install Simple Scan"), false, "install") };
+        let key = if app { "printers-scan" } else { "printers-scan-app" };
+        view.groups.push(Group { caption: Some(scanner_name(&s.what)), ..words("Scanner", key, vec![act]) });
+    }
+}
+
+/// A printer added by its address: the field, and how the last try went.
+fn add_part(view: &mut ControlView) {
+    if !cups::present() {
+        return;
+    }
+    let said = ADDING.lock().ok().and_then(|a| a.clone()).map(|a| match a {
+        Adding::Trying(at) => fill(tr("Looking for a printer at {address}…"), &[("address", &at)]),
+        Adding::Failed(at) => fill(tr("No printer answered at {address}."), &[("address", &at)]),
+    });
+    if let Some(said) = said {
+        view.groups.push(Group { centred: true, ..line_of(said) });
+    }
+    view.groups.push(field_of("printers-add", "", tr("Add a printer by its address"), 260.0));
+}
+
+/// The address typed in the field (Enter): tried off every loop, the page
+/// read again with the outcome — the new printer shown, or why not.
+pub(crate) fn add_typed(address: &str) {
+    let address = address.trim().to_owned();
+    if address.is_empty() {
+        return;
+    }
+    if let Ok(mut a) = ADDING.lock() {
+        *a = Some(Adding::Trying(address.clone()));
+    }
+    let spawned = std::thread::Builder::new().name("printer-add".into()).spawn(move || {
+        let outcome = add_printer(&address);
+        if let Ok(mut a) = ADDING.lock() {
+            *a = match &outcome {
+                Ok(_) => None,
+                Err(why) => {
+                    warn!("printers: none added at {address}: {why}");
+                    Some(Adding::Failed(address.clone()))
+                }
+            };
+        }
+        if let Ok(name) = outcome {
+            info!("printers: {name} added at {address}");
+            if let Ok(mut picked) = PICKED.lock() {
+                *picked = Some(name);
+            }
+        }
+        crate::controls::read_again("Printers");
+    });
+    if let Err(e) = spawned {
+        warn!("printers: no thread to add a printer: {e}");
+    }
+}
+
+/// The addresses a printer at `address` may answer on, in the order tried:
+/// a whole URI as it is, else IPP Everywhere's own path, then the same
+/// over TLS, then the older one.
+fn addresses(address: &str) -> Vec<String> {
+    let a = address.trim().trim_end_matches('/');
+    if a.contains("://") {
+        return vec![a.to_owned()];
+    }
+    vec![format!("ipp://{a}/ipp/print"), format!("ipps://{a}/ipp/print"), format!("ipp://{a}/ipp")]
+}
+
+/// A queue's name for a printer at `address` ("Printer-192-168-1-40"), not
+/// one CUPS has already.
+fn queue_name(address: &str, taken: &[String]) -> String {
+    let host = address.split("://").last().unwrap_or(address).split('/').next().unwrap_or(address);
+    let mut base: String = host.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    base = base.trim_matches('-').chars().take(40).collect();
+    let base = format!("Printer-{base}");
+    (1..)
+        .map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") })
+        .find(|n| !taken.iter().any(|t| t.eq_ignore_ascii_case(n)))
+        .unwrap_or(base)
+}
+
+/// Make a queue for the printer at `address`, driverless: the new queue's
+/// name, or why none was made.
+fn add_printer(address: &str) -> Result<String, String> {
+    let taken: Vec<String> = cups::snapshot().map(|s| s.printers.into_iter().map(|p| p.name).collect()).unwrap_or_default();
+    let name = queue_name(address, &taken);
+    for uri in addresses(address) {
+        let made = run_for(Command::new("lpadmin").args(["-p", &name, "-E", "-v", &uri, "-m", "everywhere"]), ADD_PATIENCE);
+        if made.is_none() {
+            continue;
+        }
+        // Called what it says it is (lpadmin read its make and model).
+        let model = cups::snapshot().ok().and_then(|s| s.printer(&name).map(|p| model_name(&p.model))).unwrap_or_default();
+        if !model.is_empty() {
+            run_for(Command::new("lpadmin").args(["-p", &name, "-D", &model]), Duration::from_secs(8));
+        }
+        return Ok(name);
+    }
+    Err(format!("nothing answered as a printer on {}", addresses(address).join(", ")))
 }
 
 /// A pick on the page (`printers-*`), on the controls' worker.
 pub(crate) fn apply(key: &str, value: &str) {
+    // (The sections and Scan need no printer.)
+    if key == "printers-tab" {
+        ON_SCANNERS.store(value == "scanners", Ordering::Relaxed);
+        return;
+    }
+    if key == "printers-scan" {
+        scan_with(value);
+        return;
+    }
     let Some(name) = PICKED.lock().ok().and_then(|p| p.clone()) else {
         return;
     };
@@ -216,8 +575,6 @@ pub(crate) fn apply(key: &str, value: &str) {
             }
             Ok(())
         }
-        // (One printer is always the default: switching it off is nothing.)
-        "printers-default" if on => cups::set_default(&name),
         "printers-colour" => cups::set_default_option(&name, &Want::Colour(on)),
         "printers-quality" => match value.parse() {
             Ok(q) => cups::set_default_option(&name, &Want::Quality(q)),
@@ -234,16 +591,47 @@ pub(crate) fn apply(key: &str, value: &str) {
             }
         }
         "printers-do" => match value {
+            "remove" => {
+                if let Ok(mut r) = REMOVING.lock() {
+                    *r = Some(name.clone());
+                }
+                Ok(())
+            }
+            "default" => cups::set_default(&name),
             "pause" => cups::pause_printer(&name),
             "resume" => cups::resume_printer(&name),
             "test" => cups::print_bytes(&name, test_page(&name).into_bytes(), tr("Golem test page")).map(|_| ()),
             _ => Ok(()),
         },
+        "printers-remove" => {
+            let asked = REMOVING.lock().ok().and_then(|mut r| r.take());
+            match (value, asked) {
+                ("yes", Some(n)) if n == name => {
+                    if let Ok(mut picked) = PICKED.lock() {
+                        *picked = None;
+                    }
+                    cups::delete_printer(&name)
+                }
+                _ => Ok(()),
+            }
+        }
         _ => Ok(()),
     };
     match done {
         Ok(()) => info!("printers: {key} = {value} on {name}"),
         Err(e) => warn!("printers: {key} = {value} on {name}: {e}"),
+    }
+}
+
+/// SCAN: the scanning app on that scanner (Simple Scan takes it as its
+/// argument; another app opens on its own).
+fn scan_with(device: &str) {
+    let Some(app) = crate::scanners::SCAN_PROGRAMS.iter().find(|p| crate::launch::on_path(p)) else {
+        return;
+    };
+    let exec = if *app == "simple-scan" { format!("simple-scan {}", crate::launch::shell_quote(device)) } else { (*app).to_owned() };
+    if let Err(e) = crate::launch::launch(&exec, false, "") {
+        warn!("printers: {exec}: {e}");
     }
 }
 
@@ -295,6 +683,41 @@ mod tests {
         assert_eq!(paper_word("na_letter_8.5x11in"), "Letter");
         assert_eq!(paper_word("iso_a4_210x297mm"), "A4");
         assert_eq!(paper_word("na_index-4x6_4x6in"), "4x6in");
+    }
+
+    #[test]
+    fn hp_ink_lines_are_kind_and_percent() {
+        let out = "warning: python-dbus not installed.\n1\t60\n2\t35\nnonsense\n4\t130\n";
+        assert_eq!(parse_ink(out), vec![(1, 60), (2, 35), (4, 100)]);
+        assert_eq!(ink_name(1), "Black");
+        assert_eq!(ink_name(2), "Colour");
+        assert_eq!(ink_name(99), "Ink");
+    }
+
+    #[test]
+    fn a_driverless_printer_is_called_by_its_make_and_model() {
+        assert_eq!(model_name("Deskjet 1200 Series, hpcups 3.26.4 - IPP Everywhere"), "Deskjet 1200 Series");
+        assert_eq!(model_name("HP OfficeJet Pro 9010 series - IPP Everywhere"), "HP OfficeJet Pro 9010 series");
+        assert_eq!(short("HP DeskJet 1200 series"), "HP DeskJet 1200 series");
+        assert_eq!(short("Canon imageCLASS MF743Cdw printer of the office"), "Canon imageCLASS MF743C…");
+    }
+
+    #[test]
+    fn a_scanner_is_called_by_its_make_and_model() {
+        assert_eq!(scanner_name("eSCL Canon MF240 ip=192.168.1.40"), "Canon MF240");
+        assert_eq!(scanner_name("Hewlett-Packard DeskJet_2700 all-in-one"), "Hewlett-Packard DeskJet 2700 all-in-one");
+    }
+
+    #[test]
+    fn an_address_is_tried_the_driverless_ways_and_named_once() {
+        assert_eq!(
+            addresses("192.168.1.40/"),
+            vec!["ipp://192.168.1.40/ipp/print", "ipps://192.168.1.40/ipp/print", "ipp://192.168.1.40/ipp"]
+        );
+        assert_eq!(addresses("ipp://office.local/ipp/print"), vec!["ipp://office.local/ipp/print"]);
+        assert_eq!(queue_name("192.168.1.40", &[]), "Printer-192-168-1-40");
+        assert_eq!(queue_name("localhost:8631", &["printer-localhost-8631".into()]), "Printer-localhost-8631-2");
+        assert_eq!(queue_name("ipp://office.local/ipp/print", &[]), "Printer-office-local");
     }
 
     #[test]

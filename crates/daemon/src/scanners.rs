@@ -7,9 +7,15 @@
 //! dock watches for a scanner and, the first time one is there and no
 //! scanning app is installed, installs Simple Scan through the ordinary
 //! install path (`start_managed_install`: one rebuild, the dock's own tile)
-//! and says so. Once — offered or not needed — it never looks again
+//! and says so. Once — offered or not needed — it is never offered again
 //! (`OFFERED`, in the data folder): an owner who takes the app out is not
 //! given it back.
+//!
+//! THE SCANNERS THERE ARE (2026-10-22, the Printers page's Scanners): the
+//! watcher keeps looking and keeps what it found ([`known`]); the page reads
+//! that, and asks for a fresh look ([`look_now`]) when what it has is old. A
+//! look whose answer differs from the last is told to the loop, which reads
+//! the page again.
 //!
 //! WHEN it looks (a worker thread, asleep otherwise): a while after the dock
 //! starts (a scanner on the network, or plugged in before), whenever a new
@@ -24,6 +30,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
@@ -55,8 +63,27 @@ const SCAN_APPS: [&str; 8] = [
     "naps2",
 ];
 /// What is installed: Simple Scan (nixpkgs attr, its desktop id).
-const APP_ATTR: &str = "simple-scan";
-const APP_ID: &str = "org.gnome.SimpleScan.desktop";
+pub(crate) const APP_ATTR: &str = "simple-scan";
+pub(crate) const APP_ID: &str = "org.gnome.SimpleScan.desktop";
+/// The scanning apps by the program each is run as, for a page that opens
+/// one (Simple Scan first: it takes the scanner to use as its argument).
+pub(crate) const SCAN_PROGRAMS: [&str; 6] = ["simple-scan", "skanpage", "skanlite", "gscan2pdf", "naps2", "xsane"];
+
+/// What the last look found, and when.
+static SEEN: Mutex<Option<(Vec<Scanner>, Instant)>> = Mutex::new(None);
+/// A look is wanted now (the Printers page found what it has old).
+static LOOK: AtomicBool = AtomicBool::new(false);
+
+/// The scanners the last look found, and how long ago; `None` before the
+/// first look (or with no SANE on this machine).
+pub(crate) fn known() -> Option<(Vec<Scanner>, Duration)> {
+    SEEN.lock().ok()?.as_ref().map(|(s, at)| (s.clone(), at.elapsed()))
+}
+
+/// Ask the watcher for a look at its next tick.
+pub(crate) fn look_now() {
+    LOOK.store(true, Ordering::Relaxed);
+}
 
 /// A scanner SANE lists: its device name and what it says it is.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,10 +152,10 @@ fn offered() -> bool {
     crate::persist::data_path(OFFERED).exists()
 }
 
-/// Start watching (on a thread) unless it has been done; a scanner found is
-/// sent once, and the watching ends with it.
-pub(crate) fn spawn(tx: calloop::channel::Sender<Scanner>) {
-    if offered() || !crate::launch::on_path("scanimage") {
+/// Start watching, on a thread (with SANE on this machine): each look that
+/// finds other scanners than the last is sent.
+pub(crate) fn spawn(tx: calloop::channel::Sender<Vec<Scanner>>) {
+    if !crate::launch::on_path("scanimage") {
         return;
     }
     let allow_test = std::env::var_os("WAVERUNNER_SCANNER_TEST").is_some();
@@ -149,14 +176,19 @@ pub(crate) fn spawn(tx: calloop::channel::Sender<Scanner>) {
                 due = Some(Instant::now() + SETTLE);
             }
             known = now;
-            if last_look.elapsed() >= NETWORK {
+            if last_look.elapsed() >= NETWORK || LOOK.swap(false, Ordering::Relaxed) {
                 due = Some(Instant::now());
             }
             if due.is_some_and(|at| Instant::now() >= at) {
                 due = None;
                 last_look = Instant::now();
-                if let Some(found) = ask_sane(allow_test).into_iter().next() {
-                    let _ = tx.send(found);
+                let found = ask_sane(allow_test);
+                let changed = SEEN.lock().map_or(true, |mut seen| {
+                    let changed = seen.as_ref().is_none_or(|(was, _)| *was != found);
+                    *seen = Some((found.clone(), Instant::now()));
+                    changed
+                });
+                if changed && tx.send(found).is_err() {
                     return;
                 }
             }
@@ -168,8 +200,17 @@ pub(crate) fn spawn(tx: calloop::channel::Sender<Scanner>) {
 }
 
 impl App {
+    /// A look found other scanners than the last: the Printers page shows
+    /// them, and the first one ever brings an app to scan with.
+    pub(crate) fn on_scanners(&mut self, found: Vec<Scanner>) {
+        if let Some(first) = found.first().filter(|_| !offered()) {
+            self.on_scanner(first.clone());
+        }
+        self.printers_page_follow();
+    }
+
     /// A scanner is there: an app to scan with, if there is none — once.
-    pub(crate) fn on_scanner(&mut self, found: Scanner) {
+    fn on_scanner(&mut self, found: Scanner) {
         let had = self
             .entries
             .iter()

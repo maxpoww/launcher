@@ -1322,13 +1322,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // A scanner found: an app to scan with, once (`scanners.rs`).
+    // The scanners there are: the Printers page's, and the first one an
+    // app to scan with, once (`scanners.rs`).
     {
-        let (scan_tx, scan_rx) = calloop::channel::channel::<scanners::Scanner>();
+        let (scan_tx, scan_rx) = calloop::channel::channel::<Vec<scanners::Scanner>>();
         scanners::spawn(scan_tx);
         if let Err(e) = event_loop.handle().insert_source(scan_rx, |event, _, app: &mut App| {
             if let calloop::channel::Event::Msg(found) = event {
-                app.on_scanner(found);
+                app.on_scanners(found);
             }
         }) {
             warn!("cannot hear about scanners: {e}");

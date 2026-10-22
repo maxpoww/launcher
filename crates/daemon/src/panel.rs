@@ -4692,9 +4692,10 @@ impl App {
         }
     }
 
-    /// A text field of Colours is being typed in (and Colours is up).
+    /// A text field of Colours (or of Printers: an address) is being typed in,
+    /// and its page is up.
     pub(crate) fn colours_typing(&self) -> bool {
-        let on = |p: &Panel| p.open_control_label() == Some("Colours");
+        let on = |p: &Panel| matches!(p.open_control_label(), Some("Colours" | "Printers"));
         crate::controls::TYPING.lock().is_ok_and(|t| t.is_some()) && (on(&self.panel) || on(&self.quick))
     }
 
@@ -4716,7 +4717,8 @@ impl App {
                 text.pop();
             }
             _ => match utf8 {
-                Some(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) && text.chars().count() < 40 => text.push_str(t),
+                // (A printer's address can be a whole URI: longer than a name.)
+                Some(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) && text.chars().count() < if key == "printers-add" { 200 } else { 40 } => text.push_str(t),
                 _ => return,
             },
         }
@@ -4724,12 +4726,13 @@ impl App {
         if let Ok(mut t) = crate::controls::TYPING.lock() {
             *t = if leave { None } else { Some((key, text)) };
         }
-        if done && key != "colors-apps-find" {
+        if done && key.starts_with("colors-") && key != "colors-apps-find" {
             crate::palette::set_preview(crate::controls::editor_draft());
             self.colors_apply(false);
         }
         let ui = self.ui_facts();
-        self.controls_send(ControlCommand::Read("Colours", ui));
+        let label = if key.starts_with("printers-") { "Printers" } else { "Colours" };
+        self.controls_send(ControlCommand::Read(label, ui));
         self.schedule_frame();
     }
 
@@ -4862,7 +4865,7 @@ impl App {
                 }
             }
             // A click on a text field: it takes the keys (`colours_type`).
-            "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" => {
+            "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "printers-add" => {
                 if let Ok(mut t) = crate::controls::TYPING.lock() {
                     *t = crate::controls::field_start(key);
                 }
@@ -4952,6 +4955,11 @@ impl App {
                     info!("control panel: this machine has no {value} page");
                 }
                 return;
+            }
+            // A scanner and nothing to scan with (the Printers page): Simple
+            // Scan, the way any app is installed.
+            "printers-scan-app" => {
+                self.start_managed_install(crate::scanners::APP_ATTR, vec![crate::scanners::APP_ID.to_owned()]);
             }
             _ => {}
         }
