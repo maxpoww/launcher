@@ -911,7 +911,7 @@ impl App {
     }
 
     /// The slug of an *installed* webapp id, or `None` otherwise.
-    fn installed_webapp_slug(&self, id: &str) -> Option<String> {
+    pub(crate) fn installed_webapp_slug(&self, id: &str) -> Option<String> {
         crate::webapps::slug_of_id(id)
             .filter(|s| self.managed_webapps.contains(s))
             .map(str::to_string)

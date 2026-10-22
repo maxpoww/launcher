@@ -9,6 +9,7 @@
 //! the process goes fully idle.
 
 mod action_track;
+mod app_actions;
 mod animation;
 mod app_themes;
 mod applier;
@@ -2721,6 +2722,8 @@ struct SearchState {
     control_lift: Vec<f32>,
     /// Which of `controls` are MODULES (they open the module), not settings.
     control_modules: Vec<bool>,
+    /// The lone app's pills beside it (`app_actions.rs`).
+    actions: app_actions::Actions,
 }
 
 impl Default for SearchState {
@@ -2736,6 +2739,7 @@ impl Default for SearchState {
             controls: Vec::new(),
             control_lift: Vec::new(),
             control_modules: Vec::new(),
+            actions: Default::default(),
         }
     }
 }
@@ -5060,6 +5064,8 @@ impl App {
             })
             .collect();
         self.search.control_lift = vec![0.0; self.search.controls.len()];
+        // One app left: its own actions (and Uninstall) beside it.
+        self.sync_app_actions();
         // Search results are a flat ranked list: dense identity slots. (A
         // resting grid keeps the paged slots built just above.)
         if !resting_grid {
@@ -5876,6 +5882,7 @@ impl App {
                     self.activate(entry_idx, LaunchFrom::Box);
                 }
             }
+            Hit::AppAction(i) => self.run_app_action(i),
             Hit::Control(i) => {
                 if let Some(&(label, _)) = self.search.controls.get(i) {
                     if self.search.control_modules.get(i).copied().unwrap_or(false) {
@@ -6106,7 +6113,16 @@ impl App {
         if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
             error!("launch failed for {id}: {e:#}");
         }
-        self.usage.increment(&id);
+        self.launched(index);
+    }
+
+    /// What follows a launch of entry `index` (the app, or one of its
+    /// actions — `app_actions.rs`): it counts as a use, the keyboard goes
+    /// to its window, its icon hops and the box goes.
+    fn launched(&mut self, index: usize) {
+        if let Some(id) = self.entries.get(index).map(|e| e.id.clone()) {
+            self.usage.increment(&id);
+        }
         // Hand keyboard focus to the launched app: drop our exclusive grab
         // now (before its window maps) — the keyboard goes back where the
         // user is until then — and focus the app's window the moment it
@@ -6758,6 +6774,11 @@ impl App {
             )
             && self.panel_keys(keysym, false)
         {
+            return;
+        }
+        // The lone app's pills (`app_actions.rs`) take the keys that walk
+        // onto them and run them.
+        if self.app_actions_key(keysym) {
             return;
         }
         match keysym {
@@ -7903,7 +7924,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton | Hit::OpenBoxCell(_) | Hit::Control(_) => None,
+                                    Hit::SearchButton | Hit::OpenBoxCell(_) | Hit::Control(_) | Hit::AppAction(_) => None,
                                 };
                                 // Busy cells (a profile mutation in
                                 // flight) never start a drag; neither do

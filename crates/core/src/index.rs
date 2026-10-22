@@ -109,6 +109,38 @@ pub fn parse_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
     app_entry(&entry, &locales)
 }
 
+/// One of an app's own DESKTOP ACTIONS (`Actions=` + `[Desktop Action …]`:
+/// Chrome's New Incognito Window, Seam's New Private Window…).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopAction {
+    /// Its localized `Name=`.
+    pub name: String,
+    /// Its `Exec=`, field codes stripped.
+    pub exec: String,
+}
+
+/// The desktop actions `path`'s file declares, in its order: each with a
+/// name and something to run (the others are left out). Read when asked —
+/// the dock wants them only for the one app a search leaves.
+pub fn desktop_actions(path: &std::path::Path) -> Vec<DesktopAction> {
+    let locales = get_languages_from_env();
+    let Ok(entry) = DesktopEntry::from_path(path.to_path_buf(), Some(&locales)) else {
+        return Vec::new();
+    };
+    let Some(ids) = entry.actions() else {
+        return Vec::new();
+    };
+    ids.into_iter()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter_map(|id| {
+            let name = entry.action_name(id, &locales)?.trim().to_string();
+            let exec = strip_field_codes(entry.action_exec(id)?);
+            (!name.is_empty() && !exec.is_empty()).then_some(DesktopAction { name, exec })
+        })
+        .collect()
+}
+
 /// The launchable application an entry describes, or `None` without a
 /// usable `Exec=`.
 fn app_entry(entry: &DesktopEntry, locales: &[String]) -> Option<AppEntry> {
@@ -185,6 +217,25 @@ mod tests {
             std::fs::write(apps.join(name), content).unwrap();
         }
         apps
+    }
+
+    #[test]
+    fn reads_an_apps_desktop_actions_in_order() {
+        let apps = write_apps_dir(&[(
+            "browser.desktop",
+            "[Desktop Entry]\nType=Application\nName=Browser\nExec=browser %U\n\
+             Actions=new-window;new-private-window;broken;\n\n\
+             [Desktop Action new-window]\nName=New Window\nExec=browser --new-window %U\n\n\
+             [Desktop Action new-private-window]\nName=New Private Window\nName[es]=Nueva ventana privada\n\
+             Exec=browser --private-window %U\n\n\
+             [Desktop Action broken]\nName=No command\n",
+        )]);
+        let actions = desktop_actions(&apps.join("browser.desktop"));
+        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.len() == 2, "the one with nothing to run is left out: {names:?}");
+        assert_eq!(actions[0].exec, "browser --new-window");
+        assert_eq!(actions[1].exec, "browser --private-window");
+        assert!(desktop_actions(&apps.join("missing.desktop")).is_empty());
     }
 
     #[test]

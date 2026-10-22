@@ -253,6 +253,9 @@ pub enum Hit {
     /// A pill in the Controls row (index into `SearchState::controls`):
     /// opens that setting on the control panel.
     Control(usize),
+    /// One of the lone app's pills beside it (index into
+    /// `app_actions::Actions::pills`): runs that action, or Uninstall.
+    AppAction(usize),
 }
 
 /// Popup sections, top to bottom: the app grid, the (future) install
@@ -683,6 +686,9 @@ pub struct SectionLayout {
     /// centre like the Controls row (see [`SectionLayout::row_shift`]).
     /// Off for the resting grid, which keeps the order Max arranged.
     pub centre_rows: bool,
+    /// How far left of its centred place the lone result stands, to make
+    /// room for its actions beside it (`app_actions.rs`); 0 otherwise.
+    pub lead: f32,
     /// The pages go DOWN, not across (a side dock's box — Max, 2026-10-21):
     /// `scroll` is then along the height, a page `viewport.h` long.
     pub vertical: bool,
@@ -715,7 +721,7 @@ impl SectionLayout {
         }
         // Equal cells: the middle one (odd) or the middle gap (even) on
         // the centre is just the row centred.
-        (self.viewport.w - k as f32 * self.viewport.w / cols as f32) / 2.0
+        (self.viewport.w - k as f32 * self.viewport.w / cols as f32) / 2.0 - self.lead
     }
 }
 
@@ -912,6 +918,9 @@ pub struct Layout {
     /// The control pills' rects in that band (filled in by the App, which
     /// measures their labels), in `SearchState::controls` order.
     pub controls: Vec<Rect>,
+    /// The lone app's pills beside it (`App::place_app_actions`), in
+    /// `Actions::pills` order; a pill that did not fit has an empty rect.
+    pub app_actions: Vec<Rect>,
     /// The Apps rows' full room (every row that fits) and the room above
     /// the fixed sections: the App aims the trim with them.
     pub apps_full_h: f32,
@@ -1309,6 +1318,7 @@ pub fn layout(
                     rows
                 },
             centre_rows: false,
+            lead: 0.0,
             vertical: false,
         }
     });
@@ -1377,6 +1387,7 @@ pub fn layout(
         apps_part: None,
         control_bands,
         controls: Vec::new(),
+        app_actions: Vec::new(),
         apps_full_h: fits as f32 * grid_cell_h,
         apps_avail: avail,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
@@ -1634,6 +1645,7 @@ fn layout_side(
             cells: n_visible[s],
             cap: cols * fits,
             centre_rows: false,
+            lead: 0.0,
             vertical: true,
         }
     });
@@ -1695,6 +1707,7 @@ fn layout_side(
         apps_part: None,
         control_bands,
         controls: Vec::new(),
+        app_actions: Vec::new(),
         apps_full_h: fits as f32 * cell_h,
         apps_avail: room,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
@@ -1929,6 +1942,9 @@ pub fn hit_test(
     if let Some(i) = layout.controls.iter().position(|r| r.contains(pos)) {
         return Some(Hit::Control(i));
     }
+    if let Some(i) = layout.app_actions.iter().position(|r| r.contains(pos)) {
+        return Some(Hit::AppAction(i));
+    }
     // The open box: resolve the member slot under the pointer (clicks
     // inside are inert/launch; only outside closes).
     if let Some(b) = layout.open_box {
@@ -2044,6 +2060,11 @@ pub struct FrameInput<'a> {
     /// `Layout::controls` order, and each pill's eased hover.
     pub controls: &'a [(&'static str, f32)],
     pub control_lift: &'a [f32],
+    /// The lone app's pills beside it, in `Layout::app_actions` order,
+    /// each one's eased hover, and the Uninstall asking to be sure.
+    pub actions: &'a [crate::app_actions::Pill],
+    pub action_lift: &'a [f32],
+    pub asking: Option<usize>,
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
     pub quick: Option<QuickDraw<'a>>,
@@ -2388,6 +2409,9 @@ pub fn scene(
         search_pill,
         controls,
         control_lift,
+        actions,
+        action_lift,
+        asking,
         fast,
         quick,
         stretch,
@@ -3912,6 +3936,79 @@ pub fn scene(
             });
         }
         scene.grids.push(cgrid);
+    }
+    // THE LONE APP'S PILLS beside it (`app_actions.rs`): the System row's
+    // pills; Uninstall asking to be sure in THE RED of the menus (the
+    // palette's own where white words read on it, else Golem's, deepened
+    // until they do — `desktop_menu::danger_on`), its words white.
+    if !layout.app_actions.is_empty() && !panel {
+        use crate::panel::{HOVER_WASH_BRIGHT, HOVER_WASH_DARK, LAYER_GLOW, LAYER_INK, LAYER_SCALE, LAYER_WASH_BRIGHT, LAYER_WASH_DARK, LIFT};
+        let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+        let (rest_a, hover_a) = if bright {
+            (LAYER_WASH_BRIGHT[0], HOVER_WASH_BRIGHT)
+        } else {
+            (LAYER_WASH_DARK[0], HOVER_WASH_DARK)
+        };
+        let sc = search_pill.scale;
+        let near = LAYER_SCALE[0];
+        let (font, line) = (crate::options::FONT_PX * sc * near, crate::options::LINE_PX * sc * near);
+        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[0]];
+        let glow = if bright { 0.0 } else { 1.0 };
+        let own = crate::palette::danger_srgb();
+        let own = [
+            crate::options::srgb_to_linear(own[0]),
+            crate::options::srgb_to_linear(own[1]),
+            crate::options::srgb_to_linear(own[2]),
+            1.0,
+        ];
+        let red = crate::desktop_menu::danger_on(own, [1.0; 4], false).0;
+        let mut agrid = GridContent {
+            clip: reveal_rect,
+            ..Default::default()
+        };
+        for (i, (r, pill)) in layout.app_actions.iter().zip(actions).enumerate() {
+            if r.w <= 0.0 {
+                continue; // no room for it
+            }
+            let ask = asking == Some(i);
+            let lift = action_lift.get(i).copied().unwrap_or(0.0);
+            let k = 1.0 + LIFT * lift;
+            let (pw, ph) = (r.w * k, r.h * k);
+            let rect = Rect::new(r.x + r.w / 2.0 - pw / 2.0, r.y + r.h / 2.0 - ph / 2.0, pw, ph);
+            if panel_mix <= 0.0005 {
+                let (blur, glow_a) = LAYER_GLOW[0];
+                scene.overlay_shadows.push(ShadowInst {
+                    rect,
+                    radius: ph / 2.0,
+                    blur: blur * sc,
+                    color: [glow, glow, glow, glow_a * card_open * card_open],
+                    edges: [1.0, 1.0, 1.0, 1.0],
+                });
+            }
+            agrid.rects.push(RectInst {
+                rect,
+                radius: ph / 2.0,
+                color: if ask { red } else { crate::options::wash(!bright, lerp(rest_a, hover_a, lift)) },
+                glass: 0.0,
+                border: 0.0,
+            });
+            agrid.labels.push(Label {
+                // (The rect was made for the words it shows: Uninstall's whole
+                // sentence where that fits, else the short one.)
+                text: pill.shown(ask, r.w + 0.5, 2.0 * crate::options::PILL_PAD_X * sc * near).0.to_string(),
+                pos: (rect.x + pw / 2.0, rect.y + (ph - line * k) / 2.0),
+                max_w: pw,
+                font_px: font * k,
+                line_px: line * k,
+                centered: true,
+                dim: false,
+                cache: (k - 1.0).abs() < 0.001,
+                family: crate::options::TEXT_FONT,
+                color: Some(if ask { [1.0, 1.0, 1.0, 1.0] } else { ink }),
+                clip: Some(reveal_clip(rect)),
+            });
+        }
+        scene.grids.push(agrid);
     }
 
     // The push: the settings field rises in from the card's bottom edge
