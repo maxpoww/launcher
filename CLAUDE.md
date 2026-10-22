@@ -1029,7 +1029,11 @@ The big daemon files are cohesive but long — go straight to the function:
   pictures and videos (`Win::media`, `is_media`, in `show_found`). Then `..` (Max: "add the '..' place
   too" — `with_up`, the first row over Favourites' heading: the folder this one is in; a click goes up
   leaving this folder selected, a drop on it moves things up, held there with a drag it climbs —
-  `up_hold`; it climbs past Home to `/`, HIDDEN only at `/`, the bin's top and Recents), FAVOURITES
+  `up_hold`; it climbs past Home to `/`; it is ALWAYS in its spot so nothing under it jumps — where
+  there is nowhere up (`/`, the bin's top, Recents) DIMMED to a disabled row's ink (`NOWHERE_INK`) and
+  inert: no band, no click, no drop (`Place::nowhere`, a `..` with no folder; Max, 2026-10-22: "hacé que
+  '..' se quede hasta en / pero dimmed", reversing 10-14's "hidden, not grey"; Media is the same folder
+  filtered, so its `..` goes up as Files' does), FAVOURITES
   (RECENTS — below —, Home under the owner's name, their folders, `~/Phones`, the bookmarks) and
   LOCATIONS (GOLEM DISK = `/`, other disks, what is plugged in, the Bin) — `places()`, `Place::gap` =
   Locations' first. FILES IS UNLOCKED (Max, 2026-10-22: "the lock we did to the file manager makes no
