@@ -779,6 +779,8 @@ pub(crate) struct Visit {
     /// How much it is in use: its visits, each forgetting as the dock's
     /// launches do (`usage::decayed`).
     pub score: f64,
+    /// Its picture as Seam kept it, when it is one Seam heard play.
+    pub pic: Option<String>,
 }
 
 /// A short, steady name for some bytes (a cache file's).
@@ -847,6 +849,7 @@ fn history(browser: &Browser, max: usize) -> Vec<Visit> {
             title: r.get(2)?,
             last: secs(r.get::<_, Option<i64>>(3)?.unwrap_or(0)),
             score: score.get(&id).copied().unwrap_or(0.0),
+            pic: None,
         })
     });
     rows.map(|rows| rows.flatten().collect()).unwrap_or_default()
@@ -1086,8 +1089,18 @@ fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBu
         return Some(path);
     }
     let bytes = std::fs::read(entry).ok()?;
-    let img = image::load_from_memory(bytes.get(..body as usize)?).ok()?;
+    squared(bytes.get(..body as usize)?, &path)
+}
+
+/// A picture's middle, SQUARE, as big as a tile, written to `path` (a
+/// PNG): the tile is square, and a wide picture in it is a thin strip (the
+/// black bands of a 4:3 video picture are inside what is cut away).
+fn squared(bytes: &[u8], path: &Path) -> Option<PathBuf> {
+    let img = image::load_from_memory(bytes).ok()?;
     let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
     // (A 4:3 one is a 16:9 picture between bands: its square within that.)
     let side = if w * 3 == h * 4 { w * 9 / 16 } else { w.min(h) };
     let img = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
@@ -1095,8 +1108,142 @@ fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBu
     let img = if side > tile { img.resize(tile, tile, image::imageops::FilterType::Triangle) } else { img };
     let tmp = path.with_extension("part");
     img.to_rgba8().save_with_format(&tmp, image::ImageFormat::Png).ok()?;
-    std::fs::rename(&tmp, &path).ok()?;
-    Some(path)
+    std::fs::rename(&tmp, path).ok()?;
+    Some(path.to_owned())
+}
+
+// ---- Seam's kitchen ---------------------------------------------------------------
+
+/// WHAT SEAM COOKED (Max, 2026-10-22: "can we make Seam leave the files 'cooked' and pick
+/// them up with the shell from a dir?" — the dock never goes on the network): Seam's chrome
+/// script (Golem's `seam/golem-chrome.js`, THE RECENTS' KITCHEN) keeps what the pages it
+/// shows really are — their title as it is now, their preview picture — and what they
+/// play (song, artist, cover), in `$XDG_STATE_HOME/golem/seam/recents/`. Read here as
+/// DATA a page had a hand in: the file at most `KITCHEN_MAX`, addresses only http(s),
+/// words clipped, pictures only files of Seam's own naming in its `pics/`, no link.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub(crate) struct Kitchen {
+    #[serde(default)]
+    v: u32,
+    #[serde(default)]
+    pages: HashMap<String, KitchenPage>,
+    #[serde(default)]
+    plays: Vec<KitchenPlay>,
+    #[serde(skip)]
+    dir: PathBuf,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+struct KitchenPage {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    pic: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+struct KitchenPlay {
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    artist: String,
+    #[serde(default)]
+    at: f64,
+    #[serde(default)]
+    n: u32,
+    #[serde(default)]
+    pic: Option<String>,
+}
+
+/// The most of Seam's file read.
+const KITCHEN_MAX: u64 = 4 * 1024 * 1024;
+/// The most of one of its pictures read.
+const KITCHEN_PIC_MAX: u64 = 2 * 1024 * 1024;
+
+/// Where Seam keeps what it cooked.
+fn kitchen_dir() -> PathBuf {
+    let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state"));
+    state.join("golem/seam/recents")
+}
+
+/// What Seam cooked, as it stands (none when it has not, or is not ours).
+pub(crate) fn kitchen() -> Kitchen {
+    kitchen_in(&kitchen_dir())
+}
+
+fn kitchen_in(dir: &Path) -> Kitchen {
+    let path = dir.join("recents.json");
+    let small = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= KITCHEN_MAX);
+    let read = small.then(|| std::fs::read(&path).ok()).flatten();
+    match read.and_then(|b| serde_json::from_slice::<Kitchen>(&b).ok()).filter(|k| k.v == 1) {
+        Some(mut k) => {
+            k.dir = dir.to_owned();
+            k
+        }
+        None => Kitchen::default(),
+    }
+}
+
+/// An http(s) address of a sane length.
+fn is_web(url: &str) -> bool {
+    url.len() <= 2000 && (url.starts_with("https://") || url.starts_with("http://"))
+}
+
+impl Kitchen {
+    /// The title Seam saw last on the page at `url`.
+    fn title_of(&self, url: &str) -> Option<String> {
+        let t = self.pages.get(url)?.title.trim();
+        (!t.is_empty()).then(|| t.chars().take(300).collect())
+    }
+
+    /// One of Seam's pictures, by its name — only a file of its own naming
+    /// (`<16 hex>.<jpg|png|webp>`), in its `pics/`, a plain small file.
+    fn picture(&self, name: &str) -> Option<PathBuf> {
+        let (stem, ext) = name.split_once('.')?;
+        let ours = stem.len() == 16 && stem.bytes().all(|b| b.is_ascii_hexdigit()) && matches!(ext, "jpg" | "png" | "webp");
+        let path = self.dir.join("pics").join(name);
+        let plain = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= KITCHEN_PIC_MAX);
+        (ours && plain && !self.dir.as_os_str().is_empty()).then_some(path)
+    }
+
+    /// The preview picture Seam kept of the page at `url`.
+    fn page_picture(&self, url: &str) -> Option<PathBuf> {
+        self.picture(self.pages.get(url)?.pic.as_deref()?)
+    }
+}
+
+/// What a music site's webapp played, by its slug: "song • artist".
+const MUSIC: [&str; 4] = ["spotify", "youtube-music", "soundcloud", "deezer"];
+
+/// What the webapp of `site` (opening at `start`) PLAYED, as Seam heard it
+/// from the page: each a page to show — a song of a music site named with
+/// its artist ("In the End • Linkin Park"), opened where it played when that
+/// is a page of the site's own (a YouTube Music song), else as a search of
+/// the site for it (Spotify plays from a search page); with its cover.
+fn played(k: &Kitchen, site: Option<&Site>, start: &str, now: f64) -> Vec<(Visit, String)> {
+    let host = origin(start).map(|(_, h)| h.to_lowercase()).unwrap_or_default();
+    let hosts: Vec<&str> = site.map_or_else(|| vec![host.as_str()], |s| s.hosts.to_vec());
+    let music = site.is_some_and(|s| MUSIC.contains(&s.slug));
+    k.plays
+        .iter()
+        .filter(|p| host_is(&p.host, &hosts) && is_web(&p.url) && !p.title.trim().is_empty())
+        .map(|p| {
+            let (song, artist): (String, String) = (p.title.trim().chars().take(200).collect(), p.artist.trim().chars().take(120).collect());
+            let title = if music && !artist.is_empty() { format!("{song} • {artist}") } else { song.clone() };
+            let own = site.is_some_and(|s| is_page(s, &p.url));
+            let url = match site.filter(|_| !own).and_then(|s| search_url(s, &format!("{song} {artist}"))) {
+                Some(search) => search,
+                None => p.url.clone(),
+            };
+            let pic = p.pic.as_deref().and_then(|n| k.picture(n)).map(|p| p.to_string_lossy().into_owned());
+            let visit = Visit { url, title: title.clone(), last: p.at, score: f64::from(p.n.max(1)) * crate::usage::decayed(now - p.at), pic };
+            (visit, title)
+        })
+        .collect()
 }
 
 // ---- the recents ----------------------------------------------------------------
@@ -1112,7 +1259,7 @@ pub(crate) struct Recent {
 }
 
 /// `pages` made recents: each one's picture found.
-fn pictured(browser: &Browser, pages: Vec<(Visit, String)>) -> Vec<Recent> {
+fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -> Vec<Recent> {
     let icons = favicons_db(browser);
     let tiles = cache("web-tiles");
     let videos = match browser {
@@ -1123,10 +1270,27 @@ fn pictured(browser: &Browser, pages: Vec<(Visit, String)>) -> Vec<Recent> {
     pages
         .into_iter()
         .map(|(v, title)| {
-            let video = video_id(&v.url)
-                .and_then(|id| Some((id, videos.get(id)?)))
-                .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body));
-            let picture = video.or_else(|| {
+            // What Seam heard it play, then the preview Seam kept, then the
+            // video's own from its cache, then the favicon.
+            let cooked = v
+                .pic
+                .as_deref()
+                .map(PathBuf::from)
+                .or_else(|| kitchen.page_picture(&v.url))
+                .and_then(|src| {
+                    let out = shots.as_deref()?.join(format!("k-{}-s1.png", src.file_stem()?.to_string_lossy()));
+                    if out.exists() {
+                        return Some(out);
+                    }
+                    let bytes = std::fs::read(&src).ok()?;
+                    squared(&bytes, &out)
+                });
+            let video = || {
+                video_id(&v.url)
+                    .and_then(|id| Some((id, videos.get(id)?)))
+                    .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body))
+            };
+            let picture = cooked.or_else(video).or_else(|| {
                 let data = favicon(browser, icons.as_ref()?, &v.url)?;
                 tile_in(tiles.as_deref()?, &data)
             });
@@ -1164,7 +1328,13 @@ fn once_each(pages: impl Iterator<Item = (Visit, String)>, group: impl Fn(&Visit
     let mut out: Vec<(Visit, String)> = Vec::new();
     for (v, title) in pages {
         match at.get(&group(&v, &title)) {
-            Some(&i) => out[i].0.score += v.score,
+            Some(&i) => {
+                out[i].0.score += v.score;
+                // (A song heard and its page: the one kept wears the cover.)
+                if out[i].0.pic.is_none() {
+                    out[i].0.pic = v.pic;
+                }
+            }
             None => {
                 at.insert(group(&v, &title), out.len());
                 out.push((v, title));
@@ -1216,9 +1386,29 @@ const CANDIDATES: usize = 400;
 /// knows it) showed lately: from Seam's history, where every webapp lives —
 /// in THE ORDER (`rank`, the owner's `picks` counted in), at most `max`.
 pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, picks: &Picks, max: usize) -> Vec<Recent> {
-    let browser = seam();
-    let pages = webapp_pages(history(&browser, 4000), site, start, name, CANDIDATES);
-    pictured(&browser, ranked_pages(pages, picks, max))
+    let (browser, k) = (seam(), kitchen());
+    let pages = webapp_pages(retitled(history(&browser, 4000), &k), site, start, name, CANDIDATES);
+    let pages = with_plays(pages, played(&k, site, start, crate::usage::now_secs()));
+    pictured(&browser, &k, ranked_pages(pages, picks, max))
+}
+
+/// A history with each page's title as Seam saw it last, where it kept one
+/// (an app that names the song after the history wrote "YouTube Music").
+fn retitled(mut visits: Vec<Visit>, k: &Kitchen) -> Vec<Visit> {
+    for v in &mut visits {
+        if let Some(t) = k.title_of(&v.url) {
+            v.title = t;
+        }
+    }
+    visits
+}
+
+/// A webapp's pages and what it played, newest first, once each (a video,
+/// a title): a song heard and its page are one.
+fn with_plays(pages: Vec<(Visit, String)>, plays: Vec<(Visit, String)>) -> Vec<(Visit, String)> {
+    let mut all: Vec<(Visit, String)> = plays.into_iter().chain(pages).collect();
+    all.sort_by(|a, b| b.0.last.total_cmp(&a.0.last));
+    once_each(all.into_iter(), |v, title| video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned))
 }
 
 /// Hosts that are not a place one went to (sign-ins, this computer).
@@ -1246,8 +1436,10 @@ fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit,
 /// What a browser showed lately: a page a site but those in `skip`, in THE
 /// ORDER (`rank`, the owner's `picks` counted in), at most `max`.
 pub(crate) fn browser_recents(browser: &Browser, skip: &[String], picks: &Picks, max: usize) -> Vec<Recent> {
-    let pages = browser_pages(history(browser, 3000), skip, CANDIDATES);
-    pictured(browser, ranked_pages(pages, picks, max))
+    // (Seam's: as Seam saw its pages; another browser's as it wrote them.)
+    let k = if *browser == seam() { kitchen() } else { Kitchen::default() };
+    let pages = browser_pages(retitled(history(browser, 3000), &k), skip, CANDIDATES);
+    pictured(browser, &k, ranked_pages(pages, picks, max))
 }
 
 /// The hosts a webapp's pages are on, as patterns: its site's when Golem
@@ -1361,7 +1553,7 @@ mod tests {
     }
 
     fn visit(url: &str, title: &str) -> Visit {
-        Visit { url: url.into(), title: title.into(), last: 0.0, score: 0.0 }
+        Visit { url: url.into(), title: title.into(), last: 0.0, score: 0.0, pic: None }
     }
 
     #[test]
@@ -1382,8 +1574,8 @@ mod tests {
         );
         // A pick from the box counts more than a visit, and as the newest.
         let pages = vec![
-            (Visit { url: "a".into(), title: "A".into(), last: 50.0, score: 2.0 }, "A".to_string()),
-            (Visit { url: "b".into(), title: "B".into(), last: 40.0, score: 1.0 }, "B".to_string()),
+            (Visit { url: "a".into(), title: "A".into(), last: 50.0, score: 2.0, pic: None }, "A".to_string()),
+            (Visit { url: "b".into(), title: "B".into(), last: 40.0, score: 1.0, pic: None }, "B".to_string()),
         ];
         let picks: Picks = [("b".to_string(), (1.0, 99.0))].into();
         let got = ranked_pages(pages, &picks, 2);
@@ -1431,6 +1623,45 @@ mod tests {
         assert_eq!(got.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["News"]);
         assert_eq!(without_name("Cloudflare - R2", "cloudflare"), "R2");
         assert!(passing_path("https://x.com/i/flow/login") && !passing_path("https://x.com/author/alice"));
+    }
+
+    #[test]
+    fn what_seam_cooked_is_read_as_data() {
+        let dir = scratch("kitchen");
+        std::fs::create_dir_all(dir.join("pics")).unwrap();
+        std::fs::write(dir.join("pics/0123456789abcdef.png"), b"png").unwrap();
+        std::fs::write(dir.join("pics/fedcba9876543210.jpg"), vec![0u8; (KITCHEN_PIC_MAX + 1) as usize]).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("pics/aaaaaaaaaaaaaaaa.png")).unwrap();
+        std::fs::write(
+            dir.join("recents.json"),
+            r#"{"v":1,"pages":{"https://music.youtube.com/watch?v=9d9PQ1hrhBk":{"title":"Robot Rock - YouTube Music","at":5,"pic":"0123456789abcdef.png"}},
+               "plays":[{"host":"open.spotify.com","url":"https://open.spotify.com/search/linkin","title":"In the End","artist":"Linkin Park","at":20,"n":2,"pic":"0123456789abcdef.png"},
+                        {"host":"music.youtube.com","url":"https://music.youtube.com/watch?v=9d9PQ1hrhBk","title":"Robot Rock","artist":"Daft Punk","at":10,"n":1},
+                        {"host":"evil.example","url":"javascript:alert(1)","title":"x","artist":"","at":30,"n":1}]}"#,
+        )
+        .unwrap();
+        let k = kitchen_in(&dir);
+        assert_eq!(k.title_of("https://music.youtube.com/watch?v=9d9PQ1hrhBk").as_deref(), Some("Robot Rock - YouTube Music"));
+        assert!(k.picture("0123456789abcdef.png").is_some());
+        assert!(k.picture("fedcba9876543210.jpg").is_none(), "too big");
+        assert!(k.picture("aaaaaaaaaaaaaaaa.png").is_none(), "a link");
+        assert!(k.picture("../../etc/passwd").is_none() && k.picture("0123456789abcdef.svg").is_none());
+        // Spotify played from a search page: a search of Spotify for the song, named with its artist.
+        let sp = played(&k, site("spotify"), "https://open.spotify.com", 20.0);
+        assert_eq!(sp.len(), 1);
+        assert_eq!(sp[0].1, "In the End • Linkin Park");
+        assert_eq!(sp[0].0.url, "https://open.spotify.com/search/In%20the%20End%20Linkin%20Park");
+        assert!(sp[0].0.pic.is_some());
+        // YouTube Music played on its own page: that page; one with it in the history.
+        let ym = played(&k, site("youtube-music"), "https://music.youtube.com", 20.0);
+        assert_eq!(ym[0].0.url, "https://music.youtube.com/watch?v=9d9PQ1hrhBk");
+        let page = (Visit { url: "https://music.youtube.com/watch?v=9d9PQ1hrhBk".into(), title: "Robot Rock".into(), last: 5.0, score: 1.0, pic: None }, "Robot Rock".to_string());
+        let both = with_plays(vec![page], ym);
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].1, "Robot Rock • Daft Punk");
+        // Not a file of its own, or not ours at all: nothing.
+        assert_eq!(kitchen_in(&dir.join("nowhere")).plays.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn scratch(name: &str) -> PathBuf {

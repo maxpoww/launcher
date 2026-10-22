@@ -1482,7 +1482,16 @@ The big daemon files are cohesive but long — go straight to the function:
   dock's launches do (`usage::decayed`, two-day half-life), plus the owner's PICKS from the box
   (`recents-use.json`, `SearchState::picks`, worth three visits and as new as the pick). Up to
   `RECENT_MAX` (24) in PAGES of a line (`RECENT_PAGES` 4): dots under the line, → past its last /
-  ← before its first turn them, the wheel over them too (`recents_wheel`, the grid's pager). On a
+  ← before its first turn them, the wheel over them too (`recents_wheel`, the grid's pager). WHAT
+  SEAM COOKED (Max: "make Seam leave the files 'cooked' and pick them up with the shell from a
+  dir" — the dock NEVER goes on the network; Golem's `seam/golem-chrome.js`, the recents' kitchen):
+  `$XDG_STATE_HOME/golem/seam/recents/recents.json` + `pics/` — a page's title as Seam saw it last
+  (`retitled`), its preview picture, and what it PLAYED (`played`: a music site's songs as "song •
+  artist", opened where they played when that is a page of the site's own, else as a search of the
+  site for them — Spotify plays from a search page; with their covers); `with_plays` makes a song and
+  its page one. Pictures: what played > the page's preview > YouTube's from Seam's cache > the
+  favicon, each cropped square (`squared`). Read as data a page had a hand in (`Kitchen`: 4 MB,
+  http(s) only, pictures only `<16 hex>.<jpg|png|webp>` plain files in its `pics/`). On a
   short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
   Real data: `cargo test -- --ignored real_recents --nocapture`.
