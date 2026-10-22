@@ -427,7 +427,26 @@ pub(crate) fn put_metered(
             }
         }
     }
+    // A copy onto another disk (a stick, a card) is ON it before it is
+    // called done, not only in this computer's memory: 300 MB "copied" to a
+    // stick in 0.2 s were still being written half a minute later, and a
+    // stick pulled when the bar said done took a broken file with it. (A
+    // move already waits for this, file by file, above.)
+    if !take && !brought.is_empty() && other_disk(paths, dir) {
+        let _ = Command::new("sync").arg("-f").arg(dir).status();
+    }
     (brought, failed)
+}
+
+/// Whether any of `paths` is on another disk than `dir`.
+fn other_disk(paths: &[PathBuf], dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(here) = std::fs::metadata(dir).map(|m| m.dev()) else {
+        return false;
+    };
+    paths
+        .iter()
+        .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.dev() != here))
 }
 
 /// Send `paths` to `place`; what to tell the owner when it is over. Runs
