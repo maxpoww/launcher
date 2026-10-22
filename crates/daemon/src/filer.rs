@@ -2972,22 +2972,19 @@ impl App {
             self.loop_handle.remove(token);
         }
         // (Recents is no folder: it is read again when Files opens a file.)
-        let watched = (dir != recent::root()).then(|| crate::apps::watch_dirs(std::slice::from_ref(&dir))).flatten();
-        if let Some(fd) = watched {
-            use std::os::fd::AsFd;
-            let source = calloop::generic::Generic::new(fd, calloop::Interest::READ, calloop::Mode::Level);
-            let token = self.loop_handle.insert_source(source, move |_, fd, app: &mut App| {
-                crate::apps::drain_inotify(fd.as_fd());
-                app.filer_changed(id);
-                Ok(calloop::PostAction::Continue)
-            });
-            match token {
-                Ok(token) => {
-                    if let Some(win) = self.filer.win_mut(id) {
-                        win.watch = Some(token);
-                    }
-                }
-                Err(e) => warn!("files: cannot follow {}: {e}", dir.display()),
+        if dir != recent::root() {
+            if slow_mount(&dir).is_some() {
+                // On a slow place even setting the watch asks it (a phone
+                // over MTP, busy with a video or the thumbnails: 1–2 s with
+                // the shell still at each folder opened): off the loop.
+                let here = dir.clone();
+                self.desktop_off_loop(
+                    move || crate::apps::watch_dirs(std::slice::from_ref(&here)),
+                    move |app, fd| app.filer_follow(id, &dir, fd),
+                );
+            } else {
+                let fd = crate::apps::watch_dirs(std::slice::from_ref(&dir));
+                self.filer_follow(id, &dir, fd);
             }
         }
         self.filer_list(id);
@@ -2996,6 +2993,33 @@ impl App {
         self.filer_note_nav();
         // (`..` is another folder now.)
         self.filer_places();
+    }
+
+    /// Follow the folder window `id` shows with the watch `fd` (inotify):
+    /// its changes read it again. A watch made off the loop for a folder the
+    /// window has left meanwhile is let go.
+    fn filer_follow(&mut self, id: u32, dir: &Path, fd: Option<std::os::fd::OwnedFd>) {
+        use std::os::fd::AsFd;
+        let Some(fd) = fd else {
+            return;
+        };
+        if self.filer.win(id).is_none_or(|w| w.dir != dir || w.watch.is_some()) {
+            return;
+        }
+        let source = calloop::generic::Generic::new(fd, calloop::Interest::READ, calloop::Mode::Level);
+        let token = self.loop_handle.insert_source(source, move |_, fd, app: &mut App| {
+            crate::apps::drain_inotify(fd.as_fd());
+            app.filer_changed(id);
+            Ok(calloop::PostAction::Continue)
+        });
+        match token {
+            Ok(token) => {
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.watch = Some(token);
+                }
+            }
+            Err(e) => warn!("files: cannot follow {}: {e}", dir.display()),
+        }
     }
 
     /// BACK AND FORWARD ON THE WINDOW'S BAR (Max, 2026-10-14: "los botones
