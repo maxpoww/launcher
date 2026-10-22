@@ -517,7 +517,13 @@ The big daemon files are cohesive but long — go straight to the function:
   `HOVER_RED`, `MenuPaint::hover`, mixed in sRGB, solid as the menu), and never so far that the row's words
   read worse than 4.5 : 1 (or four fifths of what the bare panel gives): a very light accent in the dark stays
   a tint; at the row's radius; the words and symbol keep their ink, a red row its red — never white; none on
-  a rule, a note or a row with nothing to do. The selection pill's buttons stay neutral (the panel 7 % toward
+  a rule, a note or a row with nothing to do. THE RED (Max, 2026-10-21: tangerine's light "Delete for good" read
+  grey): the palette's own red only when it is CLEARLY red as the eye sees it (`reads_red`: OKLCH hue 10°–40°,
+  chroma ≥ 0.11 — tangerine's #73310e is a brown at 45°) AND reads at 4.5 : 1 on the panel; else Golem's
+  (#c62828 on a light panel, #ff6b6b on a dark one) walked toward black or white until it does (`danger_on`,
+  `MenuPaint::danger`); the hover keeps a row that read at 4.5 : 1 at 4.5 : 1. Every shipped palette, both looks,
+  the Lighting's and the Saturation's ends, passes (`every_palettes_danger_rows_read_red`, which prints which
+  keep their own: 48 of 236). The selection pill's buttons stay neutral (the panel 7 % toward
   the ink). MENU SIZE (Max, 2026-10-21: "add ctrl +/-/0 to
   the context menus (make it bigger or smaller)" — for kids and grandmas): while a menu is OPEN, Ctrl + (=, keypad
   +) / Ctrl − / Ctrl 0 and Ctrl + the wheel over it make it bigger, smaller, as shipped — 80 % to 200 % a tenth a
