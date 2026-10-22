@@ -990,7 +990,7 @@ impl App {
                     let target = due
                         .then(|| {
                             wifi_first
-                                .then(|| crate::desktop_phone::reach_wifi(phone.addr.as_deref()))
+                                .then(|| crate::desktop_phone::reach_wifi(&probed, phone.addr.as_deref()))
                                 .flatten()
                                 .or_else(|| crate::desktop_phone::reach(&probed, phone.addr.as_deref()))
                         })

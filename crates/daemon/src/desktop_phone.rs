@@ -56,6 +56,8 @@ pub(crate) fn ready(serial: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Item {
     pub size: u64,
+    /// When it last changed on the phone (seconds since 1970).
+    pub mtime: i64,
     /// Under the phone's storage: `DCIM/Camera/IMG_1.jpg`.
     pub path: String,
     /// Where it goes here.
@@ -63,27 +65,82 @@ pub(crate) struct Item {
 }
 
 impl Item {
-    /// It is here, whole (by its size: a copy cut short, or a file changed
-    /// since, is not).
+    /// Its copy here, whole: at its place, or beside it (`free_name`) where
+    /// another file had that name.
+    fn copy_here(&self) -> Option<PathBuf> {
+        copy_at(&self.to, self.size)
+    }
+
+    /// Nothing to bring: its copy is here — or its place holds a file of the
+    /// owner's that is newer than it (changed here after it came: a photo
+    /// turned, a document edited), which is left as it is.
     fn here(&self) -> bool {
-        std::fs::metadata(&self.to).map(|m| m.len()).ok() == Some(self.size)
+        self.copy_here().is_some() || theirs(&self.to, self.mtime)
     }
 }
 
-/// `find … -exec stat -c "%s|%n"`'s lines (`2048|/sdcard/DCIM/Camera/a.jpg`)
-/// → the items of `kinds`, each with its place under `folder`. Hidden files
-/// and folders (thumbnails, the phone's bin) are nobody's.
+/// A copy, `size` bytes, of a phone's file whose place here is `to`: there,
+/// or beside it as `name (2).ext`… — where something else had the name when
+/// it came (`arrive`). Nothing is EVER copied over a file here: a size that
+/// differs is another file (a name the phone used again after one was
+/// deleted, or the owner's own edit), not a copy cut short — copies arrive
+/// whole or not at all (`ARRIVING`).
+fn copy_at(to: &Path, size: u64) -> Option<PathBuf> {
+    let whole = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == size);
+    if whole(to) {
+        return Some(to.to_path_buf());
+    }
+    std::fs::symlink_metadata(to).ok()?;
+    let (dir, name) = (to.parent()?, to.file_name()?.to_str()?);
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    (2..10_000)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .take_while(|p| std::fs::symlink_metadata(p).is_ok())
+        .find(|p| whole(p))
+}
+
+/// Whether the file at `to` is the owner's own and newer than the phone's
+/// (`mtime`): changed here after the copy came (`adb pull -a` keeps the
+/// phone's time).
+fn theirs(to: &Path, mtime: i64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(to).is_ok_and(|m| m.is_file() && m.mtime() > mtime)
+}
+
+/// The hidden folder a copy lands in before it is put in its place, whole —
+/// a copy cut short (a pull killed, a phone gone) never stands where a whole
+/// one would, and is thrown away.
+const ARRIVING: &str = ".golem-arriving";
+
+/// Put what has come at `got` in its place `to` — or, where something is
+/// already there, beside it under a free name (never over it). Where it is.
+fn arrive(got: &Path, to: &Path) -> std::io::Result<PathBuf> {
+    let dest = match (to.parent(), to.file_name().and_then(|n| n.to_str())) {
+        (Some(dir), Some(name)) => crate::bt_files::free_name(dir, name),
+        _ => to.to_path_buf(),
+    };
+    std::fs::rename(got, &dest).map(|()| dest)
+}
+
+/// `find … -exec stat -c "%s|%Y|%n"`'s lines
+/// (`2048|1760000000|/sdcard/DCIM/Camera/a.jpg`) → the items of `kinds`,
+/// each with its place under `folder`. Hidden files and folders
+/// (thumbnails, the phone's bin) are nobody's.
 pub(crate) fn parse_items(listing: &str, kinds: &[&Kind], folder: &Path) -> Vec<Item> {
     listing
         .lines()
         .filter_map(|line| {
-            let (size, path) = line.trim().split_once('|')?;
+            let (size, rest) = line.trim().split_once('|')?;
+            let (mtime, path) = rest.split_once('|')?;
             let path = path.strip_prefix("/sdcard/")?;
             if path.split('/').any(|part| part.starts_with('.')) {
                 return None;
             }
             let to = kinds.iter().find_map(|kind| crate::phones::place(kind, path, folder))?;
-            Some(Item { size: size.parse().ok()?, path: path.to_owned(), to })
+            Some(Item { size: size.parse().ok()?, mtime: mtime.parse().ok()?, path: path.to_owned(), to })
         })
         .collect()
 }
@@ -103,7 +160,7 @@ fn list(target: &str, kinds: &[&Kind], folder: &Path) -> Option<Vec<Item>> {
     // listed all the same: what it listed is read either way.)
     let listing = Command::new("adb")
         .args(["-s", target, "shell"])
-        .arg(format!("find {} -type f -exec stat -c '%s|%n' {{}} + 2>/dev/null", dirs.join(" ")))
+        .arg(format!("find {} -type f -exec stat -c '%s|%Y|%n' {{}} + 2>/dev/null", dirs.join(" ")))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -134,6 +191,11 @@ pub(crate) struct Moved {
 const STALLED: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: bool, task: &TaskHandle) -> Option<Moved> {
+    // One at a time: a Clean, an import and the hourly sync of one phone
+    // into one folder at once pulled the same files twice — one copy over
+    // another's — and the first's list then took them off the phone.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let items = list(target, kinds, folder)?;
     let wanted: Vec<&Item> = items.iter().filter(|i| !i.here()).collect();
     info!("phone: {} files on {target}, {} new", items.len(), wanted.len());
@@ -142,28 +204,45 @@ pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: boo
     let total: u64 = wanted.iter().map(|i| i.size).sum();
     let mut done: u64 = 0;
     task.set(0, total);
-    // One `adb pull` a folder's batch: it takes many files and one place.
-    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&Item>> = Default::default();
+    // One `adb pull` a folder's batch: it takes many files and one place —
+    // the folder's ARRIVING one, from where each goes to its own place
+    // whole. (Two of one name in a batch would land on each other there:
+    // `DCIM/x.jpg` and `Pictures/x.jpg` both go to Photos.)
+    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<Vec<&Item>>> = Default::default();
     for item in &wanted {
-        by_dir.entry(item.to.parent().map(Path::to_path_buf).unwrap_or_default()).or_default().push(item);
+        let batches = by_dir.entry(item.to.parent().map(Path::to_path_buf).unwrap_or_default()).or_default();
+        let name = item.to.file_name();
+        match batches.last_mut() {
+            Some(batch) if batch.len() < BATCH && batch.iter().all(|i| i.to.file_name() != name) => batch.push(item),
+            _ => batches.push(vec![item]),
+        }
     }
-    'copy: for (into, items) in &by_dir {
-        if let Err(e) = std::fs::create_dir_all(into) {
-            warn!("phone: cannot make {}: {e}", into.display());
+    let mut copied: Vec<PathBuf> = Vec::new();
+    'copy: for (into, batches) in &by_dir {
+        let arriving = into.join(ARRIVING);
+        // (What a copy cut short left there before: it comes again whole.)
+        let _ = std::fs::remove_dir_all(&arriving);
+        if let Err(e) = std::fs::create_dir_all(&arriving) {
+            warn!("phone: cannot make {}: {e}", arriving.display());
             continue;
         }
-        for batch in items.chunks(BATCH) {
+        for batch in batches {
+            let got = |i: &Item| i.to.file_name().map(|n| arriving.join(n));
             let mut cmd = Command::new("adb");
             cmd.args(["-s", target, "pull", "-a"]);
             for item in batch {
                 cmd.arg(format!("/sdcard/{}", item.path));
             }
             // (The trailing slash: a place for many files, not a name.)
-            cmd.arg(format!("{}/", into.display()));
+            cmd.arg(format!("{}/", arriving.display()));
             // While it runs, how much of the batch has landed is read off
             // the files themselves (adb writes each as it comes).
-            let landed =
-                || -> u64 { batch.iter().map(|i| std::fs::metadata(&i.to).map(|m| m.len().min(i.size)).unwrap_or(0)).sum() };
+            let landed = || -> u64 {
+                batch
+                    .iter()
+                    .map(|i| got(i).and_then(|g| std::fs::metadata(g).ok()).map_or(0, |m| m.len().min(i.size)))
+                    .sum()
+            };
             let mut stalled = false;
             match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
                 Ok(mut child) => {
@@ -180,7 +259,7 @@ pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: boo
                         }
                         task.set(done + now, total);
                         // Cancelled from the bar: the copy in hand is cut
-                        // (its half file is brought whole next time).
+                        // (its half file is thrown away; it comes whole next time).
                         if task.cancelled() {
                             let _ = child.kill();
                         } else if since.elapsed() > STALLED {
@@ -194,19 +273,32 @@ pub(crate) fn transfer(target: &str, kinds: &[&Kind], folder: &Path, remove: boo
             }
             done += landed();
             task.set(done, total);
+            // Each that came whole to its place (beside what is there, never
+            // over it); what is half is left to be thrown away.
+            for item in batch {
+                let Some(got) = got(item).filter(|g| std::fs::metadata(g).is_ok_and(|m| m.len() == item.size)) else {
+                    continue;
+                };
+                match arrive(&got, &item.to) {
+                    Ok(dest) => copied.push(dest),
+                    Err(e) => warn!("phone: {} could not be put in {}: {e}", got.display(), into.display()),
+                }
+            }
             // (Stalled: the phone is not answering; what is missing comes
             // at the next sync.)
             if task.cancelled() || stalled {
+                let _ = std::fs::remove_dir_all(&arriving);
                 break 'copy;
             }
         }
+        let _ = std::fs::remove_dir_all(&arriving);
     }
-    let copied: Vec<PathBuf> = wanted.iter().filter(|i| i.here()).map(|i| i.to.clone()).collect();
-    let failed = if task.cancelled() { 0 } else { wanted.len() - copied.len() };
+    let failed = if task.cancelled() { 0 } else { wanted.len().saturating_sub(copied.len()) };
     let mut removed = 0;
     if remove && !task.cancelled() {
-        // Only what is here whole leaves the phone.
-        let safe: Vec<&Item> = items.iter().filter(|i| i.here()).collect();
+        // Only what has a WHOLE copy here leaves the phone (not one whose
+        // place holds the owner's own edit: that copy is not the phone's file).
+        let safe: Vec<&Item> = items.iter().filter(|i| i.copy_here().is_some()).collect();
         for batch in safe.chunks(BATCH) {
             if task.cancelled() {
                 break;
@@ -346,10 +438,14 @@ fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(V
                         continue;
                     };
                     let to = dest.join(place);
-                    let Ok(size) = entry.metadata().map(|m| m.len()) else {
+                    let Ok(meta) = entry.metadata() else {
                         continue;
                     };
-                    if std::fs::metadata(&to).map(|m| m.len()).ok() != Some(size) {
+                    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+                    let (size, mtime) = (meta.len(), mtime.map_or(i64::MAX, |d| d.as_secs() as i64));
+                    // (As `transfer`: here whole, or the owner's own newer
+                    // file in its place — never copied over.)
+                    if copy_at(&to, size).is_none() && !theirs(&to, mtime) {
                         wanted.push((path, to, size));
                     }
                 }
@@ -363,9 +459,22 @@ fn import_from_folder(mount: &Path, dest: &Path, task: &TaskHandle) -> Option<(V
         if task.cancelled() {
             break;
         }
-        let copied = to.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::copy(path, to));
+        let copied = to.parent().ok_or_else(|| std::io::Error::other("no folder")).and_then(|into| {
+            let arriving = into.join(ARRIVING);
+            std::fs::create_dir_all(&arriving)?;
+            let got = arriving.join(to.file_name().unwrap_or_default());
+            let made = std::fs::copy(path, &got).and_then(|_| {
+                // (The phone's time kept, as `adb pull -a` does: the copy is
+                // then known from a later edit of the owner's.)
+                let when = std::fs::metadata(path)?.modified()?;
+                std::fs::File::options().write(true).open(&got)?.set_modified(when)?;
+                arrive(&got, to)
+            });
+            let _ = std::fs::remove_dir_all(&arriving);
+            made
+        });
         match copied {
-            Ok(_) => came.push(to.clone()),
+            Ok(dest) => came.push(dest),
             Err(e) => {
                 warn!("phone: {} was not copied: {e}", path.display());
                 failed += 1;
@@ -405,13 +514,13 @@ pub(crate) fn wifi_there(addr: &str) -> bool {
 /// The phone over Wi-Fi and nothing else, with ten seconds' patience: it was
 /// allowed a moment ago and its own side is still restarting. What `adb -s`
 /// is told.
-pub(crate) fn reach_wifi(addr: Option<&str>) -> Option<String> {
+pub(crate) fn reach_wifi(serial: &str, addr: Option<&str>) -> Option<String> {
     let addr = addr?;
     for _ in 0..20 {
         if wifi_there(addr) {
             let _ = Command::new("adb").args(["connect", addr]).stdout(Stdio::null()).stderr(Stdio::null()).status();
             if ready(addr) {
-                return Some(addr.to_owned());
+                return is_phone(addr, serial).then(|| addr.to_owned());
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -455,7 +564,15 @@ pub(crate) fn reach(serial: &str, addr: Option<&str>) -> Option<String> {
         return None;
     }
     let _ = Command::new("adb").args(["connect", addr]).stdout(Stdio::null()).stderr(Stdio::null()).status();
-    ready(addr).then(|| addr.to_owned())
+    (ready(addr) && is_phone(addr, serial)).then(|| addr.to_owned())
+}
+
+/// Whether what answers at `target` is the phone `serial` — an address on
+/// the Wi-Fi is the router's to give, and another device that lets this
+/// computer in (a second phone, a tablet, a TV) may have this one's now: it
+/// would be synced into this phone's folder, and cleaned.
+pub(crate) fn is_phone(target: &str, serial: &str) -> bool {
+    target == serial || adb(target, &["shell", "getprop ro.serialno"]).is_some_and(|said| said.trim() == serial)
 }
 
 /// Whether the phone is on a charger (cable, dock or pad).
@@ -638,10 +755,10 @@ mod tests {
 
     #[test]
     fn a_phones_things_are_listed_with_their_places_and_only_the_new_ones_wanted() {
-        let listing = "2048|/sdcard/DCIM/Camera/IMG_1.jpg\n4096|/sdcard/DCIM/Camera/VID_2.mp4\n\
-                       10|/sdcard/DCIM/.thumbnails/1.jpg\n77|/sdcard/Pictures/Screenshots/s.png\n\
-                       5|/sdcard/Pictures/.trashed-123-x.jpg\n9|/sdcard/Music/it's a song.mp3\n\
-                       3|/sdcard/Alarms/ring.ogg\nfind: /sdcard/Nope: No such file\n";
+        let listing = "2048|1700000000|/sdcard/DCIM/Camera/IMG_1.jpg\n4096|1700000000|/sdcard/DCIM/Camera/VID_2.mp4\n\
+                       10|1700000000|/sdcard/DCIM/.thumbnails/1.jpg\n77|1700000000|/sdcard/Pictures/Screenshots/s.png\n\
+                       5|1700000000|/sdcard/Pictures/.trashed-123-x.jpg\n9|1700000000|/sdcard/Music/it's a song.mp3\n\
+                       3|1700000000|/sdcard/Alarms/ring.ogg\nfind: /sdcard/Nope: No such file\n";
         let folder = std::env::temp_dir().join(format!("wr-phone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         let kinds: Vec<&Kind> = ["photos", "music"].iter().filter_map(|k| crate::phones::kind(k)).collect();
@@ -658,16 +775,50 @@ mod tests {
         );
         assert_eq!(items[0].to, folder.join("Photos/Camera/IMG_1.jpg"));
         assert_eq!(items[3].to, folder.join("Music/it's a song.mp3"));
-        // One is here whole, one cut short: only the first is not wanted,
-        // and only the first may leave the phone.
+        assert_eq!(items[0].mtime, 1_700_000_000);
+        // One is here whole, one's place holds an older other file: only the
+        // first is not wanted, and only the first may leave the phone.
         std::fs::create_dir_all(folder.join("Photos/Camera")).unwrap();
         std::fs::write(&items[0].to, vec![0u8; 2048]).unwrap();
         std::fs::write(&items[1].to, vec![0u8; 100]).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        std::fs::File::options().write(true).open(&items[1].to).unwrap().set_modified(old).unwrap();
         let here: Vec<&str> = items.iter().filter(|i| i.here()).map(|i| i.path.as_str()).collect();
         let _ = std::fs::remove_dir_all(&folder);
         assert_eq!(here, vec!["DCIM/Camera/IMG_1.jpg"]);
         // The phone's shell gets each name whole, whatever is in it.
         assert_eq!(quoted("/sdcard/Music/it's a song.mp3"), "'/sdcard/Music/it'\\''s a song.mp3'");
+    }
+
+    #[test]
+    fn nothing_here_is_ever_copied_over_and_the_owners_edit_stays() {
+        let d = std::env::temp_dir().join(format!("wr-arrive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(ARRIVING)).unwrap();
+        let to = d.join("document.pdf");
+        let phone = |size: u64, mtime: i64| Item { size, mtime, path: "Download/document.pdf".into(), to: to.clone() };
+        // The first one came (the phone's time kept, as `adb pull -a` does).
+        std::fs::write(&to, b"first version").unwrap();
+        let first_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options().write(true).open(&to).unwrap().set_modified(first_time).unwrap();
+        assert!(phone(13, 1_700_000_000).here());
+        // Deleted on the phone, a new one of the same name downloaded later:
+        // wanted — and it arrives BESIDE the first, which stays.
+        let newer = phone(6, 1_800_000_000);
+        assert!(!newer.here());
+        std::fs::write(d.join(ARRIVING).join("document.pdf"), b"second").unwrap();
+        let landed = arrive(&d.join(ARRIVING).join("document.pdf"), &to).unwrap();
+        assert_eq!(landed, d.join("document (2).pdf"));
+        assert_eq!(std::fs::read(&to).unwrap(), b"first version");
+        assert!(newer.here(), "found beside its place next time");
+        assert_eq!(newer.copy_here(), Some(landed));
+        // The owner edits the first copy here (newer than the phone's):
+        // nothing is brought over it, and it is no copy to clean the phone by.
+        std::fs::write(&to, b"first version, signed").unwrap();
+        let first = phone(13, 1_700_000_000);
+        assert!(first.here());
+        assert_eq!(first.copy_here(), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Against a REAL phone (`GOLEM_TEST_PHONE=<serial> cargo test -- --ignored
@@ -695,14 +846,19 @@ mod tests {
         assert!(sh("ls /sdcard/Download/golem-test").contains("one.txt"), "a copy takes nothing off the phone");
         // Again: nothing new.
         assert_eq!(transfer(&serial, &[&SCRATCH], &folder, false, &task).unwrap().copied.len(), 0);
-        // One copy here is spoiled, and that file has since changed on the
-        // phone too: the clean brings it again and only then takes it.
+        // One copy here was changed by its owner since: it is theirs — not
+        // brought again over it, and no copy to take the phone's by.
         std::fs::write(folder.join("Scratch/three.txt"), b"x").unwrap();
         let cleaned = transfer(&serial, &[&SCRATCH], &folder, true, &task).unwrap();
-        assert_eq!((cleaned.copied.len(), cleaned.removed, cleaned.failed), (1, 3, 0));
-        assert_eq!(std::fs::read_to_string(folder.join("Scratch/three.txt")).unwrap(), "three\n");
-        let left = sh("find /sdcard/Download/golem-test -type f");
-        assert_eq!(left.trim(), "/sdcard/Download/golem-test/.hidden", "the owner's files left; the hidden one is not ours");
+        assert_eq!((cleaned.copied.len(), cleaned.removed, cleaned.failed), (0, 2, 0));
+        assert_eq!(std::fs::read_to_string(folder.join("Scratch/three.txt")).unwrap(), "x");
+        let mut left: Vec<String> = sh("find /sdcard/Download/golem-test -type f").lines().map(str::to_owned).collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["/sdcard/Download/golem-test/.hidden", "/sdcard/Download/golem-test/three.txt"],
+            "the one with no whole copy here stays; the hidden one is not ours"
+        );
         sh("rm -rf /sdcard/Download/golem-test");
         let _ = std::fs::remove_dir_all(&folder);
         assert!(sizes(&serial).contains_key("photos"));
