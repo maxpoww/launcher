@@ -1105,7 +1105,17 @@ The big daemon files are cohesive but long — go straight to the function:
   `Hits::hidden`) is the ground menu's "Show / Hide hidden files" — one state, `Win::hidden`, the same
   `Action::ToggleHidden` (and Ctrl+H) — its symbol the state: the slashed eye (`eyeoff`) while hidden
   files are not shown, the eye PRESSED while they are ("el icono debería cambiar"); the tabs and the
-  way here give way to it as to the other tools. Rig: `files where hidden`. Buttons 22×20, 12 px
+  way here give way to it as to the other tools. Rig: `files where hidden`. KEYBOARD MODE (Max,
+  2026-10-22: "un botón de teclado pero del otro lado de la topbar … y activa 'keyboard mode'"): a
+  keyboard button at the top line's LEFT end, 8 px before the tabs (`Spot::Keys`, `Hits::keys`), pressed
+  while on; one choice for every window, remembered (`settings.files_keys`, `filer_keys`). While on,
+  plain letters (no Ctrl/Alt/Super) are commands in `filer_key` — W A S D walk as the arrows (Shift
+  stretches), Q back, E opens (Enter), Z undoes, X / C / V cut, copy, paste (the menu's own acts, so the
+  pill's flow and the zones' gate), R names the one selected; Delete as ever; no other letter types and
+  nothing searches by itself (Ctrl+F and the magnifier still do). A field that is up (search, path,
+  name, a menu's search) and a menu take their keys first, as before; Alt+W/A/S/D/Q/E still work with it
+  off. Quiet: the pressed button is the only sign. Rig: `files keymode on|off`, `files where keys`,
+  `files key w|a|s|d|e|q|z|x|c|v|r`. Buttons 22×20, 12 px
   symbols — the mockup's own strokes written as SVGs into `~/.cache/waverunner/files-glyphs/` once
   (`chrome::write_glyphs`, `glyph`) and read by the icon loader by path, washed with their colour
   (`symbol`: icon.wgsl's ghost, ring -1.17). THE i CARD (`Win::info_on`, `chrome::Info`, read off the
@@ -1247,8 +1257,15 @@ The big daemon files are cohesive but long — go straight to the function:
   only what holds the words (`Win::find`, `Win::all`, `found`, `filer_find`; Escape puts it
   away, Enter opens the first found, the walking keys go on to what is found); not into
   sub-folders. Rig: `files view
-  list|icons`, `sort name|size|date [up]`, `find <words>|-`. SHIFT with a click or an
-  arrow selects from where the selection began (`Win::anchor`, `select_to`, `span`). A drag HELD
+  list|icons`, `sort name|size|date [up]`, `find <words>|-`. SHIFT is VIM'S VISUAL MODE (Max,
+  2026-10-22: "mantener apretado shift selecciones como visual mode en vim"; arrows and W A S D alike):
+  the anchor is where the cursor stood as Shift went down (none: the first walk picks the first thing;
+  `Win::visual`, `filer_walk_to`), each walk moves the cursor and the selection is the RUN between
+  anchor and cursor in reading order (`select_to`, `span`) — back toward the anchor it shrinks, past it
+  it turns; letting Shift go keeps it (`filer_shift_up`, from `update_modifiers`) and the next Shift
+  begins again from the cursor; a plain walk is one thing; Escape clears it once nothing else is up. A
+  click sets cursor and anchor, Ctrl+click the cursor only, Shift+click runs from the anchor. No ring on
+  the cursor's thing. Rig: `files key shift <d|a|…>` (held), `files shiftup`. A drag HELD
   on a folder `SPRING` opens it under the drag (`Win::spring`, a timer from `filer_drag_over`).
   SPRING-LOADED SIDEBAR (Max, 2026-10-21: "the dirs open when i drag something on top"): a drag over
   the rested sidebar opens it AT ONCE (no `SIDE_WAIT`; `side_follow` folds it when the drag leaves it,
