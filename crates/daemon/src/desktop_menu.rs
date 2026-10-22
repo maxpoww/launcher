@@ -923,9 +923,77 @@ fn lin(c: [f32; 4]) -> [f32; 4] {
     [l(c[0]), l(c[1]), l(c[2]), c[3]]
 }
 
-/// The one colour of its own: what cannot be undone — the palette's red.
-fn red() -> [f32; 4] {
-    lin(crate::palette::danger_srgb())
+/// Golem's own red for what cannot be undone, where the palette's is not
+/// one that reads (sRGB): deep on a light panel, bright on a dark one —
+/// walked further toward black or white where a panel needs it.
+const GOLEM_RED_LIGHT: [f32; 4] = [0.776, 0.157, 0.157, 1.0]; // #c62828
+const GOLEM_RED_DARK: [f32; 4] = [1.0, 0.420, 0.420, 1.0]; // #ff6b6b
+
+/// A colour's light (the WCAG relative luminance of a linear colour).
+fn luma(c: [f32; 4]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+/// How well `a` reads on `b` (WCAG contrast, 1..21).
+fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let (x, y) = (luma(a) + 0.05, luma(b) + 0.05);
+    x.max(y) / x.min(y)
+}
+
+/// A linear channel as sRGB.
+fn srgb_of(v: f32) -> f32 {
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Whether a linear colour is CLEARLY RED, as the eye sees it (OKLCH):
+/// its hue between 10° and 40° (crimson to vermilion — no pink, no
+/// orange: tangerine's #de8e6d and #73310e stand at 43°–45°) and its
+/// colour strong enough (chroma 0.11 and more: no dusty rose, no brown).
+pub(crate) fn reads_red(c: [f32; 4]) -> bool {
+    let l = 0.412_221_47 * c[0] + 0.536_332_55 * c[1] + 0.051_445_99 * c[2];
+    let m = 0.211_903_5 * c[0] + 0.680_699_5 * c[1] + 0.107_396_96 * c[2];
+    let s = 0.088_302_46 * c[0] + 0.281_718_85 * c[1] + 0.629_978_7 * c[2];
+    let (l, m, s) = (l.cbrt(), m.cbrt(), s.cbrt());
+    let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
+    let b = 0.025_904_04 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+    let chroma = a.hypot(b);
+    let hue = b.atan2(a).to_degrees().rem_euclid(360.0);
+    chroma >= 0.11 && (10.0..=40.0).contains(&hue)
+}
+
+/// THE RED of what cannot be undone on a panel `fill` (Max, 2026-10-21:
+/// "Delete for good" read grey with the tangerine palette in the light):
+/// the palette's own (`own`, linear) only when it is clearly red and reads
+/// at 4.5 : 1 or better on the panel; else Golem's red for the panel's side
+/// (`dark`: a dark panel), walked toward black or white until it reads.
+/// Also whether it fell back.
+pub(crate) fn danger_on(own: [f32; 4], fill: [f32; 4], dark: bool) -> ([f32; 4], bool) {
+    if reads_red(own) && contrast(own, fill) >= 4.5 {
+        return (own, false);
+    }
+    let (mut red, to) = if dark {
+        (GOLEM_RED_DARK, 1.0)
+    } else {
+        (GOLEM_RED_LIGHT, 0.0)
+    };
+    for _ in 0..20 {
+        let c = lin(red);
+        if contrast(c, fill) >= 4.5 {
+            return (c, true);
+        }
+        red = std::array::from_fn(|i| {
+            if i == 3 {
+                1.0
+            } else {
+                red[i] + (to - red[i]) * 0.12
+            }
+        });
+    }
+    (lin(red), true)
 }
 
 /// What a key on a menu asks of its host (`Menu::key`).
@@ -970,31 +1038,27 @@ impl MenuPaint {
         lin(crate::palette::accent_srgb())
     }
 
+    /// The red of this panel's rows that cannot be undone (`danger_on`).
+    pub fn danger(&self) -> [f32; 4] {
+        let own = lin(crate::palette::danger_srgb());
+        danger_on(own, self.fill, luma(self.ink) > luma(self.fill)).0
+    }
+
     /// The row under the pointer: the panel tinted `k` of the way toward
     /// `tint` (`k_dark` in the dark), mixed as a page mixes them — and
     /// never so far that `ink`, the row's words as they are, reads much
     /// less well on it than on the panel (a very light accent in the dark
-    /// stays a tint: at least 4.5 : 1, or four fifths of what the panel
-    /// gives when that is less).
+    /// stays a tint: 4.5 : 1 where the panel gave that, else four fifths of
+    /// what it gives).
     pub fn hover(&self, tint: [f32; 4], k: f32, k_dark: f32, ink: [f32; 4]) -> [f32; 4] {
-        let luma = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-        let contrast = |a: [f32; 4], b: [f32; 4]| {
-            let (x, y) = (luma(a) + 0.05, luma(b) + 0.05);
-            x.max(y) / x.min(y)
-        };
-        let srgb = |v: f32| {
-            if v <= 0.003_130_8 {
-                v * 12.92
-            } else {
-                1.055 * v.powf(1.0 / 2.4) - 0.055
-            }
-        };
         let f = self.fill;
         let at = |k: f32| {
-            let m = |i: usize| srgb(f[i]) + (srgb(tint[i]) - srgb(f[i])) * k;
+            let m = |i: usize| srgb_of(f[i]) + (srgb_of(tint[i]) - srgb_of(f[i])) * k;
             lin([m(0), m(1), m(2), f[3]])
         };
-        let floor = 4.5_f32.min(contrast(ink, f) * 0.8);
+        // (A row that reads at 4.5 : 1 keeps reading at 4.5 : 1 under it.)
+        let rest = contrast(ink, f);
+        let floor = if rest >= 4.5 { 4.5 } else { rest * 0.8 };
         let dark = luma(self.ink) > luma(f);
         let mut k = if dark { k_dark } else { k };
         while k > 0.0 && contrast(ink, at(k)) < floor {
@@ -1703,10 +1767,11 @@ impl Menu {
                     // the blink — "but put at least some of the colour on
                     // the selection"); its words and symbol keep their ink,
                     // a red row its red.
-                    let base = if *danger { red() } else { paint.ink };
+                    let red = paint.danger();
+                    let base = if *danger { red } else { paint.ink };
                     if self.hover == Some(i) && !off {
                         let fill = if *danger {
-                            paint.hover(red(), HOVER_RED.0, HOVER_RED.1, base)
+                            paint.hover(red, HOVER_RED.0, HOVER_RED.1, base)
                         } else {
                             paint.hover(paint.accent, HOVER.0, HOVER.1, base)
                         };
@@ -2353,6 +2418,96 @@ mod tests {
         assert!(m.scroll_by(10_000.0));
         assert!((m.scroll - m.scroll_max()).abs() < 0.01);
         assert!(!m.scroll_by(10.0));
+    }
+
+    /// Red is told as the eye tells it.
+    #[test]
+    fn a_red_is_one_the_eye_calls_red() {
+        let hex = |h: u32| {
+            lin([
+                ((h >> 16) & 255) as f32 / 255.0,
+                ((h >> 8) & 255) as f32 / 255.0,
+                (h & 255) as f32 / 255.0,
+                1.0,
+            ])
+        };
+        for red in [
+            0xff0000, 0xe05252, 0xc62828, 0xff6b6b, 0xcc241d, 0x9d0006, 0xfb4934, 0xd87a6c,
+        ] {
+            assert!(reads_red(hex(red)), "{red:06x} is red");
+        }
+        // Tangerine's two, an orange, pinks, a dusty rose, a grey: not.
+        for not in [
+            0x73310e, 0xde8e6d, 0xff6a00, 0xffb1c5, 0xda748a, 0xa6656c, 0x595854,
+        ] {
+            assert!(!reads_red(hex(not)), "{not:06x} is not red");
+        }
+    }
+
+    /// THE RED of what cannot be undone reads as red on every palette that
+    /// ships, light and dark, at the Lighting's and the Saturation's ends
+    /// and in between — its own where it can, Golem's where not — and so
+    /// does its hovered row.
+    #[test]
+    fn every_palettes_danger_rows_read_red() {
+        use crate::palette::{linear, tint};
+        let (mut fell, mut kept) = (Vec::new(), Vec::new());
+        for p in crate::palette::shipped() {
+            for (dark, made) in [(true, p.dark), (false, p.light)] {
+                for (v, sat) in [0u8, 50, 100]
+                    .into_iter()
+                    .flat_map(|v| [(v, 0u8), (v, 50), (v, 100)])
+                {
+                    let c = tint::saturate(&tint::lit(&made, dark, v), sat);
+                    let (fill, ink) = (linear(c[1]), linear(c[5]));
+                    let panel_dark = luma(ink) > luma(fill);
+                    let (red, fallback) = danger_on(linear(c[8]), fill, panel_dark);
+                    let what = format!(
+                        "{} {} at {v}/{sat}",
+                        p.id,
+                        if dark { "dark" } else { "light" }
+                    );
+                    assert!(reads_red(red), "{what}: not red");
+                    assert!(
+                        contrast(red, fill) >= 4.5,
+                        "{what}: {:.2}",
+                        contrast(red, fill)
+                    );
+                    let paint = MenuPaint {
+                        fill,
+                        ink,
+                        wash: [0.0; 4],
+                        radius: 10.0,
+                        glass: 0.0,
+                        accent: linear(c[p.accent]),
+                    };
+                    let hovered = paint.hover(red, HOVER_RED.0, HOVER_RED.1, red);
+                    assert!(
+                        contrast(red, hovered) >= 4.5,
+                        "{what}: hovered {:.2}",
+                        contrast(red, hovered)
+                    );
+                    if v == 50 && sat == 50 {
+                        let name = format!("{} {}", p.id, if dark { "dark" } else { "light" });
+                        if fallback {
+                            fell.push(name);
+                        } else {
+                            kept.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "GOLEM RED IN PLACE OF THE PALETTE'S ({}): {}",
+            fell.len(),
+            fell.join(", ")
+        );
+        eprintln!(
+            "THE PALETTE'S OWN RED KEPT ({}): {}",
+            kept.len(),
+            kept.join(", ")
+        );
     }
 
     /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one

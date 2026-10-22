@@ -607,6 +607,15 @@ fn curated() -> &'static [Palette] {
     })
 }
 
+/// The palettes that ship (Golem's own and the curated box), for the
+/// checks every one of them must pass.
+#[cfg(test)]
+pub(crate) fn shipped() -> Vec<Palette> {
+    let mut out: Vec<Palette> = BUILT_IN.iter().filter_map(|(id, text)| parse(id, text)).collect();
+    out.extend(curated().iter().cloned());
+    out
+}
+
 /// Every palette there is: the curated box in its order, then the owner's by name.
 pub(crate) fn all() -> Vec<Palette> {
     let mut out: Vec<Palette> = curated().to_vec();
