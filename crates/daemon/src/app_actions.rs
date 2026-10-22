@@ -335,10 +335,36 @@ fn is_app(name: &str, exec: &str, keys: &[String]) -> bool {
     keys.iter().any(|k| *k == name || *k == prog || prog.strip_prefix(k.as_str()).is_some_and(|rest| rest.starts_with('-')))
 }
 
+/// A time as the record writes it ("2026-10-01T10:00:00Z", maybe with a
+/// fraction of a second), as unix seconds.
+fn iso_secs(s: &str) -> Option<f64> {
+    let (date, time) = s.trim().trim_end_matches('Z').split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let mut t = time.split(':');
+    let (h, mi) = (t.next()?.parse::<i64>().ok()?, t.next()?.parse::<i64>().ok()?);
+    let sec: f64 = t.next()?.parse().ok()?;
+    // Days since 1970 of a civil date (H. Hinnant's).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days as f64 * 86_400.0 + (h * 3600 + mi * 60) as f64 + sec)
+}
+
+/// A file the record says an app opened: when last, how many times.
+#[derive(Debug, Clone, PartialEq)]
+struct Opened {
+    path: PathBuf,
+    when: String,
+    count: u32,
+}
+
 /// The files of the system's record (`recently-used.xbel`) that the app
 /// `keys` names opened, newest first, each once.
-fn xbel_by_app(text: &str, keys: &[String]) -> Vec<PathBuf> {
-    let mut found: Vec<(String, PathBuf)> = Vec::new();
+fn xbel_by_app(text: &str, keys: &[String]) -> Vec<Opened> {
+    let mut found: Vec<Opened> = Vec::new();
     for part in text.split("<bookmark ").skip(1) {
         let Some(tag) = part.split('>').next() else {
             continue;
@@ -347,23 +373,24 @@ fn xbel_by_app(text: &str, keys: &[String]) -> Vec<PathBuf> {
         let Some(path) = attr(&tag, "href").and_then(|h| h.strip_prefix("file://")) else {
             continue;
         };
-        let mut when: Option<String> = None;
+        let mut when: Option<(String, u32)> = None;
         for app in part.split("<bookmark:application ").skip(1) {
             let app = format!(" {}", app.split('>').next().unwrap_or(""));
             if is_app(attr(&app, "name").unwrap_or(""), attr(&app, "exec").unwrap_or(""), keys) {
-                when = Some(attr(&app, "modified").unwrap_or("").to_owned());
+                let count = attr(&app, "count").and_then(|c| c.parse().ok()).unwrap_or(1);
+                when = Some((attr(&app, "modified").unwrap_or("").to_owned(), count));
             }
         }
-        let Some(when) = when else {
+        let Some((when, count)) = when else {
             continue;
         };
         let when = ["visited", "modified", "added"].iter().filter_map(|k| attr(&tag, k)).chain([when.as_str()]).max().unwrap_or("");
         let path = PathBuf::from(crate::trash::decode_path(&path.replace("&amp;", "&")));
-        found.push((when.to_owned(), path));
+        found.push(Opened { path, when: when.to_owned(), count });
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by(|a, b| b.when.cmp(&a.when));
     let mut seen = std::collections::HashSet::new();
-    found.into_iter().map(|(_, p)| p).filter(|p| seen.insert(p.clone())).collect()
+    found.into_iter().filter(|o| seen.insert(o.path.clone())).collect()
 }
 
 /// VLC's own list (`vlc-qt-interface.conf`, `[RecentsMRL]` `list=`), newest
@@ -385,10 +412,12 @@ fn vlc_recents(text: &str) -> Vec<PathBuf> {
     Vec::new()
 }
 
-/// What `app` opened lately that is still there — files and folders,
-/// newest first, at most `max`. Its program names it too unless `shared`
-/// (other apps start through the same one: a wrapper's records are theirs).
-fn recent_for(app: &AppEntry, shared: bool, max: usize) -> Vec<PathBuf> {
+/// What `app` opened lately that is still there — files and folders, each
+/// with when it was last opened and how much it is in use (its count in the
+/// record, forgetting as the dock's launches do), newest first. Its program
+/// names it too unless `shared` (other apps start through the same one: a
+/// wrapper's records are theirs).
+fn recent_for(app: &AppEntry, shared: bool) -> Vec<(PathBuf, f64, f64)> {
     let home = crate::filer::home();
     let prog = program(&app.exec);
     let mut keys = vec![app.name.to_lowercase(), app.id.to_lowercase()];
@@ -396,18 +425,25 @@ fn recent_for(app: &AppEntry, shared: bool, max: usize) -> Vec<PathBuf> {
         keys.push(prog.clone());
     }
     keys.extend(app.id.rsplit('.').next().map(str::to_lowercase));
-    let mut all = Vec::new();
-    if prog == "vlc" {
-        let conf = home.join(".config/vlc/vlc-qt-interface.conf");
-        all.extend(vlc_recents(&std::fs::read_to_string(conf).unwrap_or_default()));
-    }
+    let now = crate::usage::now_secs();
     let xbel = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/share"))
         .join("recently-used.xbel");
-    all.extend(xbel_by_app(&std::fs::read_to_string(xbel).unwrap_or_default(), &keys));
+    let mut all: Vec<(PathBuf, f64, f64)> = xbel_by_app(&std::fs::read_to_string(xbel).unwrap_or_default(), &keys)
+        .into_iter()
+        .map(|o| {
+            let last = iso_secs(&o.when).unwrap_or(0.0);
+            (o.path, last, f64::from(o.count) * crate::usage::decayed(now - last))
+        })
+        .collect();
+    // VLC's own list says no times: after what the record does.
+    if prog == "vlc" {
+        let conf = home.join(".config/vlc/vlc-qt-interface.conf");
+        all.extend(vlc_recents(&std::fs::read_to_string(conf).unwrap_or_default()).into_iter().map(|p| (p, 0.0, 0.0)));
+    }
     let mut seen = std::collections::HashSet::new();
-    all.into_iter().filter(|p| p.exists() && seen.insert(p.clone())).take(max).collect()
+    all.into_iter().filter(|(p, _, _)| p.exists() && seen.insert(p.clone())).collect()
 }
 
 /// A webapp's site, when Golem knows it (by its slug, else its address).
@@ -469,6 +505,12 @@ pub(crate) struct Actions {
     pub web: bool,
     /// The installed webapp a search opens in (its entry).
     pub opener: Option<usize>,
+    /// What each recent is, as the owner's picks are kept (its address or
+    /// path), in `recents`' order.
+    pub recent_keys: Vec<String>,
+    /// The recents' page shown, and how many there are.
+    pub recent_page: usize,
+    pub recent_pages: usize,
 }
 
 /// Where a lone app's recent pages come from and how they open
@@ -484,8 +526,9 @@ enum Source {
     Browser(web_actions::Browser, Vec<String>),
 }
 
-/// How many recent pages are read (a full line is at most this).
+/// How many recents are read: a line a page, at most `RECENT_PAGES`.
 const RECENT_MAX: usize = 24;
+const RECENT_PAGES: usize = 4;
 
 impl Actions {
     /// The Uninstall action's place in `list`.
@@ -636,6 +679,7 @@ impl App {
         left.reverse();
         let same = self.search.actions.app.as_deref() == Some(entry.id.as_str());
         let armed = self.search.actions.armed.filter(|_| same);
+        let page = if same { self.search.actions.recent_page } else { 0 };
         let n_left = left.len();
         left.extend(right);
         self.search.actions = Actions {
@@ -673,15 +717,22 @@ impl App {
         let cells = &self.search.actions.cells;
         *apps = cells[..n_left].iter().copied().chain([index]).chain(cells[n_left..].iter().copied()).collect();
         // Under it: what it opened lately, opened again in it by a click —
-        // a webapp's or a browser's pages, else files.
+        // a webapp's or a browser's pages, else files —, in THE ORDER (the
+        // three newest, then by use: `web_actions::rank`), a line a PAGE.
+        let pages = |n: usize| n.div_ceil(cols.max(1)).min(RECENT_PAGES);
         match source {
             Some(source) => {
-                for page in self.web_recents(&entry.id, &source).into_iter().take(cols) {
+                let all = self.web_recents(&entry.id, &source);
+                let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
+                self.search.actions.recent_pages = n;
+                self.search.actions.recent_page = page;
+                for item in all.into_iter().skip(page * cols).take(cols) {
                     let exec = match &source {
-                        Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &page.url),
-                        Source::Browser(..) => format!("{} {}", entry.exec, launch::shell_quote(&page.url)),
+                        Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &item.url),
+                        Source::Browser(..) => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
                     };
-                    let at = self.push_web_recent(page, exec, (placeholder, layer));
+                    self.search.actions.recent_keys.push(item.url.clone());
+                    let at = self.push_web_recent(item, exec, (placeholder, layer));
                     self.search.actions.recents.push(at);
                     apps.push(at);
                 }
@@ -690,9 +741,22 @@ impl App {
                 let prog = program(&entry.exec);
                 let base = &self.entries[..self.base_len.min(self.entries.len())];
                 let shared = base.iter().filter(|e| program(&e.exec) == prog).count() > 1;
-                for path in recent_for(&entry, shared, cols) {
+                let picks = self.search.picks.snapshot();
+                let files = recent_for(&entry, shared)
+                    .into_iter()
+                    .map(|(path, last, score)| {
+                        let (pick, picked) = picks.get(&*path.to_string_lossy()).copied().unwrap_or((0.0, 0.0));
+                        (path, last.max(picked), score + 3.0 * pick)
+                    })
+                    .collect();
+                let all = web_actions::rank(files, RECENT_MAX);
+                let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
+                self.search.actions.recent_pages = n;
+                self.search.actions.recent_page = page;
+                for path in all.into_iter().skip(page * cols).take(cols) {
                     let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
                     let exec = format!("{} {}", entry.exec, launch::shell_quote(&path.to_string_lossy()));
+                    self.search.actions.recent_keys.push(path.to_string_lossy().into_owned());
                     let at = self.push_transient_file(&path.to_string_lossy(), &name, exec, path.is_dir());
                     self.search.actions.recents.push(at);
                     apps.push(at);
@@ -793,11 +857,11 @@ impl App {
         let got = self.search.web.got.get(id).cloned();
         let fresh = got.as_ref().is_some_and(|(at, _)| at.elapsed() < web_actions::FRESH);
         if !fresh && self.search.web.asking.insert(id.to_owned()) {
-            let (key, source) = (id.to_owned(), source.clone());
+            let (key, source, picks) = (id.to_owned(), source.clone(), self.search.picks.snapshot());
             self.desktop_off_loop(
                 move || match &source {
-                    Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, RECENT_MAX),
-                    Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, RECENT_MAX),
+                    Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, &picks, RECENT_MAX),
+                    Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, &picks, RECENT_MAX),
                 },
                 move |app, pages| {
                     app.search.web.asking.remove(&key);
@@ -861,6 +925,14 @@ impl App {
             return;
         };
         info!("opening a recent of {:?}", self.search.actions.app);
+        // A pick of one's own: it comes forward next time (`web_actions::rank`).
+        let at = self.search.actions.recents.iter().position(|&r| r == index);
+        if let Some(key) = at.and_then(|k| self.search.actions.recent_keys.get(k)).cloned() {
+            self.search.picks.increment(&key);
+            if let Some(app) = &self.search.actions.app {
+                self.search.web.got.remove(app);
+            }
+        }
         if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
             error!("recent failed to open: {e:#}");
         }
@@ -1048,6 +1120,17 @@ impl App {
             return false;
         };
         let in_row = cur < row;
+        // Past either end of the recents' line: their next or previous page.
+        let (page, pages) = (a.recent_page, a.recent_pages);
+        let turn = match keysym {
+            Keysym::Right if !in_row && cur + 1 == row + recents && page + 1 < pages => Some((page + 1, true)),
+            Keysym::Left if !in_row && cur == row && page > 0 => Some((page - 1, false)),
+            _ => None,
+        };
+        if let Some((to, first)) = turn {
+            self.recents_turn(to, Some(first));
+            return true;
+        }
         let to = match keysym {
             Keysym::Left if in_row => Some(cur.saturating_sub(1)),
             Keysym::Left => Some(cur.saturating_sub(1).max(row)),
@@ -1067,6 +1150,53 @@ impl App {
         self.actions_settle();
         self.schedule_frame();
         true
+    }
+
+    /// Show the recents' page `to`; the keys, when they turned it, land on
+    /// its first (`Some(true)`) or last (`Some(false)`) recent.
+    fn recents_turn(&mut self, to: usize, keys: Option<bool>) {
+        let a = &self.search.actions;
+        if to == a.recent_page || to >= a.recent_pages {
+            return;
+        }
+        self.search.actions.recent_page = to;
+        let row = self.search.actions.row();
+        self.refilter();
+        let n = self.search.actions.recents.len();
+        if let (Some(first), true) = (keys, n > 0) {
+            self.search.selected = Some(if first { row } else { row + n - 1 });
+        }
+        self.schedule_frame();
+    }
+
+    /// The wheel or a sideways scroll over the recents turns their pages
+    /// (the grid's pager: a notch nudges, a deliberate scroll turns one).
+    /// Returns whether it was theirs.
+    pub(crate) fn recents_wheel(&mut self, value: f64) -> bool {
+        let a = &self.search.actions;
+        if a.app.is_none() || a.recent_pages < 2 {
+            return false;
+        }
+        let over = match self.hover {
+            Some(content::Hit::GridCell(s, i)) if s == content::SECTION_APPS => {
+                self.search.visible[s].get(i).is_some_and(|e| a.recents.contains(e))
+            }
+            _ => false,
+        };
+        if !over {
+            return false;
+        }
+        if let Some(dir) = self.search.recent_pager.wheel(value) {
+            let (page, pages) = (a.recent_page as i64, a.recent_pages as i64);
+            self.recents_turn((page + dir).rem_euclid(pages) as usize, None);
+        }
+        true
+    }
+
+    /// The recents' page shown and how many there are, when more than one.
+    pub(crate) fn recent_pages(&self) -> Option<(usize, usize)> {
+        let a = &self.search.actions;
+        (a.app.is_some() && a.recent_pages > 1).then_some((a.recent_page, a.recent_pages))
     }
 
     /// The recent nearest under cell `cur` of the app's row (both rows are
@@ -1305,7 +1435,11 @@ mod tests {
   </bookmark>
 </xbel>"#;
         let keys = vec!["gimp".to_owned(), "org.gimp.gimp".to_owned()];
-        assert_eq!(named(&xbel_by_app(xbel, &keys)), ["/home/max/c.png", "/home/max/a b.png"]);
+        let found = xbel_by_app(xbel, &keys);
+        assert_eq!(named(&found.iter().map(|o| o.path.clone()).collect::<Vec<_>>()), ["/home/max/c.png", "/home/max/a b.png"]);
+        assert_eq!(found[1].count, 1);
+        assert_eq!(iso_secs("2026-10-01T10:00:00Z"), Some(1_790_848_800.0));
+        assert_eq!(iso_secs("1970-01-01T00:00:01.5Z"), Some(1.5));
     }
 
     #[test]

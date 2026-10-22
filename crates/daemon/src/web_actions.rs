@@ -774,6 +774,11 @@ pub(crate) fn browser_for(program: &str) -> Option<Browser> {
 pub(crate) struct Visit {
     pub url: String,
     pub title: String,
+    /// When it was last opened (unix seconds).
+    pub last: f64,
+    /// How much it is in use: its visits, each forgetting as the dock's
+    /// launches do (`usage::decayed`).
+    pub score: f64,
 }
 
 /// A short, steady name for some bytes (a cache file's).
@@ -798,26 +803,89 @@ fn copy_open(path: &Path) -> Option<rusqlite::Connection> {
 
 /// A browser's newest pages, newest first (`max` read).
 fn history(browser: &Browser, max: usize) -> Vec<Visit> {
-    let (db, sql) = match browser {
+    // Firefox keeps microseconds since 1970; Chromium since 1601.
+    const CHROMIUM_EPOCH: f64 = 11_644_473_600.0;
+    let (db, pages, visits, epoch) = match browser {
         Browser::Firefox(p) => (
             p.join("places.sqlite"),
-            "SELECT url, COALESCE(title, '') FROM moz_places WHERE last_visit_date IS NOT NULL \
+            "SELECT id, url, COALESCE(title, ''), last_visit_date FROM moz_places WHERE last_visit_date IS NOT NULL \
              AND url LIKE 'http%' ORDER BY last_visit_date DESC LIMIT ?1",
+            "SELECT place_id, visit_date FROM moz_historyvisits WHERE visit_date > ?1",
+            0.0,
         ),
         Browser::Chromium(p) => (
             p.join("History"),
-            "SELECT url, COALESCE(title, '') FROM urls WHERE url LIKE 'http%' \
+            "SELECT id, url, COALESCE(title, ''), last_visit_time FROM urls WHERE url LIKE 'http%' \
              ORDER BY last_visit_time DESC LIMIT ?1",
+            "SELECT url, visit_time FROM visits WHERE visit_time > ?1",
+            CHROMIUM_EPOCH,
         ),
     };
     let Some(conn) = copy_open(&db) else {
         return Vec::new();
     };
-    let Ok(mut stmt) = conn.prepare(sql) else {
+    let secs = |t: i64| t as f64 / 1e6 - epoch;
+    let now = crate::usage::now_secs();
+    // The visits of the last weeks, each worth what is left of it (older
+    // ones are worth next to nothing); a history without them: none.
+    let mut score: HashMap<i64, f64> = HashMap::new();
+    let since = ((now - 30.0 * 24.0 * 3600.0 + epoch) * 1e6) as i64;
+    if let Ok(mut stmt) = conn.prepare(visits) {
+        if let Ok(rows) = stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))) {
+            for (id, at) in rows.flatten() {
+                *score.entry(id).or_default() += crate::usage::decayed(now - secs(at));
+            }
+        }
+    }
+    let Ok(mut stmt) = conn.prepare(pages) else {
         return Vec::new();
     };
-    let rows = stmt.query_map([max as i64], |r| Ok(Visit { url: r.get(0)?, title: r.get(1)? }));
+    let rows = stmt.query_map([max as i64], |r| {
+        let id: i64 = r.get(0)?;
+        Ok(Visit {
+            url: r.get(1)?,
+            title: r.get(2)?,
+            last: secs(r.get::<_, Option<i64>>(3)?.unwrap_or(0)),
+            score: score.get(&id).copied().unwrap_or(0.0),
+        })
+    });
     rows.map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
+/// What the owner picked lately from a lone app's recents, by its address
+/// or path: how much (as `usage` scores) and when last (unix seconds).
+pub(crate) type Picks = HashMap<String, (f64, f64)>;
+
+/// How many of the newest come first in a lone app's recents, by time
+/// alone (Max, 2026-10-22: "los primeros tres ítems sí sean recientes
+/// puros… la idea es que pueda retomar ahí lo que dejé ayer, o esta mañana").
+pub(crate) const NEWEST_FIRST: usize = 3;
+/// What a pick from the box is worth, in visits: a choice of one's own.
+const PICK_WEIGHT: f64 = 3.0;
+
+/// THE ORDER of a lone app's recents: the `NEWEST_FIRST` last opened, by
+/// time — to take up where one left off —, then the rest by how much they
+/// are in use (their score; at equal use the newer first); at most `max`.
+/// Each item: what it is, when last opened, its score.
+pub(crate) fn rank<T>(mut items: Vec<(T, f64, f64)>, max: usize) -> Vec<T> {
+    items.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let rest = items.split_off(NEWEST_FIRST.min(items.len()));
+    let mut rest = rest;
+    rest.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.total_cmp(&a.1)));
+    items.into_iter().chain(rest).take(max).map(|(t, _, _)| t).collect()
+}
+
+/// `pages` with the owner's picks counted in, in THE ORDER, at most `max`.
+fn ranked_pages(pages: Vec<(Visit, String)>, picks: &Picks, max: usize) -> Vec<(Visit, String)> {
+    let items = pages
+        .into_iter()
+        .map(|(v, title)| {
+            let (pick, picked) = picks.get(&v.url).copied().unwrap_or((0.0, 0.0));
+            let (last, score) = (v.last.max(picked), v.score + PICK_WEIGHT * pick);
+            ((v, title), last, score)
+        })
+        .collect();
+    rank(items, max)
 }
 
 /// The browser's favicons database, copied to read.
@@ -1089,10 +1157,28 @@ fn without_name(title: &str, name: &str) -> String {
     title.trim().to_owned()
 }
 
+/// `pages` once each by `group` (a video, a title, a site): the newest of a
+/// group stands for it, with the whole group's use (`pages` come newest first).
+fn once_each(pages: impl Iterator<Item = (Visit, String)>, group: impl Fn(&Visit, &str) -> String) -> Vec<(Visit, String)> {
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<(Visit, String)> = Vec::new();
+    for (v, title) in pages {
+        match at.get(&group(&v, &title)) {
+            Some(&i) => out[i].0.score += v.score,
+            None => {
+                at.insert(group(&v, &title), out.len());
+                out.push((v, title));
+            }
+        }
+    }
+    out
+}
+
 /// Of a history, the pages of a webapp worth showing — of its `site` when
 /// Golem knows it (its kinds of page: a video, a product), else any page of
 /// its own host but its start, a sign-in or one titled only with its name —,
-/// newest first, each once, at most `max`, with their titles cleaned.
+/// newest first, each once (a video or a title), at most `max`, with their
+/// titles cleaned.
 fn webapp_pages(visits: Vec<Visit>, site: Option<&Site>, start: &str, name: &str, max: usize) -> Vec<(Visit, String)> {
     // (A site Golem knows with no kind of page worth it: none, on purpose.)
     if site.is_some_and(|s| s.pages.is_empty()) {
@@ -1110,29 +1196,29 @@ fn webapp_pages(visits: Vec<Visit>, site: Option<&Site>, start: &str, name: &str
         }
     };
     let names: Vec<String> = [Some(name), site.map(|s| s.name)].into_iter().flatten().map(str::to_lowercase).collect();
-    let mut seen = HashSet::new();
-    visits
+    let pages = visits
         .into_iter()
         .filter(|v| worth(&v.url) && !passing_path(&v.url))
         .map(|v| {
             let title = without_name(&clean_title(site, &v.title), name);
             (v, title)
         })
-        .filter(|(v, title)| {
-            !title.is_empty()
-                && !names.contains(&title.to_lowercase())
-                && seen.insert(video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned))
-        })
-        .take(max)
-        .collect()
+        .filter(|(_, title)| !title.is_empty() && !names.contains(&title.to_lowercase()));
+    let mut pages = once_each(pages, |v, title| video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned));
+    pages.truncate(max);
+    pages
 }
 
+/// How many pages a lone app's recents are chosen from.
+const CANDIDATES: usize = 400;
+
 /// What a webapp (named `name`, opening at `start`; of `site` when Golem
-/// knows it) showed lately: from Seam's history, where every webapp lives.
-pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, max: usize) -> Vec<Recent> {
+/// knows it) showed lately: from Seam's history, where every webapp lives —
+/// in THE ORDER (`rank`, the owner's `picks` counted in), at most `max`.
+pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, picks: &Picks, max: usize) -> Vec<Recent> {
     let browser = seam();
-    let pages = webapp_pages(history(&browser, 4000), site, start, name, max);
-    pictured(&browser, pages)
+    let pages = webapp_pages(history(&browser, 4000), site, start, name, CANDIDATES);
+    pictured(&browser, ranked_pages(pages, picks, max))
 }
 
 /// Hosts that are not a place one went to (sign-ins, this computer).
@@ -1140,29 +1226,28 @@ fn passing(host: &str) -> bool {
     host.starts_with("accounts.") || host.starts_with("login.") || host == "localhost" || host.starts_with("127.")
 }
 
-/// Of a history, the newest page of each site, newest first, at most `max` —
-/// none of the sites in `skip` (patterns as a site's hosts: the installed
-/// webapps', whose pages are theirs, not the browser's).
+/// Of a history, the newest page of each site (with the whole site's use),
+/// newest first, at most `max` — none of the sites in `skip` (patterns as a
+/// site's hosts: the installed webapps', whose pages are theirs, not the
+/// browser's).
 fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit, String)> {
     let skip: Vec<&str> = skip.iter().map(String::as_str).collect();
-    let mut hosts = HashSet::new();
-    visits
-        .into_iter()
-        .filter_map(|v| {
-            let (_, host) = origin(&v.url)?;
-            let title = clean_title(site_of_host(&host), &v.title);
-            let mine = !host_is(&host, &skip) && !passing(&host) && !passing_path(&v.url);
-            (mine && !title.is_empty() && hosts.insert(host)).then_some((v, title))
-        })
-        .take(max)
-        .collect()
+    let pages = visits.into_iter().filter_map(|v| {
+        let (_, host) = origin(&v.url)?;
+        let title = clean_title(site_of_host(&host), &v.title);
+        let mine = !host_is(&host, &skip) && !passing(&host) && !passing_path(&v.url);
+        (mine && !title.is_empty()).then_some((v, title))
+    });
+    let mut pages = once_each(pages, |v, _| origin(&v.url).map(|(_, h)| h).unwrap_or_default());
+    pages.truncate(max);
+    pages
 }
 
-/// What a browser showed lately: the newest page of each site but those in
-/// `skip`, newest first, at most `max`.
-pub(crate) fn browser_recents(browser: &Browser, skip: &[String], max: usize) -> Vec<Recent> {
-    let pages = browser_pages(history(browser, 3000), skip, max);
-    pictured(browser, pages)
+/// What a browser showed lately: a page a site but those in `skip`, in THE
+/// ORDER (`rank`, the owner's `picks` counted in), at most `max`.
+pub(crate) fn browser_recents(browser: &Browser, skip: &[String], picks: &Picks, max: usize) -> Vec<Recent> {
+    let pages = browser_pages(history(browser, 3000), skip, CANDIDATES);
+    pictured(browser, ranked_pages(pages, picks, max))
 }
 
 /// The hosts a webapp's pages are on, as patterns: its site's when Golem
@@ -1276,7 +1361,33 @@ mod tests {
     }
 
     fn visit(url: &str, title: &str) -> Visit {
-        Visit { url: url.into(), title: title.into() }
+        Visit { url: url.into(), title: title.into(), last: 0.0, score: 0.0 }
+    }
+
+    #[test]
+    fn the_newest_three_come_first_then_the_most_in_use() {
+        // (what, when last opened, how much in use)
+        let items = vec![
+            ("daily", 10.0, 9.0),
+            ("this morning", 90.0, 1.0),
+            ("yesterday", 70.0, 1.0),
+            ("an hour ago", 95.0, 0.5),
+            ("weekly", 20.0, 3.0),
+            ("once, long ago", 5.0, 0.1),
+            ("once, last week", 30.0, 0.1),
+        ];
+        assert_eq!(
+            rank(items, 6),
+            ["an hour ago", "this morning", "yesterday", "daily", "weekly", "once, last week"]
+        );
+        // A pick from the box counts more than a visit, and as the newest.
+        let pages = vec![
+            (Visit { url: "a".into(), title: "A".into(), last: 50.0, score: 2.0 }, "A".to_string()),
+            (Visit { url: "b".into(), title: "B".into(), last: 40.0, score: 1.0 }, "B".to_string()),
+        ];
+        let picks: Picks = [("b".to_string(), (1.0, 99.0))].into();
+        let got = ranked_pages(pages, &picks, 2);
+        assert_eq!(got.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["B", "A"]);
     }
 
     #[test]
@@ -1372,14 +1483,14 @@ mod tests {
         for slug in ["youtube", "claude", "amazon", "github", "google-docs", "chatgpt"] {
             let at = Instant::now();
             let s = site(slug).unwrap();
-            let got = webapp_recents(Some(s), &format!("https://{}", s.hosts[0]), s.name, 8);
+            let got = webapp_recents(Some(s), &format!("https://{}", s.hosts[0]), s.name, &Picks::new(), 8);
             println!("{slug}: {} in {:?}", got.len(), at.elapsed());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.picture.map(|p| p.display().to_string()).unwrap_or_default());
             }
         }
         for (name, start) in [("Google Keep", "https://keep.google.com"), ("Cloudflare", "https://dash.cloudflare.com")] {
-            let got = webapp_recents(None, start, name, 8);
+            let got = webapp_recents(None, start, name, &Picks::new(), 8);
             println!("{name}: {}", got.len());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);
@@ -1403,7 +1514,7 @@ mod tests {
         for prog in ["seam", "google-chrome-stable", "firefox"] {
             let Some(b) = browser_for(prog) else { continue };
             let at = Instant::now();
-            let got = browser_recents(&b, if prog == "seam" { &skip } else { &[] }, 8);
+            let got = browser_recents(&b, if prog == "seam" { &skip } else { &[] }, &Picks::new(), 8);
             println!("{prog}: {} in {:?}", got.len(), at.elapsed());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);

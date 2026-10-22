@@ -1713,6 +1713,7 @@ impl App {
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             &content::FrameInput {
                 names: Some(&names),
+                recent_pages: self.recent_pages(),
                 // Suppress hover highlight and magnification while dragging.
                 hover: if drag_frame.is_none() {
                     self.hover

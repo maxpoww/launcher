@@ -2073,6 +2073,9 @@ const SECOND_LINE: f32 = 14.0;
 pub struct FrameInput<'a> {
     /// The grid cells whose names need two lines, by entry (`NameFit`).
     pub names: Option<&'a std::collections::HashMap<usize, NameFit>>,
+    /// A lone app's recents' page shown and how many, when more than one:
+    /// their dots under their line (`app_actions.rs`).
+    pub recent_pages: Option<(usize, usize)>,
     /// Item under the pointer (hover highlight).
     pub hover: Option<Hit>,
     /// Shaped pixel width of the live query (the caret anchor).
@@ -2433,6 +2436,7 @@ pub fn scene(
 ) -> Scene {
     let FrameInput {
         names,
+        recent_pages,
         hover,
         query_px,
         search_pill,
@@ -3911,7 +3915,8 @@ pub fn scene(
             let row = (slot % cells_per_page) / sec.cols.max(1);
             let parted = s == SECTION_APPS && layout.apps_part.is_some_and(|p| row as isize == p.row);
             let bottom = cell.y + grid_cell_h > sec.viewport.y + sec.viewport.h - 0.5;
-            let room_under = parted || if bottom { sec.n_pages <= 1 } else { !taken.contains(&(slot + sec.cols)) };
+            let dots = sec.n_pages > 1 || (s == SECTION_APPS && recent_pages.is_some());
+            let room_under = parted || if bottom { !dots } else { !taken.contains(&(slot + sec.cols)) };
             let (name, second) = match fit {
                 Some(fit) if !room_under => (fit.one.clone(), None),
                 Some(fit) => (fit.two.0.clone(), Some(fit.two.1.clone())),
@@ -3991,6 +3996,27 @@ pub fn scene(
             continue;
         }
         let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0 - DOTS_RAISE;
+        // A lone app's recents' pages: their dots where the section's would
+        // be, under their line (the section itself has one page).
+        if let Some((page, n)) = recent_pages.filter(|_| s == SECTION_APPS && sec.n_pages <= 1) {
+            if (reveal_top..=reveal_bottom).contains(&dot_y) {
+                let (dot_r, dot_spacing) = (3.0, 10.0);
+                let total_dots_w = n as f32 * dot_spacing - (dot_spacing - dot_r * 2.0);
+                let dot_cx = sec.viewport.x + sec.viewport.w / 2.0;
+                let hl = dock_highlight;
+                for p in 0..n {
+                    let x = dot_cx - total_dots_w / 2.0 + p as f32 * dot_spacing + dot_r;
+                    let alpha = if p == page { 1.0 } else { 0.28 };
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(x - dot_r, dot_y - dot_r, dot_r * 2.0, dot_r * 2.0),
+                        radius: dot_r,
+                        color: [hl[0], hl[1], hl[2], hl[3] * alpha],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+            }
+        }
         if sec.n_pages > 1 && (reveal_top..=reveal_bottom).contains(&dot_y) {
             let dot_r = 3.0;
             let dot_spacing = 10.0;

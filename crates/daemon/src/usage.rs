@@ -38,7 +38,19 @@ use serde::{Deserialize, Serialize};
 
 /// How long it takes a score to halve. Two days: yesterday still counts for
 /// most of what it was, last week for almost nothing.
-const HALF_LIFE: f64 = 2.0 * 24.0 * 3600.0;
+pub(crate) const HALF_LIFE: f64 = 2.0 * 24.0 * 3600.0;
+
+/// What one use `age` seconds ago is worth now (1 at once, ½ a
+/// [`HALF_LIFE`] later) — the same forgetting for other things in use (a
+/// lone app's recents, `web_actions::rank`).
+pub(crate) fn decayed(age: f64) -> f64 {
+    0.5f64.powf(age.max(0.0) / HALF_LIFE)
+}
+
+/// Now, as unix seconds.
+pub(crate) fn now_secs() -> f64 {
+    now()
+}
 
 /// The most a lifetime count from the old file is worth — under one launch.
 const LEGACY_SEED: f64 = 0.5;
@@ -83,6 +95,20 @@ fn seeds(counts: &HashMap<String, u32>, at: f64) -> HashMap<String, Mark> {
 }
 
 impl UsageDb {
+    /// A database of its own in the data dir, `file` (no old counts to seed
+    /// from): the same forgetting for other things than apps.
+    pub fn load_named(file: &str) -> Self {
+        let path = crate::persist::data_path(file);
+        let marks = crate::persist::read_json::<HashMap<String, Mark>>(&path).unwrap_or_default();
+        Self { marks, path }
+    }
+
+    /// Every key's score now and when it was last used (unix seconds).
+    pub fn snapshot(&self) -> HashMap<String, (f64, f64)> {
+        let now = now();
+        self.marks.iter().map(|(k, m)| (k.clone(), (m.at(now), m.at))).collect()
+    }
+
     /// Load from disk; the first time, seed from the old lifetime counts (see
     /// the module doc); with neither file, start empty.
     pub fn load() -> Self {

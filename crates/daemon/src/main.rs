@@ -2735,6 +2735,10 @@ struct SearchState {
     actions: app_actions::Actions,
     /// The web's recents read lately, by app (`web_actions.rs`).
     web: web_actions::Recents,
+    /// What the owner picked from a lone app's recents (`web_actions::rank`).
+    picks: usage::UsageDb,
+    /// The recents' pager (the wheel over them turns their pages).
+    recent_pager: pager::Pager,
 }
 
 impl Default for SearchState {
@@ -2752,6 +2756,8 @@ impl Default for SearchState {
             control_modules: Vec::new(),
             actions: Default::default(),
             web: Default::default(),
+            picks: usage::UsageDb::load_named("recents-use.json"),
+            recent_pager: Default::default(),
         }
     }
 }
@@ -6585,6 +6591,10 @@ impl App {
                     self.panel_wheel(value);
                     return;
                 }
+                // A lone app's recents turn their own pages.
+                if self.recents_wheel(value) {
+                    return;
+                }
                 if let Some(section) = self
                     .pointer_pos
                     .and_then(|pos| content::section_at(&self.current_layout(), pos))
@@ -6663,6 +6673,8 @@ impl App {
         if self.ui.target() == Target::Open && !self.control_panel {
             if self.stack_open() {
                 self.box_page_scroll(value);
+            } else if self.recents_wheel(value) {
+                // (A lone app's recents turn their own pages.)
             } else if let Some(section) = self
                 .pointer_pos
                 .and_then(|pos| content::section_at(&self.current_layout(), pos))

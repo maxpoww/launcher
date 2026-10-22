@@ -1475,7 +1475,15 @@ The big daemon files are cohesive but long — go straight to the function:
   (`App::fitted_names`, `name_fit`), TWO lines broken between words where the space under the cell
   is free (no cell below, a last row with no page dots, the parted row), else ONE with "…" — the
   rows are a line apart (`content::NameFit`, `SECOND_LINE`); files keep their middle cut
-  (`tile_label`). On a short screen the card GROWS for the recents (a negative trim,
+  (`tile_label`). THE RECENTS' ORDER (Max, 2026-10-22: "los primeros tres ítems sí sean recientes
+  puros… y después el ranking"; `web_actions::rank`): the `NEWEST_FIRST` (3) last opened by time —
+  to take up where one left off —, then the rest by use: a page's visits (Firefox
+  `moz_historyvisits`, Chromium `visits`) or a file's count in the record, each forgetting as the
+  dock's launches do (`usage::decayed`, two-day half-life), plus the owner's PICKS from the box
+  (`recents-use.json`, `SearchState::picks`, worth three visits and as new as the pick). Up to
+  `RECENT_MAX` (24) in PAGES of a line (`RECENT_PAGES` 4): dots under the line, → past its last /
+  ← before its first turn them, the wheel over them too (`recents_wheel`, the grid's pager). On a
+  short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
   Real data: `cargo test -- --ignored real_recents --nocapture`.
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
