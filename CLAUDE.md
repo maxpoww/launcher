@@ -492,7 +492,22 @@ The big daemon files are cohesive but long — go straight to the function:
   highlight is the hover's tint and stays theirs until the pointer MOVES (`Menu::pointer`, by where the pointer
   stood — hosts update the hover only through it). In Files Shift+F10 / the Menu key open the menu on the
   selection or the folder (`filer_menu_from_keys`). Rig: `files key down|up|home|end|enter|space|right|left|
-  shift f10|menukey`, `files type <letter>`, `debug-desktop "key down|up|left|right|space|escape"`.
+  shift f10|menukey`, `files type <letter>`, `debug-desktop "key down|up|left|right|space|escape"`. ANOTHER APP
+  (Max, 2026-10-21; `other_apps.rs`): the Open with page ends, after a rule, with "Another app" › — a page
+  (`Page::OtherApp`, `OtherApps`, `other_rows`, `Menu::show_other` / `other_found`) of every app that opens files
+  (`openers`: its desktop file's Exec takes `%f %F %u %U`, web apps left out), A→Z with its OWN icon (a row's
+  `pic`, an icon key drawn in its own colours; the file window's `icon_keys` and the desktop's
+  `top_glyphs_sync` load `Menu::pictures` as they do the symbols); a SEARCH line at the top (`Row::Search`,
+  `search_type`: what is typed filters by substring — Space types there too —, the first found highlighted);
+  at the foot "Always use for <kind>" (`kind_of`: shared-mime-info's comment in the shell's language —
+  `i18n::lang` —, English made plural), off at first (`toggle_always`, "box"/"boxed"). Choosing an app opens the
+  file (`open_with_other`); with the check on, `xdg-mime default` makes it the app (`other_app_default`), it is
+  listed first on Open with, and the history keeps `Undo::Default` ("Opened PNG images with Image Viewer from
+  now on"), taken back to the owner's OWN choice before (`chosen_default`, read from mimeapps.list; none → its
+  line taken out — `unset_default`). PAGES SCROLL (`Menu::scroll`, `pinned`, `capped`, `middle`, `scroll_by`,
+  `reveal`): no page taller than the surface; Another app at most `PAGE_ROWS` (12) apps, its search and check
+  pinned; the rows between scroll under the wheel and follow the keys; a row scrolled out is neither drawn nor
+  hit (`seen`).
   The look: rows 29 px, 14 px symbols at 75 % of the ink, hairline rules between groups, the width the
   words want (214 at least, `width_of`). THE ROW UNDER THE POINTER is a QUIET HOVER (Max, 2026-10-21, after
   macOS and Windows: both are instant, and the blink was our accent band with white words flipping on every
