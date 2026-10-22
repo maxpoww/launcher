@@ -2160,11 +2160,17 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     // its ink and the look (`web_dark`).
     let pal = palette_of(&shell.id).unwrap_or_else(golem);
     let wv = if shell.web_dark { pal.dark } else { pal.light };
+    // UNDER AMBIENT THE PAGES TAKE THE LOOK, NOT EACH POINT OF THE LIGHT:
+    // Seam hands Dark Reader a new pair by restarting it, and every open page
+    // loses its colours for that moment — a flash at every step of the day
+    // (Max, 2026-10-21: "no jumps at all"). So the pair is the look's as
+    // designed; it changes with the look, under the slow dissolve.
+    let web_light = if picked.ambient_of(Surface::Web) { 50 } else { shell.web_light };
     // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
     let mut wv = if web_dark_off {
-        tint::saturate(&tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, shell.web_light), shell.web_sat)
+        tint::saturate(&tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, web_light), shell.web_sat)
     } else {
-        tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint, shell.web_light, shell.web_sat)
+        tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint, web_light, shell.web_sat)
     };
     if web_dark_off {
         // …and the ink with no colour either (Hacker's is green: ASUS,
@@ -2175,6 +2181,12 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     m.insert("web_dark".into(), shell.web_dark.into());
     m.insert("web_bg".into(), format!("#{}", hex(wv[1])).into());
     m.insert("web_ink".into(), format!("#{}", hex(wv[5])).into());
+    // The webapps' pair for Dark Reader (the apps' row) — the same: under
+    // Ambient the apps' look as designed, not base01/base05, which follow
+    // the light for Seam's own bar.
+    let steady = if picked.ambient_of(Surface::Apps) { for_apps(&Theme { apps_light: 50, ..shell.clone() }) } else { t.clone() };
+    m.insert("apps_bg".into(), format!("#{}", hex(steady.c[1])).into());
+    m.insert("apps_ink".into(), format!("#{}", hex(steady.c[5])).into());
     // (What a Seam from before 2026-10-15 reads: it only darkened.)
     m.insert("dark_websites".into(), (t.web && shell.web_dark).into());
     m.insert("icons_tint".into(), shell.icons_tint.into());
@@ -3724,6 +3736,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn under_ambient_the_pages_pair_holds_through_the_light() {
+        // (Every new pair restarts Dark Reader: every open page flashes.)
+        let pair = |ambient: bool, light: u8| {
+            let picked = ColorChoice { ambient: Some(ambient), web_tint: None, ..Default::default() };
+            let shell = Theme { web_light: light, apps_light: light, web_dark: true, ..resolve(&picked, true) };
+            let j: serde_json::Value = serde_json::from_str(&colors_json(&for_apps(&shell), &shell, &picked, &[])).unwrap();
+            (j["web_bg"].as_str().unwrap().to_owned(), j["apps_bg"].as_str().unwrap().to_owned())
+        };
+        assert_eq!(pair(true, 30), pair(true, 60), "Ambient: one pair a look");
+        assert_ne!(pair(false, 30), pair(false, 60), "by hand: the Lighting reaches the pages");
     }
 
     #[test]
