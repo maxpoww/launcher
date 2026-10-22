@@ -1225,7 +1225,12 @@ The big daemon files are cohesive but long — go straight to the function:
   Open with again; an archive → Extract here (the pill only); a
   folder that is mostly songs or photos (`folder_kind`: 70 % of at least 3 files, read once a change —
   `kind_of_folder`) → Play all (+ Shuffle) / Slideshow. The pill wears ONE, first, in Open with's place; the menu
-  up to three, right after Open (`Ctx::smart`). BY THE ↶: the folder shown's own Play all / Slideshow (icon +
+  up to three, right after Open (`Ctx::smart`). THE DESKTOP'S item menus get the same rows from the same rules
+  (Max, 2026-10-21: `filer::smart_for`, in `desktop_menu_ctx`; whether there is a printer asked as the desktop
+  starts and its menu opens — `print_can`), and the same doing (`App::smart_act`, for a file window's menu or
+  the desktop's — `SendFor`; `desktop_smart_act`): Quick Look plays and shows from the desktop
+  (`quicklook::DESKTOP`), "from here" through the desktop's photos in the order of their cells, wallpaper and
+  rotate in the desktop's own history (`said_of`), a print said quietly (no pill there). BY THE ↶: the folder shown's own Play all / Slideshow (icon +
   word, `filer_here_kind`, `Hits::here`), standing still left of sort — the ↶ slides in LEFT of it. What each
   does (`filer_smart_act`): PLAY = Quick Look's player through a PLAYLIST (`peek_slides.rs`: `peek_playlist`,
   each started by `peek_autoplay`, the next at its end — a song's mpv gone, a video's last frame; a song that
