@@ -277,6 +277,39 @@ fn hyphenated(word: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (S
     (format!("{head}-"), crate::desktop::fit_label(&tail, room, measure))
 }
 
+// ---- the exact name ------------------------------------------------------------
+
+/// A name as typed to find it: lower case, and Golem's own also without
+/// "Golem" ("Golem Files" is found as "files").
+fn spoken(name: &str) -> [String; 2] {
+    let n = name.trim().to_lowercase();
+    let bare = n.strip_prefix("golem ").unwrap_or(&n).to_owned();
+    [n, bare]
+}
+
+/// THE EXACT NAME (Max, 2026-10-22: "'googl' muestra la grilla, agrego la e
+/// queda solo Google, agrego un espacio y aparece la grilla sin Google"):
+/// which of the apps named `names` (used `used` much) what was typed leaves —
+/// `None`: all of them, as ranked.
+/// - The query IS an app's name: that app alone (the most used of several
+///   of that name: Golem Files over Nautilus's "Files").
+/// - The query ends in a SPACE after a name: the apps whose names go on past
+///   it ("google " → Keep, Docs, Calendar…; "youtube " → YouTube Music),
+///   without the one of that very name.
+fn narrow(query: &str, names: &[&str], used: &[u32]) -> Option<Vec<usize>> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    if query.ends_with(char::is_whitespace) {
+        let past = format!("{q} ");
+        let on: Vec<usize> = (0..names.len()).filter(|&i| spoken(names[i]).iter().any(|n| n.starts_with(&past))).collect();
+        return (!on.is_empty()).then_some(on);
+    }
+    let exact = (0..names.len()).filter(|&i| spoken(names[i]).contains(&q));
+    exact.max_by_key(|&i| (used.get(i).copied().unwrap_or(0), std::cmp::Reverse(i))).map(|i| vec![i])
+}
+
 // ---- the recents --------------------------------------------------------------
 
 /// The value of attribute `name` in a tag's text.
@@ -531,6 +564,14 @@ impl App {
     /// windows' on the left, its recents under it. The same app keeps its
     /// asking; another starts afresh.
     pub(crate) fn add_action_cells(&mut self, apps: &mut Vec<usize>, resting: bool) {
+        // The exact name: that app alone; a space after it, the ones past it.
+        if !resting && !self.control_panel {
+            let names: Vec<&str> = apps.iter().map(|&i| self.entries[i].name.as_str()).collect();
+            let used: Vec<u32> = apps.iter().map(|&i| self.usage.count(&self.entries[i].id)).collect();
+            if let Some(kept) = narrow(&self.search.query, &names, &used) {
+                *apps = kept.into_iter().map(|k| apps[k]).collect();
+            }
+        }
         // A site's search asked by its name: its cell first, no app alone —
         // unless what is typed begins an app's name ("google maps", "youtube
         // music" are apps to find, not searches).
@@ -1164,6 +1205,22 @@ mod tests {
         assert_eq!(right[0].does, Does::Uninstall);
         keep_right(&mut right, 0);
         assert!(right.is_empty());
+    }
+
+    #[test]
+    fn the_exact_name_stands_alone_and_a_space_shows_the_ones_past_it() {
+        let names = ["YouTube", "YouTube Music", "Google", "Google Keep", "Google Docs", "Files", "Golem Files", "Foot"];
+        let used = [9, 6, 3, 1, 2, 1, 39, 1];
+        let keep = |q: &str| narrow(q, &names, &used).map(|v| v.into_iter().map(|i| names[i]).collect::<Vec<_>>());
+        assert_eq!(keep("youtub"), None);
+        assert_eq!(keep("youtube"), Some(vec!["YouTube"]));
+        assert_eq!(keep("YouTube "), Some(vec!["YouTube Music"]));
+        assert_eq!(keep("google"), Some(vec!["Google"]));
+        assert_eq!(keep("google "), Some(vec!["Google Keep", "Google Docs"]));
+        assert_eq!(keep("files"), Some(vec!["Golem Files"]));
+        assert_eq!(keep("foot "), None);
+        assert_eq!(keep("googl"), None);
+        assert_eq!(keep(""), None);
     }
 
     #[test]

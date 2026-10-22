@@ -1447,7 +1447,11 @@ The big daemon files are cohesive but long — go straight to the function:
   then the words — never when the query begins an app's name: "google maps") is the first cell,
   alone in its row and selected, "Search Amazon" / "“zapatillas”" spread over three cells
   (`WIDE_LABEL`), opened in the webapp when it is installed (on its own country: amazon.com.mx),
-  else in Seam. On a short screen the card GROWS for the recents (a negative trim,
+  else in Seam. THE EXACT NAME (Max, 2026-10-22: "'googl' muestra la grilla, agrego la e queda solo
+  Google, agrego un espacio y aparece la grilla sin Google"; `narrow`): a query that IS an app's name
+  leaves that app alone (Golem's own also by their name without "Golem"; the most used of several
+  of one name), and a SPACE after it the apps whose names go on past it, without it ("youtube " →
+  YouTube Music). On a short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
   Real data: `cargo test -- --ignored real_recents --nocapture`.
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
