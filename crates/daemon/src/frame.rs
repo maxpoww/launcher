@@ -1883,6 +1883,7 @@ impl App {
         // region, and draw.
         self.sync_options_zone();
         self.measure_options_text();
+        self.task_pill_remeasure();
         self.measure_notif();
         // Any icons resolved before this renderer existed haven't been uploaded
         // to it yet (their resolve found no renderer); push them now.

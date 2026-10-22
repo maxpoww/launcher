@@ -69,9 +69,9 @@ type Item = (&'static str, u8, &'static str);
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [Item; 26] = [
+const SETTINGS: [Item; 27] = [
     // (name, first layer, search keywords: what else people call it or
-    // look for it by). 5 near, 9 middle, 12 far.
+    // look for it by). 5 near, 9 middle, 13 far.
     ("Resolution", 0, "display screen monitor size pixels"),
     ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
     ("Wi-Fi", 0, "wifi wireless network internet connection"),
@@ -90,6 +90,8 @@ const SETTINGS: [Item; 26] = [
     ("Launcher", 2, "dock launcher apps box hide hidden stay away position left right bottom side monitors screens displays animated icons motion arrange sort order"),
     // The screens together (Max, 2026-10-21): arranged, mirrored, what goes where.
     ("Monitors", 2, "monitors screens displays external tv projector arrange mirror extend isolated rotate turn resolution scale lid"),
+    // Printing (2026-10-21): the printers, their prints and what a print gets.
+    ("Printers", 2, "printers printer print printing prints queue cancel paper ink toner colour color black white quality draft test page pause resume default scanner"),
     ("Notifications", 1, "alerts do not disturb dnd messages"),
     ("Keyboard layout", 1, "input language typing keys"),
     ("Power mode", 1, "battery performance energy saver"),
@@ -5305,9 +5307,9 @@ mod tests {
     #[test]
     fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
         let p = panel();
-        assert_eq!(p.pills.len(), 26);
+        assert_eq!(p.pills.len(), 27);
         let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [5, 9, 12]);
+        assert_eq!(per_layer, [5, 9, 13]);
         assert_clean(&p, "at rest");
         // Up under the dock: the heap starts at the top gap.
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
@@ -5319,14 +5321,14 @@ mod tests {
         let mut p = panel();
         let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [9, 12, 5], "down: the near group goes to the back");
+        assert_eq!(counts(&p), [9, 13, 5], "down: the near group goes to the back");
         assert_clean(&p, "one step down");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [12, 5, 9]);
+        assert_eq!(counts(&p), [13, 5, 9]);
         assert_clean(&p, "two steps down");
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [5, 9, 12], "up undoes it");
+        assert_eq!(counts(&p), [5, 9, 13], "up undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
@@ -5431,10 +5433,10 @@ mod tests {
         assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
-        assert_eq!(layer_sizes(&p), [5, 9, 12], "the layers keep their sizes");
+        assert_eq!(layer_sizes(&p), [5, 9, 13], "the layers keep their sizes");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
-        assert_eq!(layer_sizes(&p), [5, 9, 12]);
+        assert_eq!(layer_sizes(&p), [5, 9, 13]);
         // Whoever it passed stepped back exactly one layer.
         let back: Vec<(&str, u8, u8)> = p
             .pills

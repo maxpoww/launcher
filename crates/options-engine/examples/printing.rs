@@ -4,7 +4,8 @@
 //! ```sh
 //! cargo run -p options-engine --example printing
 //! cargo run -p options-engine --example printing cancel 14   # or restart <id>,
-//!     # resume <printer>, default <printer>, print <printer> <file>
+//!     # resume|pause|options <printer>, default <printer>, print <printer> <file>,
+//!     # set <printer> colour|quality|media|sides <value>
 //! ```
 //!
 //! From a container: `CUPS_SERVER=<the host's cups.sock>` and
@@ -24,6 +25,18 @@ async fn main() {
             "default" => cups::set_default(arg).map(|_| String::new()),
             "print" => cups::print_file(arg, std::path::Path::new(&rest[0]), "Golem")
                 .map(|id| format!("job {id}")),
+            "options" => cups::defaults(arg).map(|d| format!("{d:?}")),
+            "set" => {
+                let value = match rest[0].as_str() {
+                    "colour" => cups::Default::Colour(rest[1] == "on"),
+                    "quality" => cups::Default::Quality(rest[1].parse().expect("3, 4 or 5")),
+                    "media" => cups::Default::Media(rest[1].clone()),
+                    "sides" => cups::Default::BothSides(rest[1] == "on"),
+                    other => panic!("no such default: {other}"),
+                };
+                cups::set_default_option(arg, &value).map(|_| String::new())
+            }
+            "pause" => cups::pause_printer(arg).map(|_| String::new()),
             other => panic!("no such action: {other}"),
         };
         println!("{action} {arg}: {done:?}");

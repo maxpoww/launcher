@@ -586,6 +586,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Tiles"
             | "Launcher"
             | "Monitors"
+            | "Printers"
     )
 }
 
@@ -2235,6 +2236,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             });
         }
         "Monitors" => crate::monitors_page::view(&mut view),
+        "Printers" => crate::printers_page::view(&mut view),
         "About Golem" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));
@@ -2573,6 +2575,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
                 }
             }
         }
+        k if k.starts_with("printers-") => crate::printers_page::apply(k, value),
         _ => debug!("controls: nothing sets {key:?}"),
     }
     Applied::Done

@@ -147,21 +147,36 @@ impl App {
     /// Measure what the pill writes, where it changed.
     fn task_pill_measure(&mut self) {
         let label = self.task_pill_label();
-        let number = self.task_pill.shown.as_ref().map(|t| format!("{}%", t.percent())).unwrap_or_default();
+        let number = self.task_pill.shown.as_ref().map(Task::shown_number).unwrap_or_default();
+        // The number's slot is reserved at its widest ("100%"), so the pill
+        // does not twitch as the digits change — or, for a task that says
+        // something else there, at what it says.
+        let slot = self.task_pill.shown.as_ref().and_then(|t| t.number.clone()).unwrap_or_else(|| WIDEST.to_owned());
         let font_px = FONT_PX * self.options_scale();
         let Some(r) = self.options_renderer.as_mut() else {
             return;
         };
-        if label != self.task_pill.measured || self.task_pill.pct_w <= 0.0 {
+        let key = format!("{label}\u{0}{slot}");
+        if key != self.task_pill.measured || self.task_pill.cancel_w <= 0.0 {
             self.task_pill.label_w = r.measure_text(&label, font_px, TEXT_FONT);
-            self.task_pill.pct_w = r.measure_text(WIDEST, font_px, TEXT_FONT);
+            self.task_pill.pct_w = if slot.is_empty() { 0.0 } else { r.measure_text(&slot, font_px, TEXT_FONT) };
             self.task_pill.cancel_w = r.measure_text(crate::i18n::tr(CANCEL), font_px, TEXT_FONT);
-            self.task_pill.measured = label;
+            self.task_pill.measured = key;
         }
         if number != self.task_pill.num_measured {
             self.task_pill.num_w = r.measure_text(&number, font_px, TEXT_FONT);
             self.task_pill.num_measured = number;
         }
+    }
+
+    /// The bar's text measured anew (its renderer just made, or its scale
+    /// changed): the pill's with it. A task begun before the bar could
+    /// measure — a print already waiting when the dock starts — was drawn
+    /// with no width for its words.
+    pub(crate) fn task_pill_remeasure(&mut self) {
+        self.task_pill.measured.clear();
+        self.task_pill.num_measured.clear();
+        self.task_pill_measure();
     }
 
     /// The list of tasks changed (one began, moved on, ended, left): the
@@ -354,6 +369,7 @@ impl App {
             if self.tasks.cancel(id) {
                 self.tasks_changed();
             }
+            self.printing_task_cancelled(id);
             return;
         }
         // Only the band collapses it: a click between two rows is nothing.
@@ -387,6 +403,7 @@ impl App {
                 if let Some(id) = self.task_pill.shown.as_ref().map(|t| t.id) {
                     self.tasks.cancel(id);
                     self.tasks_changed();
+                    self.printing_task_cancelled(id);
                 }
             }
             _ => return "taskbox open|close|collapse|peek|unpeek|cancel".to_owned(),
@@ -573,7 +590,7 @@ impl App {
         let num_w = self.task_pill.num_w.max(1.0);
         let x = lerp(band.x + SMALL_PAD, slot_x + (slot - num_w) / 2.0, whole);
         scene.labels.push(Label {
-            text: format!("{}%", task.percent()),
+            text: task.shown_number(),
             pos: (x, ty),
             max_w: num_w + 4.0,
             font_px,
@@ -633,7 +650,7 @@ impl App {
                 color,
             });
             scene.labels.push(Label {
-                text: format!("{}%", task.percent()),
+                text: task.shown_number(),
                 pos: (slot_x + slot / 2.0, ty),
                 max_w: slot.max(1.0),
                 font_px,

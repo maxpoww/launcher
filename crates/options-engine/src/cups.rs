@@ -37,10 +37,13 @@ const CANCEL_JOB: u16 = 0x0008;
 const GET_JOB_ATTRIBUTES: u16 = 0x0009;
 const GET_JOBS: u16 = 0x000A;
 const RESTART_JOB: u16 = 0x000E;
+const GET_PRINTER_ATTRIBUTES: u16 = 0x000B;
+const PAUSE_PRINTER: u16 = 0x0010;
 const RESUME_PRINTER: u16 = 0x0011;
 pub(crate) const CREATE_PRINTER_SUBSCRIPTIONS: u16 = 0x0016;
 pub(crate) const CANCEL_SUBSCRIPTION: u16 = 0x001B;
 const CUPS_GET_PRINTERS: u16 = 0x4002;
+const CUPS_ADD_MODIFY_PRINTER: u16 = 0x4003;
 const CUPS_SET_DEFAULT: u16 = 0x400A;
 
 // --- tags ------------------------------------------------------------------
@@ -211,7 +214,12 @@ impl Request {
     }
 
     pub(crate) fn int(&mut self, name: &str, value: i32) -> &mut Self {
-        self.body.push(INTEGER);
+        self.number(INTEGER, name, value)
+    }
+
+    /// A four-byte value of `tag` (an integer, or an enum's number).
+    fn number(&mut self, tag: u8, name: &str, value: i32) -> &mut Self {
+        self.body.push(tag);
         self.body
             .extend_from_slice(&(name.len() as u16).to_be_bytes());
         self.body.extend_from_slice(name.as_bytes());
@@ -340,6 +348,47 @@ fn user() -> String {
 
 /// Split an HTTP response into its status and body (Content-Length or
 /// chunked, or everything to the end).
+/// Read one HTTP answer: to the end of its body by its length (or its last
+/// chunk), not to the connection's end — CUPS keeps a connection open after
+/// a 401, waiting for the request again with who is asking.
+fn read_answer(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            return Ok(raw);
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if answer_whole(&raw) {
+            return Ok(raw);
+        }
+    }
+}
+
+/// Whether `raw` holds a whole HTTP answer (headers, and the body they
+/// announce). An answer with neither a length nor chunks ends with the
+/// connection.
+pub(crate) fn answer_whole(raw: &[u8]) -> bool {
+    let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    let body = raw.len() - head_end - 4;
+    for l in head.split("\r\n").skip(1) {
+        let Some((k, v)) = l.split_once(':') else { continue };
+        match k.trim() {
+            "content-length" => return v.trim().parse::<usize>().is_ok_and(|n| body >= n),
+            "transfer-encoding" if v.trim() == "chunked" => {
+                let rest = &raw[head_end + 4..];
+                return rest.starts_with(b"0\r\n\r\n") || rest.ends_with(b"\r\n0\r\n\r\n");
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(crate) fn http_body(raw: &[u8]) -> Option<(u16, Vec<u8>)> {
     let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&raw[..head_end]).ok()?;
@@ -401,8 +450,7 @@ pub(crate) fn send(resource: &str, req: &Request) -> Result<Response, CupsError>
         );
         stream.write_all(head.as_bytes())?;
         stream.write_all(&body)?;
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw)?;
+        let raw = read_answer(&mut stream)?;
         let (status, ipp) = http_body(&raw).ok_or(CupsError::Garbled)?;
         if status == 401 && auth.is_none() {
             auth = Some(format!("PeerCred {}", user()));
@@ -651,6 +699,25 @@ pub fn snapshot() -> Result<PrintingState, CupsError> {
     Ok(state)
 }
 
+/// The prints that ended (printed, cancelled, failed) since `since` (Unix
+/// seconds), newest first — CUPS keeps their history, and their files a
+/// while (to print one again).
+pub fn ended_since(since: u64) -> Result<Vec<PrintJob>, CupsError> {
+    let mut req = Request::new(GET_JOBS);
+    req.attr(URI, "printer-uri", &["ipp://localhost/"]);
+    req.attr(NAME, "requesting-user-name", &[&user()]);
+    req.attr(KEYWORD, "which-jobs", &["completed"]);
+    req.attr(KEYWORD, "requested-attributes", JOB_ATTRS);
+    let r = send_ok("/", &req)?;
+    let mut jobs: Vec<PrintJob> = r
+        .of(0x02)
+        .filter_map(job_of)
+        .filter(|j| j.finished.is_some_and(|t| t >= since))
+        .collect();
+    jobs.sort_by(|a, b| b.finished.cmp(&a.finished).then(b.id.cmp(&a.id)));
+    Ok(jobs)
+}
+
 /// One print, whatever its state (how a print that left the waiting list
 /// ended).
 pub fn job(id: u32) -> Result<Option<PrintJob>, CupsError> {
@@ -706,7 +773,12 @@ pub fn set_default(name: &str) -> Result<(), CupsError> {
 
 /// Print a file on `printer` (its type found by CUPS): the new print's id.
 pub fn print_file(printer: &str, file: &std::path::Path, title: &str) -> Result<u32, CupsError> {
-    let data = std::fs::read(file)?;
+    print_bytes(printer, std::fs::read(file)?, title)
+}
+
+/// Print a document held in memory (its type found by CUPS): the new
+/// print's id.
+pub fn print_bytes(printer: &str, data: Vec<u8>, title: &str) -> Result<u32, CupsError> {
     let mut req = Request::new(PRINT_JOB);
     req.attr(
         URI,
@@ -722,6 +794,106 @@ pub fn print_file(printer: &str, file: &std::path::Path, title: &str) -> Result<
         .and_then(|g| g.int("job-id"))
         .and_then(|n| u32::try_from(n).ok())
         .ok_or(CupsError::Garbled)
+}
+
+/// Stop a printer taking up its prints (they wait for it).
+pub fn pause_printer(name: &str) -> Result<(), CupsError> {
+    let mut req = Request::new(PAUSE_PRINTER);
+    req.attr(URI, "printer-uri", &[&format!("ipp://localhost/printers/{name}")]);
+    req.attr(NAME, "requesting-user-name", &[&user()]);
+    send_ok("/admin/", &req).map(|_| ())
+}
+
+/// A printer's own defaults — what a print gets unless its app asks for
+/// something else — and what it can do. The standard IPP job template
+/// names: CUPS maps them onto a driver's own options (`OutputMode`,
+/// `ColorModel`, `PageSize`…) at print time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Defaults {
+    /// In colour by default (`Some(false)`: in black and white); `None`: it
+    /// prints in one colour only.
+    pub colour: Option<bool>,
+    /// `print-quality`: 3 draft, 4 normal, 5 high — the default, and the ones
+    /// it has.
+    pub quality: Option<i32>,
+    pub qualities: Vec<i32>,
+    /// The paper by its PWG name (`na_letter_8.5x11in`), and the ones it takes.
+    pub media: String,
+    pub medias: Vec<String>,
+    /// On both sides by default; `None`: it cannot.
+    pub both_sides: Option<bool>,
+}
+
+/// Read a printer's defaults.
+pub fn defaults(name: &str) -> Result<Defaults, CupsError> {
+    let mut req = Request::new(GET_PRINTER_ATTRIBUTES);
+    req.attr(URI, "printer-uri", &[&format!("ipp://localhost/printers/{name}")]);
+    req.attr(NAME, "requesting-user-name", &[&user()]);
+    req.attr(
+        KEYWORD,
+        "requested-attributes",
+        &[
+            "print-color-mode-default",
+            "print-color-mode-supported",
+            "print-quality-default",
+            "print-quality-supported",
+            "media-default",
+            "media-supported",
+            "sides-default",
+            "sides-supported",
+        ],
+    );
+    let r = send_ok("/", &req)?;
+    Ok(r.first(0x04).map(defaults_of).unwrap_or_default())
+}
+
+pub(crate) fn defaults_of(g: &Group) -> Defaults {
+    let modes = g.texts("print-color-mode-supported");
+    let mode = g.text("print-color-mode-default");
+    let sides = g.texts("sides-supported");
+    Defaults {
+        colour: modes.iter().any(|m| m == "color").then(|| mode != "monochrome"),
+        quality: g.int("print-quality-default"),
+        qualities: g.ints("print-quality-supported"),
+        media: g.text("media-default"),
+        medias: g.texts("media-supported"),
+        both_sides: sides
+            .iter()
+            .any(|s| s.starts_with("two-sided"))
+            .then(|| g.text("sides-default").starts_with("two-sided")),
+    }
+}
+
+/// One of a printer's defaults changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Default {
+    Colour(bool),
+    /// 3 draft, 4 normal, 5 high.
+    Quality(i32),
+    /// A paper by its PWG name.
+    Media(String),
+    BothSides(bool),
+}
+
+/// Change one of a printer's defaults (kept by CUPS with the printer).
+pub fn set_default_option(name: &str, value: &Default) -> Result<(), CupsError> {
+    let mut req = Request::new(CUPS_ADD_MODIFY_PRINTER);
+    req.attr(URI, "printer-uri", &[&format!("ipp://localhost/printers/{name}")]);
+    req.attr(NAME, "requesting-user-name", &[&user()]);
+    req.group(0x04);
+    match value {
+        Default::Colour(c) => {
+            req.attr(KEYWORD, "print-color-mode-default", &[if *c { "color" } else { "monochrome" }])
+        }
+        Default::Quality(q) => req.number(ENUM, "print-quality-default", *q),
+        Default::Media(m) => req.attr(KEYWORD, "media-default", &[m]),
+        Default::BothSides(b) => req.attr(
+            KEYWORD,
+            "sides-default",
+            &[if *b { "two-sided-long-edge" } else { "one-sided" }],
+        ),
+    };
+    send_ok("/admin/", &req).map(|_| ())
 }
 
 /// The events a printing surface follows, as CUPS names them.
@@ -854,6 +1026,13 @@ mod tests {
         assert_eq!(http_body(chunked), Some((200, b"abcde".to_vec())));
         let denied = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
         assert_eq!(http_body(denied), Some((401, Vec::new())));
+        // Whole by its length or its last chunk; not before.
+        assert!(answer_whole(denied));
+        assert!(!answer_whole(&plain[..40]));
+        assert!(answer_whole(plain));
+        assert!(answer_whole(chunked));
+        assert!(!answer_whole(&chunked[..chunked.len() - 5]));
+        assert!(!answer_whole(b"HTTP/1.1 200 OK\r\n\r\nabc"));
     }
 
     #[test]

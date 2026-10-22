@@ -34,6 +34,8 @@ mod desktop_props;
 mod desktop_send;
 mod desktop_top;
 mod scanners;
+mod printers_page;
+mod printing;
 mod mounts;
 mod logging;
 mod lighting;
@@ -751,6 +753,7 @@ fn main() -> anyhow::Result<()> {
         tasks: tasks::Tasks::default(),
         task_tx: None,
         task_pill: task_pill::TaskPill::default(),
+        print_tasks: printing::PrintTasks::default(),
         bar_zoom_keys: false,
         zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
@@ -1736,6 +1739,8 @@ pub struct App {
     pub(crate) tasks: tasks::Tasks,
     task_tx: Option<calloop::channel::Sender<tasks::Report>>,
     task_pill: task_pill::TaskPill,
+    /// The prints on the bar, each a task (`printing.rs`).
+    print_tasks: printing::PrintTasks,
     /// The pointer is on the bar: Ctrl +/−/0 are its zoom's, unless a dock
     /// stack is open.
     bar_zoom_keys: bool,
@@ -4370,7 +4375,15 @@ impl App {
             .brain
             .as_ref()
             .is_none_or(|c| c.sounding_pids != ctx.sounding_pids);
+        // The prints on the bar follow CUPS (`printing.rs`).
+        let printing_changed = self.brain.as_ref().is_none_or(|c| c.printing != ctx.printing);
+        if printing_changed {
+            self.printing_seen(&ctx.printing);
+        }
         self.brain = Some(ctx);
+        if printing_changed {
+            self.printers_page_follow();
+        }
         if sounding_changed {
             // The stage deck's speaker badges.
             self.sync_deck_audio();

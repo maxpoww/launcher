@@ -41,9 +41,8 @@ const EVERY: Duration = Duration::from_millis(80);
 pub(crate) enum Report {
     /// `done` of `total`, in whatever the work is counted in (bytes, files).
     Progress { id: u64, done: u64, total: u64 },
-    /// What it is doing now, if that changes along the way.
-    // (No worker says this yet: it is there for the ones wired in later.)
-    #[allow(dead_code)]
+    /// What it is doing now, if that changes along the way (a print: its
+    /// printer out of paper).
     Label { id: u64, label: String },
     /// It is over.
     End { id: u64 },
@@ -58,6 +57,11 @@ pub(crate) struct Task {
     pub done: u64,
     /// 0 until the work knows how much there is.
     pub total: u64,
+    /// What the number's place says instead of a percentage, for work whose
+    /// progress cannot be measured (a print: CUPS knows the pages it made,
+    /// not the ones out of the printer). Empty: nothing there; the fill
+    /// still comes whole at the end.
+    pub number: Option<String>,
     /// When it ended; it lingers for `LINGER` after.
     pub ended: Option<Instant>,
 }
@@ -73,6 +77,11 @@ impl Task {
         } else {
             (self.done as f64 / self.total as f64).clamp(0.0, 1.0) as f32
         }
+    }
+
+    /// What the pill writes in the number's place.
+    pub fn shown_number(&self) -> String {
+        self.number.clone().unwrap_or_else(|| format!("{}%", self.percent()))
     }
 
     /// The percentage as the pill writes it.
@@ -95,9 +104,16 @@ pub(crate) struct Tasks {
 impl Tasks {
     /// A new task: its id, and the flag its worker reads to know it was
     /// cancelled.
+    #[cfg(test)]
     pub fn begin(&mut self, label: &str) -> (u64, Arc<AtomicBool>) {
+        self.begin_with(label, None)
+    }
+
+    /// [`begin`](Self::begin), with what the number's place says instead
+    /// of a percentage ([`Task::number`]).
+    pub fn begin_with(&mut self, label: &str, number: Option<String>) -> (u64, Arc<AtomicBool>) {
         self.next += 1;
-        self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, ended: None });
+        self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, number, ended: None });
         let stop = Arc::new(AtomicBool::new(false));
         self.stops.insert(self.next, stop.clone());
         (self.next, stop)
@@ -200,6 +216,11 @@ impl TaskHandle {
         Self::new(0, calloop::channel::channel::<Report>().0, Arc::new(AtomicBool::new(false)))
     }
 
+    /// Its id among the tasks (what a cancel from the bar names).
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// The owner cancelled it from the bar: stop where you can.
     pub fn cancelled(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
@@ -220,7 +241,6 @@ impl TaskHandle {
     }
 
     /// What it is doing now.
-    #[allow(dead_code)]
     pub fn label(&self, label: &str) {
         let _ = self.tx.send(Report::Label { id: self.id, label: label.to_owned() });
     }
@@ -236,6 +256,12 @@ impl crate::App {
     /// Start a task the bar shows ("Moving golem.iso to Home"): hand the
     /// handle to whatever does the work. On the loop.
     pub(crate) fn task_begin(&mut self, label: &str) -> TaskHandle {
+        self.task_begin_with(label, None)
+    }
+
+    /// [`task_begin`](Self::task_begin) for work whose progress cannot be
+    /// measured: `number` stands where the percentage would ([`Task::number`]).
+    pub(crate) fn task_begin_with(&mut self, label: &str, number: Option<String>) -> TaskHandle {
         if self.task_tx.is_none() {
             let (tx, rx) = calloop::channel::channel::<Report>();
             let heard = self.loop_handle.insert_source(rx, |event, _, app: &mut crate::App| {
@@ -254,7 +280,7 @@ impl crate::App {
             }
             self.task_tx = Some(tx);
         }
-        let (id, stop) = self.tasks.begin(label);
+        let (id, stop) = self.tasks.begin_with(label, number);
         tracing::info!("tasks: {label} (#{id})");
         self.tasks_changed();
         // (The sender is there: made just above.)
