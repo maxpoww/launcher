@@ -1374,5 +1374,7 @@
  "Menu size": "Tamaño del menú",
  "Keyboard driven": "Con el teclado",
  "Keyboard mode on/off": "Activar o quitar el modo teclado",
- "Turn off keyboard mode (Ctrl+K)": "Quitar el modo teclado (Ctrl+K)"
+ "Turn off keyboard mode (Ctrl+K)": "Quitar el modo teclado (Ctrl+K)",
+ "Jump through the sidebar · stop to open": "Recorrer la barra lateral · al parar se abre",
+ "Backwards": "Hacia atrás"
 }

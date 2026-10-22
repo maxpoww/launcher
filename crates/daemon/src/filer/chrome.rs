@@ -54,7 +54,7 @@ const CHEV: f32 = 8.0;
 const PEN_BOX: f32 = 18.0;
 /// KEYBOARD MODE's letters and what each does (`filer_key`): the pill's
 /// glyph's words for when the shell's buttons are named (and the log's now).
-pub(super) const KEYS: [(&str, &str); 26] = [
+pub(super) const KEYS: [(&str, &str); 28] = [
     ("W A S D", "Move around"),
     ("Shift", "Select a run"),
     ("Q", "Back"),
@@ -81,6 +81,8 @@ pub(super) const KEYS: [(&str, &str); 26] = [
     ("← →", "Previous or next tab"),
     ("?", "Keyboard shortcuts"),
     ("Ctrl+K", "Keyboard mode on/off"),
+    ("`", "Jump through the sidebar · stop to open"),
+    ("Shift+`", "Backwards"),
 ];
 
 /// Keyboard mode's letters, said in the shell's language ("Q Back · …").
@@ -548,6 +550,17 @@ impl App {
     ) -> [GridContent; 2] {
         let (_, h) = win.virt();
         let ink = pal.ink;
+        // (The sidebar cycle's place: tinted toward the accent as a menu's
+        // hovered row, from the sidebar's own ground.)
+        let cycle_tint = crate::desktop_menu::MenuPaint {
+            fill: [pal.ground[0], pal.ground[1], pal.ground[2], 1.0],
+            ink,
+            wash: [0.0; 4],
+            radius: 0.0,
+            glass: 0.0,
+            accent: pal.accent,
+        }
+        .row_tint();
         let open = if win.pinned {
             1.0
         } else {
@@ -699,6 +712,10 @@ impl App {
             if row.y + row.h <= PLACES_TOP || row.y >= h {
                 hits.places.push(Rect::default());
                 continue;
+            }
+            // (The place the sidebar cycle has lit: a menu row's quiet tint.)
+            if win.cycle.is_some_and(|(c, _)| c == n) {
+                list.rects.push(rect(row, 6.0, cycle_tint));
             }
             // (A place a drag is held on wears the box — and loses it for
             // a blink just before it opens.)

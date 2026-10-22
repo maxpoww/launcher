@@ -44,6 +44,8 @@ const LINES: &[Line] = &[
     Line::Keys("T", "New tab"),
     Line::Keys("Shift+T", "Close tab"),
     Line::Keys("Delete", "Move to bin"),
+    Line::Keys("`", "Jump through the sidebar · stop to open"),
+    Line::Keys("Shift+`", "Backwards"),
     Line::Keys("?", "Keyboard shortcuts"),
     Line::Heading("Always"),
     Line::Keys("Ctrl+K", "Keyboard mode on/off"),

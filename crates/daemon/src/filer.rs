@@ -134,6 +134,9 @@ const CHAINS_MAX: usize = 400;
 const LAYER_HEADROOM: u32 = 16;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How long the sidebar cycle waits after its last press to open the place
+/// lit (Max: "when i stop 0.5s it opens the selected").
+const CYCLE_REST: Duration = Duration::from_millis(500);
 /// THE CARD'S SCROLLING (Max, 2026-10-14: "hacé que el scrolling sea como
 /// el de la card" — `card/mod.rs::card_scroll_by` / `card_fling`, its
 /// numbers): a step of the wheel or the fingers in pixels; how fast and
@@ -1748,6 +1751,9 @@ struct Win {
     /// selection from `anchor` — set where the cursor stood as Shift went
     /// down (`filer_walk_to`); Shift let go ends it (`filer_shift_up`).
     visual: bool,
+    /// THE SIDEBAR CYCLE (`filer_cycle`): the place lit, and the press it
+    /// came from (only the newest press's wait opens it).
+    cycle: Option<(usize, u64)>,
     /// A drag held on a folder: which, and since when — held long enough,
     /// the folder opens under it.
     spring: Option<(usize, Instant)>,
@@ -2067,6 +2073,10 @@ impl Win {
     /// (`side_wait`, the caller's timer); leaving closes it at once. Whether
     /// that changed what is drawn.
     fn side_follow(&mut self) -> bool {
+        // (A sidebar cycle holds it open, wherever the pointer is.)
+        if self.cycle.is_some() {
+            return false;
+        }
         let reach = if self.side_open { self.side_open_w() } else { self.rail() };
         let want = self.has_side() && !self.pinned && self.at_win.is_some_and(|p| p.0 < reach);
         if !want {
@@ -3088,6 +3098,7 @@ impl App {
             cursor: None,
             anchor: None,
             visual: false,
+            cycle: None,
             spring: None,
             place_spring: None,
             place_blink: None,
@@ -6233,6 +6244,11 @@ impl App {
         if win.shortcuts.is_some() {
             return;
         }
+        // A sidebar cycle: the pointer coming onto the sidebar takes over as
+        // a hover (the cycle ends there, nothing opened).
+        if win.cycle.is_some() && win.at_win.is_some_and(|p| win.in_side(p)) {
+            win.cycle = None;
+        }
         // A confirmation up: only its buttons answer the pointer.
         if let Some((panel, _)) = win.confirm.as_mut() {
             if panel.pointer(win.ptr) {
@@ -6494,6 +6510,13 @@ impl App {
             return;
         };
         let at = win.ptr.unwrap_or_default();
+        // A sidebar cycle: a press takes over (nothing is opened by it).
+        if win.cycle.take().is_some() && pressed {
+            self.filer_request_draw(id);
+        }
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
         // The shortcuts table up: any press puts it away.
         if win.shortcuts.is_some() {
             if pressed {
@@ -7818,6 +7841,64 @@ impl App {
         self.filer_request_draw(id);
     }
 
+    /// THE SIDEBAR CYCLE: a press of ` (`back`: Shift+`) lights the next
+    /// place of the sidebar after the one lit, or after the folder shown
+    /// (`..` is not one), round the ends, and opens the sidebar at once;
+    /// `CYCLE_REST` after the last press the place lit opens in this tab and
+    /// the sidebar folds (unless pinned).
+    fn filer_cycle(&mut self, id: u32, back: bool) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let ring: Vec<usize> = (0..win.places.len()).filter(|&i| win.places[i].name != UP).collect();
+        if ring.is_empty() {
+            return;
+        }
+        let from = win
+            .cycle
+            .map(|(n, _)| n)
+            .or_else(|| win.places.iter().position(|p| p.path == win.dir && p.name != UP));
+        let k = ring.len();
+        let at = match from.and_then(|n| ring.iter().position(|&r| r == n)) {
+            Some(p) if back => (p + k - 1) % k,
+            Some(p) => (p + 1) % k,
+            None if back => k - 1,
+            None => 0,
+        };
+        let press = win.cycle.map_or(0, |(_, g)| g) + 1;
+        win.cycle = Some((ring[at], press));
+        win.side_open = true;
+        win.side_wait = None;
+        self.filer_request_draw(id);
+        let timer = calloop::timer::Timer::from_duration(CYCLE_REST);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.filer.win(id).and_then(|w| w.cycle).is_some_and(|(_, g)| g == press) {
+                app.filer_cycle_end(id, true);
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// The sidebar cycle ends: the place lit opens (`open`) or not, and the
+    /// sidebar folds unless it is pinned.
+    fn filer_cycle_end(&mut self, id: u32, open: bool) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some((n, _)) = win.cycle.take() else {
+            return;
+        };
+        if !win.pinned {
+            win.side_open = false;
+        }
+        let path = win.places.get(n).map(|p| p.path.clone()).filter(|_| open);
+        self.filer_request_draw(id);
+        if let Some(path) = path {
+            info!("files: the sidebar cycle opens {}", path.display());
+            self.filer_go(id, path);
+        }
+    }
+
     /// THE SHORTCUTS TABLE up over window `id` (`shortcuts.rs`).
     fn filer_shortcuts(&mut self, id: u32) {
         if let Some(win) = self.filer.win_mut(id) {
@@ -7851,6 +7932,10 @@ impl App {
         if let Some((panel, _)) = self.filer.win_mut(id).and_then(|w| w.confirm.as_mut()) {
             let answer = panel.key(keysym);
             return self.filer_confirm_answer(id, answer);
+        }
+        // A sidebar cycle: Escape ends it, nothing opened.
+        if keysym == Keysym::Escape && self.filer.win(id).is_some_and(|w| w.cycle.is_some()) {
+            return self.filer_cycle_end(id, false);
         }
         // The shortcuts table up: `?` or Escape put it away, nothing else.
         if let Some(win) = self.filer.win_mut(id).filter(|w| w.shortcuts.is_some()) {
@@ -8065,6 +8150,11 @@ impl App {
                 Keysym::slash => return self.filer_go(id, PathBuf::from("/")),
                 Keysym::period => return self.filer_go(id, home()),
                 Keysym::question => return self.filer_shortcuts(id),
+                // THE SIDEBAR CYCLE (Max, 2026-10-22: "add ` to jump over the
+                // items on the sidebar … when i stop 0.5s it opens the
+                // selected"): ` the next place, Shift+` the one before.
+                Keysym::grave => return self.filer_cycle(id, false),
+                Keysym::asciitilde => return self.filer_cycle(id, true),
                 Keysym::_1
                 | Keysym::_2
                 | Keysym::_3
@@ -8416,6 +8506,8 @@ impl App {
                     "slash" => Keysym::slash,
                     "period" => Keysym::period,
                     "question" => Keysym::question,
+                    "grave" => Keysym::grave,
+                    "tilde" => Keysym::asciitilde,
                     "1" => Keysym::_1,
                     "2" => Keysym::_2,
                     "3" => Keysym::_3,
