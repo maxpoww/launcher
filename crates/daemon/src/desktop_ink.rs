@@ -24,16 +24,34 @@ pub(crate) fn wallpaper_changed() {
     WALL_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The map's columns; its rows follow the screen's shape.
-const COLS: u32 = 96;
-/// Brighter than this behind a name (relative luminance, after the veil),
-/// the name is dark: where black ink starts to read better than white (the
-/// two contrasts cross at ~0.2), a little toward white, the desktop's own.
-const DARK_FROM: f32 = 0.24;
+/// The map's columns (a dozen screen pixels each); its rows follow the
+/// screen's shape.
+const COLS: u32 = 160;
+/// White is the desktop's own: the dark ink only where it reads this much
+/// better at the worst part behind the name.
+const DARK_BETTER: f32 = 1.15;
+/// Under this contrast at the worst part behind it (a name across a bright
+/// part and a dark one, a busy picture), neither ink reads alone: the halo
+/// goes all round the letters.
+const OUTLINE_UNDER: f32 = 3.0;
+/// The dark ink's luminance (its sRGB colour below).
+const DARK_LUM: f32 = 0.0117;
 
-/// A name's two colours: its ink, and the halo drawn a pixel under it.
-pub(crate) const LIGHT: ([f32; 4], [f32; 4]) = ([1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.6]);
-pub(crate) const DARK: ([f32; 4], [f32; 4]) = ([0.11, 0.11, 0.12, 1.0], [1.0, 1.0, 1.0, 0.55]);
+/// A name's colours: its ink, the halo, and whether the halo goes all round
+/// the letters (else one pixel under them).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Ink {
+    pub ink: [f32; 4],
+    pub halo: [f32; 4],
+    pub outline: bool,
+}
+
+pub(crate) const LIGHT: Ink = Ink { ink: [1.0, 1.0, 1.0, 1.0], halo: [0.0, 0.0, 0.0, 0.6], outline: false };
+pub(crate) const DARK: Ink = Ink { ink: [0.11, 0.11, 0.12, 1.0], halo: [1.0, 1.0, 1.0, 0.55], outline: false };
+
+fn ratio(a: f32, b: f32) -> f32 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
 
 /// How bright the wallpaper is on the screen, part by part.
 #[derive(Debug)]
@@ -79,37 +97,37 @@ impl Map {
         Some(Map { cols, rows, lum, size })
     }
 
-    /// How bright the picture is behind `rect` (the surface's coordinates):
-    /// between its mean and its brightest part, since a name must read where
-    /// it is lightest too.
-    fn behind(&self, rect: Rect) -> f32 {
+    /// How bright the picture is behind `rect` (the surface's
+    /// coordinates), part by part: its darkest and its brightest.
+    fn behind(&self, rect: Rect) -> (f32, f32) {
         let (sw, sh) = self.size;
         let col = |x: f32| ((x / sw * self.cols as f32).floor().max(0.0) as usize).min(self.cols - 1);
         let row = |y: f32| ((y / sh * self.rows as f32).floor().max(0.0) as usize).min(self.rows - 1);
         let (c0, c1, r0, r1) = (col(rect.x), col(rect.x + rect.w), row(rect.y), row(rect.y + rect.h));
-        let (mut sum, mut n, mut most) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut least, mut most) = (f32::MAX, 0.0f32);
         for r in r0..=r1 {
             for c in c0..=c1 {
                 let l = self.lum[r * self.cols + c];
-                sum += l;
-                n += 1.0;
+                least = least.min(l);
                 most = most.max(l);
             }
         }
-        if n == 0.0 {
-            return 0.0;
-        }
-        0.6 * sum / n + 0.4 * most
+        (least.min(most), most)
     }
 
     /// The colours of a name written in `rect`, the veil's black at `veil`
-    /// (its alpha) over the picture.
-    pub(crate) fn ink(&self, rect: Rect, veil: f32) -> ([f32; 4], [f32; 4]) {
-        if self.behind(rect) * (1.0 - veil.clamp(0.0, 1.0)) > DARK_FROM {
-            DARK
-        } else {
-            LIGHT
-        }
+    /// (its alpha) over the picture: the ink that reads best where the
+    /// picture behind it is worst for it — white unless the dark reads
+    /// clearly better — and the halo all round where even that is weak.
+    pub(crate) fn ink(&self, rect: Rect, veil: f32) -> Ink {
+        let keep = 1.0 - veil.clamp(0.0, 1.0);
+        let (least, most) = self.behind(rect);
+        let (least, most) = (least * keep, most * keep);
+        // White reads worst on the brightest part, the dark on the darkest.
+        let (light, dark) = (ratio(most, 1.0), ratio(least, DARK_LUM));
+        let (mut ink, worst) = if dark > light * DARK_BETTER { (DARK, dark) } else { (LIGHT, light) };
+        ink.outline = worst < OUTLINE_UNDER;
+        ink
     }
 }
 
@@ -126,11 +144,11 @@ mod tests {
         let size = (1600.0, 1000.0);
         let name = Rect::new(20.0, 120.0, 80.0, 18.0);
         let paper = Map::of(&plain(64, 40, |_, _| [0xf3, 0xe9, 0xe4]), size).unwrap();
-        assert_eq!(paper.ink(name, 0.0), DARK, "Max's light palette wallpaper");
+        assert_eq!(paper.ink(name, 0.0), DARK, "Max's light palette wallpaper: dark, a pixel's halo");
         let night = Map::of(&plain(64, 40, |_, _| [0x16, 0x18, 0x1d]), size).unwrap();
         assert_eq!(night.ink(name, 0.0), LIGHT);
         // The veil over the paper at night: dark enough for white again.
-        assert_eq!(paper.ink(name, 0.85), LIGHT);
+        assert_eq!(paper.ink(name, 0.85).ink, LIGHT.ink);
     }
 
     #[test]
@@ -140,8 +158,120 @@ mod tests {
         let half = Map::of(&plain(160, 100, |x, _| if x < 80 { [20, 20, 30] } else { [240, 240, 235] }), size).unwrap();
         assert_eq!(half.ink(Rect::new(30.0, 100.0, 80.0, 18.0), 0.0), LIGHT, "left: dark picture");
         assert_eq!(half.ink(Rect::new(1480.0, 100.0, 80.0, 18.0), 0.0), DARK, "right: light picture");
-        // A name over a small bright patch reads it too (the brightest part counts).
-        assert_eq!(half.ink(Rect::new(760.0, 100.0, 80.0, 18.0), 0.0), DARK, "astride the edge");
+        // Astride the edge neither reads alone: white, its halo all round.
+        let astride = half.ink(Rect::new(760.0, 100.0, 80.0, 18.0), 0.0);
+        assert!(astride.outline, "a name across a bright part and a dark one is outlined");
+        // A plain mid grey: both read; no outline.
+        let grey = Map::of(&plain(64, 40, |_, _| [128, 128, 128]), size).unwrap();
+        assert!(!grey.ink(Rect::new(30.0, 100.0, 80.0, 18.0), 0.0).outline);
+    }
+
+    /// EVERY WALLPAPER, LOOKED AT (run by hand: `cargo test -- --ignored
+    /// ink_on_every_wallpaper`; GOLEM_INK_WALLS = the folder, default
+    /// ~/Pictures/Wallpapers; GOLEM_INK_OUT = where the pictures go): names
+    /// where the desktop puts them (both edges) and across the screen, each
+    /// drawn in the ink chosen, and for each the contrast of its ink with the
+    /// picture under it at its worst tenth — then the same for the old white.
+    #[test]
+    #[ignore]
+    fn ink_on_every_wallpaper() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let dir = std::env::var("GOLEM_INK_WALLS").unwrap_or(format!("{home}/Pictures/Wallpapers"));
+        let out = std::path::PathBuf::from(std::env::var("GOLEM_INK_OUT").unwrap_or("/tmp/claude-1000/ink-sheet".into()));
+        std::fs::create_dir_all(&out).unwrap();
+        let (sw, sh) = (800u32, 500u32);
+        let mut names: Vec<Rect> = Vec::new();
+        for k in 0..5 {
+            names.push(Rect::new(10.0, 70.0 + 85.0 * k as f32, 80.0, 14.0));
+            names.push(Rect::new(710.0, 70.0 + 85.0 * k as f32, 80.0, 14.0));
+        }
+        for gy in 0..4 {
+            for gx in 0..5 {
+                names.push(Rect::new(110.0 + 120.0 * gx as f32, 60.0 + 110.0 * gy as f32, 80.0, 14.0));
+            }
+        }
+        let lum = |p: &image::Rgb<u8>| crate::palette::rel_lum([p[0], p[1], p[2]]);
+        let ratio = |a: f32, b: f32| (a.max(b) + 0.05) / (a.min(b) + 0.05);
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let (mut bad_new, mut bad_old, mut total) = (0, 0, 0);
+        let mut worst: Vec<(f32, String)> = Vec::new();
+        for path in files {
+            let p = path.to_string_lossy().into_owned();
+            let still = if crate::controls::wallpaper_is_video(&p) && !p.to_ascii_lowercase().ends_with(".gif") {
+                match crate::controls::poster(&p) {
+                    Some(s) => s,
+                    None => {
+                        println!("{p}: no still (no video tool here)");
+                        continue;
+                    }
+                }
+            } else {
+                p.clone()
+            };
+            let Ok(img) = image::open(&still) else {
+                println!("{p}: unreadable");
+                continue;
+            };
+            let screen = img.resize_to_fill(sw, sh, image::imageops::FilterType::Triangle).to_rgb8();
+            let map = Map::of(&img.thumbnail(COLS * 4, COLS * 4).to_rgb8(), (sw as f32, sh as f32)).unwrap();
+            let mut canvas = image::RgbaImage::from_fn(sw, sh, |x, y| {
+                let q = screen.get_pixel(x, y);
+                image::Rgba([q[0], q[1], q[2], 255])
+            });
+            let mut file_worst = f32::MAX;
+            for r in &names {
+                let chosen = map.ink(*r, 0.0);
+                let (ink, halo) = (chosen.ink, chosen.halo);
+                let ink_l = crate::palette::rel_lum([(ink[0] * 255.0) as u8, (ink[1] * 255.0) as u8, (ink[2] * 255.0) as u8]);
+                let mut c_new = Vec::new();
+                let mut c_old = Vec::new();
+                for y in r.y as u32..((r.y + r.h) as u32).min(sh) {
+                    for x in r.x as u32..((r.x + r.w) as u32).min(sw) {
+                        let l = lum(screen.get_pixel(x, y));
+                        c_new.push(ratio(l, ink_l));
+                        c_old.push(ratio(l, 1.0));
+                    }
+                }
+                c_new.sort_by(f32::total_cmp);
+                c_old.sort_by(f32::total_cmp);
+                let (n10, o10) = (c_new[c_new.len() / 10], c_old[c_old.len() / 10]);
+                total += 1;
+                bad_new += usize::from(n10 < 3.0);
+                bad_old += usize::from(o10 < 3.0);
+                file_worst = file_worst.min(n10);
+                // The name as the desktop draws it: the halo a pixel under, then the ink.
+                let rgb = |c: [f32; 4]| [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8];
+                let mut layer = vec![0u8; (sw * sh * 4) as usize];
+                let offsets: &[(f32, f32)] = if chosen.outline { &[(0.0, 1.0), (0.0, -1.0), (1.0, 0.0), (-1.0, 0.0)] } else { &[(0.0, 1.0)] };
+                crate::thumb_more::with_fonts(|fonts| {
+                    let attrs = glyphon::Attrs::new().family(glyphon::Family::SansSerif);
+                    for (dx, dy) in offsets {
+                        crate::thumb_more::draw_text_in(&mut layer, sw, "Documents", attrs.clone(), 13.0, (r.x + dx, r.y + dy), (0.0, 0.0, sw as f32, sh as f32), rgb(halo), fonts);
+                    }
+                    Some(())
+                });
+                for (i, px) in canvas.pixels_mut().enumerate() {
+                    let a = f32::from(layer[i * 4 + 3]) / 255.0 * halo[3];
+                    for k in 0..3 {
+                        px[k] = (f32::from(layer[i * 4 + k]) * a + f32::from(px[k]) * (1.0 - a)) as u8;
+                    }
+                }
+                crate::thumb_more::with_fonts(|fonts| {
+                    let attrs = glyphon::Attrs::new().family(glyphon::Family::SansSerif);
+                    crate::thumb_more::draw_text_in(&mut canvas, sw, "Documents", attrs, 13.0, (r.x, r.y), (0.0, 0.0, sw as f32, sh as f32), rgb(ink), fonts);
+                    Some(())
+                });
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            canvas.save(out.join(format!("{name}.png"))).unwrap();
+            worst.push((file_worst, name));
+        }
+        worst.sort_by(|a, b| a.0.total_cmp(&b.0));
+        println!("names under 3:1 at their worst tenth: {bad_new} of {total} now, {bad_old} with white alone");
+        for (c, n) in worst.iter().take(12) {
+            println!("  {c:5.2}  {n}");
+        }
     }
 
     #[test]

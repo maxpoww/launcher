@@ -86,10 +86,9 @@ const CURSOR_REFRESH: std::time::Duration = std::time::Duration::from_millis(120
 /// more (a file away for a moment keeps its place); past this the absent
 /// ones are forgotten.
 const REMEMBERED_MAX: usize = 1000;
-/// The name's colour, and the shadow under it that keeps it readable on any
-/// wallpaper (white on a bright picture would otherwise vanish).
+/// The typed name's colour (a name at rest takes its ink from the picture
+/// behind it: `desktop_ink.rs`).
 const INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const INK_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
 /// Environment override of the folder, for a test rig that must not show
 /// the owner's real desktop.
 const DIR_ENV: &str = "WAVERUNNER_DESKTOP_DIR";
@@ -2016,12 +2015,14 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
         });
         return;
     }
-    // The picture behind the name decides its ink (`desktop_ink.rs`).
-    let (ink, halo) = tile.ink.map_or((INK, INK_SHADOW), |(map, veil)| map.ink(name_rect, veil));
-    for (dy, color) in [(1.0, halo), (0.0, ink)] {
+    // The picture behind the name decides its ink (`desktop_ink.rs`): a
+    // halo a pixel under it, or all round where the picture is busy.
+    let chosen = tile.ink.map_or(crate::desktop_ink::LIGHT, |(map, veil)| map.ink(name_rect, veil));
+    let halo: &[(f32, f32)] = if chosen.outline { &[(0.0, 1.0), (0.0, -1.0), (1.0, 0.0), (-1.0, 0.0)] } else { &[(0.0, 1.0)] };
+    for (dx, dy, color) in halo.iter().map(|&(dx, dy)| (dx, dy, chosen.halo)).chain([(0.0, 0.0, chosen.ink)]) {
         scene.labels.push(Label {
             text: tile.name.to_owned(),
-            pos: (cx, top + dy),
+            pos: (cx + dx, top + dy),
             max_w: tile.max_w,
             font_px,
             line_px,
@@ -6693,7 +6694,7 @@ mod tests {
         assert_eq!(s.icons.len(), 1);
         assert_eq!(s.icons[0].layer, 0);
         assert_eq!(s.labels.len(), 4, "a shadow and an ink label per placed item");
-        assert_eq!(s.labels[0].color, Some(INK_SHADOW));
+        assert_eq!(s.labels[0].color, Some(crate::desktop_ink::LIGHT.halo));
         assert_eq!(s.labels[1].color, Some(INK));
         assert_eq!(s.labels[1].text, "a.txt");
         // The icon rests centred under the cell's top padding.
