@@ -1029,11 +1029,48 @@ The big daemon files are cohesive but long — go straight to the function:
   pictures and videos (`Win::media`, `is_media`, in `show_found`). Then `..` (Max: "add the '..' place
   too" — `with_up`, the first row over Favourites' heading: the folder this one is in; a click goes up
   leaving this folder selected, a drop on it moves things up, held there with a drag it climbs —
-  `up_hold`; HIDDEN at the floor, as before: Home, a root, Recents), FAVOURITES (RECENTS — below —,
-  Home under the owner's name, their folders, `~/Phones`, the bookmarks) and LOCATIONS (other disks,
-  what is plugged in, the Bin) — `places()`, `Place::gap` = Locations' first. RECENTS
-  (`filer/recent.rs`, Max 2026-10-21): a place of no folder (`recent::root()` = `recent:///`, one of
-  the roots) listing the files of the freedesktop `recently-used.xbel` that are still there, newest
+  `up_hold`; it climbs past Home to `/`, HIDDEN only at `/`, the bin's top and Recents), FAVOURITES
+  (RECENTS — below —, Home under the owner's name, their folders, `~/Phones`, the bookmarks) and
+  LOCATIONS (GOLEM DISK = `/`, other disks, what is plugged in, the Bin) — `places()`, `Place::gap` =
+  Locations' first. FILES IS UNLOCKED (Max, 2026-10-22: "the lock we did to the file manager makes no
+  sense, golem is for every user, i just needed to go to /tmp … add a confirmation for changes made on
+  specific directories"; it REPLACED the 2026-10-15 floor, `floor`/`Win::root`/`filer_roots`, gone):
+  every folder can be shown — `..`, a typed path, Golem Disk, a folder asked for from outside
+  (FileManager1, xdg-open, ctl) opens as any other; the way here starts at the owner's name inside
+  Home, at "Golem Disk" outside it ("Golem Disk › tmp"). What a CHANGE may do depends on where — THREE
+  ZONES (`filer/zones.rs`: `zone_of` a thing changed, `zone_in` a folder changed inside; remembered
+  3 s; `Win::zone` is its folder's): YOURS (Home and below but the delicate places, your sticks,
+  phones and disks, /tmp, /var/tmp — no question, Undo covers it; /tmp and /var/tmp wear a dim chip
+  "Emptied at restart" at the end of the path line); DELICATE (`delicate_at`: ~/Golem and all in it,
+  Home's top dot entries and all in them, the owner's folders THEMSELVES — not what is in them —,
+  ~/Phones and all in it) — a change asks first, `filer/confirm.rs`: a panel in the menus' paint,
+  centred over the window, ~360 wide, a shield, the act named in the title ("Move “.config” to the
+  bin?", "Rename “Pictures”?", "Move 3 items inside “Golem” to the bin?", "Change files inside
+  “Golem”?" — `confirm_title`, one panel an action), ONE sentence for the place (`Why::sentence`:
+  Golem, settings, keys, the browser — `.mozilla` and Seam's `.local/share/seam` —, the main
+  folders, Phones, else "It's part of how Golem works."), [Cancel] [<act> anyway] (`Act::anyway`);
+  Cancel has the focus (a ring of the accent), Tab/←/→ move it, Enter/Space press it, Escape or a
+  press off the panel cancels; THE SYSTEM'S (`system_tree`: `/`, /etc /nix /boot /usr /proc /sys
+  /dev /root /srv /opt /bin /sbin /lib*, /var but /var/tmp, /run but the owner's media and gvfs;
+  and whatever the owner cannot write or does not own) — looked at, copied, never changed: no row
+  that changes files (`Action::changes`, `Ctx::readonly`; Set as wallpaper stays), no Move/Rename/
+  New folder/bin on the pill, `put_here` false, no room made under a drag, a drop or paste INTO it
+  refused with a quiet flash "This is the system's. Golem manages it." (`filer_refuse`); a dim chip
+  with a lock, "System"; NO "open as administrator" (a superuser has the terminal). THE GATE
+  (`filer_gate`, Act + the things changed + the folder changed inside → go, refuse, or ask with the
+  change kept as a `Pending` and done again on "anyway" — `filer_do`, the gate opened once by
+  `filer_confirmed`) stands in every way a change is made: `filer_bin`, `filer_begin_rename`,
+  `filer_paste_into`, `filer_bring` (drops; it ends the drag at once whatever is asked; what is the
+  system's is COPIED from, never moved), `filer_new_folder`, `filer_duplicate`, `filer_group`,
+  `filer_archive`, Rotate; Cut of the system's is refused. A just-made folder's name is not asked
+  about again. `trash::protected` (the hard rule every way of throwing away meets) is now ONLY `/`,
+  Home and above it, the bin, a volume's own folder and the system's; the dock's bin cannot show the
+  question, so a delicate thing dropped there stays, quietly (`trash_file`) — a file window's drag
+  on it asks in that window (`filer_bin`) — and the desktop COPIES what is not the owner's to change
+  (`desktop_dnd_received`). Rig (never Max's real Home): `RIG_HOME=<a fake home>` for the rig dock,
+  `files go /etc`, `files key tab|enter|escape|delete`, `files rename <n>`, `files bin`. RECENTS
+  (`filer/recent.rs`, Max 2026-10-21): a place of no folder (`recent::root()` = `recent:///`)
+  listing the files of the freedesktop `recently-used.xbel` that are still there, newest
   first, at most 100 (`recent::list`, read by `filer_list` like the bin's records; not watched — read
   again when Files opens a file); every file Files opens (double click, Enter, Open with) is NOTED there
   as GTK does (`filer_used` → `recent::note`, off the loop: the entry's times moved, or a new
