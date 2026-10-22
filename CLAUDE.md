@@ -337,11 +337,11 @@ The big daemon files are cohesive but long — go straight to the function:
   dark look; Colours must fit a 900 px field — the panel does not scroll). The setting is "Colours" in the control panel / Super+H (`controls.rs`, keys `colors-*`, run on
   the UI thread in `App::control_pick`).
 - `lighting.rs` — AUTO LIGHTING (Max, 2026-10-18; Colours page: "Auto" beside the Lighting slider, "Include the
-  background" under it): the Lighting follows the sun (`line`: Light 60 from +45°, one even slope to Light 15 at the horizon, Dark 60 → 20 by -12°; the
+  background" under it): the Lighting follows the sun (`line`: Light 60 from +45°, one even slope down; DUSK round the horizon — Light down to 0 in the last 2.5° above it, Dark from 100 in the first 5° below (`DUSK_ABOVE`/`DUSK_BELOW`: ~20 min of stronger darkening, the switch at the looks' nearest) — to Dark 20 by -12°; the
   elevation is `options_engine::sun_elevation_deg`, the place from the timezone) and changes ONLY IN FRONT OF THE
   OWNER (Golem §7). Presence = ext-idle-notify-v1 (120 s "away", 3 s "quiet"; `hyprlock` running or a sleep =
   gone); `Plan` (pure, tested) says when to look: present AND settled (2 min after a dock start; 2 s after the
-  first touch back from away — `RETURN_CUE`) AND not under a fullscreen window, every 2 minutes (`SLOT_SECS`, one
+  first touch back from away — `RETURN_CUE`) AND not under a fullscreen window, every minute (`SLOT_SECS`, one
   point of the line a fade, `MIN_STEP`); missed slots are never replayed. A step of more than 2 points, and every
   switch between the looks, reaches the apps under the slow dissolve of every screen (`dissolve_slow`). The look starts a
   20 s eased FADE: ~15 frames a second move only the SHELL's pair (`palette::ShellPlan`, made once; a frame on the
