@@ -417,7 +417,8 @@ fn parse_ink(out: &str) -> Vec<(u32, u8)> {
 /// reading begun, off the worker, when that one is old and no print holds
 /// the printer. The page is read again when it comes.
 fn hp_ink(p: &Printer, printing: bool) -> Option<Vec<(u32, u8)>> {
-    if !p.uri.starts_with("hp:") {
+    // (An HP that is off or unplugged cannot be asked.)
+    if !p.uri.starts_with("hp:") || p.problem == Some(options_engine::PrinterProblem::Offline) {
         return None;
     }
     let (fresh, levels) = INK

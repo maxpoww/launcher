@@ -20,7 +20,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::state::{
@@ -706,6 +706,16 @@ pub fn snapshot() -> Result<PrintingState, CupsError> {
             .of(0x04)
             .map(printer_of)
             .filter(|p| !p.name.is_empty())
+            .map(|mut p| {
+                // A USB printer that is not plugged in is off, whatever CUPS
+                // still says of it: a printer taken away while the computer
+                // was off (no udev "remove", so no pause) stayed "ready" — or
+                // "out of paper", the last thing its last print said.
+                if usb_absent(&p.uri, Path::new(USB_DEVICES)) {
+                    p.problem = Some(PrinterProblem::Offline);
+                }
+                p
+            })
             .collect(),
         jobs: jobs.of(0x02).filter_map(job_of).collect(),
     };
@@ -730,6 +740,34 @@ pub fn ended_since(since: u64) -> Result<Vec<PrintJob>, CupsError> {
         .collect();
     jobs.sort_by(|a, b| b.finished.cmp(&a.finished).then(b.id.cmp(&a.id)));
     Ok(jobs)
+}
+
+/// Where the kernel lists the USB devices plugged in.
+const USB_DEVICES: &str = "/sys/bus/usb/devices";
+
+/// A USB printer's serial number, from its queue's address
+/// (`hp:/usb/DeskJet_1200_series?serial=CN17722320`,
+/// `usb://HP/DeskJet%201200%20series?serial=CN17722320&interface=1`).
+pub(crate) fn usb_serial(uri: &str) -> Option<&str> {
+    if !(uri.starts_with("usb://") || uri.starts_with("hp:/usb/") || uri.starts_with("hpfax:/usb/")) {
+        return None;
+    }
+    let (_, query) = uri.split_once('?')?;
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("serial="))
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether the USB printer at `uri` is not plugged in: its serial is on no
+/// device under `devices`. Not a USB address, no serial in it, or no list
+/// to read: it cannot be told, and it is not said to be away.
+pub(crate) fn usb_absent(uri: &str, devices: &Path) -> bool {
+    let Some(serial) = usb_serial(uri) else { return false };
+    let Ok(dir) = std::fs::read_dir(devices) else { return false };
+    !dir.flatten().any(|d| {
+        std::fs::read_to_string(d.path().join("serial")).is_ok_and(|s| s.trim().eq_ignore_ascii_case(serial))
+    })
 }
 
 /// One print, whatever its state (how a print that left the waiting list
@@ -1055,6 +1093,25 @@ mod tests {
         assert!(answer_whole(chunked));
         assert!(!answer_whole(&chunked[..chunked.len() - 5]));
         assert!(!answer_whole(b"HTTP/1.1 200 OK\r\n\r\nabc"));
+    }
+
+    #[test]
+    fn a_usb_printer_unplugged_is_away() {
+        assert_eq!(usb_serial("hp:/usb/DeskJet_1200_series?serial=CN17722320"), Some("CN17722320"));
+        assert_eq!(usb_serial("usb://HP/DeskJet%201200%20series?serial=CN1772&interface=1"), Some("CN1772"));
+        assert_eq!(usb_serial("ipp://printer.local/ipp/print"), None);
+        assert_eq!(usb_serial("usb://HP/DeskJet"), None);
+        let dir = std::env::temp_dir().join(format!("golem-usb-{}", std::process::id()));
+        let dev = dir.join("3-9");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("serial"), "CN17722320\n").unwrap();
+        assert!(!usb_absent("hp:/usb/DeskJet_1200_series?serial=cn17722320", &dir));
+        assert!(usb_absent("hp:/usb/Other?serial=XYZ", &dir));
+        // Not USB, no serial, no list: not said to be away.
+        assert!(!usb_absent("ipp://printer.local/ipp/print", &dir));
+        assert!(!usb_absent("hp:/usb/Other", &dir));
+        assert!(!usb_absent("hp:/usb/Other?serial=XYZ", &dir.join("none")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
