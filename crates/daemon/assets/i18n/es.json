@@ -1236,5 +1236,12 @@
   "No printer answered at {address}.": "Ninguna impresora respondió en {address}.",
   "Add a printer by its address": "Agregar impresora por dirección",
   "Scanners": "Escáneres",
-  "Make default": "Predeterminar"
+  "Make default": "Predeterminar",
+  "Opened {kind} with {app} from now on": "Desde ahora {kind} se abre con {app}",
+  "{app} could not be made the app for {kind}": "No se pudo poner {app} para {kind}",
+  "Another app": "Otra app",
+  "No app is called that": "Ninguna app se llama así",
+  "Always use for {kind}": "Usar siempre para {kind}",
+  "Type to find an app": "Escribe para buscar una app",
+  "Undone: {kind} open as before": "Deshecho: {kind} se abre como antes"
 }

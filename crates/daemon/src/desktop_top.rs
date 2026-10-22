@@ -194,8 +194,9 @@ impl App {
     pub(crate) fn desktop_push_panels(&self, scene: &mut Scene) {
         if let Some(menu) = self.desktop.menu.as_ref() {
             let layers = &self.desktop_top.glyph_layers;
+            // (A symbol by its name; an app's icon by its own key.)
             let glyph = |name: &str| {
-                let key = crate::glyphs::key(name);
+                let key = if name.contains(':') { name.to_owned() } else { crate::glyphs::key(name) };
                 layers.iter().position(|k| *k == key).map(|l| l as u32)
             };
             menu.push(scene, &self.desktop_panel_paint(menu.rect), &glyph);
@@ -216,8 +217,9 @@ impl App {
             return;
         };
         let mut asked = Vec::new();
-        for name in menu.glyphs() {
-            let key = crate::glyphs::key(name);
+        // (Its symbols, and the apps' own icons of its Another app page.)
+        let keys: Vec<String> = menu.glyphs().into_iter().map(crate::glyphs::key).chain(menu.pictures()).collect();
+        for key in keys {
             if self.desktop_top.glyph_layers.contains(&key) {
                 continue;
             }

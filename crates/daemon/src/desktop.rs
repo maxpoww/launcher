@@ -2620,7 +2620,7 @@ impl App {
     /// the theme has no such icon — the name alone is shown) and draw.
     pub(crate) fn on_desktop_icon(&mut self, res: crate::notif_icons::Resolved) {
         // (A symbol of the menus: the top surface's.)
-        if crate::glyphs::is_key(&res.key) {
+        if crate::glyphs::is_key(&res.key) || self.desktop_top.glyph_asked.contains(&res.key) {
             return self.desktop_on_glyph(res.key, res.chain);
         }
         self.desktop.pending.remove(&res.key);
@@ -2886,6 +2886,32 @@ impl App {
                 self.request_desktop_draw();
                 return "Back".to_owned();
             }
+            Action::OtherApp => {
+                self.desktop_other_apps();
+                return "Another app".to_owned();
+            }
+            Action::AlwaysUse => {
+                menu.toggle_always();
+                self.request_desktop_draw();
+                return "Always use".to_owned();
+            }
+            Action::OtherAppPick(n) => {
+                let chosen = menu
+                    .other
+                    .as_ref()
+                    .and_then(|o| Some((o.apps.get(n)?.clone(), o.always, o.mime.clone(), o.kind.clone())));
+                let path = menu.item.and_then(|i| self.desktop.items.get(i)).map(|it| it.path.clone());
+                self.desktop.menu = None;
+                self.request_desktop_draw();
+                let (Some((other, always, mime, kind)), Some(path)) = (chosen, path) else {
+                    return "nothing to open".to_owned();
+                };
+                self.open_with_other(&other, std::path::Path::new(&path));
+                if let (true, Some(mime), Some(kind)) = (always, mime, kind) {
+                    self.other_app_default(other, mime, kind, SendFor::Desktop);
+                }
+                return "Another app".to_owned();
+            }
             _ => {}
         }
         let Some(menu) = self.desktop.menu.take() else {
@@ -2904,6 +2930,46 @@ impl App {
         self.desktop_menu_act(action, item, menu_at);
         self.request_desktop_draw();
         format!("{action:?}")
+    }
+
+    /// The desktop menu's Another app page (`other_apps.rs`): every app
+    /// that opens files, found off the loop, and the file's kind.
+    fn desktop_other_apps(&mut self) {
+        use crate::desktop_menu::{OtherApps, Page};
+        let Some(path) = self
+            .desktop
+            .menu
+            .as_ref()
+            .and_then(|m| m.item)
+            .and_then(|i| self.desktop.items.get(i))
+            .map(|it| it.path.clone())
+        else {
+            return;
+        };
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            menu.show_other(OtherApps {
+                looking: true,
+                ..Default::default()
+            });
+        }
+        self.request_desktop_draw();
+        let apps = self.other_app_entries();
+        self.desktop_off_loop(
+            move || {
+                let mime = crate::other_apps::mime_of(std::path::Path::new(&path));
+                let kind = mime.as_deref().and_then(crate::other_apps::kind_of);
+                (crate::other_apps::openers(apps), mime, kind)
+            },
+            |app, (apps, mime, kind)| {
+                if let Some(menu) = app.desktop.menu.as_mut().filter(|m| m.page == Page::OtherApp) {
+                    if let Some(o) = menu.other.as_mut() {
+                        o.mime = mime;
+                    }
+                    menu.other_found(apps, kind);
+                }
+                app.request_desktop_draw();
+            },
+        );
     }
 
     /// The desktop menu's "Open with" page: the apps that say they open
@@ -3419,7 +3485,13 @@ impl App {
                 }
             }
             // (Turning the page is the row's own: `desktop_menu_row`.)
-            Action::Back | Action::OpenWith | Action::SendPage | Action::SortPage => {}
+            Action::Back
+            | Action::OpenWith
+            | Action::SendPage
+            | Action::SortPage
+            | Action::OtherApp
+            | Action::OtherAppPick(_)
+            | Action::AlwaysUse => {}
             // (The bin's rows and the sidebar's are the file windows'.)
             Action::PutBack
             | Action::Erase
@@ -4741,6 +4813,21 @@ impl App {
                 if steps != 0.0 {
                     self.desktop.menu_zoom_run -= steps * 15.0;
                     self.zoom("menu", if steps < 0.0 { "in" } else { "out" });
+                }
+            }
+            // The wheel over a menu that scrolls (the Another app page).
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if self.desktop.menu.is_some() => {
+                let at = self.desktop.ptr;
+                if let Some(menu) = self.desktop.menu.as_mut().filter(|m| at.is_some_and(|p| m.rect.contains(p))) {
+                    if menu.scroll_by(value as f32 * 29.0 * menu.scale / 15.0) {
+                        menu.pointer(None);
+                        menu.pointer(at);
+                        self.request_desktop_draw();
+                    }
                 }
             }
             wl_pointer::Event::Enter {
@@ -6069,6 +6156,7 @@ impl App {
                                 format!("{i}: {label}{}", if *off { " (off)" } else { "" })
                             }
                             crate::desktop_menu::Row::Note(t) => format!("{i}: ({t})"),
+                            crate::desktop_menu::Row::Search(t) => format!("{i}: [{t}]"),
                             crate::desktop_menu::Row::Sep => format!("{i}: —"),
                         })
                         .collect::<Vec<_>>()

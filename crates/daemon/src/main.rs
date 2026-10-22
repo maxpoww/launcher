@@ -110,6 +110,7 @@ mod notif;
 // Off-thread resolver: a notification's app icon → premultiplied mip chain.
 mod notif_icons;
 mod options;
+mod other_apps;
 mod order;
 // Golem's control panel: the main card, opened empty.
 mod panel;

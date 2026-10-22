@@ -154,6 +154,15 @@ pub(crate) const GLYPHS: &[(&str, &str)] = &[
         "selall",
         r#"<rect x="2.4" y="2.4" width="11.2" height="11.2" rx="1.6" stroke-dasharray="2 1.6"/>"#,
     ),
+    // The check of a menu's row, off and on.
+    (
+        "box",
+        r#"<rect x="2.6" y="2.6" width="10.8" height="10.8" rx="2.4"/>"#,
+    ),
+    (
+        "boxed",
+        r#"<rect x="2.6" y="2.6" width="10.8" height="10.8" rx="2.4"/><path d="m5.2 8.2 2 2 3.6-4"/>"#,
+    ),
     (
         "cleanup",
         r#"<rect x="2.4" y="2.4" width="4.4" height="4.4" rx="1"/><rect x="9.2" y="2.4" width="4.4" height="4.4" rx="1"/><rect x="2.4" y="9.2" width="4.4" height="4.4" rx="1"/><rect x="9.2" y="9.2" width="4.4" height="4.4" rx="1"/>"#,

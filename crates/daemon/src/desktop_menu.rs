@@ -57,6 +57,11 @@ pub(crate) enum Action {
     /// with the `n`th of those.
     OpenWith,
     OpenApp(usize),
+    /// …turn on to EVERY app that opens files (`OtherApps`), open it with
+    /// the `n`th of those, and the check "Always use for <kind>" turned.
+    OtherApp,
+    OtherAppPick(usize),
+    AlwaysUse,
     /// Turn the page to the orders; order by the `n`th key (name, date
     /// modified, size, kind), and which way (descending?).
     SortPage,
@@ -149,10 +154,15 @@ pub(crate) enum Row {
         danger: bool,
         /// Shown, but there is nothing for it to do now.
         off: bool,
+        /// A picture in its own colours in the symbol's place (an app's
+        /// icon: its icon key), else none.
+        pic: Option<String>,
     },
     /// A heading over a list of a page ("Plugged in"), or a line that only
     /// says something ("Looking for more…").
     Note(String),
+    /// The line a page's search is typed into (what is typed: none yet).
+    Search(String),
     Sep,
 }
 
@@ -164,6 +174,7 @@ impl Row {
             action,
             danger: false,
             off: false,
+            pic: None,
         }
     }
 
@@ -174,6 +185,19 @@ impl Row {
             action,
             danger: true,
             off: false,
+            pic: None,
+        }
+    }
+
+    /// A row wearing a picture (`key`, an icon key) in its own colours.
+    pub fn pictured(label: impl Into<String>, key: String, action: Action) -> Self {
+        Row::Item {
+            label: label.into(),
+            icon: "",
+            action,
+            danger: false,
+            off: false,
+            pic: Some(key),
         }
     }
 
@@ -194,7 +218,7 @@ impl Row {
 pub(crate) fn turns_page(action: Action) -> bool {
     matches!(
         action,
-        Action::OpenWith | Action::SendPage | Action::SortPage
+        Action::OpenWith | Action::SendPage | Action::SortPage | Action::OtherApp
     )
 }
 
@@ -533,6 +557,7 @@ pub(crate) fn rows_for(c: &Ctx) -> Vec<Row> {
                 action: Action::EmptyBin,
                 danger: true,
                 off: c.bin_n == 0,
+                pic: None,
             })]);
         }
         On::Stick => {
@@ -651,6 +676,7 @@ pub(crate) enum Page {
     OpenWith,
     Send,
     Sort,
+    OtherApp,
 }
 
 /// The row a page leads back with: "‹ <its name>".
@@ -671,8 +697,79 @@ pub(crate) fn open_with_rows(apps: Option<&[String]>) -> Vec<Row> {
                 .map(|(n, name)| Row::item(name.clone(), "app", Action::OpenApp(n))),
         ),
     }
+    // Any other app the computer has (Max, 2026-10-21).
+    rows.push(Row::Sep);
+    rows.push(Row::item(tr("Another app"), "more", Action::OtherApp));
     rows
 }
+
+/// One app of the Another app page: its name, its icon (an icon key), and
+/// its id (`<id>.desktop`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OtherApp {
+    pub name: String,
+    pub pic: String,
+    pub id: String,
+}
+
+/// THE ANOTHER APP PAGE (Max, 2026-10-21): every app of the computer that
+/// opens files, A→Z, each with its own icon, found by typing (the
+/// search line takes what is typed); at its foot "Always use for <kind>"
+/// (`kind`: the file's kind in the plural, none when not known).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct OtherApps {
+    pub apps: Vec<OtherApp>,
+    /// The file's kind (its MIME type), when it could be told.
+    pub mime: Option<String>,
+    /// Still being found.
+    pub looking: bool,
+    pub query: String,
+    pub always: bool,
+    pub kind: Option<String>,
+}
+
+/// The rows of the Another app page: the way back, the search line, the
+/// apps whose names hold what is typed, and the check. (Its first three
+/// rows and, with a kind, its last two stay where they are while the
+/// apps scroll: `OtherApps::pinned`.)
+pub(crate) fn other_rows(o: &OtherApps) -> Vec<Row> {
+    let mut rows = back(tr("Another app"));
+    rows.push(Row::Search(o.query.clone()));
+    let q = o.query.to_lowercase();
+    let found: Vec<Row> = o
+        .apps
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.name.to_lowercase().contains(&q))
+        .map(|(n, a)| Row::pictured(a.name.clone(), a.pic.clone(), Action::OtherAppPick(n)))
+        .collect();
+    if o.looking {
+        rows.push(Row::note(tr("Looking for apps…")));
+    } else if found.is_empty() {
+        rows.push(Row::note(tr("No app is called that")));
+    }
+    rows.extend(found);
+    if let Some(kind) = &o.kind {
+        rows.push(Row::Sep);
+        let words = fill(tr("Always use for {kind}"), &[("kind", kind)]);
+        rows.push(Row::item(
+            words,
+            if o.always { "boxed" } else { "box" },
+            Action::AlwaysUse,
+        ));
+    }
+    rows
+}
+
+impl OtherApps {
+    /// The rows that stay while the rest scroll: at the top and the foot.
+    pub fn pinned(&self) -> (usize, usize) {
+        (3, if self.kind.is_some() { 2 } else { 0 })
+    }
+}
+
+/// The most rows a page that scrolls shows at once.
+const PAGE_ROWS: usize = 12;
 
 /// One place a thing can be sent to: its name, and whether it is a phone.
 #[derive(Debug, Clone, PartialEq)]
@@ -836,7 +933,7 @@ fn red() -> [f32; 4] {
 pub(crate) enum MenuKey {
     /// Nothing for it (or nothing to do).
     Nothing,
-    /// The highlight moved: draw again.
+    /// The highlight moved, or the search changed: draw again.
     Moved,
     /// Row `n` chosen (Enter, Space, → on a page's row).
     Choose(usize),
@@ -944,6 +1041,14 @@ pub(crate) struct Menu {
     /// THE KEYS (Max, 2026-10-21): where the pointer stood when they last
     /// took the highlight — it stays theirs until the pointer moves.
     keys_at: Option<Option<(f32, f32)>>,
+    /// A page longer than it may be (`PAGE_ROWS` for the apps; the surface
+    /// at the most for any) SCROLLS between its pinned rows: how far, and
+    /// how many rows stay at its top and foot.
+    pub scroll: f32,
+    pinned: (usize, usize),
+    capped: bool,
+    /// The Another app page, while it is up.
+    pub other: Option<OtherApps>,
 }
 
 impl Menu {
@@ -992,6 +1097,10 @@ impl Menu {
             from_left,
             from_top,
             keys_at: None,
+            scroll: 0.0,
+            pinned: (0, 0),
+            capped: false,
+            other: None,
         };
         menu.place();
         menu
@@ -1010,7 +1119,7 @@ impl Menu {
     /// anchor, shifted back onto the surface where it would leave it.
     fn place(&mut self) {
         let s = self.scale;
-        let (w, h) = (width_of(&self.rows, s), height_of(&self.rows, s));
+        let (w, h) = (width_of(&self.rows, s), self.height());
         let (ax, ay) = self.anchor;
         let x = if self.from_left { ax } else { ax - w };
         let y = if self.from_top { ay } else { ay - h };
@@ -1039,10 +1148,22 @@ impl Menu {
     /// Turn to `page`, made of `rows`. (Turned by the keys: its first
     /// choice is highlighted.)
     pub fn turn(&mut self, page: Page, rows: Vec<Row>) {
+        let other = page == Page::OtherApp;
+        if page != self.page || !other {
+            self.scroll = 0.0;
+        }
+        if !other {
+            self.other = None;
+        }
+        (self.pinned, self.capped) = match self.other.as_ref().filter(|_| other) {
+            Some(o) => (o.pinned(), true),
+            None => ((0, 0), false),
+        };
         self.page = page;
         self.set_rows(rows);
         if self.keys_at.is_some() {
             self.hover = self.first_choice();
+            self.reveal();
         }
     }
 
@@ -1054,7 +1175,7 @@ impl Menu {
         self.turn(Page::Main, rows);
         if self.keys_at.is_some() {
             let to = match from {
-                Page::OpenWith => Some(Action::OpenWith),
+                Page::OpenWith | Page::OtherApp => Some(Action::OpenWith),
                 Page::Send => Some(Action::SendPage),
                 Page::Sort => Some(Action::SortPage),
                 Page::Main => None,
@@ -1065,19 +1186,85 @@ impl Menu {
         }
     }
 
+    /// The Another app page: the apps (or still being found), turned to.
+    pub fn show_other(&mut self, other: OtherApps) {
+        let rows = other_rows(&other);
+        self.other = Some(other);
+        self.turn(Page::OtherApp, rows);
+    }
+
+    /// The Another app page made again from what it holds now (typed, the
+    /// check turned, the apps found), the highlight on its first app while
+    /// something is typed or the keys move it.
+    fn refill_other(&mut self, keep: Option<Action>) {
+        let Some(o) = self.other.as_ref() else {
+            return;
+        };
+        let rows = other_rows(o);
+        self.pinned = o.pinned();
+        self.rows = rows;
+        self.scroll = 0.0;
+        self.place();
+        self.hover = match keep {
+            Some(a) => self.rows.iter().position(|r| r.action() == Some(a)),
+            None if self.keys_at.is_some() => self.first_choice(),
+            None => None,
+        };
+        self.reveal();
+    }
+
+    /// The apps of the Another app page, found: shown.
+    pub fn other_found(&mut self, apps: Vec<OtherApp>, kind: Option<String>) {
+        if let Some(o) = self.other.as_mut() {
+            (o.apps, o.kind, o.looking) = (apps, kind, false);
+            self.refill_other(None);
+        }
+    }
+
+    /// The check "Always use for <kind>" turned.
+    pub fn toggle_always(&mut self) {
+        if let Some(o) = self.other.as_mut() {
+            o.always = !o.always;
+            self.refill_other(Some(Action::AlwaysUse));
+        }
+    }
+
+    /// Typed on a page with a search line (`None`: Backspace): what it holds
+    /// filters the rows, the first found highlighted. Whether it was the
+    /// search's.
+    pub fn search_type(&mut self, letter: Option<char>, at: Option<(f32, f32)>) -> bool {
+        let Some(o) = self.other.as_mut().filter(|_| self.page == Page::OtherApp) else {
+            return false;
+        };
+        match letter {
+            Some(c) => o.query.push(c),
+            None => {
+                o.query.pop();
+            }
+        }
+        self.keys_at = Some(at);
+        self.refill_other(None);
+        true
+    }
+
     // ── the keys ──────────────────────────────────────────────────────
 
     /// A key while the menu is up (`at`: where the pointer is): ↓/↑ walk
     /// the rows that do something, round the ends; Home/End; Enter or Space
     /// choose; → turns a row's page, ← goes back; Escape closes; a letter
-    /// goes to the next row it begins. What the host is to do.
+    /// goes to the next row it begins (on a page with a search line, what
+    /// is typed is the search's, Space too). What the host is to do.
     pub fn key(&mut self, keysym: Keysym, utf8: Option<&str>, at: Option<(f32, f32)>) -> MenuKey {
+        let searching = self.page == Page::OtherApp;
         match keysym {
             Keysym::Down | Keysym::KP_Down => self.key_step(true, at),
             Keysym::Up | Keysym::KP_Up => self.key_step(false, at),
             Keysym::Home | Keysym::KP_Home => self.key_end(false, at),
             Keysym::End | Keysym::KP_End => self.key_end(true, at),
-            Keysym::Return | Keysym::KP_Enter | Keysym::space => {
+            Keysym::Return | Keysym::KP_Enter => {
+                return self.hover.map_or(MenuKey::Nothing, MenuKey::Choose);
+            }
+            Keysym::space if !searching => {
                 return self.hover.map_or(MenuKey::Nothing, MenuKey::Choose);
             }
             Keysym::Right | Keysym::KP_Right => {
@@ -1091,6 +1278,9 @@ impl Menu {
                 return MenuKey::Back;
             }
             Keysym::Escape => return MenuKey::Close,
+            Keysym::BackSpace if searching => {
+                self.search_type(None, at);
+            }
             _ => {
                 let Some(c) = utf8
                     .and_then(|t| t.chars().next())
@@ -1098,7 +1288,9 @@ impl Menu {
                 else {
                     return MenuKey::Nothing;
                 };
-                if !self.key_letter(c, at) {
+                if searching {
+                    self.search_type(Some(c), at);
+                } else if !self.key_letter(c, at) {
                     return MenuKey::Nothing;
                 }
             }
@@ -1143,6 +1335,7 @@ impl Menu {
             i = next(i);
         }
         self.keys_at = Some(at);
+        self.reveal();
     }
 
     /// Home / End: the first row that does something, or the last.
@@ -1154,6 +1347,7 @@ impl Menu {
             choices.next()
         };
         self.keys_at = Some(at);
+        self.reveal();
     }
 
     /// A letter: the next row whose words begin with it, round the end.
@@ -1170,6 +1364,7 @@ impl Menu {
         if found.is_some() {
             self.hover = found;
             self.keys_at = Some(at);
+            self.reveal();
         }
         found.is_some()
     }
@@ -1188,28 +1383,126 @@ impl Menu {
         changed
     }
 
-    /// Each row's rectangle, in order (rules included).
+    // ── a page that scrolls ───────────────────────────────────────────
+
+    /// Its height: its rows', at the most `PAGE_ROWS` of them between the
+    /// pinned ones on a page that is capped, and never more than the
+    /// surface.
+    fn height(&self) -> f32 {
+        let s = self.scale;
+        let natural = height_of(&self.rows, s);
+        let room = (self.room.1 - 8.0).max(ROW_H * s * 3.0);
+        let cap = if self.capped {
+            let (top, foot) = self.pinned;
+            let ends: f32 = self.rows.iter().take(top).map(row_h).sum::<f32>()
+                + self.rows.iter().rev().take(foot).map(row_h).sum::<f32>();
+            (PAD * 2.0 + ends + PAGE_ROWS as f32 * ROW_H) * s
+        } else {
+            f32::MAX
+        };
+        natural.min(cap).min(room)
+    }
+
+    /// The rows between the pinned ones: their indices, and where they are
+    /// seen (the panel's inside between the pinned rows).
+    fn middle(&self) -> (std::ops::Range<usize>, Rect) {
+        let (s, pad) = (self.scale, PAD * self.scale);
+        let n = self.rows.len();
+        let (top, foot) = (
+            self.pinned.0.min(n),
+            self.pinned.1.min(n - self.pinned.0.min(n)),
+        );
+        let head: f32 = self.rows[..top].iter().map(|r| row_h(r) * s).sum();
+        let tail: f32 = self.rows[n - foot..].iter().map(|r| row_h(r) * s).sum();
+        let y0 = self.rect.y + pad + head;
+        let y1 = self.rect.y + self.rect.h - pad - tail;
+        (
+            top..n - foot,
+            Rect::new(self.rect.x, y0, self.rect.w, (y1 - y0).max(0.0)),
+        )
+    }
+
+    /// How far the middle rows may scroll.
+    fn scroll_max(&self) -> f32 {
+        let (mid, view) = self.middle();
+        let content: f32 = self.rows[mid].iter().map(|r| row_h(r) * self.scale).sum();
+        (content - view.h).max(0.0)
+    }
+
+    /// The wheel over it: its rows move by `dy` (when it scrolls at all).
+    /// Whether they moved.
+    pub fn scroll_by(&mut self, dy: f32) -> bool {
+        let to = (self.scroll + dy).clamp(0.0, self.scroll_max());
+        let moved = (to - self.scroll).abs() > 0.01;
+        self.scroll = to;
+        moved
+    }
+
+    /// The highlighted row into view (the keys walking a long page).
+    fn reveal(&mut self) {
+        let Some(i) = self.hover else {
+            return;
+        };
+        let (mid, view) = self.middle();
+        if !mid.contains(&i) {
+            return;
+        }
+        let r = self.row_rects()[i];
+        if r.y < view.y {
+            self.scroll -= view.y - r.y;
+        } else if r.y + r.h > view.y + view.h {
+            self.scroll += r.y + r.h - (view.y + view.h);
+        }
+        self.scroll = self.scroll.clamp(0.0, self.scroll_max());
+    }
+
+    /// Each row's rectangle, in order (rules included): the middle ones
+    /// where they have scrolled to, the pinned ones at the top and foot.
     pub fn row_rects(&self) -> Vec<Rect> {
         let (s, pad) = (self.scale, PAD * self.scale);
+        let (mid, view) = self.middle();
         let mut y = self.rect.y + pad;
-        self.rows
+        let mut rects: Vec<Rect> = self
+            .rows
             .iter()
-            .map(|r| {
+            .enumerate()
+            .map(|(i, r)| {
                 let h = row_h(r) * s;
+                if i == mid.start {
+                    y = view.y - self.scroll;
+                }
                 let rect = Rect::new(self.rect.x + pad, y, self.rect.w - 2.0 * pad, h);
                 y += h;
                 rect
             })
-            .collect()
+            .collect();
+        // (The foot's rows from the panel's foot up.)
+        let mut y = self.rect.y + self.rect.h - pad;
+        for i in (mid.end..self.rows.len()).rev() {
+            y -= rects[i].h;
+            rects[i].y = y;
+        }
+        rects
+    }
+
+    /// Whether row `i` is seen (a middle row scrolled out is not).
+    fn seen(&self, i: usize, r: &Rect) -> bool {
+        let (mid, view) = self.middle();
+        !mid.contains(&i) || (r.y + r.h > view.y + 0.5 && r.y < view.y + view.h - 0.5)
     }
 
     /// The action row under `pos` (never a rule, a note, or a row with
-    /// nothing to do).
+    /// nothing to do, or one scrolled out of sight).
     pub fn hit(&self, pos: (f32, f32)) -> Option<usize> {
+        let (mid, view) = self.middle();
         self.row_rects()
             .iter()
             .enumerate()
-            .find(|(i, r)| r.contains(pos) && matches!(self.rows[*i], Row::Item { off: false, .. }))
+            .find(|(i, r)| {
+                r.contains(pos)
+                    && matches!(self.rows[*i], Row::Item { off: false, .. })
+                    && (!mid.contains(i) || view.contains(pos))
+            })
             .map(|(i, _)| i)
     }
 
@@ -1218,9 +1511,23 @@ impl Menu {
         self.rows.get(i).and_then(Row::action)
     }
 
+    /// The pictures its rows wear (apps' icons: their icon keys).
+    pub fn pictures(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item { pic: Some(k), .. } => Some(k.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The symbols its rows wear (for the surface's icon layers).
     pub fn glyphs(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
+        if self.rows.iter().any(|r| matches!(r, Row::Search(_))) {
+            names.push("search");
+        }
         for row in &self.rows {
             if let Row::Item { icon, action, .. } = row {
                 if !icon.is_empty() && !names.contains(icon) {
@@ -1269,13 +1576,22 @@ impl Menu {
             glass: paint.glass,
             border: 0.0,
         });
+        // (The rows between the pinned ones scroll: drawn in a grid of their
+        // own, cut to where they are seen.)
+        let (middle, view) = self.middle();
+        let view = Rect::new(view.x, view.y + lift, view.w, view.h);
+        let mut mid = GridContent {
+            clip: view,
+            ..Default::default()
+        };
         let label = |text: &str,
                      pos: (f32, f32),
                      max_w: f32,
                      px: f32,
                      line: f32,
                      bold: bool,
-                     color: [f32; 4]| Label {
+                     color: [f32; 4],
+                     clip: Rect| Label {
             text: text.to_owned(),
             pos,
             max_w,
@@ -1284,7 +1600,7 @@ impl Menu {
             centered: false,
             dim: false,
             cache: true,
-            clip: Some(panel),
+            clip: Some(clip),
             family: bold.then_some(FONT_BOLD),
             color: Some(fade(color)),
         };
@@ -1300,7 +1616,15 @@ impl Menu {
             }
         };
         for (i, (row, rect)) in self.rows.iter().zip(self.row_rects()).enumerate() {
+            if !self.seen(i, &rect) {
+                continue;
+            }
             let rect = Rect::new(rect.x, rect.y + lift, rect.w, rect.h);
+            let (grid, clip) = if middle.contains(&i) {
+                (&mut mid, view)
+            } else {
+                (&mut grid, panel)
+            };
             match row {
                 Row::Sep => grid.rects.push(RectInst {
                     rect: Rect::new(
@@ -1322,13 +1646,55 @@ impl Menu {
                     (NOTE_PX + 4.0) * s,
                     false,
                     ink_at(NOTE_INK),
+                    clip,
                 )),
+                // The search line: a faint field, the magnifier, and what is
+                // typed (else how to: just type).
+                Row::Search(typed) => {
+                    let field = Rect::new(
+                        rect.x + 2.0 * s,
+                        rect.y + 3.0 * s,
+                        rect.w - 4.0 * s,
+                        rect.h - 6.0 * s,
+                    );
+                    grid.rects.push(RectInst {
+                        rect: field,
+                        radius: ROW_RADIUS * s,
+                        color: fade(ink_at(0.07)),
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                    let cy = rect.y + rect.h / 2.0;
+                    let r = Rect::new(
+                        (rect.x + ICON_X * s).round(),
+                        (cy - ICON * s / 2.0).round(),
+                        ICON * s,
+                        ICON * s,
+                    );
+                    symbol(grid, "search", r, ink_at(ICON_INK));
+                    let (words, ink) = if typed.is_empty() {
+                        (tr("Type to find an app"), ink_at(NOTE_INK))
+                    } else {
+                        (typed.as_str(), paint.ink)
+                    };
+                    grid.labels.push(label(
+                        words,
+                        (rect.x + TEXT_X * s, cy - LINE_PX * s / 2.0),
+                        rect.w - (TEXT_X + 8.0) * s,
+                        FONT_PX * s,
+                        LINE_PX * s,
+                        false,
+                        ink,
+                        clip,
+                    ));
+                }
                 Row::Item {
                     label: words,
                     icon,
                     action,
                     danger,
                     off,
+                    pic,
                 } => {
                     // The row under the pointer: a SOFT TINT of the accent
                     // (red for what cannot be undone), at once (Max,
@@ -1355,14 +1721,29 @@ impl Menu {
                     let k = if *off { OFF_INK } else { 1.0 };
                     let at = |a: f32| [base[0], base[1], base[2], base[3] * a * k];
                     let cy = rect.y + rect.h / 2.0;
-                    if !icon.is_empty() {
+                    if let Some(layer) = pic.as_deref().and_then(glyph) {
+                        // (An app's own icon, in its own colours.)
+                        let side = (ICON + 2.0) * s;
+                        grid.icons.push(IconInst {
+                            rect: Rect::new(
+                                (rect.x + (ICON_X - 1.0) * s).round(),
+                                (cy - side / 2.0).round(),
+                                side,
+                                side,
+                            ),
+                            layer,
+                            tint: [0.0; 4],
+                            ring: -1.0,
+                            plate: crate::content::NO_PLATE,
+                        });
+                    } else if !icon.is_empty() {
                         let r = Rect::new(
                             (rect.x + ICON_X * s).round(),
                             (cy - ICON * s / 2.0).round(),
                             ICON * s,
                             ICON * s,
                         );
-                        symbol(&mut grid, icon, r, at(ICON_INK));
+                        symbol(grid, icon, r, at(ICON_INK));
                     }
                     let chev = turns_page(*action);
                     if chev {
@@ -1372,7 +1753,7 @@ impl Menu {
                             CHEV * s,
                             CHEV * s,
                         );
-                        symbol(&mut grid, "chev", r, at(0.55));
+                        symbol(grid, "chev", r, at(0.55));
                     }
                     let room = rect.w - (TEXT_X + if chev { CHEV + 12.0 } else { 8.0 }) * s;
                     grid.labels.push(label(
@@ -1383,17 +1764,21 @@ impl Menu {
                         LINE_PX * s,
                         *action == Action::Back,
                         at(1.0),
+                        clip,
                     ));
                 }
             }
         }
         scene.grids.push(grid);
+        if !mid.rects.is_empty() || !mid.icons.is_empty() || !mid.labels.is_empty() {
+            scene.grids.push(mid);
+        }
     }
 }
 
 fn row_h(row: &Row) -> f32 {
     match row {
-        Row::Item { .. } => ROW_H,
+        Row::Item { .. } | Row::Search(_) => ROW_H,
         Row::Note(_) => NOTE_H,
         Row::Sep => SEP_H,
     }
@@ -1421,7 +1806,7 @@ fn width_of(rows: &[Row], s: f32) -> f32 {
                 TEXT_X + label.chars().count() as f32 * FONT_PX * 0.54 * bold + chev
             }
             Row::Note(text) => 20.0 + text.chars().count() as f32 * NOTE_PX * 0.54,
-            Row::Sep => 0.0,
+            Row::Search(_) | Row::Sep => 0.0,
         })
         .fold(0.0, f32::max);
     ((words + 2.0 * PAD).clamp(WIDTH, WIDTH_MAX) * s).ceil()
@@ -1902,6 +2287,72 @@ mod tests {
         assert_eq!(m.hover, Some(open_with), "back on the row that turned it");
         // ← on the first page is nothing.
         assert_eq!(m.key(Keysym::Left, None, at), MenuKey::Nothing);
+    }
+
+    /// Thirty apps that open files.
+    fn thirty() -> Vec<OtherApp> {
+        (0..30)
+            .map(|n| OtherApp {
+                name: format!("{} app", ["Gimp", "Inkscape", "Seam"][n % 3]),
+                pic: format!("asset:app-{n}"),
+                id: format!("app{n}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn another_app_scrolls_between_its_search_and_its_check() {
+        let mut m = file_menu();
+        m.show_other(OtherApps {
+            looking: true,
+            ..Default::default()
+        });
+        assert_eq!(m.page, Page::OtherApp);
+        assert!(m.rows.iter().any(|r| matches!(r, Row::Search(_))));
+        m.other_found(thirty(), Some("PNG images".into()));
+        // At most twelve apps tall, the rest below, the check at the foot.
+        let row = ROW_H * m.scale;
+        assert!(m.rect.h <= (PAD * 2.0) * m.scale + 3.0 * row + 12.0 * row + 2.0 * row + 0.5);
+        assert!(m.scroll_max() > 0.0);
+        let check = m.rows.len() - 1;
+        assert_eq!(words(&m, Some(check)), "Always use for PNG images");
+        let rects = m.row_rects();
+        assert!(m.seen(check, &rects[check]), "the check stays at the foot");
+        let last_app = check - 2;
+        assert!(!m.seen(last_app, &rects[last_app]), "the last app is below");
+        // The keys walk down into it: it is scrolled into view.
+        let at = None;
+        m.key(Keysym::End, None, at);
+        m.key(Keysym::Up, None, at);
+        assert_eq!(m.hover, Some(last_app));
+        let r = m.row_rects()[last_app];
+        assert!(m.seen(last_app, &r));
+        // Typing finds; Backspace takes it back.
+        m.key(Keysym::s, Some("s"), at);
+        m.key(Keysym::e, Some("e"), at);
+        assert!(m.rows.iter().all(|r| match r {
+            Row::Item {
+                action: Action::OtherAppPick(_),
+                label,
+                ..
+            } => label.starts_with("Seam"),
+            _ => true,
+        }));
+        assert_eq!(words(&m, m.hover), "Seam app");
+        m.key(Keysym::BackSpace, None, at);
+        m.key(Keysym::BackSpace, None, at);
+        assert_eq!(m.other.as_ref().map(|o| o.query.as_str()), Some(""));
+        // The check turns, and stays highlighted.
+        m.toggle_always();
+        assert!(m.other.as_ref().is_some_and(|o| o.always));
+        assert!(matches!(
+            m.rows.last(),
+            Some(Row::Item { icon: "boxed", .. })
+        ));
+        // The wheel scrolls it, no further than its end.
+        assert!(m.scroll_by(10_000.0));
+        assert!((m.scroll - m.scroll_max()).abs() < 0.01);
+        assert!(!m.scroll_by(10.0));
     }
 
     /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one

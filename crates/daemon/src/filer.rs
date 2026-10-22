@@ -873,6 +873,16 @@ pub(crate) enum Undo {
     Wallpaper { was: String, now: String },
     /// Photos turned a quarter clockwise.
     Rotated(Vec<PathBuf>),
+    /// An app made the one for a kind of file ("Always use for…"): the
+    /// kind, in words, the app's name, the one before (none: the system's
+    /// own), the one now (`<id>.desktop`).
+    Default {
+        mime: String,
+        kind: String,
+        app: String,
+        was: Option<String>,
+        now: String,
+    },
 }
 
 /// What bringing `sources` in did, as things to take back: those that are
@@ -987,6 +997,14 @@ pub(crate) fn take_back(undo: Undo) -> Option<String> {
         Undo::Rotated(paths) => {
             let n = paths.iter().filter(|p| p.exists() && smart::rotate(p, 3)).count();
             (n > 0).then(|| fill(tr("Undone: {n} turned back"), &[("n", &n)]))
+        }
+        // The app before, the one again (or none of the owner's own).
+        Undo::Default { mime, kind, was, .. } => {
+            let back = match &was {
+                Some(was) => crate::other_apps::set_default(was, &mime),
+                None => crate::other_apps::unset_default(&mime),
+            };
+            back.then(|| fill(tr("Undone: {kind} open as before"), &[("kind", &kind)]))
         }
     }
 }
@@ -3413,6 +3431,32 @@ impl App {
                 self.filer_menu_back(id);
                 return "Back".to_owned();
             }
+            Action::OtherApp => {
+                self.filer_other_apps(id);
+                return "Another app".to_owned();
+            }
+            Action::AlwaysUse => {
+                menu.toggle_always();
+                self.filer_request_draw(id);
+                return "Always use".to_owned();
+            }
+            Action::OtherAppPick(n) => {
+                let chosen = menu.other.as_ref().and_then(|o| Some((o.apps.get(n)?.clone(), o.always, o.mime.clone(), o.kind.clone())));
+                let path = win.menu_path.take();
+                win.menu = None;
+                self.filer_request_draw(id);
+                let (Some((other, always, mime, kind)), Some(path)) = (chosen, path) else {
+                    return "nothing to open".to_owned();
+                };
+                let path = PathBuf::from(path);
+                if self.open_with_other(&other, &path) {
+                    self.filer_used(&path);
+                }
+                if let (true, Some(mime), Some(kind)) = (always, mime, kind) {
+                    self.other_app_default(other, mime, kind, crate::desktop::SendFor::Files(id));
+                }
+                return "Another app".to_owned();
+            }
             _ => {}
         }
         let Some(menu) = win.menu.take() else {
@@ -3467,6 +3511,48 @@ impl App {
             None => (layout.body.x + layout.body.w / 2.0, layout.body.y + layout.body.h / 2.0),
         };
         self.filer_open_menu(id, at, item);
+    }
+
+    /// THE ANOTHER APP PAGE of the menu (`other_apps.rs`): every app that
+    /// opens files, found off the loop ("Looking for apps…" meanwhile),
+    /// and the file's kind for the check.
+    fn filer_other_apps(&mut self, id: u32) {
+        use crate::desktop_menu::{OtherApps, Page};
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some(path) = win.menu_path.clone() else {
+            return;
+        };
+        if let Some(menu) = win.menu.as_mut() {
+            menu.show_other(OtherApps {
+                looking: true,
+                ..Default::default()
+            });
+        }
+        self.filer_hover(id);
+        self.filer_request_draw(id);
+        let apps = self.other_app_entries();
+        self.desktop_off_loop(
+            move || {
+                let mime = crate::other_apps::mime_of(Path::new(&path));
+                let kind = mime.as_deref().and_then(crate::other_apps::kind_of);
+                (crate::other_apps::openers(apps), mime, kind)
+            },
+            move |app, (apps, mime, kind)| {
+                let Some(win) = app.filer.win_mut(id) else {
+                    return;
+                };
+                if let Some(menu) = win.menu.as_mut().filter(|m| m.page == Page::OtherApp) {
+                    if let Some(o) = menu.other.as_mut() {
+                        o.mime = mime;
+                    }
+                    menu.other_found(apps, kind);
+                }
+                app.filer_hover(id);
+                app.filer_request_draw(id);
+            },
+        );
     }
 
     /// The menu's "Open with": its page turns to the apps that say they
@@ -5452,7 +5538,14 @@ impl App {
         win.hits = hits;
         // The menu and the box, over everything.
         if let Some(menu) = win.menu.as_ref() {
-            let glyph = |name: &str| win.layer_of(&chrome::glyph(name));
+            // (A symbol by its name; an app's icon by its own key.)
+            let glyph = |name: &str| {
+                if name.contains(':') {
+                    win.layer_of(name)
+                } else {
+                    win.layer_of(&chrome::glyph(name))
+                }
+            };
             menu.push(&mut scene, &self.filer_panel_paint(menu.rect, ground), &glyph);
         }
         if let Some(props) = win.props.as_ref() {
@@ -5683,6 +5776,21 @@ impl App {
                             .win(id)
                             .map_or("files", |w| if w.menu.is_some() { "menu" } else { w.zoom_target() });
                         self.zoom(what, if steps < 0.0 { "in" } else { "out" });
+                    }
+                    return;
+                }
+                // (Over a menu that scrolls — the Another app page — its
+                // rows; over any menu, nothing under it.)
+                if let Some(win) = self.filer.win_mut(id).filter(|w| w.menu.is_some()) {
+                    let at = win.ptr;
+                    let finger = win.finger;
+                    if let Some(menu) = win.menu.as_mut().filter(|m| at.is_some_and(|p| m.rect.contains(p))) {
+                        let step = if finger { 1.0 } else { 29.0 * menu.scale / 15.0 };
+                        if menu.scroll_by(value as f32 * step) {
+                            menu.pointer(None);
+                            menu.pointer(at);
+                            self.filer_request_draw(id);
+                        }
                     }
                     return;
                 }
@@ -7413,6 +7521,7 @@ impl App {
                             .map(|(i, r)| match r {
                                 Row::Item { label, off, .. } => format!("{i}: {label}{}", if *off { " (off)" } else { "" }),
                                 Row::Note(t) => format!("{i}: ({t})"),
+                                Row::Search(t) => format!("{i}: [{t}]"),
                                 Row::Sep => format!("{i}: —"),
                             })
                             .collect::<Vec<_>>()

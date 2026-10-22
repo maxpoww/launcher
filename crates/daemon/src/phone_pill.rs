@@ -723,6 +723,7 @@ impl App {
                             air = true;
                             continue;
                         }
+                        Row::Search(_) => continue,
                         // (Said, not left out: a row that is simply not
                         // there reads as something broken.)
                         Row::Note(text) => Line { dim: true, ..line(&text, "", Act::Nothing) },

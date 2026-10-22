@@ -171,6 +171,12 @@ pub(super) fn icon_keys(win: &Win) -> Vec<String> {
                 keys.push(key);
             }
         }
+        // (And the apps' own icons of its Another app page.)
+        for key in menu.pictures() {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
     }
     keys
 }

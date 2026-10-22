@@ -40,6 +40,15 @@ static TABLE: AtomicPtr<HashMap<String, String>> = AtomicPtr::new(std::ptr::null
 /// working copy).
 const EMBEDDED: [(&str, &str); 1] = [("es", include_str!("../assets/i18n/es.json"))];
 
+/// The tag of the language whose catalogue is loaded (none: English).
+static LANG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The language the shell speaks now, by its tag (`None`: English) — for
+/// what other programs say in many languages (a kind of file's name).
+pub fn lang() -> Option<String> {
+    LANG.lock().ok().and_then(|l| l.clone())
+}
+
 fn table() -> Option<&'static HashMap<String, String>> {
     // SAFETY: the pointer is null or a leaked `Box`, never freed.
     unsafe { TABLE.load(Ordering::Acquire).as_ref() }
@@ -154,25 +163,35 @@ fn load_table() -> HashMap<String, String> {
         std::env::var("LC_MESSAGES").ok(),
         std::env::var("LANG").ok(),
     ) else {
+        set_lang(None);
         return HashMap::new();
     };
     for tag in tags {
         let path = crate::persist::data_path(&format!("i18n/{tag}.json"));
         if let Some(map) = read_file(&path) {
             info!("i18n: loaded {} strings from {}", map.len(), path.display());
+            set_lang(Some(&tag));
             return map;
         }
         if let Some((_, text)) = EMBEDDED.iter().find(|(t, _)| *t == tag) {
             match serde_json::from_str::<HashMap<String, String>>(text) {
                 Ok(map) => {
                     info!("i18n: {} strings of the built-in {tag} catalogue", map.len());
+                    set_lang(Some(&tag));
                     return map;
                 }
                 Err(e) => warn!("i18n: the built-in {tag} catalogue does not parse: {e}"),
             }
         }
     }
+    set_lang(None);
     HashMap::new()
+}
+
+fn set_lang(tag: Option<&str>) {
+    if let Ok(mut l) = LANG.lock() {
+        *l = tag.map(str::to_owned);
+    }
 }
 
 /// The languages there is a catalogue for (their tags), besides English.

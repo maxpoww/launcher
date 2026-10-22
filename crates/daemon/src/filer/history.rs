@@ -97,6 +97,7 @@ fn describe(undo: &Undo) -> (String, &'static str) {
             },
             "rotate",
         ),
+        Undo::Default { kind, app, .. } => (crate::other_apps::said_as(kind, app), "app"),
         Undo::Grouped { folder, moved } => (
             fill(
                 tr("Put {n} items in “{name}”"),
@@ -142,6 +143,10 @@ pub(super) fn can_undo(undo: &Undo, bin: &[crate::trash::TrashItem]) -> bool {
             crate::controls::wallpaper_now().as_deref() == Some(now.as_str())
         }
         Undo::Rotated(paths) => paths.iter().any(|p| p.exists()),
+        // (The owner's own choice, read from its file: no program asked.)
+        Undo::Default { mime, now, .. } => {
+            crate::other_apps::chosen_default(mime).as_deref() == Some(now.as_str())
+        }
     }
 }
 
@@ -416,6 +421,13 @@ mod tests {
                 now: "/h/a.jpg".into(),
             },
             Undo::Rotated(vec![p("/h/a.jpg")]),
+            Undo::Default {
+                mime: "image/png".into(),
+                kind: "PNG images".into(),
+                app: "GIMP".into(),
+                was: None,
+                now: "gimp.desktop".into(),
+            },
         ];
         for undo in all {
             let sign = describe(&undo).1;
