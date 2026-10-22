@@ -1740,6 +1740,8 @@ fn show_still(tool: &str, path: &str, fade: bool) -> bool {
 /// player that dies leaves its own picture, not somebody else's.
 /// Returns whether it was put: call it from a thread that may wait.
 fn show_wallpaper(path: &str, fade: bool) -> bool {
+    // (The desktop's names read the new picture: `desktop_ink`.)
+    crate::desktop_ink::wallpaper_changed();
     let old = players();
     if wallpaper_moves(path) {
         if let Some(player) = video_tool() {

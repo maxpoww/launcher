@@ -403,6 +403,13 @@ pub struct Done {
 /// The desktop's state on the loop.
 #[derive(Default)]
 pub(crate) struct Desktop {
+    /// How bright the wallpaper is behind each place (`desktop_ink.rs`): the
+    /// names' ink. None: not read (yet), or unreadable — white, shadowed.
+    pub ink: Option<std::sync::Arc<crate::desktop_ink::Map>>,
+    /// The wallpaper (`desktop_ink::WALL_GEN`) and surface size it was read
+    /// for, and the veil the names were last drawn under.
+    pub ink_for: (u64, (u32, u32)),
+    pub ink_veil: f32,
     /// The one of several selected Quick Look shows (its path).
     pub peek_on: Option<String>,
     pub items: Vec<Item>,
@@ -1911,6 +1918,8 @@ struct Tile<'a> {
     /// How much bigger than its own size the name is written (the desktop's
     /// zoom; 0 = as it is).
     text: f32,
+    /// The wallpaper's brightness map and the veil over it (`Live::ink`).
+    ink: Option<(&'a crate::desktop_ink::Map, f32)>,
 }
 
 /// The name field while typing: its pad around the text, corner, colours.
@@ -2007,7 +2016,9 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
         });
         return;
     }
-    for (dy, color) in [(1.0, INK_SHADOW), (0.0, INK)] {
+    // The picture behind the name decides its ink (`desktop_ink.rs`).
+    let (ink, halo) = tile.ink.map_or((INK, INK_SHADOW), |(map, veil)| map.ink(name_rect, veil));
+    for (dy, color) in [(1.0, halo), (0.0, ink)] {
         scene.labels.push(Label {
             text: tile.name.to_owned(),
             pos: (cx, top + dy),
@@ -2027,6 +2038,8 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
 /// What one frame shows besides the placed items.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Live<'a> {
+    /// The wallpaper's brightness map and the veil over it: each name's ink.
+    pub ink: Option<(&'a crate::desktop_ink::Map, f32)>,
     /// The items in hand, the grabbed one first: their cells are left
     /// empty. The compositor carries the grabbed one's picture under the
     /// pointer; the rest travel with it, drawn here.
@@ -2116,6 +2129,7 @@ pub(crate) fn scene(
                     text: live.text,
                     cover: None,
                     rename: None,
+                    ink: live.ink,
                 },
             );
             continue;
@@ -2152,6 +2166,7 @@ pub(crate) fn scene(
                     .rename
                     .filter(|(r, ..)| *r == i)
                     .map(|(_, text, all, w)| (text, all, w)),
+                ink: live.ink,
             },
         );
     }
@@ -4675,6 +4690,46 @@ impl App {
         }
     }
 
+    /// THE NAMES' INK (`desktop_ink.rs`): looked at every 2 s — a new
+    /// wallpaper is read off the loop (or a new screen size); a veil moved
+    /// far enough to change a name's ink draws again.
+    pub(crate) fn desktop_ink_start(&mut self) {
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(2));
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.desktop_ink_sync();
+            calloop::timer::TimeoutAction::ToDuration(std::time::Duration::from_secs(2))
+        });
+        if let Err(e) = armed {
+            warn!("desktop: no timer for the names' ink ({e}); they stay white");
+        }
+    }
+
+    fn desktop_ink_sync(&mut self) {
+        let size = self.desktop_size;
+        if self.desktop_layer.is_none() || size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let gen = crate::desktop_ink::WALL_GEN.load(std::sync::atomic::Ordering::Relaxed);
+        if (gen, size) != self.desktop.ink_for {
+            self.desktop.ink_for = (gen, size);
+            let at = (size.0 as f32, size.1 as f32);
+            self.desktop_off_loop(
+                move || crate::controls::wallpaper_now().and_then(|p| crate::desktop_ink::Map::read(&p, at)),
+                move |app: &mut App, map| {
+                    if app.desktop.ink_for == (gen, size) {
+                        debug!("desktop: names' ink {}", if map.is_some() { "read from the wallpaper" } else { "white (the wallpaper could not be read)" });
+                        app.desktop.ink = map.map(std::sync::Arc::new);
+                        app.request_desktop_draw();
+                    }
+                },
+            );
+            return;
+        }
+        if self.desktop.ink.is_some() && (crate::lighting::veil_now() - self.desktop.ink_veil).abs() > 0.02 {
+            self.request_desktop_draw();
+        }
+    }
+
     /// Draw one desktop frame.
     pub(crate) fn draw_desktop(&mut self) {
         if self.part_lost(crate::shell_screens::Part::Desktop) {
@@ -4775,6 +4830,8 @@ impl App {
                 })
             })
             .collect();
+        let (ink_now, veil) = (self.desktop.ink.clone(), crate::lighting::veil_now());
+        self.desktop.ink_veil = veil;
         let mut scene = scene(
             &self.desktop.items,
             &self.desktop.slots,
@@ -4793,6 +4850,7 @@ impl App {
                 props: self.desktop.props.as_ref().zip(props_paint),
                 text: zoom,
                 rename: rename_view,
+                ink: ink_now.as_deref().map(|m| (m, veil)),
             },
         );
         scene.alpha = if lit { 1.0 } else { group_alpha };
@@ -6655,6 +6713,7 @@ mod tests {
             props: None,
             text: 0.0,
             rename: None,
+            ink: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert!(s.overlay.is_empty());
@@ -6675,6 +6734,7 @@ mod tests {
             props: None,
             text: 0.0,
             rename: None,
+            ink: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         assert_eq!(s.rects.len(), 3, "the wash, the band's fill and its line");
@@ -6703,6 +6763,7 @@ mod tests {
             props: None,
             text: 0.0,
             rename: None,
+            ink: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, live);
         // b's icon travels, in the overlay, one cell below where a's is.
@@ -6727,6 +6788,7 @@ mod tests {
             props: None,
             text: 0.0,
             rename: None,
+            ink: None,
         };
         let s = scene(&items, &slots, &g, &names, &[true, true, true], 1.0, away);
         assert!(s.overlay.is_empty());

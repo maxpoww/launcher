@@ -33,6 +33,7 @@ mod desktop_phone;
 mod desktop_props;
 mod desktop_send;
 mod desktop_top;
+mod desktop_ink;
 mod scanners;
 mod printers_page;
 mod printing;
@@ -1421,6 +1422,8 @@ fn main() -> anyhow::Result<()> {
     app.colors_apply(true);
     // …and, if the owner asked, the light follows the sun (in front of them).
     app.lighting_start();
+    // The desktop's names take their ink from the wallpaper behind them.
+    app.desktop_ink_start();
     app.gear_startup();
     // Each app's remembered window place rides its own rule (`window_memory`).
     app.reassert_place_rules();
