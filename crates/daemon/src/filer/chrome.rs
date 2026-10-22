@@ -292,6 +292,32 @@ fn words(text: &str, (x, y): (f32, f32), max_w: f32, px: f32, color: [f32; 4]) -
     }
 }
 
+/// Leave out of `labels` every one drawn over `panel`, by the width it is
+/// drawn at (`measure`). WORDS ARE PAINTED AFTER EVERY GRID (the renderer's
+/// one text pass): one under a panel drawn later — a menu, the Properties
+/// box, the history, the pill — showed through it while the symbols beside
+/// it were covered (a 160 % menu over the selection pill: its words, and
+/// not its symbols).
+pub(super) fn leave_out(
+    labels: &mut Vec<Label>,
+    panel: Rect,
+    measure: &mut dyn FnMut(&Label) -> f32,
+) {
+    labels.retain(|l| {
+        let w = measure(l).min(l.max_w);
+        let x = if l.centered {
+            l.pos.0 - w / 2.0
+        } else {
+            l.pos.0
+        };
+        let h = l.line_px * (l.text.lines().count().max(1) as f32);
+        !(x < panel.x + panel.w
+            && panel.x < x + w
+            && l.pos.1 < panel.y + panel.h
+            && panel.y < l.pos.1 + h)
+    });
+}
+
 /// Words of the top line, at its size.
 fn words_at_line(text: &str, at: (f32, f32), max_w: f32, color: [f32; 4]) -> Label {
     words(text, at, max_w, LINE_PX, color)
@@ -2295,6 +2321,29 @@ mod tests {
         for name in worn {
             assert!(known.contains(&name), "no symbol {name}");
         }
+    }
+
+    /// Words under a panel drawn over them are left out — a word that only
+    /// starts under it too — and the words beside it stay.
+    #[test]
+    fn words_under_a_panel_are_left_out() {
+        let at = |text: &str, x: f32, y: f32| words(text, (x, y), 200.0, 12.0, [1.0; 4]);
+        let mut labels = vec![
+            at("Print", 100.0, 500.0),
+            at("Copy", 300.0, 500.0),
+            at("Rename", 560.0, 500.0),
+            at("Open", 300.0, 300.0),
+        ];
+        // (Each letter 7 px wide.)
+        let mut measure = |l: &Label| l.text.chars().count() as f32 * 7.0;
+        // A menu reaching down over the middle of the pill.
+        leave_out(
+            &mut labels,
+            Rect::new(280.0, 320.0, 300.0, 190.0),
+            &mut measure,
+        );
+        let kept: Vec<&str> = labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(kept, ["Print", "Open"]);
     }
 
     #[test]

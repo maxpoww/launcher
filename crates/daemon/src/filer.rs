@@ -5399,12 +5399,7 @@ impl App {
         // list's names beside it stay.)
         for panel in [hits.hist, hits.pill].into_iter().filter(|p| p.w > 0.0) {
             if let Some(r) = win.renderer.as_mut() {
-                grid.labels.retain(|l| {
-                    let w = r.measure_text(&l.text, l.font_px, l.family).min(l.max_w);
-                    let x = if l.centered { l.pos.0 - w / 2.0 } else { l.pos.0 };
-                    let h = l.line_px * (l.text.lines().count().max(1) as f32);
-                    !(x < panel.x + panel.w && panel.x < x + w && l.pos.1 < panel.y + panel.h && panel.y < l.pos.1 + h)
-                });
+                chrome::leave_out(&mut grid.labels, panel, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
             }
         }
         // (The files under the top line, beside the sidebar — as it is drawn
@@ -5412,6 +5407,20 @@ impl App {
         let left = win.field_left().max(win.side_now());
         grid.clip = Rect::new(left, HEAD_H, (w - left).max(0.0), (h - HEAD_H).max(0.0));
         scene.grids.push(grid);
+        // (The chrome's words under the menu or the box — the pill's, the top
+        // line's, the i card's — are left out as the files' names are: words
+        // are painted after every grid and showed through a big menu.)
+        let mut chrome = chrome;
+        let panel = win
+            .menu
+            .as_ref()
+            .map(|m| Rect::new(m.rect.x, m.rect.y - 4.0 * m.scale, m.rect.w, m.rect.h + 4.0 * m.scale))
+            .or(win.props.as_ref().map(|p| p.rect));
+        if let (Some(panel), Some(r)) = (panel, win.renderer.as_mut()) {
+            for g in chrome.iter_mut() {
+                chrome::leave_out(&mut g.labels, panel, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
+            }
+        }
         scene.grids.extend(chrome);
         win.hits = hits;
         // The menu and the box, over everything.
