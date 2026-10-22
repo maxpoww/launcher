@@ -52,6 +52,8 @@ const CHIP_ICON: f32 = 13.0;
 const CRUMB_ICON: f32 = 14.0;
 const CHEV: f32 = 8.0;
 const PEN_BOX: f32 = 18.0;
+/// `..` with nowhere up: a disabled menu row's ink (`desktop_menu`'s 0.38).
+const NOWHERE_INK: f32 = 0.35;
 /// The path line's chip (`zones`): its height, air, words and lock.
 const TAG_H: f32 = 18.0;
 const TAG_PAD: f32 = 7.0;
@@ -664,6 +666,8 @@ impl App {
             // a blink just before it opens.)
             let here = (win.dir == place.path && place.name != UP)
                 || (win.drop_place == Some(n) && win.place_blink != Some(n));
+            // (`..` with nowhere up: in its spot, at a disabled row's ink.)
+            let dim = if place.nowhere() { NOWHERE_INK } else { 1.0 };
             if here {
                 list.rects.push(rect(row, 6.0, tones.sunk));
             } else if win.hover == Spot::Place(n) {
@@ -677,10 +681,10 @@ impl App {
                     win,
                     &key,
                     at,
-                    if here { tones.carved_lit } else { tones.carved },
+                    faded(if here { tones.carved_lit } else { tones.carved }, dim),
                 );
             } else {
-                picture(&mut list, win, &key, at, 1.0);
+                picture(&mut list, win, &key, at, dim);
             }
             if open > 0.0 {
                 let name = place.name.clone();
@@ -691,7 +695,7 @@ impl App {
                         (row.x + 8.0 + icon + 9.0, row.y + (row_h - 17.0) / 2.0),
                         inner - icon - 25.0,
                         13.0,
-                        faded(ink, open),
+                        faded(ink, open * dim),
                     )
                 });
             }

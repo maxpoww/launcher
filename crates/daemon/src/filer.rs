@@ -375,6 +375,14 @@ pub(crate) struct Place {
     pub start: bool,
 }
 
+impl Place {
+    /// `..` where there is nowhere up (`/`, the bin's top, Recents): it
+    /// stays in its spot, dimmed, and does nothing (`with_up`).
+    pub(crate) fn nowhere(&self) -> bool {
+        self.name == UP && self.path.as_os_str().is_empty()
+    }
+}
+
 /// What the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Spot {
@@ -2111,7 +2119,11 @@ impl Win {
             if let Some(n) = h.mode.iter().position(|r| r.w > 0.0 && r.contains(pos)) {
                 return Spot::Mode(n);
             }
+            // (`..` with nowhere up is only drawn there: no band, no click.)
             if let Some(i) = h.places.iter().position(|r| r.contains(pos)) {
+                if self.places.get(i).is_some_and(Place::nowhere) {
+                    return Spot::Chrome;
+                }
                 return Spot::Place(i);
             }
             return Spot::Chrome;
@@ -2570,19 +2582,20 @@ pub(crate) const UP: &str = "..";
 /// first, a place like the others (Max, 2026-10-14: "tiene que ser otra
 /// carpeta arriba de Home"; brought back to the sidebar of 2026-10-21: "add
 /// the '..' place too"). It climbs past Home to `/` (Max, 2026-10-22: Files
-/// UNLOCKED — "golem is for every user, i just needed to go to /tmp"); at
-/// `/` there is nowhere up, and the bin's top and Recents are places of
-/// their own: no `..` at all there (Max: hidden, not grey).
+/// UNLOCKED — "golem is for every user, i just needed to go to /tmp"). It
+/// is ALWAYS there, in its spot, so nothing under it jumps (Max,
+/// 2026-10-22: "hacé que '..' se quede hasta en / pero dimmed" — the
+/// "hidden, not grey" of 10-14 reversed): at `/`, the bin's top and Recents,
+/// where there is nowhere up, it has no folder (`Place::nowhere`) — dimmed,
+/// and it does nothing.
 pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
-    let Some(parent) = dir.parent() else {
-        return places.to_vec();
-    };
-    if dir == bin_root() || dir == recent::root() {
-        return places.to_vec();
-    }
+    let up = dir
+        .parent()
+        .filter(|_| dir != bin_root() && dir != recent::root())
+        .map_or_else(PathBuf::new, Path::to_path_buf);
     let mut out = vec![Place {
         name: UP.to_owned(),
-        path: parent.to_path_buf(),
+        path: up,
         icon: "asset:folder-up".to_owned(),
         gap: false,
         start: false,
@@ -6877,7 +6890,13 @@ impl App {
         }
         let at = if win.in_side(at_win) { at_win } else { layout.inward(at_win) };
         // Over the places: onto that place (the bin among them).
-        let place = win.hits.places.iter().position(|r| r.contains(at));
+        // (Not `..` with nowhere up: nothing is let go on it.)
+        let place = win
+            .hits
+            .places
+            .iter()
+            .position(|r| r.contains(at))
+            .filter(|&n| !win.places.get(n).is_some_and(Place::nowhere));
         // SPRING-LOADED PLACES: held on a folder place, the window opens it
         // in this tab — after `SPRING`, a blink first (`filer_place_spring`).
         // Not Recents (nothing goes in it), not the bin (a drop there
@@ -8659,10 +8678,14 @@ mod tests {
         let up = |dir: &Path| with_up(std::slice::from_ref(&home), dir).first().filter(|p| p.name == UP).map(|p| p.path.clone());
         assert_eq!(up(Path::new("/home/max")), Some(PathBuf::from("/home")));
         assert_eq!(up(Path::new("/tmp")), Some(PathBuf::from("/")));
-        // At `/`, the bin's top and Recents (places of their own): no `..`.
-        assert_eq!(up(Path::new("/")), None);
-        assert_eq!(up(&recent::root()), None);
-        assert_eq!(up(&bin_root()), None);
+        // At `/`, the bin's top and Recents (places of their own): `..`
+        // stays in its spot, with nowhere to go.
+        for dir in [PathBuf::from("/"), recent::root(), bin_root()] {
+            let places = with_up(std::slice::from_ref(&home), &dir);
+            assert!(places[0].nowhere(), "{} has nowhere up", dir.display());
+            assert_eq!(places.len(), 2);
+        }
+        assert!(!with_up(std::slice::from_ref(&home), Path::new("/tmp"))[0].nowhere());
     }
 
     #[test]
