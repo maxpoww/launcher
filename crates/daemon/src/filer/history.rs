@@ -105,7 +105,7 @@ fn describe(undo: &Undo) -> (String, &'static str) {
             ),
             "newf",
         ),
-        Undo::Copied(copies) => {
+        Undo::Copied(copies, _) => {
             let to = copies.first().map(|c| folder(c)).unwrap_or_default();
             let text = match copies.as_slice() {
                 [one] => fill(
@@ -130,7 +130,7 @@ pub(super) fn can_undo(undo: &Undo, bin: &[crate::trash::TrashItem]) -> bool {
         Undo::Moved(pairs) => pairs
             .iter()
             .any(|(from, now)| now.exists() && !from.exists()),
-        Undo::Copied(copies) => copies.iter().any(|c| c.exists()),
+        Undo::Copied(copies, at) => copies.iter().any(|c| c.exists() && !super::changed_since(c, *at)),
         Undo::Binned(names) => names.iter().any(|n| {
             bin.iter()
                 .any(|t| &t.name == n && !t.original_path.exists())
@@ -409,7 +409,7 @@ mod tests {
                 to: p("/h/b"),
             },
             Undo::Moved(vec![(p("/h/a"), p("/h/d/a"))]),
-            Undo::Copied(vec![p("/h/a")]),
+            Undo::Copied(vec![p("/h/a")], std::time::UNIX_EPOCH),
             Undo::Binned(vec!["a".into()]),
             Undo::Made(p("/h/d")),
             Undo::Grouped {
@@ -466,7 +466,7 @@ mod tests {
             "Moved “x” to Downloads"
         );
         assert_eq!(
-            said(Undo::Copied(vec![p("/h/Pictures/a"), p("/h/Pictures/b")])),
+            said(Undo::Copied(vec![p("/h/Pictures/a"), p("/h/Pictures/b")], std::time::UNIX_EPOCH)),
             "Copied 2 items to Pictures"
         );
     }

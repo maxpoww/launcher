@@ -860,8 +860,10 @@ pub(crate) enum Undo {
     Renamed { from: PathBuf, to: PathBuf },
     /// Each thing: where it was, where it is now.
     Moved(Vec<(PathBuf, PathBuf)>),
-    /// The copies made.
-    Copied(Vec<PathBuf>),
+    /// The copies made, and when they were all there: a copy changed since
+    /// (written in, renamed in, added to) is the owner's work now, and is
+    /// not thrown away by taking the copy back (`changed_since`).
+    Copied(Vec<PathBuf>, std::time::SystemTime),
     /// Thrown away: their names in the bin.
     Binned(Vec<String>),
     /// A folder made.
@@ -905,7 +907,7 @@ pub(crate) fn undo_of(sources: &[PathBuf], brought: &[PathBuf]) -> Vec<Undo> {
         out.push(Undo::Moved(moved));
     }
     if !copied.is_empty() {
-        out.push(Undo::Copied(copied));
+        out.push(Undo::Copied(copied, std::time::SystemTime::now()));
     }
     out
 }
@@ -962,8 +964,11 @@ pub(crate) fn take_back(undo: Undo) -> Option<String> {
                 .count();
             (n > 0).then(|| fill(tr("Undone: {n} moved back"), &[("n", &n)]))
         }
-        Undo::Copied(copies) => {
-            let n = copies.iter().filter(|c| c.exists() && trash.trash(c).is_ok()).count();
+        Undo::Copied(copies, at) => {
+            let n = copies
+                .iter()
+                .filter(|c| c.exists() && !changed_since(c, at) && trash.trash(c).is_ok())
+                .count();
             (n > 0).then(|| fill(tr("Undone: {n} copies moved to the bin"), &[("n", &n)]))
         }
         Undo::Binned(names) => {
@@ -1006,12 +1011,37 @@ pub(crate) fn take_back(undo: Undo) -> Option<String> {
         // The app before, the one again (or none of the owner's own).
         Undo::Default { mime, kind, was, .. } => {
             let back = match &was {
-                Some(was) => crate::other_apps::set_default(was, &mime),
+                Some(was) => crate::other_apps::restore_default(&mime, was),
                 None => crate::other_apps::unset_default(&mime),
             };
             back.then(|| fill(tr("Undone: {kind} open as before"), &[("kind", &kind)]))
         }
     }
+}
+
+/// Whether anything in `path` (itself, or all a folder holds) changed after
+/// `at` — a little after, for the copy's own last writes. Links are not
+/// followed. A folder too big to look through all of counts as changed.
+pub(crate) fn changed_since(path: &Path, at: std::time::SystemTime) -> bool {
+    let after = at + Duration::from_secs(2);
+    let mut stack = vec![path.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(p) = stack.pop() {
+        seen += 1;
+        if seen > 50_000 {
+            return true;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.modified().is_ok_and(|m| m > after) {
+            return true;
+        }
+        if meta.is_dir() {
+            stack.extend(std::fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path()));
+        }
+    }
+    false
 }
 
 /// Whether `undo` can still be taken back, the disk as it is now.
@@ -4288,7 +4318,7 @@ impl App {
                     [one] => fill(tr("Duplicated “{name}”"), &[("name", &file_name(one))]),
                     _ => fill(tr("Duplicated {n} items"), &[("n", &made.len())]),
                 };
-                app.filer_did_said(id, Undo::Copied(made), text, "dup");
+                app.filer_did_said(id, Undo::Copied(made, std::time::SystemTime::now()), text, "dup");
                 app.filer_list(id);
             },
         );
@@ -8381,6 +8411,29 @@ mod tests {
         assert_eq!(below(&got[1].path, &dir), "a/b");
         assert_eq!(search_below(&dir, "informe", true).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_changed_since_is_not_taken_back() {
+        let d = std::env::temp_dir().join(format!("waverunner-copied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("folder")).unwrap();
+        std::fs::write(d.join("copy.txt"), "as copied").unwrap();
+        std::fs::write(d.join("folder/a.txt"), "a").unwrap();
+        let at = std::time::SystemTime::now();
+        let undo = Undo::Copied(vec![d.join("copy.txt"), d.join("folder")], at);
+        assert!(!changed_since(&d.join("copy.txt"), at) && !changed_since(&d.join("folder"), at));
+        assert!(can_take_back(&undo));
+        // The owner writes in the copy later: it is theirs now.
+        let later = at + Duration::from_secs(60);
+        std::fs::File::options().write(true).open(d.join("copy.txt")).unwrap().set_modified(later).unwrap();
+        assert!(changed_since(&d.join("copy.txt"), at));
+        // …and puts something of theirs in the copied folder.
+        std::fs::write(d.join("folder/notes.txt"), "mine").unwrap();
+        std::fs::File::options().write(true).open(d.join("folder/notes.txt")).unwrap().set_modified(later).unwrap();
+        assert!(changed_since(&d.join("folder"), at));
+        assert!(!can_take_back(&undo), "nothing of it can be taken back now");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

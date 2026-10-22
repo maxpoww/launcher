@@ -3368,7 +3368,7 @@ impl App {
                     None => crate::desktop_send_notify(&said),
                 }
                 if !made.is_empty() {
-                    let undo = crate::filer::Undo::Copied(made);
+                    let undo = crate::filer::Undo::Copied(made, std::time::SystemTime::now());
                     match files {
                         Some(id) => app.filer_did(id, undo),
                         None => app.desktop_did(undo, crate::i18n::fill(tr("Send to {name}"), &[("name", &name)])),
@@ -3569,7 +3569,7 @@ impl App {
                     },
                     |app, made: Vec<PathBuf>| {
                         if !made.is_empty() {
-                            app.desktop_did(crate::filer::Undo::Copied(made), tr("Duplicate").to_owned());
+                            app.desktop_did(crate::filer::Undo::Copied(made, std::time::SystemTime::now()), tr("Duplicate").to_owned());
                         }
                         app.reload_desktop();
                     },
@@ -3610,7 +3610,7 @@ impl App {
                         crate::filer::say_quietly(said);
                         if !made.is_empty() {
                             let what = crate::i18n::fill(tr("Copy to {stick}"), &[("stick", &name)]);
-                            app.desktop_did(crate::filer::Undo::Copied(made), what);
+                            app.desktop_did(crate::filer::Undo::Copied(made, std::time::SystemTime::now()), what);
                         }
                     },
                 );
