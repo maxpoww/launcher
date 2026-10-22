@@ -1052,8 +1052,13 @@ The big daemon files are cohesive but long — go straight to the function:
   `edit_w`): Enter goes (`filer_go_typed`, a file → its folder with it selected; nothing there → red),
   Escape, ✎ again or a press anywhere off the tab closes it. At its right end: sort (`filer_sort_menu`:
   Name · Date Modified · Size · Kind, Ascending · Descending — `Action::SortBy/SortDir`, `SORT_MENU`;
-  `SortKey::Kind`; Name descending turns the folder's own order round) · i · grid | list · search (a
-  170 px field slides out between the view and the magnifier, `Win::find_t`). Buttons 22×20, 12 px
+  `SortKey::Kind`; Name descending turns the folder's own order round) · i · grid | list · the EYE ·
+  search (a 170 px field slides out between the eye and the magnifier, `Win::find_t`). THE EYE (Max,
+  2026-10-22: "agrega a los botones 'see hidden files' a la izquierda de buscar"; `Spot::Hidden`,
+  `Hits::hidden`) is the ground menu's "Show / Hide hidden files" — one state, `Win::hidden`, the same
+  `Action::ToggleHidden` (and Ctrl+H) — its symbol the state: the slashed eye (`eyeoff`) while hidden
+  files are not shown, the eye PRESSED while they are ("el icono debería cambiar"); the tabs and the
+  way here give way to it as to the other tools. Rig: `files where hidden`. Buttons 22×20, 12 px
   symbols — the mockup's own strokes written as SVGs into `~/.cache/waverunner/files-glyphs/` once
   (`chrome::write_glyphs`, `glyph`) and read by the icon loader by path, washed with their colour
   (`symbol`: icon.wgsl's ghost, ring -1.17). THE i CARD (`Win::info_on`, `chrome::Info`, read off the
