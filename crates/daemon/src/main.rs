@@ -1473,6 +1473,8 @@ fn main() -> anyhow::Result<()> {
     app.filer_restore_session();
     // …and it answers "show in folder" for every other app.
     app.filer_serve_dbus();
+    // (A folder on a phone is read for what it holds off the loop.)
+    app.filer_folder_bell();
 
     info!("daemon up; try: waverunner-ctl toggle");
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
