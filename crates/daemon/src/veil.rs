@@ -31,6 +31,13 @@ pub(crate) struct VeilLayer {
     viewport: WpViewport,
     /// The output's logical size from the last configure (none before it).
     size: Option<(u32, u32)>,
+    /// A pixel is on it (the veil shows). An empty commit is sent only to
+    /// take that pixel away: committing nothing to a surface that has
+    /// nothing UNMAPS it again, and the compositor answers with a configure
+    /// — which asked for another empty commit. On the MacBook (Lighting 50,
+    /// no veil) that was ~3500 configures a second: the dock at 70 % of a
+    /// core and Hyprland at 38 %, all the time (2026-10-22).
+    mapped: bool,
 }
 
 /// The pixel for `alpha` (0..1) as `wl_shm` ARGB8888 wants it on a
@@ -64,7 +71,7 @@ pub(crate) fn create(
         layer.wl_surface().set_input_region(Some(region.wl_region()));
     }
     layer.commit();
-    VeilLayer { layer, viewport, size: None }
+    VeilLayer { layer, viewport, size: None, mapped: false }
 }
 
 impl VeilLayer {
@@ -114,19 +121,24 @@ impl App {
         if self.part_lost(crate::shell_screens::Part::Veil) {
             return;
         }
-        let (Some(v), Some(shm)) = (self.veil_layer.as_ref(), self.shm.as_ref()) else {
+        let (Some(v), Some(shm)) = (self.veil_layer.as_mut(), self.shm.as_ref()) else {
             return;
         };
         let Some((w, h)) = v.size else {
             return;
         };
-        let surface = v.layer.wl_surface();
-        v.viewport.set_destination(w as i32, h as i32);
         if !shown(alpha) {
-            surface.attach(None, 0, 0);
-            surface.commit();
+            if v.mapped {
+                v.mapped = false;
+                let surface = v.layer.wl_surface();
+                surface.attach(None, 0, 0);
+                surface.commit();
+            }
             return;
         }
+        v.mapped = true;
+        let surface = v.layer.wl_surface();
+        v.viewport.set_destination(w as i32, h as i32);
         let mut pool = match RawPool::new(4, shm) {
             Ok(pool) => pool,
             Err(e) => {
