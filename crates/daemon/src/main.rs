@@ -10,6 +10,7 @@
 
 mod action_track;
 mod app_actions;
+mod web_actions;
 mod animation;
 mod app_themes;
 mod applier;
@@ -2728,6 +2729,8 @@ struct SearchState {
     control_modules: Vec<bool>,
     /// The lone app's pills beside it (`app_actions.rs`).
     actions: app_actions::Actions,
+    /// The web's recents read lately, by app (`web_actions.rs`).
+    web: web_actions::Recents,
 }
 
 impl Default for SearchState {
@@ -2744,6 +2747,7 @@ impl Default for SearchState {
             control_lift: Vec::new(),
             control_modules: Vec::new(),
             actions: Default::default(),
+            web: Default::default(),
         }
     }
 }
@@ -6013,6 +6017,11 @@ impl App {
         // One of the lone app's actions (`app_actions.rs`).
         if let Some(n) = self.action_of(index) {
             self.run_app_action(n);
+            return;
+        }
+        // …and its recents: a page comes up in its window.
+        if self.lone_recent(index) {
+            self.run_recent(index);
             return;
         }
         let Some(entry) = self.entries.get(index) else {

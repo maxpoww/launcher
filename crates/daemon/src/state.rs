@@ -105,11 +105,12 @@ impl UiState {
         self.open_trim
     }
 
-    /// Shorten the open card by `trim` px. Settled open, the card follows at
+    /// Shorten the open card by `trim` px (lengthen it, negative: a lone
+    /// app's recents on a short screen). Settled open, the card follows at
     /// once (the App eases `trim` itself); mid-transition the running slide
     /// just lands on the new height.
     pub fn set_open_trim(&mut self, trim: f32) {
-        self.open_trim = trim.max(0.0);
+        self.open_trim = trim;
         if self.animator.is_none() && self.target == Target::Open {
             self.extent = self.extent_of(Target::Open);
             self.start_extent = self.extent;

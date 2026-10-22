@@ -60,6 +60,11 @@ pub fn exec_app_slug(exec: &str) -> Option<&str> {
     exec_app(exec).map(|(slug, _)| slug)
 }
 
+/// The address a webapp launcher opens at (`webapp-<slug>.desktop`'s `Exec`).
+pub fn exec_app_url(exec: &str) -> Option<&str> {
+    exec_app(exec).map(|(_, url)| url)
+}
+
 /// The host of a webapp launcher's start URL, for matching a copied link
 /// against an installed webapp.
 pub fn exec_app_host(exec: &str) -> Option<&str> {

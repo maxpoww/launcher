@@ -2056,6 +2056,9 @@ pub struct FrameInput<'a> {
     /// the texture layer of its symbol; and the one asking to be sure.
     pub act_cells: &'a [(usize, u32)],
     pub act_asking: Option<usize>,
+    /// The action cell whose name may spread over `WIDE_LABEL` cells (a
+    /// site's search, alone in its row).
+    pub act_wide: Option<usize>,
     /// The lone app's recents' title ("Recent in VLC"), drawn in the room
     /// opened under its row.
     pub recent_title: Option<&'a str>,
@@ -2405,6 +2408,7 @@ pub fn scene(
         control_lift,
         act_cells,
         act_asking,
+        act_wide,
         recent_title,
         fast,
         quick,
@@ -3757,11 +3761,12 @@ pub fn scene(
                     // (Its second line hangs a line below the grid's rows.)
                     let v = sec.viewport;
                     let clip = reveal_clip(Rect::new(v.x, v.y, v.w, v.h + 2.0 * LABEL_LINE_PX));
+                    let spread = if act_wide == Some(entry_idx) { crate::app_actions::WIDE_LABEL } else { 1.0 };
                     for (k, line) in entry.name.lines().take(2).enumerate() {
                         g.labels.push(Label {
                             text: line.to_string(),
                             pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP + k as f32 * LABEL_LINE_PX),
-                            max_w: cell.w - 12.0,
+                            max_w: cell.w * spread - 12.0,
                             font_px: LABEL_FONT_PX,
                             line_px: LABEL_LINE_PX,
                             centered: true,

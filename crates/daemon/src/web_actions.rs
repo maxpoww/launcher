@@ -1,0 +1,1305 @@
+//! THE WEB'S OWN (Max, 2026-10-22: "podríamos hacer lo mismo con las webapps?
+//! … instagram → chats, youtube → suscripciones, recientes en youtube, amazon
+//! → recientes en amazon"; then "quiero que funcione en las 40 apps más usadas
+//! del mundo"). What a lone app's row (`app_actions.rs`) knows of the web:
+//!
+//! - SITES: the most used sites of the world, each with the pages Golem knows
+//!   it has (`Site::links`: Instagram's Messages, YouTube's Subscriptions,
+//!   Amazon's orders…) — the right side of its webapp's row, opened in the
+//!   webapp's own window (`seam -golem-app <slug> <url>` loads it there) —,
+//!   which of its pages are worth showing as RECENT (`Site::pages`: a video, a
+//!   product, a chat), what its titles carry that is not the page's own
+//!   (`Site::strip`), and how to SEARCH it (`Site::search`, asked by typing one
+//!   of `Site::words` and then the words: "amazon zapatillas").
+//! - HISTORY, read where the browsers keep it, never over the network: the
+//!   Firefox family (Seam — where the webapps live —, Firefox, LibreWolf:
+//!   `places.sqlite`) and the Chromium one (Chrome, Chromium, Brave, Edge,
+//!   Vivaldi: `History`), each a COPY read off the loop (the browser holds the
+//!   file); and each page's FAVICON as the browser saved it (`favicons.sqlite`,
+//!   `Favicons`), written once into the cache as a picture for the thumbnailer.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// One of a site's pages Golem knows: its name (English, said in the shell's
+/// language), where it is (a path from the site's own address, or a whole
+/// address) and its symbol (`app_actions::SYMBOLS`).
+pub(crate) struct Link {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub symbol: &'static str,
+}
+
+const fn link(name: &'static str, url: &'static str, symbol: &'static str) -> Link {
+    Link { name, url, symbol }
+}
+
+/// One of the sites.
+pub(crate) struct Site {
+    /// Its webapp's slug in the catalog (`webapps.list`).
+    pub slug: &'static str,
+    /// Its name, as a search names it ("Search … in YouTube").
+    pub name: &'static str,
+    /// The hosts its pages are on: `www.youtube.com` exactly, `*.wikipedia.org`
+    /// any under it, `www.amazon.*` any ending.
+    pub hosts: &'static [&'static str],
+    pub links: &'static [Link],
+    /// What a page's path holds for it to be shown as recent (none: no
+    /// recents; `"/"` alone: any page but the first).
+    pub pages: &'static [&'static str],
+    /// What its titles carry at their ends that is not the page's own.
+    pub strip: &'static [&'static str],
+    /// Its search's address, `{q}` the words (`{lang}` the shell's language).
+    pub search: Option<&'static str>,
+    /// What typed first asks it to search ("youtube gatos").
+    pub words: &'static [&'static str],
+}
+
+/// THE SITES (most used first, roughly as the world uses them).
+pub(crate) const SITES: &[Site] = &[
+    Site {
+        slug: "youtube",
+        name: "YouTube",
+        hosts: &["www.youtube.com", "youtube.com", "m.youtube.com"],
+        links: &[
+            link("Subscriptions", "/feed/subscriptions", "list"),
+            link("History", "/feed/history", "clock"),
+            link("Watch later", "/playlist?list=WL", "bookmark"),
+            link("Shorts", "/shorts", "play"),
+        ],
+        pages: &["/watch", "/shorts/"],
+        strip: &[" - YouTube"],
+        search: Some("https://www.youtube.com/results?search_query={q}"),
+        words: &["youtube", "yt"],
+    },
+    Site {
+        slug: "google",
+        name: "Google",
+        hosts: &["www.google.com", "google.com", "www.google.*"],
+        links: &[],
+        pages: &["/search"],
+        strip: &[" - Buscar con Google", " - Google Search", " - Google Suche", " - Recherche Google"],
+        search: Some("https://www.google.com/search?q={q}"),
+        words: &["google", "g"],
+    },
+    Site {
+        slug: "facebook",
+        name: "Facebook",
+        hosts: &["www.facebook.com", "facebook.com", "m.facebook.com"],
+        links: &[
+            link("Messages", "/messages/", "chat"),
+            link("Marketplace", "/marketplace/", "cart"),
+            link("Groups", "/groups/feed/", "list"),
+            link("Notifications", "/notifications", "bell"),
+        ],
+        pages: &["/groups/", "/marketplace/item/", "/events/"],
+        strip: &[" | Facebook"],
+        search: Some("https://www.facebook.com/search/top?q={q}"),
+        words: &["facebook", "fb"],
+    },
+    Site {
+        slug: "instagram",
+        name: "Instagram",
+        hosts: &["www.instagram.com", "instagram.com"],
+        links: &[
+            link("Messages", "/direct/inbox/", "chat"),
+            link("Reels", "/reels/", "play"),
+            link("Explore", "/explore/", "compass"),
+        ],
+        pages: &["/p/", "/reel/"],
+        strip: &[" • Instagram photos and videos", " • Fotos y videos de Instagram", " • Instagram"],
+        search: Some("https://www.instagram.com/explore/search/keyword/?q={q}"),
+        words: &["instagram", "ig"],
+    },
+    Site {
+        slug: "whatsapp",
+        name: "WhatsApp",
+        hosts: &["web.whatsapp.com"],
+        links: &[],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "tiktok",
+        name: "TikTok",
+        hosts: &["www.tiktok.com", "tiktok.com"],
+        links: &[
+            link("Following", "/following", "list"),
+            link("Explore", "/explore", "compass"),
+            link("Messages", "/messages", "chat"),
+        ],
+        pages: &["/video/"],
+        strip: &[" | TikTok"],
+        search: Some("https://www.tiktok.com/search?q={q}"),
+        words: &["tiktok"],
+    },
+    Site {
+        slug: "x",
+        name: "X",
+        hosts: &["x.com", "twitter.com", "mobile.x.com"],
+        links: &[
+            link("Messages", "/messages", "chat"),
+            link("Notifications", "/notifications", "bell"),
+            link("Bookmarks", "/i/bookmarks", "bookmark"),
+        ],
+        pages: &["/status/"],
+        strip: &[" / X"],
+        search: Some("https://x.com/search?q={q}"),
+        words: &["x", "twitter"],
+    },
+    Site {
+        slug: "reddit",
+        name: "Reddit",
+        hosts: &["www.reddit.com", "reddit.com", "old.reddit.com"],
+        links: &[
+            link("Popular", "/r/popular/", "compass"),
+            link("Messages", "/message/inbox/", "chat"),
+            link("Saved", "/user/me/saved/", "bookmark"),
+        ],
+        pages: &["/comments/"],
+        strip: &[" : reddit", " - Reddit"],
+        search: Some("https://www.reddit.com/search/?q={q}"),
+        words: &["reddit"],
+    },
+    Site {
+        slug: "wikipedia",
+        name: "Wikipedia",
+        hosts: &["*.wikipedia.org"],
+        links: &[link("Random article", "https://{lang}.wikipedia.org/wiki/Special:Random", "compass")],
+        pages: &["/wiki/"],
+        strip: &[" - Wikipedia, la enciclopedia libre", " - Wikipedia"],
+        search: Some("https://{lang}.wikipedia.org/w/index.php?search={q}"),
+        words: &["wikipedia", "wiki"],
+    },
+    Site {
+        slug: "amazon",
+        name: "Amazon",
+        hosts: &["www.amazon.*", "amazon.*", "smile.amazon.*"],
+        links: &[
+            link("Your orders", "/gp/css/order-history", "package"),
+            link("Cart", "/gp/cart/view.html", "cart"),
+            link("Wish list", "/hz/wishlist/ls", "heart"),
+        ],
+        pages: &["/dp/", "/gp/product/"],
+        strip: &["Amazon.com: ", "Amazon.es: ", "Amazon.com.mx: ", "Amazon.de: ", " : Amazon.com", " : Amazon.es", ": Amazon.com.mx"],
+        search: Some("https://www.amazon.com/s?k={q}"),
+        words: &["amazon"],
+    },
+    Site {
+        slug: "chatgpt",
+        name: "ChatGPT",
+        hosts: &["chatgpt.com", "chat.openai.com"],
+        links: &[link("New chat", "/", "plus")],
+        pages: &["/c/"],
+        strip: &["ChatGPT - "],
+        search: Some("https://chatgpt.com/?q={q}"),
+        words: &["chatgpt", "gpt"],
+    },
+    Site {
+        slug: "netflix",
+        name: "Netflix",
+        hosts: &["www.netflix.com", "netflix.com"],
+        links: &[
+            link("My list", "/browse/my-list", "bookmark"),
+            link("New & popular", "/latest", "star"),
+        ],
+        pages: &["/title/"],
+        strip: &[" | Netflix Official Site", " | Sitio oficial de Netflix", " | Netflix"],
+        search: Some("https://www.netflix.com/search?q={q}"),
+        words: &["netflix"],
+    },
+    Site {
+        slug: "linkedin",
+        name: "LinkedIn",
+        hosts: &["www.linkedin.com", "linkedin.com"],
+        links: &[
+            link("Messages", "/messaging/", "chat"),
+            link("My network", "/mynetwork/", "person"),
+            link("Jobs", "/jobs/", "package"),
+            link("Notifications", "/notifications/", "bell"),
+        ],
+        pages: &["/in/", "/jobs/view/", "/company/"],
+        strip: &[" | LinkedIn"],
+        search: Some("https://www.linkedin.com/search/results/all/?keywords={q}"),
+        words: &["linkedin"],
+    },
+    Site {
+        slug: "gmail",
+        name: "Gmail",
+        hosts: &["mail.google.com"],
+        links: &[
+            link("Compose", "/mail/?view=cm&fs=1", "pen"),
+            link("Starred", "/mail/u/0/#starred", "star"),
+            link("Sent", "/mail/u/0/#sent", "send"),
+        ],
+        pages: &[],
+        strip: &[],
+        search: Some("https://mail.google.com/mail/u/0/#search/{q}"),
+        words: &["gmail"],
+    },
+    Site {
+        slug: "outlook",
+        name: "Outlook",
+        hosts: &["outlook.live.com", "outlook.office.com"],
+        links: &[
+            link("Compose", "/mail/0/deeplink/compose", "pen"),
+            link("Calendar", "/calendar/0/", "clock"),
+        ],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &["outlook"],
+    },
+    Site {
+        slug: "spotify",
+        name: "Spotify",
+        hosts: &["open.spotify.com"],
+        links: &[
+            link("Your library", "/collection", "list"),
+            link("Liked songs", "/collection/tracks", "heart"),
+        ],
+        pages: &["/playlist/", "/album/", "/artist/", "/track/", "/show/", "/episode/"],
+        strip: &[" | Spotify"],
+        search: Some("https://open.spotify.com/search/{q}"),
+        words: &["spotify"],
+    },
+    Site {
+        slug: "twitch",
+        name: "Twitch",
+        hosts: &["www.twitch.tv", "twitch.tv"],
+        links: &[
+            link("Following", "/directory/following", "list"),
+            link("Explore", "/directory", "compass"),
+        ],
+        pages: &["/videos/"],
+        strip: &[" - Twitch"],
+        search: Some("https://www.twitch.tv/search?term={q}"),
+        words: &["twitch"],
+    },
+    Site {
+        slug: "pinterest",
+        name: "Pinterest",
+        hosts: &["www.pinterest.com", "pinterest.com", "*.pinterest.com"],
+        links: &[],
+        pages: &["/pin/"],
+        strip: &[" | Pinterest"],
+        search: Some("https://www.pinterest.com/search/pins/?q={q}"),
+        words: &["pinterest"],
+    },
+    Site {
+        slug: "discord",
+        name: "Discord",
+        hosts: &["discord.com"],
+        links: &[link("Direct messages", "/channels/@me", "chat")],
+        pages: &["/channels/"],
+        strip: &["Discord | "],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "telegram",
+        name: "Telegram",
+        hosts: &["web.telegram.org"],
+        links: &[],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "google-maps",
+        name: "Google Maps",
+        hosts: &["maps.google.com", "www.google.com"],
+        links: &[],
+        pages: &["/maps/place/"],
+        strip: &[" - Google Maps"],
+        search: Some("https://www.google.com/maps/search/{q}"),
+        words: &["maps", "mapa"],
+    },
+    Site {
+        slug: "google-drive",
+        name: "Google Drive",
+        hosts: &["drive.google.com"],
+        links: &[
+            link("Recent", "/drive/recent", "clock"),
+            link("Shared with me", "/drive/shared-with-me", "person"),
+            link("Starred", "/drive/starred", "star"),
+        ],
+        pages: &["/file/d/", "/drive/folders/"],
+        strip: &[" - Google Drive"],
+        search: Some("https://drive.google.com/drive/search?q={q}"),
+        words: &["drive"],
+    },
+    Site {
+        slug: "google-docs",
+        name: "Google Docs",
+        hosts: &["docs.google.com"],
+        links: &[
+            link("New document", "https://docs.new", "plus"),
+            link("New spreadsheet", "https://sheets.new", "plus"),
+            link("New presentation", "https://slides.new", "plus"),
+        ],
+        pages: &["/document/d/", "/spreadsheets/d/", "/presentation/d/", "/forms/d/"],
+        strip: &[
+            " - Documentos de Google",
+            " - Hojas de cálculo de Google",
+            " - Presentaciones de Google",
+            " - Google Docs",
+            " - Google Sheets",
+            " - Google Slides",
+            " - Google Forms",
+        ],
+        search: None,
+        words: &["docs"],
+    },
+    Site {
+        slug: "google-calendar",
+        name: "Google Calendar",
+        hosts: &["calendar.google.com"],
+        links: &[
+            link("New event", "/calendar/r/eventedit", "plus"),
+            link("Today", "/calendar/r/day", "clock"),
+        ],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "google-photos",
+        name: "Google Photos",
+        hosts: &["photos.google.com"],
+        links: &[link("Albums", "/albums", "picture")],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "google-meet",
+        name: "Google Meet",
+        hosts: &["meet.google.com"],
+        links: &[link("New meeting", "/new", "plus")],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "google-translate",
+        name: "Google Translate",
+        hosts: &["translate.google.com"],
+        links: &[],
+        pages: &[],
+        strip: &[],
+        search: Some("https://translate.google.com/?sl=auto&text={q}"),
+        words: &["translate", "traducir"],
+    },
+    Site {
+        slug: "claude",
+        name: "Claude",
+        hosts: &["claude.ai"],
+        links: &[link("New chat", "/new", "plus"), link("Projects", "/projects", "list")],
+        pages: &["/chat/"],
+        strip: &[" - Claude"],
+        search: Some("https://claude.ai/new?q={q}"),
+        words: &["claude"],
+    },
+    Site {
+        slug: "gemini",
+        name: "Gemini",
+        hosts: &["gemini.google.com"],
+        links: &[link("New chat", "/app", "plus")],
+        pages: &["/app/"],
+        strip: &[" - Gemini", "Gemini - "],
+        search: None,
+        words: &["gemini"],
+    },
+    Site {
+        slug: "ebay",
+        name: "eBay",
+        hosts: &["www.ebay.com", "www.ebay.*", "ebay.com"],
+        links: &[
+            link("Purchases", "/mye/myebay/purchase", "package"),
+            link("Watchlist", "/mye/myebay/watchlist", "heart"),
+        ],
+        pages: &["/itm/"],
+        strip: &[" | eBay"],
+        search: Some("https://www.ebay.com/sch/i.html?_nkw={q}"),
+        words: &["ebay"],
+    },
+    Site {
+        slug: "github",
+        name: "GitHub",
+        hosts: &["github.com"],
+        links: &[
+            link("Notifications", "/notifications", "bell"),
+            link("Pull requests", "/pulls", "send"),
+            link("Issues", "/issues", "list"),
+        ],
+        pages: &["/"],
+        strip: &[" · GitHub"],
+        search: Some("https://github.com/search?q={q}"),
+        words: &["github", "gh"],
+    },
+    Site {
+        slug: "zoom",
+        name: "Zoom",
+        hosts: &["app.zoom.us", "zoom.us"],
+        links: &[],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "canva",
+        name: "Canva",
+        hosts: &["www.canva.com", "canva.com"],
+        links: &[link("Your designs", "/projects", "list")],
+        pages: &["/design/"],
+        strip: &[" - Canva"],
+        search: Some("https://www.canva.com/search/templates?q={q}"),
+        words: &["canva"],
+    },
+    Site {
+        slug: "duolingo",
+        name: "Duolingo",
+        hosts: &["www.duolingo.com", "duolingo.com"],
+        links: &[link("Learn", "/learn", "play")],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "aliexpress",
+        name: "AliExpress",
+        hosts: &["www.aliexpress.com", "*.aliexpress.com", "www.aliexpress.*"],
+        links: &[
+            link("Your orders", "/p/order/index.html", "package"),
+            link("Cart", "/p/shoppingcart/index.html", "cart"),
+        ],
+        pages: &["/item/"],
+        strip: &[" - AliExpress"],
+        search: Some("https://www.aliexpress.com/wholesale?SearchText={q}"),
+        words: &["aliexpress", "ali"],
+    },
+    Site {
+        slug: "booking",
+        name: "Booking.com",
+        hosts: &["www.booking.com", "booking.com"],
+        links: &[],
+        pages: &["/hotel/"],
+        strip: &[],
+        search: Some("https://www.booking.com/searchresults.html?ss={q}"),
+        words: &["booking"],
+    },
+    Site {
+        slug: "airbnb",
+        name: "Airbnb",
+        hosts: &["www.airbnb.com", "www.airbnb.*", "airbnb.com"],
+        links: &[
+            link("Trips", "/trips/v1", "package"),
+            link("Wishlists", "/wishlists", "heart"),
+            link("Messages", "/guest/messages", "chat"),
+        ],
+        pages: &["/rooms/"],
+        strip: &[" - Airbnb"],
+        search: Some("https://www.airbnb.com/s/{q}/homes"),
+        words: &["airbnb"],
+    },
+    Site {
+        slug: "youtube-music",
+        name: "YouTube Music",
+        hosts: &["music.youtube.com"],
+        links: &[
+            link("Library", "/library", "list"),
+            link("Liked music", "/playlist?list=LM", "heart"),
+            link("Explore", "/explore", "compass"),
+        ],
+        pages: &["/watch", "/playlist", "/browse/"],
+        strip: &[" - YouTube Music"],
+        search: Some("https://music.youtube.com/search?q={q}"),
+        words: &["ytmusic"],
+    },
+    Site {
+        slug: "messenger",
+        name: "Messenger",
+        hosts: &["www.messenger.com", "messenger.com"],
+        links: &[],
+        pages: &[],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "steam",
+        name: "Steam",
+        hosts: &["store.steampowered.com"],
+        links: &[link("Wishlist", "/wishlist/", "heart"), link("Cart", "/cart/", "cart")],
+        pages: &["/app/"],
+        strip: &[" on Steam", " en Steam"],
+        search: Some("https://store.steampowered.com/search/?term={q}"),
+        words: &[],
+    },
+    Site {
+        slug: "stackoverflow",
+        name: "Stack Overflow",
+        hosts: &["stackoverflow.com"],
+        links: &[],
+        pages: &["/questions/"],
+        strip: &[" - Stack Overflow"],
+        search: Some("https://stackoverflow.com/search?q={q}"),
+        words: &["stackoverflow", "so"],
+    },
+    Site {
+        slug: "notion",
+        name: "Notion",
+        hosts: &["www.notion.so", "notion.so"],
+        links: &[],
+        pages: &["/"],
+        strip: &[],
+        search: None,
+        words: &[],
+    },
+    Site {
+        slug: "figma",
+        name: "Figma",
+        hosts: &["www.figma.com", "figma.com"],
+        links: &[],
+        pages: &["/file/", "/design/"],
+        strip: &[" – Figma", " - Figma"],
+        search: None,
+        words: &[],
+    },
+];
+
+/// The site of webapp `slug`.
+pub(crate) fn site(slug: &str) -> Option<&'static Site> {
+    SITES.iter().find(|s| s.slug == slug)
+}
+
+/// The site whose pages are on `host`.
+pub(crate) fn site_of_host(host: &str) -> Option<&'static Site> {
+    SITES.iter().find(|s| host_is(host, s.hosts))
+}
+
+/// A search asked by what was typed: one of a site's words, then the words
+/// to search ("amazon zapatillas" → Amazon, "zapatillas").
+pub(crate) fn asked(query: &str) -> Option<(&'static Site, String)> {
+    let (first, rest) = query.trim_start().split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let first = first.to_lowercase();
+    let site = SITES.iter().find(|s| s.search.is_some() && s.words.contains(&first.as_str()))?;
+    Some((site, rest.to_owned()))
+}
+
+/// `s` made safe in a URL's query.
+fn encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b' ' => out.push_str("%20"),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The shell's language as Wikipedia names it ("es", "en").
+fn lang() -> String {
+    let l = crate::i18n::lang().unwrap_or_default();
+    l.split(['-', '_']).next().filter(|l| !l.is_empty()).unwrap_or("en").to_lowercase()
+}
+
+/// Where a search of `words` on `site` goes.
+pub(crate) fn search_url(site: &Site, words: &str) -> Option<String> {
+    Some(site.search?.replace("{lang}", &lang()).replace("{q}", &encode(words)))
+}
+
+/// Where a search of `words` on `site` goes for a webapp that opens at
+/// `start`: on that webapp's own country of the site (amazon.com.mx), when
+/// the site is one of many endings.
+pub(crate) fn search_url_from(site: &Site, words: &str, start: Option<&str>) -> Option<String> {
+    let url = search_url(site, words)?;
+    let ends = |host: &str| site.hosts.iter().any(|p| p.ends_with(".*") && host_is(host, &[p]));
+    match start.and_then(origin).zip(origin(&url)) {
+        Some(((theirs, host), (own, _))) if ends(&host) && theirs != own => Some(format!("{theirs}{}", &url[own.len()..])),
+        _ => Some(url),
+    }
+}
+
+/// Where `link` goes, on a site whose webapp opens at `origin`
+/// (`https://www.youtube.com`).
+pub(crate) fn link_url(link: &Link, origin: &str) -> String {
+    let url = link.url.replace("{lang}", &lang());
+    if url.starts_with("https://") || url.starts_with("http://") {
+        url
+    } else {
+        format!("{}{url}", origin.trim_end_matches('/'))
+    }
+}
+
+/// An address's scheme and host (`https://www.youtube.com`), and its host.
+pub(crate) fn origin(url: &str) -> Option<(String, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?.to_owned();
+    Some((format!("{scheme}://{host}"), host))
+}
+
+/// Whether `host` is one of `patterns` (`www.youtube.com`, `*.wikipedia.org`,
+/// `www.amazon.*`).
+fn host_is(host: &str, patterns: &[&str]) -> bool {
+    let host = host.to_lowercase();
+    patterns.iter().any(|p| {
+        if let Some(tail) = p.strip_prefix("*.") {
+            host == tail || host.ends_with(&format!(".{tail}"))
+        } else if let Some(head) = p.strip_suffix(".*") {
+            host.strip_prefix(head).is_some_and(|rest| rest.starts_with('.') && !rest[1..].contains('/'))
+        } else {
+            host == *p
+        }
+    })
+}
+
+/// Whether the page at `url` is one of `site`'s worth showing as recent.
+fn is_page(site: &Site, url: &str) -> bool {
+    let Some((_, host)) = origin(url) else {
+        return false;
+    };
+    if !host_is(&host, site.hosts) || site.pages.is_empty() {
+        return false;
+    }
+    let path = url.split_once("://").map_or("", |(_, r)| r.find('/').map_or("", |i| &r[i..]));
+    if site.pages == ["/"] {
+        // Any page but the first, and none of the site's own known pages.
+        let bare = path.split(['?', '#']).next().unwrap_or("");
+        return bare.len() > 1 && !site.links.iter().any(|l| l.url.starts_with(bare));
+    }
+    site.pages.iter().any(|p| path.contains(p))
+}
+
+/// A page's title, without what the site adds to every one.
+pub(crate) fn clean_title(site: Option<&Site>, title: &str) -> String {
+    let mut t = title.trim().to_owned();
+    // A count of what is new, "(3) Inbox": not the page's.
+    if t.starts_with('(') {
+        if let Some(end) = t.find(") ") {
+            if t[1..end].chars().all(|c| c.is_ascii_digit() || c == '+') {
+                t = t[end + 2..].to_owned();
+            }
+        }
+    }
+    for s in site.map_or(&[][..], |s| s.strip) {
+        if let Some(rest) = t.strip_suffix(s) {
+            t = rest.trim().to_owned();
+        }
+        if let Some(rest) = t.strip_prefix(s) {
+            t = rest.trim().to_owned();
+        }
+    }
+    t
+}
+
+// ---- the browsers -------------------------------------------------------------
+
+/// Where a browser keeps its history.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Browser {
+    /// A Firefox profile's folder (`places.sqlite`, `favicons.sqlite`;
+    /// Seam's own also its disk cache, `cache2`).
+    Firefox(PathBuf),
+    /// A Chromium profile's folder (`History`, `Favicons`).
+    Chromium(PathBuf),
+}
+
+fn home() -> PathBuf {
+    crate::filer::home()
+}
+
+/// A folder of the dock's cache (`~/.cache/waverunner/<what>`), made.
+fn cache(what: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache"));
+    let dir = base.join("waverunner").join(what);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Seam's profile: where every webapp's pages are.
+pub(crate) fn seam() -> Browser {
+    Browser::Firefox(home().join(".local/share/seam"))
+}
+
+/// The newest profile of a Firefox-like browser under `dir` (by its history's age).
+fn newest_profile(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| {
+            let at = std::fs::metadata(p.join("places.sqlite")).and_then(|m| m.modified()).ok()?;
+            Some((at, p))
+        })
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, p)| p)
+}
+
+/// The browser an app's program is, and where its history is.
+pub(crate) fn browser_for(program: &str) -> Option<Browser> {
+    let config = home().join(".config");
+    let chromium = |dir: &str| Some(Browser::Chromium(config.join(dir).join("Default")));
+    match program.to_lowercase().as_str() {
+        "seam" => Some(seam()),
+        "firefox" | "firefox-esr" => newest_profile(&home().join(".mozilla/firefox")).map(Browser::Firefox),
+        "librewolf" => newest_profile(&home().join(".librewolf")).map(Browser::Firefox),
+        "google-chrome" | "google-chrome-stable" => chromium("google-chrome"),
+        "chromium" | "chromium-browser" => chromium("chromium"),
+        "brave" | "brave-browser" => chromium("BraveSoftware/Brave-Browser"),
+        "microsoft-edge" | "microsoft-edge-stable" => chromium("microsoft-edge"),
+        "vivaldi" | "vivaldi-stable" => chromium("vivaldi"),
+        _ => None,
+    }
+}
+
+/// One page of a history.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Visit {
+    pub url: String,
+    pub title: String,
+}
+
+/// A short, steady name for some bytes (a cache file's).
+fn hash_of(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// A copy of a browser's database (and its write-ahead log) in the cache,
+/// opened: the browser holds the file and keeps writing it.
+fn copy_open(path: &Path) -> Option<rusqlite::Connection> {
+    let dir = cache("history")?;
+    let to = dir.join(hash_of(path.as_os_str().as_encoded_bytes()));
+    let wal = |p: &Path| PathBuf::from(format!("{}-wal", p.display()));
+    let _ = std::fs::remove_file(wal(&to));
+    std::fs::copy(path, &to).ok()?;
+    let _ = std::fs::copy(wal(path), wal(&to));
+    rusqlite::Connection::open(&to).ok()
+}
+
+/// A browser's newest pages, newest first (`max` read).
+fn history(browser: &Browser, max: usize) -> Vec<Visit> {
+    let (db, sql) = match browser {
+        Browser::Firefox(p) => (
+            p.join("places.sqlite"),
+            "SELECT url, COALESCE(title, '') FROM moz_places WHERE last_visit_date IS NOT NULL \
+             AND url LIKE 'http%' ORDER BY last_visit_date DESC LIMIT ?1",
+        ),
+        Browser::Chromium(p) => (
+            p.join("History"),
+            "SELECT url, COALESCE(title, '') FROM urls WHERE url LIKE 'http%' \
+             ORDER BY last_visit_time DESC LIMIT ?1",
+        ),
+    };
+    let Some(conn) = copy_open(&db) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([max as i64], |r| Ok(Visit { url: r.get(0)?, title: r.get(1)? }));
+    rows.map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
+/// The browser's favicons database, copied to read.
+fn favicons_db(browser: &Browser) -> Option<rusqlite::Connection> {
+    copy_open(&match browser {
+        Browser::Firefox(p) => p.join("favicons.sqlite"),
+        Browser::Chromium(p) => p.join("Favicons"),
+    })
+}
+
+/// The favicon a browser keeps of the page at `url` (the biggest; a
+/// drawing first), or of its site when the page has none of its own.
+fn favicon(browser: &Browser, conn: &rusqlite::Connection, url: &str) -> Option<Vec<u8>> {
+    match browser {
+        Browser::Firefox(_) => conn
+            .query_row(
+                "SELECT i.data FROM moz_pages_w_icons p JOIN moz_icons_to_pages ip ON ip.page_id = p.id \
+                 JOIN moz_icons i ON i.id = ip.icon_id WHERE p.page_url = ?1 AND i.data IS NOT NULL \
+                 ORDER BY i.width DESC LIMIT 1",
+                [url],
+                |r| r.get(0),
+            )
+            .or_else(|_| {
+                let (origin, _) = origin(url).ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                conn.query_row(
+                    "SELECT data FROM moz_icons WHERE icon_url LIKE ?1 AND data IS NOT NULL \
+                     ORDER BY root DESC, width DESC LIMIT 1",
+                    [format!("{origin}/%")],
+                    |r| r.get(0),
+                )
+            })
+            .ok(),
+        Browser::Chromium(_) => conn
+            .query_row(
+                "SELECT b.image_data FROM icon_mapping m JOIN favicon_bitmaps b ON b.icon_id = m.icon_id \
+                 WHERE m.page_url = ?1 ORDER BY b.width DESC LIMIT 1",
+                [url],
+                |r| r.get(0),
+            )
+            .ok(),
+    }
+}
+
+/// How big a favicon stands on its tile, of the tile.
+const FAVICON_ON_TILE: f32 = 0.5;
+/// The tile's colour under a favicon (a light card: favicons are drawn for
+/// light pages).
+const TILE_GROUND: [u8; 4] = [243, 243, 243, 255];
+
+/// A favicon (PNG, JPEG, WebP or a drawing) as a TILE: centred on a light
+/// card the size of an icon, written once into `dir` (named by its bytes)
+/// for the thumbnailer, which rounds its corners as a file's picture.
+fn tile_in(dir: &Path, data: &[u8]) -> Option<PathBuf> {
+    let path = dir.join(format!("{}-t1.png", hash_of(data)));
+    if path.exists() {
+        return Some(path);
+    }
+    let side = crate::apps::ICON_SIZE;
+    let room = (side as f32 * FAVICON_ON_TILE) as u32;
+    let svg = data[..data.len().min(512)].windows(4).any(|w| w == b"<svg");
+    let fav = if svg { svg_rgba(data, room)? } else { image::load_from_memory(data).ok()?.to_rgba8() };
+    let fav = if fav.width() == room || fav.height() == room {
+        fav
+    } else {
+        let k = room as f32 / fav.width().max(fav.height()).max(1) as f32;
+        let (w, h) = (((fav.width() as f32 * k).round() as u32).max(1), ((fav.height() as f32 * k).round() as u32).max(1));
+        image::imageops::resize(&fav, w, h, image::imageops::FilterType::CatmullRom)
+    };
+    let mut tile = image::RgbaImage::from_pixel(side, side, image::Rgba(TILE_GROUND));
+    let (x, y) = ((side - fav.width()) / 2, (side - fav.height()) / 2);
+    image::imageops::overlay(&mut tile, &fav, i64::from(x), i64::from(y));
+    let tmp = path.with_extension("part");
+    tile.save_with_format(&tmp, image::ImageFormat::Png).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}
+
+/// A drawing's pixels, `side` on its longer side (straight alpha).
+fn svg_rgba(data: &[u8], side: u32) -> Option<image::RgbaImage> {
+    let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let k = side as f32 / size.width().max(size.height()).max(1.0);
+    let (w, h) = (((size.width() * k).round() as u32).max(1), ((size.height() * k).round() as u32).max(1));
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k), &mut pixmap.as_mut());
+    let mut px = pixmap.take();
+    for p in px.chunks_exact_mut(4) {
+        let a = u32::from(p[3]);
+        if a > 0 && a < 255 {
+            for c in &mut p[..3] {
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    image::RgbaImage::from_raw(w, h, px)
+}
+
+// ---- YouTube's pictures, from Seam's disk cache -------------------------------
+
+/// The video a YouTube page shows (`/watch?v=…`, `/shorts/…`), by its id.
+fn video_id(url: &str) -> Option<&str> {
+    let (_, host) = origin(url)?;
+    if !host.ends_with("youtube.com") {
+        return None;
+    }
+    let by_query = url.split_once('?').and_then(|(_, q)| q.split(['&', '#']).find_map(|kv| kv.strip_prefix("v=")));
+    let id = by_query.or_else(|| url.split_once("/shorts/").map(|(_, r)| r))?;
+    let id = id.split(['&', '#', '?', '/']).next()?;
+    (id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).then_some(id)
+}
+
+/// A cache entry's key — its address. Firefox's cache file is the body,
+/// then its metadata, whose place is the file's last four bytes; the key
+/// follows a few numbers there (`a,:https://…`, maybe after a partition).
+fn cache_key(path: &Path) -> Option<(String, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len < 8 {
+        return None;
+    }
+    f.seek(SeekFrom::End(-4)).ok()?;
+    let mut b = [0u8; 4];
+    f.read_exact(&mut b).ok()?;
+    let body = u64::from(u32::from_be_bytes(b));
+    if body >= len {
+        return None;
+    }
+    f.seek(SeekFrom::Start(body)).ok()?;
+    let mut meta = vec![0u8; ((len - body) as usize).min(4096)];
+    f.read_exact(&mut meta).ok()?;
+    let at = meta.windows(5).position(|w| w == b":http")? + 1;
+    let end = meta[at..].iter().position(|&c| c == 0).map_or(meta.len(), |e| at + e);
+    Some((String::from_utf8_lossy(&meta[at..end]).into_owned(), body))
+}
+
+/// How good a picture of a video its file's name says it is (none: not one).
+fn picture_rank(name: &str) -> u8 {
+    match name.split(['.', '?']).next().unwrap_or("") {
+        n if n.starts_with("hq720") => 4,
+        "mqdefault" => 3,
+        "hqdefault" | "sddefault" => 2,
+        _ => 0,
+    }
+}
+
+/// The pictures of videos in a cache, by video id: how good, the entry, its
+/// body's length.
+type Pictures = HashMap<String, (u8, PathBuf, u64)>;
+
+/// Where Seam's cache keeps a picture of each video, by its id (the best
+/// it has): an index made once each time the cache's folder changes.
+fn video_pictures(cache2: &Path) -> Pictures {
+    static INDEX: std::sync::Mutex<Option<(PathBuf, std::time::SystemTime, Pictures)>> = std::sync::Mutex::new(None);
+    let entries = cache2.join("entries");
+    let Ok(changed) = std::fs::metadata(&entries).and_then(|m| m.modified()) else {
+        return HashMap::new();
+    };
+    if let Ok(index) = INDEX.lock() {
+        if let Some((_, _, found)) = index.as_ref().filter(|(d, at, _)| *d == entries && *at == changed) {
+            return found.clone();
+        }
+    }
+    let mut found = Pictures::new();
+    for e in std::fs::read_dir(&entries).into_iter().flatten().flatten() {
+        let path = e.path();
+        let Some((key, body)) = cache_key(&path) else {
+            continue;
+        };
+        let Some(rest) = key.split_once("i.ytimg.com/").map(|(_, r)| r) else {
+            continue;
+        };
+        let mut parts = rest.split('/');
+        let (Some(kind), Some(id), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let rank = picture_rank(name);
+        if !kind.starts_with("vi") || rank == 0 {
+            continue;
+        }
+        if found.get(id).is_none_or(|(r, _, _)| *r < rank) {
+            found.insert(id.to_owned(), (rank, path, body));
+        }
+    }
+    if let Ok(mut index) = INDEX.lock() {
+        *index = Some((entries, changed, found.clone()));
+    }
+    found
+}
+
+/// A video's picture from a cache entry (`body` bytes long), as a file of
+/// ours: its middle, SQUARE, as big as a tile — the tile is square, and a
+/// wide picture in it is a thin strip (the black bands of a 4:3 one are
+/// inside what is cut away).
+fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBuf> {
+    let path = dir.join(format!("{id}-s1.png"));
+    if path.exists() {
+        return Some(path);
+    }
+    let bytes = std::fs::read(entry).ok()?;
+    let img = image::load_from_memory(bytes.get(..body as usize)?).ok()?;
+    let (w, h) = (img.width(), img.height());
+    // (A 4:3 one is a 16:9 picture between bands: its square within that.)
+    let side = if w * 3 == h * 4 { w * 9 / 16 } else { w.min(h) };
+    let img = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
+    let tile = crate::apps::ICON_SIZE;
+    let img = if side > tile { img.resize(tile, tile, image::imageops::FilterType::Triangle) } else { img };
+    let tmp = path.with_extension("part");
+    img.to_rgba8().save_with_format(&tmp, image::ImageFormat::Png).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}
+
+// ---- the recents ----------------------------------------------------------------
+
+/// A recent page as a row of a lone app shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Recent {
+    pub url: String,
+    pub title: String,
+    /// Its picture as a file: the video's own (YouTube, from Seam's cache),
+    /// else its favicon on a tile; none without either.
+    pub picture: Option<PathBuf>,
+}
+
+/// `pages` made recents: each one's picture found.
+fn pictured(browser: &Browser, pages: Vec<(Visit, String)>) -> Vec<Recent> {
+    let icons = favicons_db(browser);
+    let tiles = cache("web-tiles");
+    let videos = match browser {
+        Browser::Firefox(p) if p.join("cache2").is_dir() => video_pictures(&p.join("cache2")),
+        _ => HashMap::new(),
+    };
+    let shots = cache("web-pictures");
+    pages
+        .into_iter()
+        .map(|(v, title)| {
+            let video = video_id(&v.url)
+                .and_then(|id| Some((id, videos.get(id)?)))
+                .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body));
+            let picture = video.or_else(|| {
+                let data = favicon(browser, icons.as_ref()?, &v.url)?;
+                tile_in(tiles.as_deref()?, &data)
+            });
+            Recent { url: v.url, title, picture }
+        })
+        .collect()
+}
+
+/// What a webapp of `site` showed lately (Seam's history): its pages worth
+/// showing, newest first, each once, at most `max`.
+pub(crate) fn site_recents(site: &Site, max: usize) -> Vec<Recent> {
+    let browser = seam();
+    let mut seen = HashSet::new();
+    let pages: Vec<(Visit, String)> = history(&browser, 4000)
+        .into_iter()
+        .filter(|v| is_page(site, &v.url))
+        .map(|v| {
+            let title = clean_title(Some(site), &v.title);
+            (v, title)
+        })
+        .filter(|(v, title)| !title.is_empty() && seen.insert(video_id(&v.url).map_or_else(|| title.clone(), str::to_owned)))
+        .take(max)
+        .collect();
+    pictured(&browser, pages)
+}
+
+/// Hosts that are not a place one went to (sign-ins, this computer).
+fn passing(host: &str) -> bool {
+    host.starts_with("accounts.") || host.starts_with("login.") || host == "localhost" || host.starts_with("127.")
+}
+
+/// What a browser showed lately: the newest page of each site, newest first,
+/// at most `max`.
+pub(crate) fn browser_recents(browser: &Browser, max: usize) -> Vec<Recent> {
+    let mut hosts = HashSet::new();
+    let pages: Vec<(Visit, String)> = history(browser, 3000)
+        .into_iter()
+        .filter_map(|v| {
+            let (_, host) = origin(&v.url)?;
+            let title = clean_title(site_of_host(&host), &v.title);
+            (!title.is_empty() && !passing(&host) && hosts.insert(host)).then_some((v, title))
+        })
+        .take(max)
+        .collect();
+    pictured(browser, pages)
+}
+
+/// The recents read lately, by app (its desktop id), so typing over a lone
+/// app does not read a history on every letter (`app_actions.rs` asks;
+/// read off the loop).
+#[derive(Debug, Default)]
+pub(crate) struct Recents {
+    pub got: HashMap<String, (Instant, Vec<Recent>)>,
+    pub asking: HashSet<String>,
+}
+
+/// How long recents read stay good.
+pub(crate) const FRESH: Duration = Duration::from_secs(60);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_match_exactly_below_or_with_any_ending() {
+        assert!(host_is("www.youtube.com", &["www.youtube.com"]));
+        assert!(!host_is("music.youtube.com", &["www.youtube.com", "youtube.com"]));
+        assert!(host_is("es.wikipedia.org", &["*.wikipedia.org"]));
+        assert!(host_is("www.amazon.es", &["www.amazon.*"]));
+        assert!(host_is("www.amazon.com.mx", &["www.amazon.*"]));
+        assert!(!host_is("www.amazonia.org", &["www.amazon.*"]));
+    }
+
+    #[test]
+    fn a_sites_recent_pages_are_its_kind_of_page() {
+        let yt = site("youtube").unwrap();
+        assert!(is_page(yt, "https://www.youtube.com/watch?v=abc"));
+        assert!(!is_page(yt, "https://www.youtube.com/feed/subscriptions"));
+        assert!(!is_page(yt, "https://music.youtube.com/watch?v=abc"));
+        let az = site("amazon").unwrap();
+        assert!(is_page(az, "https://www.amazon.es/Zapatillas-Running/dp/B0C1234/ref=x"));
+        let gh = site("github").unwrap();
+        assert!(is_page(gh, "https://github.com/maxpoww/waveview"));
+        assert!(!is_page(gh, "https://github.com/"));
+        assert!(!is_page(gh, "https://github.com/notifications"));
+        assert!(!is_page(site("gmail").unwrap(), "https://mail.google.com/mail/u/0/#inbox"));
+    }
+
+    #[test]
+    fn titles_lose_what_the_site_adds() {
+        let yt = site("youtube");
+        assert_eq!(clean_title(yt, "(3) Gatos graciosos - YouTube"), "Gatos graciosos");
+        assert_eq!(clean_title(site("amazon"), "Amazon.com: Running Shoes : Clothing"), "Running Shoes : Clothing");
+        assert_eq!(clean_title(site("github"), "maxpoww/waveview · GitHub"), "maxpoww/waveview");
+        assert_eq!(clean_title(None, "  Plain page "), "Plain page");
+    }
+
+    #[test]
+    fn a_search_is_asked_by_a_sites_word_then_the_words() {
+        let (s, q) = asked("amazon zapatillas running").unwrap();
+        assert_eq!((s.slug, q.as_str()), ("amazon", "zapatillas running"));
+        assert_eq!(asked("YouTube  gatos").map(|(s, q)| (s.slug, q)), Some(("youtube", "gatos".into())));
+        assert!(asked("amazon").is_none());
+        assert!(asked("amazon ").is_none());
+        assert!(asked("vlc media").is_none());
+        let s = site("youtube").unwrap();
+        assert_eq!(search_url(s, "gatos & perros").unwrap(), "https://www.youtube.com/results?search_query=gatos%20%26%20perros");
+        let az = site("amazon").unwrap();
+        assert_eq!(search_url_from(az, "x", Some("https://www.amazon.com.mx")).unwrap(), "https://www.amazon.com.mx/s?k=x");
+        assert_eq!(search_url_from(az, "x", None).unwrap(), "https://www.amazon.com/s?k=x");
+        let wiki = site("wikipedia").unwrap();
+        assert!(search_url_from(wiki, "x", Some("https://www.wikipedia.org")).unwrap().ends_with(".wikipedia.org/w/index.php?search=x"));
+    }
+
+    #[test]
+    fn links_open_on_the_webapps_own_address() {
+        let yt = site("youtube").unwrap();
+        assert_eq!(link_url(&yt.links[0], "https://www.youtube.com/"), "https://www.youtube.com/feed/subscriptions");
+        let docs = site("google-docs").unwrap();
+        assert_eq!(link_url(&docs.links[0], "https://docs.google.com"), "https://docs.new");
+        assert_eq!(origin("https://www.amazon.es/dp/x?y=1"), Some(("https://www.amazon.es".into(), "www.amazon.es".into())));
+    }
+
+    #[test]
+    fn every_sites_slug_is_one_and_its_symbols_exist() {
+        let mut seen = HashSet::new();
+        for s in SITES {
+            assert!(seen.insert(s.slug), "{} twice", s.slug);
+            for l in s.links {
+                assert!(crate::app_actions::has_symbol(l.symbol), "{}'s {} has no symbol {}", s.slug, l.name, l.symbol);
+            }
+        }
+        assert!(SITES.len() >= 40, "{} sites", SITES.len());
+    }
+
+    #[test]
+    fn a_videos_id_is_read_from_its_page() {
+        assert_eq!(video_id("https://www.youtube.com/watch?v=9d9PQ1hrhBk&t=10s"), Some("9d9PQ1hrhBk"));
+        assert_eq!(video_id("https://www.youtube.com/watch?feature=x&v=9d9PQ1hrhBk"), Some("9d9PQ1hrhBk"));
+        assert_eq!(video_id("https://www.youtube.com/shorts/9d9PQ1hrhBk"), Some("9d9PQ1hrhBk"));
+        assert_eq!(video_id("https://music.youtube.com/watch?v=9d9PQ1hrhBk&list=x"), Some("9d9PQ1hrhBk"));
+        assert_eq!(video_id("https://example.com/watch?v=9d9PQ1hrhBk"), None);
+        assert_eq!(video_id("https://www.youtube.com/watch?v=short"), None);
+        assert_eq!(picture_rank("hq720_custom_3.jpg?sqp=x"), 4);
+        assert_eq!(picture_rank("mqdefault.jpg"), 3);
+        assert_eq!(picture_rank("maxresdefault.jpg"), 0);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wr-web-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_cache_entrys_key_and_body_are_found() {
+        let dir = scratch("cache");
+        let body = b"\xFF\xD8picture bytes";
+        let mut file = body.to_vec();
+        file.extend_from_slice(&[0, 0, 0, 7, 1, 2]);
+        file.extend_from_slice(b"O^partitionKey=%28https%2Cyoutube.com%29,a,:https://i.ytimg.com/vi/9d9PQ1hrhBk/mqdefault.jpg\0");
+        file.extend_from_slice(b"response-head\0HTTP/2 200\0");
+        file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        let entry = dir.join("ENTRY");
+        std::fs::write(&entry, &file).unwrap();
+        let (key, len) = cache_key(&entry).unwrap();
+        assert_eq!(key, "https://i.ytimg.com/vi/9d9PQ1hrhBk/mqdefault.jpg");
+        assert_eq!(len, body.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_favicon_becomes_a_tile() {
+        let dir = scratch("tile");
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([200, 0, 0, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let tile = image::open(tile_in(&dir, &png).unwrap()).unwrap().to_rgba8();
+        let side = crate::apps::ICON_SIZE;
+        assert_eq!((tile.width(), tile.height()), (side, side));
+        assert_eq!(tile.get_pixel(side / 2, side / 2).0, [200, 0, 0, 255]);
+        assert_eq!(tile.get_pixel(4, 4).0, TILE_GROUND);
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#00f"/></svg>"##;
+        let tile = image::open(tile_in(&dir, svg).unwrap()).unwrap().to_rgba8();
+        assert_eq!(tile.get_pixel(side / 2, side / 2).0, [0, 0, 255, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the rows would show from this computer's own histories:
+    /// `cargo test -- --ignored real_recents --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_recents() {
+        for slug in ["youtube", "claude", "amazon", "github", "google-docs", "chatgpt"] {
+            let at = Instant::now();
+            let got = site_recents(site(slug).unwrap(), 8);
+            println!("{slug}: {} in {:?}", got.len(), at.elapsed());
+            for r in got {
+                println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.picture.map(|p| p.display().to_string()).unwrap_or_default());
+            }
+        }
+        for prog in ["seam", "google-chrome-stable", "firefox"] {
+            let Some(b) = browser_for(prog) else { continue };
+            let at = Instant::now();
+            let got = browser_recents(&b, 8);
+            println!("{prog}: {} in {:?}", got.len(), at.elapsed());
+            for r in got {
+                println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);
+            }
+        }
+    }
+
+    #[test]
+    fn a_firefox_and_a_chromium_history_are_read() {
+        let dir = scratch("history");
+        let places = rusqlite::Connection::open(dir.join("places.sqlite")).unwrap();
+        places
+            .execute_batch(
+                "CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_date INTEGER);
+                 INSERT INTO moz_places VALUES (1, 'https://www.youtube.com/watch?v=a', 'Old - YouTube', 10);
+                 INSERT INTO moz_places VALUES (2, 'https://www.youtube.com/watch?v=b', 'New - YouTube', 20);
+                 INSERT INTO moz_places VALUES (3, 'https://www.youtube.com/feed/subscriptions', NULL, 30);
+                 INSERT INTO moz_places VALUES (4, 'about:blank', 'x', 40);",
+            )
+            .unwrap();
+        drop(places);
+        let got = history(&Browser::Firefox(dir.clone()), 10);
+        assert_eq!(got.iter().map(|v| v.title.as_str()).collect::<Vec<_>>(), ["", "New - YouTube", "Old - YouTube"]);
+        let chrome = rusqlite::Connection::open(dir.join("History")).unwrap();
+        chrome
+            .execute_batch(
+                "CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_time INTEGER);
+                 INSERT INTO urls VALUES (1, 'https://github.com/a/b', 'a/b · GitHub', 5);
+                 INSERT INTO urls VALUES (2, 'https://www.reddit.com/r/x/comments/1/y', 'y : reddit', 9);",
+            )
+            .unwrap();
+        drop(chrome);
+        let got = history(&Browser::Chromium(dir.clone()), 10);
+        assert_eq!(got.iter().map(|v| v.url.as_str()).collect::<Vec<_>>(), ["https://www.reddit.com/r/x/comments/1/y", "https://github.com/a/b"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

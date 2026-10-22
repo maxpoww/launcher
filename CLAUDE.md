@@ -1397,5 +1397,27 @@ The big daemon files are cohesive but long — go straight to the function:
   <folder>|back|forward|up|select <n>|activate <n>|key <name>|type <letters>|scroll
   <px>|hidden|menu [<n>]|pick <row>|copy|cut|paste|newfolder|rename <n>|bin|props <n>|close|state`
   drive the newest (⚠ `activate`/`key enter` on a file really opens it; `bin`, `paste`, `pick` are REAL).
+- `app_actions.rs` + `web_actions.rs` — THE LONE APP (Max, 2026-10-22; look "3a", canvas
+  https://claude.ai/artifact/9WByNs3AHU4wZNYCR9tUgi): a search that leaves ONE app in Apps lays its
+  row out round it — the app in the middle, selected (`SectionLayout::anchor`); to its right its
+  desktop file's actions, Golem's own for apps it knows (`KNOWN`: VLC, mpv, GIMP, OBS), A WEBAPP's
+  known pages (`web_actions::SITES`, ~45 of the world's most used sites: YouTube's Subscriptions,
+  Instagram's Messages, Amazon's orders… opened in its window by `seam -golem-app <slug> <url>`) and
+  Uninstall last (asked twice); to its left, while it has windows, Show all (waveview's `spread_app`)
+  and Close all; under it "Recent in <app>" (`AppsPart` room, `RECENT_ROOM`): its files (the system's
+  `recently-used.xbel`, VLC's list) or, for a webapp or a BROWSER, its pages — read OFF THE LOOP from
+  the browser's own history (Seam/Firefox/LibreWolf `places.sqlite`, Chrome/Chromium/Brave/Edge/
+  Vivaldi `History`; each a copy, the browser holds the file; kept `FRESH` 60 s by app), pictured
+  with no network: a YouTube video by its own picture from SEAM'S DISK CACHE (`cache2`, an index of
+  `i.ytimg.com/vi/<id>/` entries, cropped square), else the page's favicon on a light tile
+  (`tile_in`). A page opens in its app's window, which is brought forward (`web_opened`: Seam cannot
+  raise one on Wayland). An action is its app's tile at half light with a white symbol
+  (`SYMBOLS`; `act_cells` in `content.rs`). A SITE'S SEARCH: "amazon zapatillas" (`Site::words`,
+  then the words — never when the query begins an app's name: "google maps") is the first cell,
+  alone in its row and selected, "Search Amazon" / "“zapatillas”" spread over three cells
+  (`WIDE_LABEL`), opened in the webapp when it is installed (on its own country: amazon.com.mx),
+  else in Seam. On a short screen the card GROWS for the recents (a negative trim,
+  `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
+  Real data: `cargo test -- --ignored real_recents --nocapture`.
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

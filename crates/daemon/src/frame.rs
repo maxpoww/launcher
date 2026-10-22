@@ -48,6 +48,9 @@ const ORBIT_FRAME: Duration = Duration::from_millis(33);
 /// one (see `draw_options`). Far above any healthy frame time.
 const FRAME_OVERDUE: Duration = Duration::from_millis(100);
 
+/// What a card grown for a lone app's recents keeps clear under the bar.
+const LONE_GROW_AIR: f32 = 12.0;
+
 impl App {
     /// Layout for an arbitrary card extent at the current scroll offsets.
     /// Whether a drag that can land on the Apps grid is in flight — the
@@ -118,7 +121,16 @@ impl App {
         };
         // Aimed with the room the Controls band is heading for, so the Apps
         // viewport lands on exactly `keep` rows.
-        (room - keep as f32 * cell - box_room).max(0.0)
+        let trim = room - keep as f32 * cell - box_room;
+        if trim >= 0.0 || self.app_group.is_some() || self.lone_room() <= 0.0 {
+            return trim.max(0.0);
+        }
+        // A lone app's recents want more than the rows the card holds (a
+        // short screen): the card GROWS by what is missing — the trim the
+        // other way —, as far as the screen over it lets it.
+        // (The card's top untrimmed: the trim in use moved it by as much.)
+        let over = layout.card_top - self.ui.open_trim() - self.dock_top_reserved() - LONE_GROW_AIR;
+        trim.max(-over.max(0.0))
     }
 
     /// The Controls row's pill height: the control panel's near layer.
@@ -1690,7 +1702,7 @@ impl App {
             ink: self.fast_backdrop.map(crate::options::ink_on).unwrap_or(dock_ink),
         });
         // The lone app's action cells (`app_actions.rs`).
-        let (act_cells, act_asking) = self.action_draw();
+        let (act_cells, act_asking, act_wide) = self.action_draw();
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -1713,6 +1725,7 @@ impl App {
                 control_lift: &self.search.control_lift,
                 act_cells: &act_cells,
                 act_asking,
+                act_wide,
                 recent_title: self.search.actions.title.as_deref(),
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {

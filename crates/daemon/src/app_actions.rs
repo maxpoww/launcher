@@ -50,7 +50,7 @@ use tracing::{error, info, warn};
 use waverunner_core::index::AppEntry;
 
 use crate::i18n::{fill, tr};
-use crate::{apps, content, hypr, launch, surface, App, KbSurface};
+use crate::{apps, content, hypr, launch, surface, web_actions, webapps, App, KbSurface};
 
 /// The id prefix of an action's cell (`act:<n>`, n its place in the list).
 pub(crate) const PREFIX: &str = "act:";
@@ -64,6 +64,9 @@ pub(crate) const DIM: f32 = 0.5;
 /// The room opened under the app's row for the actions' second lines and
 /// the recents' title (px at icon scale 1).
 pub(crate) const RECENT_ROOM: f32 = 44.0;
+/// How many cells a site's search cell's name may spread over (it stands
+/// alone in its row).
+pub(crate) const WIDE_LABEL: f32 = 3.0;
 
 /// Chrome's own symbols (its resources' New Window and Incognito, BSD-3 like
 /// Chromium) and Seam's (Firefox's `window.svg` and `privateBrowsing.svg`,
@@ -80,9 +83,20 @@ const MUSIC: &str = r#"<path d="M6 12.2V3.8l7.2-1.6v8.4"/><circle cx="4.2" cy="1
 const SPREAD: &str = r#"<rect x="1.6" y="2.6" width="5.6" height="4.6" rx="1"/><rect x="8.8" y="2.6" width="5.6" height="4.6" rx="1"/><rect x="1.6" y="8.8" width="5.6" height="4.6" rx="1"/><rect x="8.8" y="8.8" width="5.6" height="4.6" rx="1"/>"#;
 const CLOSE: &str = r#"<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>"#;
 const RECORD: &str = r#"<circle cx="8" cy="8" r="5.2"/>"#;
+/// The web's (`web_actions.rs`): a chat, a heart, a cart, a bell, a
+/// compass, a star, a person, a bookmark, a parcel.
+const CHAT: &str = r#"<path d="M2.5 4.2c0-.9.7-1.6 1.6-1.6h7.8c.9 0 1.6.7 1.6 1.6v5c0 .9-.7 1.6-1.6 1.6H7.2l-3.1 2.6v-2.6h0c-.9 0-1.6-.7-1.6-1.6z"/>"#;
+const HEART: &str = r#"<path d="M8 13.2S2.2 9.8 2.2 5.9A2.9 2.9 0 0 1 8 4.6a2.9 2.9 0 0 1 5.8 1.3C13.8 9.8 8 13.2 8 13.2z"/>"#;
+const CART: &str = r#"<path d="M1.8 2.6h1.9l1.5 7.4h7l1.4-5.2H4.4"/><circle cx="6" cy="12.6" r="1"/><circle cx="11.4" cy="12.6" r="1"/>"#;
+const BELL: &str = r#"<path d="M4 11.2V7.4a4 4 0 0 1 8 0v3.8l1.2 1.2H2.8z"/><path d="M6.6 13.6a1.5 1.5 0 0 0 2.8 0"/>"#;
+const COMPASS: &str = r#"<circle cx="8" cy="8" r="6.2"/><path d="M10.6 5.4 9.1 9.1 5.4 10.6 6.9 6.9z"/>"#;
+const STAR: &str = r#"<path d="M8 2.2l1.8 3.7 4 .6-2.9 2.8.7 4L8 11.4l-3.6 1.9.7-4-2.9-2.8 4-.6z"/>"#;
+const PERSON: &str = r#"<circle cx="8" cy="5.4" r="2.6"/><path d="M2.8 13.6c.6-2.6 2.7-4.2 5.2-4.2s4.6 1.6 5.2 4.2"/>"#;
+const BOOKMARK: &str = r#"<path d="M4.2 2.4h7.6v11.2L8 10.8l-3.8 2.8z"/>"#;
+const PACKAGE: &str = r#"<path d="M8 1.9l5.6 2.9v6.4L8 14.1l-5.6-2.9V4.8z"/><path d="M2.4 4.8 8 7.7l5.6-2.9M8 7.7v6.4"/>"#;
 
 /// Every symbol an action can wear, in the order of their texture layers.
-const SYMBOLS: [(&str, Symbol); 17] = [
+const SYMBOLS: &[(&str, Symbol)] = &[
     ("window", Symbol::Filled(CHROME_WINDOW)),
     ("incognito", Symbol::Filled(INCOGNITO)),
     ("seam-window", Symbol::Filled(SEAM_WINDOW)),
@@ -100,6 +114,22 @@ const SYMBOLS: [(&str, Symbol); 17] = [
     ("spread", Symbol::Lines(SPREAD)),
     ("close", Symbol::Lines(CLOSE)),
     ("record", Symbol::Filled(RECORD)),
+    ("chat", Symbol::Lines(CHAT)),
+    ("heart", Symbol::Lines(HEART)),
+    ("cart", Symbol::Lines(CART)),
+    ("bell", Symbol::Lines(BELL)),
+    ("compass", Symbol::Lines(COMPASS)),
+    ("star", Symbol::Lines(STAR)),
+    ("person", Symbol::Lines(PERSON)),
+    ("bookmark", Symbol::Lines(BOOKMARK)),
+    ("package", Symbol::Lines(PACKAGE)),
+    ("clock", Symbol::Glyph("clock")),
+    ("list", Symbol::Glyph("list")),
+    ("play", Symbol::Glyph("play")),
+    ("plus", Symbol::Glyph("plus")),
+    ("pen", Symbol::Glyph("pen")),
+    ("send", Symbol::Glyph("send")),
+    ("search", Symbol::Glyph("search")),
 ];
 
 #[derive(Clone, Copy)]
@@ -130,8 +160,15 @@ impl Symbol {
 }
 
 /// A symbol's place in `SYMBOLS` (the open arrow for one not there).
-fn symbol(name: &str) -> usize {
-    SYMBOLS.iter().position(|(n, _)| *n == name).unwrap_or(8)
+pub(crate) fn symbol(name: &str) -> usize {
+    let at = |name: &str| SYMBOLS.iter().position(|(n, _)| *n == name);
+    at(name).or_else(|| at("open")).unwrap_or(0)
+}
+
+/// Whether `SYMBOLS` has one of that name.
+#[cfg(test)]
+pub(crate) fn has_symbol(name: &str) -> bool {
+    SYMBOLS.iter().any(|(n, _)| *n == name)
 }
 
 /// The symbols' tiles, one texture layer each in `SYMBOLS`' order (put
@@ -219,10 +256,25 @@ fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (Str
     while n < words.len() && fits(n + 1, measure) {
         n += 1;
     }
+    if words.len() == 1 && measure(text) > room - crate::desktop::FIT_SLACK {
+        return hyphenated(text, room, measure);
+    }
     if n == 0 || n == words.len() {
         return crate::filer::two_lines(text, room, measure);
     }
     (words[..n].join(" "), crate::desktop::fit_label(&words[n..].join(" "), room, measure))
+}
+
+/// One word too long for its line, broken with a hyphen: as much as fits
+/// with it on the first line, the rest on the second (cut with "…").
+fn hyphenated(word: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
+    let chars: Vec<char> = word.chars().collect();
+    let mut k = chars.len().saturating_sub(1);
+    while k > 1 && measure(&format!("{}-", chars[..k].iter().collect::<String>())) > room - crate::desktop::FIT_SLACK {
+        k -= 1;
+    }
+    let (head, tail): (String, String) = (chars[..k].iter().collect(), chars[k..].iter().collect());
+    (format!("{head}-"), crate::desktop::fit_label(&tail, room, measure))
 }
 
 // ---- the recents --------------------------------------------------------------
@@ -320,13 +372,28 @@ fn recent_for(app: &AppEntry, max: usize) -> Vec<PathBuf> {
     all.into_iter().filter(|p| p.exists() && seen.insert(p.clone())).take(max).collect()
 }
 
+/// Where an app's recent pages come from: a webapp's site (one Golem
+/// knows, by its slug or its address), or a browser's history.
+fn source_of(app: &AppEntry) -> Option<Source> {
+    if let Some(slug) = webapps::exec_app_slug(&app.exec) {
+        let host = webapps::exec_app_url(&app.exec).and_then(web_actions::origin).map(|(_, h)| h);
+        let site = web_actions::site(slug).or_else(|| web_actions::site_of_host(host.as_deref()?))?;
+        return Some(Source::Site(site, slug.to_owned()));
+    }
+    web_actions::browser_for(&program(&app.exec)).map(Source::Browser)
+}
+
 // ---- the actions ----------------------------------------------------------------
 
 /// What an action does.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Does {
-    /// One of the app's desktop actions or Golem's: its command.
+    /// One of the app's desktop actions or Golem's, or a page of its site
+    /// (`web_actions.rs`): its command.
     Run(String),
+    /// A search of a site asked by name ("amazon zapatillas"): its command,
+    /// no app alone.
+    Open(String),
     /// Take the app away.
     Uninstall,
     /// Its windows, every one, in a spread (waveview's `spread_app`).
@@ -364,7 +431,25 @@ pub(crate) struct Actions {
     pub cols: usize,
     /// Since when Uninstall has been asking to be sure.
     pub armed: Option<Instant>,
+    /// Whether its pages open in its window (a webapp, a browser): that
+    /// window is brought forward (Seam cannot raise one on Wayland).
+    pub web: bool,
+    /// The installed webapp a search opens in (its entry).
+    pub opener: Option<usize>,
 }
+
+/// Where a lone app's recent pages come from and how they open
+/// (`web_actions.rs`).
+#[derive(Clone)]
+enum Source {
+    /// A webapp's site: its pages in Seam's history, opened in its window.
+    Site(&'static web_actions::Site, String),
+    /// A browser: its own history, opened by it.
+    Browser(web_actions::Browser),
+}
+
+/// How many recent pages are read (a full line is at most this).
+const RECENT_MAX: usize = 24;
 
 impl Actions {
     /// The Uninstall action's place in `list`.
@@ -375,6 +460,11 @@ impl Actions {
     /// How many cells the app's row has (the app and its actions).
     fn row(&self) -> usize {
         self.list.len() + 1
+    }
+
+    /// Whether the row is a site's search (no app alone).
+    fn searching(&self) -> bool {
+        self.app.is_none() && self.list.first().is_some_and(|a| matches!(a.does, Does::Open(_)))
     }
 }
 
@@ -411,7 +501,12 @@ impl App {
     /// Where the lone app stands in its row (the cell under the title),
     /// while one is alone.
     pub(crate) fn lone_anchor(&self) -> Option<usize> {
-        self.search.actions.app.as_ref().map(|_| self.search.actions.left)
+        let a = &self.search.actions;
+        match &a.app {
+            Some(_) => Some(a.left),
+            // (A site's search stands alone in its row, in the middle.)
+            None => a.searching().then_some(0),
+        }
     }
 
     /// The room opened under the app's row while it has recents.
@@ -434,6 +529,17 @@ impl App {
     /// windows' on the left, its recents under it. The same app keeps its
     /// asking; another starts afresh.
     pub(crate) fn add_action_cells(&mut self, apps: &mut Vec<usize>, resting: bool) {
+        // A site's search asked by its name: its cell first, no app alone —
+        // unless what is typed begins an app's name ("google maps", "youtube
+        // music" are apps to find, not searches).
+        if !resting && !self.control_panel {
+            if let Some((site, words)) = web_actions::asked(&self.search.query) {
+                if !self.begins_a_name(&self.search.query) {
+                    self.add_search_cell(apps, site, &words);
+                    return;
+                }
+            }
+        }
         let lone = match apps.as_slice() {
             &[only] if !resting && !self.control_panel && !self.search.query.is_empty() => Some(only),
             _ => None,
@@ -458,6 +564,17 @@ impl App {
             does: Does::Run(k.exec.to_owned()),
             symbol: symbol(k.symbol),
         }));
+        // A webapp: the pages Golem knows its site has, in its window.
+        let source = source_of(&entry);
+        if let Some(Source::Site(site, slug)) = &source {
+            let start = webapps::exec_app_url(&entry.exec).and_then(web_actions::origin).map(|(o, _)| o);
+            let start = start.unwrap_or_else(|| site.hosts.first().map(|h| format!("https://{h}")).unwrap_or_default());
+            right.extend(site.links.iter().map(|l| Action {
+                name: tr(l.name).to_string(),
+                does: Does::Run(webapps::app_open_exec(slug, &web_actions::link_url(l, &start))),
+                symbol: symbol(l.symbol),
+            }));
+        }
         if self.can_uninstall(&entry.id) {
             right.push(Action {
                 name: fill(tr("Uninstall {app}"), &[("app", &entry.name)]),
@@ -484,6 +601,7 @@ impl App {
             left: n_left,
             cols,
             armed,
+            web: source.is_some(),
             ..Default::default()
         };
         let (placeholder, layer) = (
@@ -511,23 +629,215 @@ impl App {
         }
         let cells = &self.search.actions.cells;
         *apps = cells[..n_left].iter().copied().chain([index]).chain(cells[n_left..].iter().copied()).collect();
-        // Under it: what it opened lately, opened again in it by a click.
-        for path in recent_for(&entry, cols) {
-            let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
-            let exec = format!("{} {}", entry.exec, launch::shell_quote(&path.to_string_lossy()));
-            let at = self.push_transient_file(&path.to_string_lossy(), &name, exec, path.is_dir());
-            self.search.actions.recents.push(at);
-            apps.push(at);
+        // Under it: what it opened lately, opened again in it by a click —
+        // a webapp's or a browser's pages, else files.
+        match source {
+            Some(source) => {
+                for page in self.web_recents(&entry.id, &source).into_iter().take(cols) {
+                    let exec = match &source {
+                        Source::Site(_, slug) => webapps::app_open_exec(slug, &page.url),
+                        Source::Browser(_) => format!("{} {}", entry.exec, launch::shell_quote(&page.url)),
+                    };
+                    let at = self.push_web_recent(page, exec, (placeholder, layer));
+                    self.search.actions.recents.push(at);
+                    apps.push(at);
+                }
+            }
+            None => {
+                for path in recent_for(&entry, cols) {
+                    let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+                    let exec = format!("{} {}", entry.exec, launch::shell_quote(&path.to_string_lossy()));
+                    let at = self.push_transient_file(&path.to_string_lossy(), &name, exec, path.is_dir());
+                    self.search.actions.recents.push(at);
+                    apps.push(at);
+                }
+            }
         }
         if !self.search.actions.recents.is_empty() {
             self.search.actions.title = Some(fill(tr("Recent in {app}"), &[("app", &entry.name)]));
         }
     }
 
+    /// Whether `query` begins the name of an app (installed, or one of the
+    /// catalog's webapps).
+    fn begins_a_name(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        let base = &self.entries[..self.base_len.min(self.entries.len())];
+        base.iter().zip(&self.kinds).any(|(e, k)| *k == apps::EntryKind::App && e.name.to_lowercase().starts_with(&q))
+    }
+
+    /// The search of `site` for `words` as the first of Apps, selected: its
+    /// webapp's icon (installed or in the catalog, else Seam's) with the
+    /// search's symbol; Enter opens it in the webapp when it is installed,
+    /// else in Seam.
+    fn add_search_cell(&mut self, apps: &mut Vec<usize>, site: &'static web_actions::Site, words: &str) {
+        self.search.actions = Actions::default();
+        let id = webapps::id_for_slug(site.slug);
+        let base = &self.entries[..self.base_len.min(self.entries.len())];
+        let webapp = base.iter().position(|e| e.id == id);
+        let opener = webapp.filter(|&i| !self.is_catalog_webapp(i));
+        let start = opener.and_then(|i| webapps::exec_app_url(&base[i].exec));
+        let Some(url) = web_actions::search_url_from(site, words, start) else {
+            return;
+        };
+        let exec = match opener {
+            Some(_) => webapps::app_open_exec(site.slug, &url),
+            None => format!("seam {}", launch::shell_quote(&url)),
+        };
+        let looks = webapp.or_else(|| base.iter().position(|e| program(&e.exec) == "seam"));
+        let (placeholder, layer) = looks.map_or((true, 0), |i| {
+            (self.placeholders.get(i).copied().unwrap_or(true), self.icon_layers.get(i).copied().unwrap_or(0))
+        });
+        // (On two lines: the site, then the words — whole, as the box has room.)
+        let name = format!("{}\n{}", fill(tr("Search {site}"), &[("site", &site.name)]), fill(tr("“{words}”"), &[("words", &words)]));
+        info!("search cell: {name} → {url}");
+        self.search.actions = Actions {
+            list: vec![Action { name, does: Does::Open(exec.clone()), symbol: symbol("search") }],
+            opener,
+            web: true,
+            cols: self.apps_cols(),
+            ..Default::default()
+        };
+        let cell = AppEntry {
+            id: format!("{PREFIX}0"),
+            name: self.action_label(0),
+            description: None,
+            exec,
+            icon: looks.and_then(|i| self.entries[i].icon.clone()),
+            startup_wm_class: None,
+            needs_terminal: false,
+            path: None,
+        };
+        let at = self.push_transient(cell, apps::EntryKind::App, placeholder, layer);
+        self.search.actions.cells.push(at);
+        apps.insert(0, at);
+    }
+
+    /// The recent pages of app `id` from `source`: those read lately, and a
+    /// reading asked for off the loop when they are not fresh (the row is
+    /// laid out again when it brings something new while the app is still
+    /// alone).
+    fn web_recents(&mut self, id: &str, source: &Source) -> Vec<web_actions::Recent> {
+        let got = self.search.web.got.get(id).cloned();
+        let fresh = got.as_ref().is_some_and(|(at, _)| at.elapsed() < web_actions::FRESH);
+        if !fresh && self.search.web.asking.insert(id.to_owned()) {
+            let (key, source) = (id.to_owned(), source.clone());
+            self.desktop_off_loop(
+                move || match &source {
+                    Source::Site(site, _) => web_actions::site_recents(site, RECENT_MAX),
+                    Source::Browser(browser) => web_actions::browser_recents(browser, RECENT_MAX),
+                },
+                move |app, pages| {
+                    app.search.web.asking.remove(&key);
+                    info!("web recents of {key}: {}", pages.len());
+                    let new = app.search.web.got.get(&key).is_none_or(|(_, old)| *old != pages);
+                    app.search.web.got.insert(key.clone(), (Instant::now(), pages));
+                    if new && app.search.actions.app.as_deref() == Some(key.as_str()) {
+                        // The app's row is the same: the keys stay where they were on it.
+                        let (sel, row) = (app.search.selected, app.search.actions.row());
+                        app.refilter();
+                        if let Some(sel) = sel.filter(|&s| s < row && app.search.actions.app.as_deref() == Some(key.as_str())) {
+                            app.search.selected = Some(sel);
+                        }
+                        app.schedule_frame();
+                    }
+                },
+            );
+        }
+        got.map(|(_, pages)| pages).unwrap_or_default()
+    }
+
+    /// A recent page's cell: its picture once the thumbnailer has it (the
+    /// app's own icon meanwhile, and without one), its title as its name.
+    fn push_web_recent(&mut self, page: web_actions::Recent, exec: String, (placeholder, layer): (bool, u32)) -> usize {
+        let (mut placeholder, mut layer) = (placeholder, layer);
+        let id = match &page.picture {
+            Some(picture) => {
+                let path = picture.to_string_lossy().into_owned();
+                if let Some(&(slot, _)) = self.thumb_map.get(&path) {
+                    layer = self.thumb_layer_base() + slot as u32;
+                    placeholder = false;
+                } else if self.thumb_pending.insert(path.clone()) {
+                    self.thumbs.request(&path);
+                }
+                path
+            }
+            None => format!("web:{}", page.url),
+        };
+        let cell = AppEntry {
+            id,
+            name: page.title,
+            description: None,
+            exec,
+            icon: None,
+            startup_wm_class: None,
+            needs_terminal: false,
+            path: None,
+        };
+        self.push_transient(cell, apps::EntryKind::File, placeholder, layer)
+    }
+
+    /// Whether entry `index` is one of the lone app's recents.
+    pub(crate) fn lone_recent(&self, index: usize) -> bool {
+        self.search.actions.recents.contains(&index)
+    }
+
+    /// Open recent `index` in the lone app: a page in a webapp's or a
+    /// browser's window, which comes forward; a file as it always opened.
+    pub(crate) fn run_recent(&mut self, index: usize) {
+        let Some(exec) = self.entries.get(index).map(|e| e.exec.clone()) else {
+            return;
+        };
+        info!("opening a recent of {:?}", self.search.actions.app);
+        if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+            error!("recent failed to open: {e:#}");
+        }
+        let app = self.search.actions.app.clone().and_then(|id| self.entries.iter().position(|e| e.id == id));
+        match app {
+            Some(app) if self.search.actions.web => self.web_opened(app),
+            _ => self.launched(index),
+        }
+    }
+
+    /// After a page was asked of app `index`'s window: that window comes
+    /// forward (Seam loads it there but cannot raise it on Wayland), else
+    /// the app starts as any other.
+    fn web_opened(&mut self, index: usize) {
+        let windows = self.running.get(&index).cloned().unwrap_or_default();
+        let shown = windows.iter().find(|a| !self.parked_windows.contains(*a)).cloned();
+        let parked = windows.first().filter(|a| self.parked_windows.contains(*a)).cloned();
+        if shown.is_none() && parked.is_none() {
+            self.launched(index);
+            return;
+        }
+        if let Some(id) = self.entries.get(index).map(|e| e.id.clone()) {
+            self.usage.increment(&id);
+        }
+        if self.interactive {
+            self.begin_keyboard_handback(KbSurface::Launcher, shown.clone());
+            surface::set_interactive(&self.layer, false);
+            self.interactive = false;
+        } else if let Some(addr) = &shown {
+            hypr::focus_window(addr);
+        }
+        if let (None, Some(addr)) = (&shown, &parked) {
+            self.restore_minimized(addr);
+        }
+        self.dismiss();
+    }
+
     /// The lone app's display slots (`refilter`, after the search's dense
     /// ones): its row from the first slot, its recents from the second row.
     pub(crate) fn lone_slots(&mut self) {
         let a = &self.search.actions;
+        if a.searching() {
+            // The search alone in the first row; the apps found from the next.
+            let n = self.search.visible[content::SECTION_APPS].len();
+            let cols = a.cols.max(1);
+            self.apps_slots = (0..n).map(|i| if i == 0 { 0 } else { cols + i - 1 }).collect();
+            self.apps_span = self.apps_slots.last().map_or(0, |s| s + 1);
+            return;
+        }
         if a.app.is_none() {
             return;
         }
@@ -554,12 +864,17 @@ impl App {
         };
         let layout = self.layout_at(self.ui.extent_of(crate::state::Target::Open));
         let sec = &layout.sections[content::SECTION_APPS];
-        let room = sec.viewport.w / sec.cols.max(1) as f32 - 12.0;
+        let spread = if a.searching() { WIDE_LABEL } else { 1.0 };
+        let room = sec.viewport.w / sec.cols.max(1) as f32 * spread - 12.0;
         let mut measure = |s: &str| match self.renderer.as_mut() {
             Some(r) => r.measure_text(s, content::LABEL_FONT_PX, None),
             None => crate::options::est_text_w(s, content::LABEL_FONT_PX),
         };
-        let (first, second) = by_words(&text, room, &mut measure);
+        // A name of two lines already (a search's) keeps them, each fitted.
+        let (first, second) = match text.split_once('\n') {
+            Some((a, b)) => (crate::desktop::fit_label(a, room, &mut measure), crate::desktop::fit_label(b, room, &mut measure)),
+            None => by_words(&text, room, &mut measure),
+        };
         if second.is_empty() {
             first
         } else {
@@ -580,15 +895,17 @@ impl App {
     }
 
     /// What the frame draws of them: each action cell's entry with its
-    /// symbol's texture layer, and the cell asking to be sure.
-    pub(crate) fn action_draw(&self) -> (Vec<(usize, u32)>, Option<usize>) {
+    /// symbol's texture layer, the cell asking to be sure, and the one whose
+    /// name may spread (a search's).
+    pub(crate) fn action_draw(&self) -> (Vec<(usize, u32)>, Option<usize>, Option<usize>) {
         let a = &self.search.actions;
         let Some(base) = self.act_symbol_layer else {
-            return (Vec::new(), None);
+            return (Vec::new(), None, None);
         };
         let cells = a.cells.iter().zip(&a.list).map(|(&e, act)| (e, base + act.symbol as u32)).collect();
         let asking = a.uninstall().filter(|_| a.armed.is_some()).and_then(|u| a.cells.get(u).copied());
-        (cells, asking)
+        let wide = a.cells.first().copied().filter(|_| a.searching());
+        (cells, asking, wide)
     }
 
     /// The dock box's keys, first, while an app is alone: Escape puts an
@@ -692,6 +1009,17 @@ impl App {
         let Some(action) = self.search.actions.list.get(n).cloned() else {
             return;
         };
+        if let Does::Open(exec) = &action.does {
+            info!("searching: {}", action.name);
+            if let Err(e) = launch::launch(exec, false, &self.config.launch.terminal) {
+                error!("search failed to open: {e:#}");
+            }
+            match self.search.actions.opener {
+                Some(webapp) => self.web_opened(webapp),
+                None => self.lone_leave(),
+            }
+            return;
+        }
         let Some(app) = self.search.actions.app.clone() else {
             return;
         };
@@ -707,7 +1035,11 @@ impl App {
                 if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
                     error!("app action failed for {app}: {e:#}");
                 }
-                self.launched(index);
+                if self.search.actions.web {
+                    self.web_opened(index);
+                } else {
+                    self.launched(index);
+                }
             }
             Does::ShowAll => {
                 let class = hypr::running_windows().into_iter().find(|w| windows.contains(&w.address)).map(|w| w.class);
@@ -721,6 +1053,8 @@ impl App {
                     None => warn!("no window of {app} to show"),
                 }
             }
+            // (Taken before: it needs no app.)
+            Does::Open(_) => {}
             Does::CloseAll => {
                 info!("closing every window of {app} ({})", windows.len());
                 for addr in &windows {
@@ -810,6 +1144,10 @@ mod tests {
         assert_eq!(by_words("New Window", room, &mut w), ("New Window".into(), String::new()));
         assert_eq!(by_words("New Incognito Window", room, &mut w), ("New Incognito".into(), "Window".into()));
         assert_eq!(by_words("Uninstall Google Chrome", room, &mut w), ("Uninstall".into(), "Google Chrome".into()));
+        // One word too long: broken with a hyphen.
+        let (first, second) = by_words("Subscriptionsxxxxx", room, &mut w);
+        assert!(first.ends_with('-') && w(&first) <= room - crate::desktop::FIT_SLACK, "{first}");
+        assert_eq!(format!("{}{second}", first.trim_end_matches('-')), "Subscriptionsxxxxx");
     }
 
     #[test]
