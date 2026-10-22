@@ -1115,13 +1115,21 @@ The big daemon files are cohesive but long — go straight to the function:
   2026-10-22: "constrúilos todos"): U up (`..`; nothing at `/`), N a new folder with its name typed (the
   zones ask or refuse as ever), F the search, G the first thing and Shift+G the last (plain moves, not
   visual mode), I the i card, H hidden files (the eye's own state), L grid ↔ list, T a tab on this folder
-  and Shift+T closes it (nothing on the last). The letters and their words are `chrome::KEYS` (Spanish
+  and Shift+T closes it (nothing on the last); AND MORE: `/` Golem Disk (it no longer opens the path
+  field while the mode is on — ✎ and Ctrl+L still do, mode or not), `.` Home, 1…9 the steps of the path
+  line AS SHOWN (`Hits::crumbs`: inside Home 1 = the owner's name; outside, 1 = Golem Disk; past the last
+  does nothing), ← → the tabs round (↑ ↓ walk as ever), `?` THE SHORTCUTS TABLE (`filer/shortcuts.rs`,
+  `filer_shortcuts`; also a right click on the keyboard button, mode on or off): the confirmation's
+  material centred over the window, ~520 wide, two columns cut where they balance, a key cap and the
+  words a row under "Keyboard mode" and "Always"; `?`, Escape or any press puts it away, and nothing else
+  answers meanwhile. The letters and their words are `chrome::KEYS` (Spanish
   in es.json; said in the log as the mode turns on — the button's words once the top line's buttons are
   named: `keys_words`). No other letter types and nothing searches by itself (Ctrl+F and the magnifier
   still do). A field that is up (search, path,
   name, a menu's search) and a menu take their keys first, as before; Alt+W/A/S/D/Q/E still work with it
   off. Quiet: the pressed button is the only sign. Rig: `files keymode on|off`, `files where keys`,
-  `files key w|a|s|d|e|q|z|x|c|v|r|u|n|f|g|G|i|h|l|t|T` (the state names the cursor's thing, the search,
+  `files key w|a|s|d|e|q|z|x|c|v|r|u|n|f|g|G|i|h|l|t|T|slash|period|question|1|2|3|9|left|right`,
+  `files key ctrl l` (the state names the cursor's thing, the search,
   the i card, hidden, list, the tabs). Buttons 22×20, 12 px
   symbols — the mockup's own strokes written as SVGs into `~/.cache/waverunner/files-glyphs/` once
   (`chrome::write_glyphs`, `glyph`) and read by the icon loader by path, washed with their colour
