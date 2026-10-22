@@ -6970,7 +6970,7 @@ impl CompositorHandler for App {
         // Route by surface. A dissolve's still asks for one frame: the one
         // that shows it.
         if self.is_dissolve_surface(surface) {
-            self.dissolve_covered();
+            self.dissolve_covered(surface);
             return;
         }
         // A file window's.
@@ -7183,7 +7183,7 @@ impl App {
         // with its own renderer and draw path; everything below is the
         // dock/card.
         if self.is_dissolve_surface(layer.wl_surface()) {
-            self.configure_dissolve(configure);
+            self.configure_dissolve(layer.wl_surface(), configure);
             return;
         }
         if self.is_veil_surface(layer.wl_surface()) {

@@ -21,6 +21,10 @@
 //!
 //! What is seen is one dissolve from the old screen to the new.
 //!
+//! The same, slower, carries the LIGHT across its two looks
+//! (`dissolve_slow`, `lighting.rs`): a still on EVERY screen, held while the
+//! apps take their new colours, faded out over 2.5 s.
+//!
 //! **Under the still, nothing glides.** The compositor slides every layer
 //! surface to its new place when a monitor is re-arranged (`layers`
 //! animation, ~0.4 s) and tiled windows fly to their new sizes; our own card
@@ -134,21 +138,25 @@ enum Stage {
     Mapping,
     /// The still is committed; waiting for the frame that shows it.
     Presenting,
-    /// On the screen, the change made under it.
+    /// On the screen.
+    Shown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Phase {
+    /// The stills are being put up.
+    Preparing,
+    /// Every still is up, the change made under them.
     Covered,
     Fading(Instant),
 }
 
-/// A dissolve in flight.
-pub(crate) struct Dissolve {
-    /// Tells this run's timers from a later run's.
-    id: u64,
+/// One screen's still.
+struct Still {
     output: WlOutput,
-    /// The scale `then` sets (the still's size after it is worked out from it).
-    new_scale: f64,
-    then: Option<Then>,
-    /// The light's slow pace (`SLOW_HOLD`, `SLOW_FADE`), not a scale's.
-    slow: bool,
+    /// The scale the output is about to have (the still's size is worked out
+    /// from it before the change); None: it keeps its own.
+    new_scale: Option<f64>,
     stage: Stage,
     frame: Option<ZwlrScreencopyFrameV1>,
     /// Whether the engine was told a capture of ours is running.
@@ -164,10 +172,28 @@ pub(crate) struct Dissolve {
     alpha: Option<WpAlphaModifierSurfaceV1>,
 }
 
-impl Dissolve {
-    /// Take everything down. The surface goes first, so the buffer is no
-    /// longer in use when it is destroyed.
-    fn teardown(mut self) -> Option<Then> {
+impl Still {
+    fn new(output: WlOutput, new_scale: Option<f64>, frame: ZwlrScreencopyFrameV1) -> Self {
+        Self {
+            output,
+            new_scale,
+            stage: Stage::Shooting,
+            frame: Some(frame),
+            capturing: true,
+            pool: None,
+            buffer: None,
+            px: (0, 0),
+            format: wl_shm::Format::Xrgb8888,
+            y_invert: false,
+            layer: None,
+            viewport: None,
+            alpha: None,
+        }
+    }
+
+    /// Take it down. The surface goes first, so the buffer is no longer in
+    /// use when it is destroyed.
+    fn teardown(mut self) {
         if self.capturing {
             options_engine::end_self_capture();
         }
@@ -184,7 +210,41 @@ impl Dissolve {
         if let Some(buffer) = self.buffer.take() {
             buffer.destroy();
         }
+    }
+}
+
+/// A dissolve in flight: a still on each screen it covers (the screen whose
+/// scale changes; every screen for the light's look).
+pub(crate) struct Dissolve {
+    /// Tells this run's timers from a later run's.
+    id: u64,
+    then: Option<Then>,
+    /// The light's slow pace (`SLOW_HOLD`, `SLOW_FADE`), not a scale's.
+    slow: bool,
+    phase: Phase,
+    stills: Vec<Still>,
+}
+
+impl Dissolve {
+    /// Take every still down; what was to be done under them, if not done.
+    fn teardown(mut self) -> Option<Then> {
+        for still in self.stills.drain(..) {
+            still.teardown();
+        }
         self.then.take()
+    }
+
+    fn of_frame(&self, frame: &ZwlrScreencopyFrameV1) -> Option<usize> {
+        self.stills.iter().position(|s| s.frame.as_ref() == Some(frame))
+    }
+
+    fn of_surface(&self, surface: &WlSurface) -> Option<usize> {
+        self.stills.iter().position(|s| s.layer.as_ref().is_some_and(|l| l.wl_surface() == surface))
+    }
+
+    /// Every still left is on its screen.
+    fn all_shown(&self) -> bool {
+        self.stills.iter().all(|s| s.stage == Stage::Shown)
     }
 }
 
@@ -214,55 +274,48 @@ impl App {
     /// under a still of the screen, and dissolve to the result. Without the
     /// means to (or with motion reduced) `then` just runs.
     pub(crate) fn dissolve(&mut self, output_name: &str, new_scale: f64, then: Then) {
-        self.dissolve_paced(output_name, new_scale, then, false);
+        let over = self.output_by_name(output_name).map(|o| vec![(o, Some(new_scale))]).unwrap_or_default();
+        self.dissolve_over(over, then, false);
     }
 
-    /// [`dissolve`] at the light's pace: held a moment longer for the apps
-    /// to take their new look under the still, then faded out slowly.
-    pub(crate) fn dissolve_slow(&mut self, output_name: &str, new_scale: f64, then: Then) {
-        self.dissolve_paced(output_name, new_scale, then, true);
+    /// The light's dissolve: `then` — a change of the look, of no screen's
+    /// size — under a still of EVERY screen, held a moment longer for the
+    /// apps to take their new look, then faded out slowly (a screen left
+    /// bare was a cut in one frame — Max, 2026-10-21: "no jumps at all").
+    pub(crate) fn dissolve_slow(&mut self, then: Then) {
+        let over = self.output_state.outputs().map(|o| (o, None)).collect();
+        self.dissolve_over(over, then, true);
     }
 
-    fn dissolve_paced(&mut self, output_name: &str, new_scale: f64, then: Then, slow: bool) {
+    fn dissolve_over(&mut self, over: Vec<(WlOutput, Option<f64>)>, then: Then, slow: bool) {
         // A second change while one dissolves: the first is finished at once.
         self.dissolve_end();
         let ready = !crate::animation::reduce_motion()
             && self.veil.viewporter.is_some()
             && self.veil.alpha.is_some()
-            && self.shm.is_some();
-        let (true, Some(mgr), Some(output)) = (ready, self.screencopy.clone(), self.output_by_name(output_name))
-        else {
+            && self.shm.is_some()
+            && !over.is_empty();
+        let (true, Some(mgr)) = (ready, self.screencopy.clone()) else {
             then(self);
             return;
         };
         self.dissolve_runs += 1;
         let id = self.dissolve_runs;
-        // Ours, not a screen share (see `start_options_capture`).
-        options_engine::begin_self_capture();
-        let frame = mgr.capture_output(0, &output, &self.qh, Shot);
-        self.dissolve = Some(Dissolve {
-            id,
-            output,
-            new_scale,
-            then: Some(then),
-            slow,
-            stage: Stage::Shooting,
-            frame: Some(frame),
-            capturing: true,
-            pool: None,
-            buffer: None,
-            px: (0, 0),
-            format: wl_shm::Format::Xrgb8888,
-            y_invert: false,
-            layer: None,
-            viewport: None,
-            alpha: None,
-        });
-        // Not covered in time: make the change bare rather than late.
+        let stills = over
+            .into_iter()
+            .map(|(output, new_scale)| {
+                // Ours, not a screen share (see `start_options_capture`).
+                options_engine::begin_self_capture();
+                let frame = mgr.capture_output(0, &output, &self.qh, Shot);
+                Still::new(output, new_scale, frame)
+            })
+            .collect();
+        self.dissolve = Some(Dissolve { id, then: Some(then), slow, phase: Phase::Preparing, stills });
+        // Not covered in time: what is up covers its screen, and the change
+        // is made rather than late.
         self.dissolve_timer(id, COVER_DEADLINE, |app| {
-            if app.dissolve.as_ref().is_some_and(|d| matches!(d.stage, Stage::Shooting | Stage::Mapping | Stage::Presenting)) {
-                warn!("dissolve: the still was not up in time; changing without it");
-                app.dissolve_end();
+            if app.dissolve.as_ref().is_some_and(|d| d.phase == Phase::Preparing) {
+                app.dissolve_cover_late();
             }
         });
         let cap = if slow { HARD_CAP + SLOW_HOLD + SLOW_FADE } else { HARD_CAP };
@@ -287,13 +340,13 @@ impl App {
         }
     }
 
-    /// End the dissolve now: the still goes, and what was to be done under
-    /// it is done if it has not been.
+    /// End the dissolve now: the stills go, and what was to be done under
+    /// them is done if it has not been.
     pub(crate) fn dissolve_end(&mut self) {
         if let Some(d) = self.dissolve.take() {
-            // The still was up: motion is given back, ours and the
+            // The stills were up: motion is given back, ours and the
             // compositor's.
-            if matches!(d.stage, Stage::Covered | Stage::Fading(_)) {
+            if d.phase != Phase::Preparing {
                 crate::animation::set_reduce_motion(self.config.accessibility.reduce_motion);
                 still_rules(false);
             }
@@ -303,24 +356,25 @@ impl App {
         }
     }
 
-    /// Whether `surface` is the still's.
+    /// Whether `surface` is a still's.
     pub(crate) fn is_dissolve_surface(&self, surface: &WlSurface) -> bool {
-        self.dissolve
-            .as_ref()
-            .and_then(|d| d.layer.as_ref())
-            .is_some_and(|l| l.wl_surface() == surface)
+        self.dissolve.as_ref().is_some_and(|d| d.of_surface(surface).is_some())
     }
 
     /// The capture's `buffer` event: somewhere for the frame to go.
-    fn dissolve_shot_buffer(&mut self, format: WEnum<wl_shm::Format>, width: u32, height: u32, stride: u32) {
+    fn dissolve_shot_buffer(&mut self, frame: &ZwlrScreencopyFrameV1, format: WEnum<wl_shm::Format>, width: u32, height: u32, stride: u32) {
         let (Some(d), Some(shm)) = (self.dissolve.as_mut(), self.shm.as_ref()) else {
             return;
         };
+        let Some(i) = d.of_frame(frame) else {
+            return;
+        };
+        let s = &mut d.stills[i];
         let WEnum::Value(format) = format else {
             return;
         };
         let len = (height as usize).saturating_mul(stride as usize);
-        if d.buffer.is_some() || !supported_format(format) || len == 0 {
+        if s.buffer.is_some() || !supported_format(format) || len == 0 {
             return;
         }
         let mut pool = match RawPool::new(len, shm) {
@@ -331,38 +385,40 @@ impl App {
             }
         };
         let buffer = pool.create_buffer(0, width as i32, height as i32, stride as i32, format, (), &self.qh);
-        if let Some(frame) = &d.frame {
-            frame.copy(&buffer);
-        }
-        d.pool = Some(pool);
-        d.buffer = Some(buffer);
-        d.px = (width, height);
-        d.format = format;
+        frame.copy(&buffer);
+        s.pool = Some(pool);
+        s.buffer = Some(buffer);
+        s.px = (width, height);
+        s.format = format;
     }
 
-    /// The capture is in the buffer: lay it over the screen.
-    fn dissolve_shot_ready(&mut self) {
+    /// A capture is in its buffer: lay it over its screen.
+    fn dissolve_shot_ready(&mut self, frame: &ZwlrScreencopyFrameV1) {
         let output = {
             let Some(d) = self.dissolve.as_mut() else {
                 return;
             };
-            if d.capturing {
+            let Some(i) = d.of_frame(frame) else {
+                return;
+            };
+            let s = &mut d.stills[i];
+            if s.capturing {
                 options_engine::end_self_capture();
-                d.capturing = false;
+                s.capturing = false;
             }
-            if d.stage != Stage::Shooting || d.buffer.is_none() {
+            if s.stage != Stage::Shooting || s.buffer.is_none() {
                 return;
             }
             // A format with an alpha channel: the capture's alpha is not
             // ours to trust, and the still must hide what is under it.
-            if !opaque_format(d.format) {
-                if let Some(pool) = d.pool.as_mut() {
+            if !opaque_format(s.format) {
+                if let Some(pool) = s.pool.as_mut() {
                     for px in pool.mmap().chunks_exact_mut(4) {
                         px[3] = 0xFF;
                     }
                 }
             }
-            d.output.clone()
+            s.output.clone()
         };
         // The still appears at once and whole: a map animation would show
         // the screen sliding or fading over itself.
@@ -391,13 +447,39 @@ impl App {
         layer.wl_surface().set_input_region(Some(region.wl_region()));
         layer.commit();
         if let Some(d) = self.dissolve.as_mut() {
-            d.layer = Some(layer);
-            d.stage = Stage::Mapping;
+            if let Some(i) = d.of_frame(frame) {
+                d.stills[i].layer = Some(layer);
+                d.stills[i].stage = Stage::Mapping;
+            }
         }
     }
 
-    /// A `configure` for the still's surface.
-    pub(crate) fn configure_dissolve(&mut self, configure: LayerSurfaceConfigure) {
+    /// A capture failed: that screen goes without a still; with none left,
+    /// the change is made bare.
+    fn dissolve_shot_failed(&mut self, frame: &ZwlrScreencopyFrameV1) {
+        let (none, ready) = {
+            let Some(d) = self.dissolve.as_mut() else {
+                return;
+            };
+            let Some(i) = d.of_frame(frame) else {
+                return;
+            };
+            d.stills.remove(i).teardown();
+            (d.stills.is_empty(), d.phase == Phase::Preparing && d.all_shown())
+        };
+        if none {
+            warn!("dissolve: the capture failed; changing without it");
+            self.dissolve_end();
+        } else {
+            warn!("dissolve: a screen's capture failed; that screen changes without its still");
+            if ready {
+                self.dissolve_cover();
+            }
+        }
+    }
+
+    /// A `configure` for a still's surface.
+    pub(crate) fn configure_dissolve(&mut self, wl: &WlSurface, configure: LayerSurfaceConfigure) {
         let (w, h) = configure.new_size;
         let qh = self.qh.clone();
         let (Some(d), Some(viewporter), Some(alpha)) =
@@ -405,23 +487,27 @@ impl App {
         else {
             return;
         };
-        let Some(layer) = d.layer.as_ref() else {
+        let Some(i) = d.of_surface(wl) else {
+            return;
+        };
+        let s = &mut d.stills[i];
+        let Some(layer) = s.layer.as_ref() else {
             return;
         };
         if w == 0 || h == 0 {
             return;
         }
         let surface = layer.wl_surface();
-        if d.stage != Stage::Mapping {
+        if s.stage != Stage::Mapping {
             // The output's logical size changed under the still (our own
             // doing): keep covering it.
-            if let Some(viewport) = &d.viewport {
+            if let Some(viewport) = &s.viewport {
                 viewport.set_destination(w as i32, h as i32);
             }
             surface.commit();
             return;
         }
-        let Some(buffer) = d.buffer.as_ref() else {
+        let Some(buffer) = s.buffer.as_ref() else {
             return;
         };
         // The still's pixels are the screen's pixels: shown at the output's
@@ -431,35 +517,81 @@ impl App {
         let alpha = alpha.get_surface(surface, &qh, ());
         alpha.set_multiplier(u32::MAX);
         surface.set_buffer_scale(1);
-        if d.y_invert {
+        if s.y_invert {
             surface.set_buffer_transform(wl_output::Transform::Flipped180);
         }
         surface.attach(Some(buffer), 0, 0);
-        surface.damage_buffer(0, 0, d.px.0 as i32, d.px.1 as i32);
-        // The frame that shows it is the cue to make the change.
+        surface.damage_buffer(0, 0, s.px.0 as i32, s.px.1 as i32);
+        // The frame that shows it is its cue.
         surface.frame(&qh, surface.clone());
         surface.commit();
-        d.viewport = Some(viewport);
-        d.alpha = Some(alpha);
-        d.stage = Stage::Presenting;
+        s.viewport = Some(viewport);
+        s.alpha = Some(alpha);
+        s.stage = Stage::Presenting;
     }
 
-    /// The still is on the screen: make the change under it.
-    pub(crate) fn dissolve_covered(&mut self) {
+    /// A still is on its screen; once every one is, the change is made.
+    pub(crate) fn dissolve_covered(&mut self, wl: &WlSurface) {
+        let ready = {
+            let Some(d) = self.dissolve.as_mut() else {
+                return;
+            };
+            let Some(i) = d.of_surface(wl) else {
+                return;
+            };
+            if d.stills[i].stage != Stage::Presenting {
+                return;
+            }
+            d.stills[i].stage = Stage::Shown;
+            d.phase == Phase::Preparing && d.all_shown()
+        };
+        if ready {
+            self.dissolve_cover();
+        }
+    }
+
+    /// The deadline came with stills still on their way: the ones up cover
+    /// their screens and the change is made; with none up, it is made bare.
+    fn dissolve_cover_late(&mut self) {
+        let none = {
+            let Some(d) = self.dissolve.as_mut() else {
+                return;
+            };
+            let (shown, late): (Vec<Still>, Vec<Still>) = d.stills.drain(..).partition(|s| s.stage == Stage::Shown);
+            d.stills = shown;
+            for still in late {
+                still.teardown();
+            }
+            d.stills.is_empty()
+        };
+        if none {
+            warn!("dissolve: the still was not up in time; changing without it");
+            self.dissolve_end();
+        } else {
+            warn!("dissolve: a screen's still was not up in time; that screen changes without it");
+            self.dissolve_cover();
+        }
+    }
+
+    /// The stills are up: make the change under them.
+    fn dissolve_cover(&mut self) {
         let (id, then, slow) = {
             let Some(d) = self.dissolve.as_mut() else {
                 return;
             };
-            if d.stage != Stage::Presenting {
+            if d.phase != Phase::Preparing {
                 return;
             }
-            d.stage = Stage::Covered;
-            // The size the still has at the new scale, committed before the
-            // change is asked for: both land in the compositor's next frame.
-            let (w, h) = logical(d.px, d.new_scale);
-            if let (Some(viewport), Some(layer)) = (&d.viewport, &d.layer) {
-                viewport.set_destination(w, h);
-                layer.wl_surface().commit();
+            d.phase = Phase::Covered;
+            // The size a still has at its screen's new scale, committed
+            // before the change is asked for: both land in the compositor's
+            // next frame.
+            for s in &d.stills {
+                if let (Some(scale), Some(viewport), Some(layer)) = (s.new_scale, &s.viewport, &s.layer) {
+                    let (w, h) = logical(s.px, scale);
+                    viewport.set_destination(w, h);
+                    layer.wl_surface().commit();
+                }
             }
             (d.id, d.then.take(), d.slow)
         };
@@ -476,25 +608,30 @@ impl App {
         self.dissolve_timer(id, if slow { SLOW_HOLD } else { HOLD }, move |app| app.dissolve_fade(id));
     }
 
-    /// Fade the still out, a tick at a time, then take it down.
+    /// Fade the stills out, a tick at a time, then take them down.
     fn dissolve_fade(&mut self, id: u64) {
         let t = {
             let Some(d) = self.dissolve.as_mut() else {
                 return;
             };
-            let from = match d.stage {
-                Stage::Fading(from) => from,
+            let from = match d.phase {
+                Phase::Fading(from) => from,
                 _ => {
                     let now = Instant::now();
-                    d.stage = Stage::Fading(now);
+                    d.phase = Phase::Fading(now);
                     now
                 }
             };
             let fade = if d.slow { SLOW_FADE } else { FADE };
             let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
-            if let (true, Some(alpha), Some(layer)) = (t < 1.0, &d.alpha, &d.layer) {
-                alpha.set_multiplier((f64::from(opacity(t)) * f64::from(u32::MAX)) as u32);
-                layer.wl_surface().commit();
+            if t < 1.0 {
+                let multiplier = (f64::from(opacity(t)) * f64::from(u32::MAX)) as u32;
+                for s in &d.stills {
+                    if let (Some(alpha), Some(layer)) = (&s.alpha, &s.layer) {
+                        alpha.set_multiplier(multiplier);
+                        layer.wl_surface().commit();
+                    }
+                }
             }
             t
         };
@@ -516,24 +653,21 @@ impl Dispatch<ZwlrScreencopyFrameV1, Shot> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // A frame of a dissolve already ended.
-        if app.dissolve.as_ref().and_then(|d| d.frame.as_ref()) != Some(frame) {
+        // A frame of a dissolve already ended, or of a still let go.
+        let Some(i) = app.dissolve.as_ref().and_then(|d| d.of_frame(frame)) else {
             return;
-        }
+        };
         match event {
             zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
-                app.dissolve_shot_buffer(format, width, height, stride);
+                app.dissolve_shot_buffer(frame, format, width, height, stride);
             }
             zwlr_screencopy_frame_v1::Event::Flags { flags } => {
                 if let (Some(d), WEnum::Value(f)) = (app.dissolve.as_mut(), flags) {
-                    d.y_invert = f.bits() & 1 != 0;
+                    d.stills[i].y_invert = f.bits() & 1 != 0;
                 }
             }
-            zwlr_screencopy_frame_v1::Event::Ready { .. } => app.dissolve_shot_ready(),
-            zwlr_screencopy_frame_v1::Event::Failed => {
-                warn!("dissolve: the capture failed; changing without it");
-                app.dissolve_end();
-            }
+            zwlr_screencopy_frame_v1::Event::Ready { .. } => app.dissolve_shot_ready(frame),
+            zwlr_screencopy_frame_v1::Event::Failed => app.dissolve_shot_failed(frame),
             _ => {}
         }
     }

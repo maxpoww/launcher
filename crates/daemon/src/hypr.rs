@@ -1297,12 +1297,6 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // `workspacev2>>ID,NAME` — the space changed. Hand back
                         // the window that was left there, if the way in didn't
                         // (see [`crate::focus_cycle`]).
-                        // Something is moving on the screen: a window arriving,
-                        // the space turning. The one step the apps' look cannot
-                        // fade hides in it (`lighting.rs`).
-                        if name.starts_with("openwindow") || (name.starts_with("workspace") && !name.starts_with("workspacerule")) {
-                            app.lighting_motion();
-                        }
                         if name.starts_with("workspace") && !name.starts_with("workspacerule") {
                             if let Some(id) = line
                                 .split(">>")

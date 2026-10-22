@@ -53,12 +53,15 @@ pub(crate) const NIGHT: u8 = 20;
 /// The leap over the gap between the looks, in a fade that crosses it.
 const GAP: Duration = Duration::from_secs(2);
 /// The sun is looked at this often (seconds): tiny steps, never a jump
-/// (Max, 2026-10-20: "slow and smooth all the time").
-const SLOT_SECS: i64 = 600;
-/// THE HOLD (Max, 2026-10-20): the apps' look — the one step other
-/// people's programs cannot fade — waits for something already moving on the
-/// screen (a window opening, the space turning) and hides in it; this long at
-/// most, then it goes under a dissolve of the whole screen.
+/// (Max, 2026-10-20: "slow and smooth all the time"; 2026-10-21: "no jumps
+/// at all" — ten minutes let a step grow to three or more points, which the
+/// apps took in one frame).
+const SLOT_SECS: i64 = 120;
+/// THE HOLD: the apps' look — the one step other people's programs cannot
+/// fade — stays the old one through the dock's fade across the looks and
+/// turns under the slow dissolve at its end. Should that never come (a
+/// failure on the way), it goes at a quiet moment this long after at most.
+/// (Hiding it in a moment of motion, 2026-10-20, still showed.)
 const HOLD_MAX: Duration = Duration::from_secs(30 * 60);
 /// Away after this long without input; a quiet moment after this long.
 const AWAY_MS: u32 = 120_000;
@@ -71,8 +74,12 @@ const SETTLE_GRACE: Duration = Duration::from_secs(5);
 const TICK: Duration = Duration::from_secs(30);
 const FRAME: Duration = Duration::from_millis(66);
 const FADE: Duration = Duration::from_secs(20);
-/// A change smaller than this is not worth a fade.
-const MIN_STEP: u8 = 3;
+/// A change smaller than this is not worth a fade: one point of the line
+/// (~0.005 of lightness on the grounds, under what an eye sees change).
+const MIN_STEP: u8 = 1;
+/// The most the apps take in one frame. A bigger step (a return, the first
+/// look after a start) reaches them under the slow dissolve.
+const APPS_STEP: u8 = 2;
 /// The wall clock ran this much further than the monotonic one between two
 /// ticks: the computer slept (or its clock was set).
 const SLEPT_GAP: Duration = Duration::from_secs(20);
@@ -470,10 +477,6 @@ pub(crate) struct Lighting {
     owed: Option<(bool, Instant)>,
     /// The owner came back while a look was owed: it goes with their settling.
     returned: bool,
-    /// The owner came back from away since the last look: the next is a
-    /// catch-up in front of them. (Not a dock start: a restart is not a
-    /// return, and a start already wears the sun's line — `lighting_wake`.)
-    back: bool,
 }
 
 impl Lighting {
@@ -492,7 +495,6 @@ impl Lighting {
             last_tick: None,
             owed: None,
             returned: false,
-            back: false,
         }
     }
 
@@ -594,19 +596,8 @@ impl App {
                 self.lighting_release_dissolved();
             }
         }
-        let catch_up = self.lighting.plan.first_look() && self.lighting.back;
         if self.lighting.plan.step(&facts) {
-            self.lighting.back = false;
-            self.lighting_look(catch_up);
-        }
-    }
-
-    /// Something is moving on the screen (a window arrived, the space
-    /// turned): a look owed to the apps goes now, hidden in it.
-    pub(crate) fn lighting_motion(&mut self) {
-        if self.lighting.owed.is_some() && self.lighting.fade.is_none() {
-            debug!("lighting: the apps take the new look under the motion");
-            self.lighting_release();
+            self.lighting_look();
         }
     }
 
@@ -623,28 +614,29 @@ impl App {
         }
     }
 
-    /// …under a still of the screen dissolving to the result (the scale
-    /// change's own dissolve; without the means, the plain step).
+    /// …under a still of every screen dissolving slowly to the result
+    /// (without the means, the plain step).
     fn lighting_release_dissolved(&mut self) {
-        match crate::display::focused_screen() {
-            Some((name, scale)) => {
-                debug!("lighting: the apps take the new look under a dissolve");
-                self.dissolve_slow(&name, scale, Box::new(|app: &mut App| app.lighting_release()));
-            }
-            None => self.lighting_release(),
-        }
+        debug!("lighting: the apps take the new look under a dissolve");
+        self.dissolve_slow(Box::new(|app: &mut App| app.lighting_release()));
+    }
+
+    /// A step within the look too big for the apps to take in one frame:
+    /// they take it under the slow dissolve.
+    fn lighting_apply_dissolved(&mut self) {
+        debug!("lighting: the apps take a big step under a dissolve");
+        self.lighting.apply_pending = false;
+        self.dissolve_slow(Box::new(|app: &mut App| app.colors_apply(false)));
     }
 
     /// Auto was just turned on, by the owner: the light goes to the sun's now.
     pub(crate) fn lighting_auto_on(&mut self) {
         self.lighting.plan.looked(slot_key(unix_now()));
-        self.lighting_look(true);
+        self.lighting_look();
     }
 
     /// Look at the sun: a fade to its line if that is far enough from this.
-    /// `catch_up`: the owner is plainly there for it (just back, or their own
-    /// hand), so the apps' step goes with the fade, not held.
-    fn lighting_look(&mut self, catch_up: bool) {
+    fn lighting_look(&mut self) {
         let Some(elevation) = options_engine::sun_elevation_deg(unix_now() as f64) else {
             debug!("lighting: no place on the planet from the time zone; Ambient has nothing to follow");
             return;
@@ -662,7 +654,7 @@ impl App {
         match decide(from, target) {
             Some(to) => {
                 SUN.store(target, Ordering::Relaxed);
-                self.lighting_fade(from, to, catch_up);
+                self.lighting_fade(from, to);
             }
             None => {
                 debug!("lighting: sun at {elevation:.1}° asks {target}, shown {from}: close enough");
@@ -699,16 +691,15 @@ impl App {
         info!("lighting: the sun at {elevation:.1}° asks {target} at the start");
     }
 
-    fn lighting_fade(&mut self, from: u8, to: u8, catch_up: bool) {
+    fn lighting_fade(&mut self, from: u8, to: u8) {
         let picked = palette::choice();
         let (colours, wall) = (picked.ambient_of(palette::Surface::Shell), picked.ambient_of(palette::Surface::Wall));
         if !colours && !wall {
             return;
         }
-        // Crossing the looks: the programs keep the old one from here until
-        // the step is let go (`lighting_motion`), unless the owner is plainly
-        // there for the whole change.
-        if colours && palette::line_to(from).0 != palette::line_to(to).0 && !catch_up && held().is_none() {
+        // Crossing the looks: the programs keep the old one until the fade
+        // ends and lets it go under the slow dissolve (`lighting_finish`).
+        if colours && palette::line_to(from).0 != palette::line_to(to).0 && held().is_none() {
             hold(Some(palette::line_to(from)));
         }
         info!("lighting: {from} -> {to} over {} s{}", fade_len(from, to).as_secs(), if palette::line_to(from).0 != palette::line_to(to).0 { ", across the looks" } else { "" });
@@ -795,23 +786,26 @@ impl App {
         let (dark, light) = palette::line_to(to);
         palette::tint::set_lighting(light);
         store(to);
-        // The look crossed. Held (the owner is at work): the dock's whole
-        // look turns now, at the END of its own fade, and the programs' step
-        // waits for a moment already moving on the screen
-        // (`lighting_motion`). Not held (the owner is plainly there for it):
-        // the dock's look and the programs' turn together under the SLOW
-        // dissolve — a light dimming, never a cut; held at the old look until
-        // the still is up.
+        // The look crossed: at the END of the dock's own fade, the dock's
+        // whole look and the programs' turn together under the SLOW dissolve
+        // of every screen — a light dimming, never a cut (Max, 2026-10-21:
+        // "no jumps at all"; flipping them under a moment of motion still
+        // showed). Held at the old look until the stills are up.
         if colours && crate::look::dark() != dark {
             self.lighting.owed = Some((dark, Instant::now()));
-            if held().is_some() {
-                self.look_set(dark);
-            } else {
+            if held().is_none() {
                 if let Some(f) = from {
                     hold(Some(palette::line_to(f)));
                 }
-                self.lighting_release_dissolved();
             }
+            self.lighting_release_dissolved();
+            return;
+        }
+        // Within the look: a step of a point or two the apps take at the next
+        // quiet moment (nothing to see); a bigger one under the dissolve.
+        if colours && from.is_some_and(|f| f.abs_diff(to) > APPS_STEP) {
+            self.lighting_apply_dissolved();
+            return;
         }
         self.lighting.apply_pending = true;
         self.lighting_apply_if_due();
@@ -860,7 +854,6 @@ impl App {
         } else {
             let at = self.lighting.since_start();
             self.lighting.plan.back(at);
-            self.lighting.back = true;
             self.lighting.returned = self.lighting.owed.is_some();
         }
         debug!("lighting: owner {}", if away { "away" } else { "back" });
@@ -1029,12 +1022,9 @@ mod tests {
     }
 
     #[test]
-    fn a_small_step_is_not_worth_a_fade() {
-        assert_eq!(decide(50, 49), None);
-        assert_eq!(decide(50, 48), None);
-        assert_eq!(decide(50, 47), Some(47));
-        assert_eq!(decide(20, 22), None);
-        assert_eq!(decide(20, 23), Some(23));
+    fn every_point_of_the_line_is_a_fade_and_none_is_none() {
+        assert_eq!(decide(50, 49), Some(49));
+        assert_eq!(decide(20, 22), Some(22));
         assert_eq!(decide(30, 30), None);
     }
 

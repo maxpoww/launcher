@@ -200,13 +200,6 @@ pub(crate) fn monitors() -> Vec<Monitor> {
     hypr::monitors_json().map(|json| parse_monitors(&json)).unwrap_or_default()
 }
 
-/// The screen the owner is on (else the first): its connector and scale —
-/// what a dissolve of the whole screen is run on.
-pub(crate) fn focused_screen() -> Option<(String, f64)> {
-    let all = monitors();
-    all.iter().find(|m| m.focused).or(all.first()).map(|m| (m.name.clone(), m.scale))
-}
-
 /// The size, in pixels, of the picture that covers the biggest of these
 /// screens exactly (what a wallpaper made to measure is drawn at: the
 /// picture program puts ONE picture on every screen and fits it to each, so

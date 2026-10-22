@@ -5832,6 +5832,12 @@ impl App {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
         }
+        // `dissolve`: the light's slow dissolve over every screen with
+        // nothing changed under it (it must look like nothing but a beat).
+        if what.trim() == "dissolve" {
+            self.dissolve_slow(Box::new(|_: &mut crate::App| info!("dissolve: covered (nothing changed under it)")));
+            return "slow dissolve over every screen".to_owned();
+        }
         // `peek …`: Quick Look's pencil without a pointer (`edit_debug`).
         if let Some(rest) = what.strip_prefix("peek ") {
             return self.edit_debug(rest);
