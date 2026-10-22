@@ -7277,6 +7277,8 @@ impl App {
             Spot::View(list) => self.filer_set_list(list),
             // The eye: the ground menu's "Show / Hide hidden files", one state.
             Spot::Hidden => self.filer_act(id, Action::ToggleHidden, None, (0.0, 0.0)),
+            // The magnifier opens the search; its × (the search out) puts
+            // it away, the text with it — what Escape in the field does.
             Spot::Find => {
                 let open = win.find.is_none();
                 self.filer_find(id, open.then(String::new));

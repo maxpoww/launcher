@@ -855,7 +855,11 @@ impl App {
         button(&mut g, win, list, "list", win.list, Spot::View(true));
         let eye = if win.hidden { "eye" } else { "eyeoff" };
         button(&mut g, win, hidden, eye, win.hidden, Spot::Hidden);
-        button(&mut g, win, find, "search", win.find.is_some(), Spot::Find);
+        // While the search is out, its button is its ×: a click cancels it
+        // as Escape in the field does (Max, 2026-10-22) — "Search" /
+        // "Cancel search".
+        let sign = if win.find.is_some() { "x" } else { "search" };
+        button(&mut g, win, find, sign, win.find.is_some(), Spot::Find);
         (
             hits.sort,
             hits.info,
