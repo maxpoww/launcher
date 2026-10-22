@@ -348,6 +348,9 @@ pub struct Renderer {
     /// Accumulated render time — only advances while frames are drawn, so
     /// there are no phase jumps when the dock hides and reappears.
     anim_time: f32,
+    /// The glass's own light (its iridescent edges) stands still this
+    /// frame: `hold_lights`.
+    lights_held: bool,
     last_render: Option<std::time::Instant>,
 
     /// Work out what each frame changed (see [`crate::damage`]): a frame
@@ -1489,6 +1492,7 @@ impl Renderer {
             volatile: std::collections::HashMap::new(),
             frame_no: 0,
             anim_time: 0.0,
+            lights_held: false,
             last_render: None,
             track_damage,
             present_damage,
@@ -1929,6 +1933,18 @@ impl Renderer {
         }
         self.icon_layer_gen[at] = self.icon_layer_gen[at].wrapping_add(1);
     }
+    /// Hold the glass's own light still (its iridescent edges, the shader's
+    /// `time`) for the frames drawn while `held`: frames that are there for
+    /// something else only (the control panel's pills' orbit) then change
+    /// nothing of the glass — with a setting open, nothing at all, and the
+    /// frame is not presented. Each one used to repaint the card's four edge
+    /// bands (13.7 % of the dock), and on a VRR screen that damage kept the
+    /// panel at its full rate (Hyprland 15 % with the panel open). The light
+    /// stands still as it does whenever no frames are drawn (the apps box
+    /// open), and goes on from there.
+    pub fn hold_lights(&mut self, held: bool) {
+        self.lights_held = held;
+    }
 
     /// Render one frame of the given scene.
     ///
@@ -1968,7 +1984,9 @@ impl Renderer {
             .map(|l| now.duration_since(l).as_secs_f32().min(0.1))
             .unwrap_or(0.0);
         self.last_render = Some(now);
-        self.anim_time += dt;
+        if !self.lights_held {
+            self.anim_time += dt;
+        }
 
         let cursor_px = cursor.map(|(x, y)| [x, y]).unwrap_or([-9999.0, -9999.0]);
 

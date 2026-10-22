@@ -1549,6 +1549,9 @@ impl App {
         if crate::palette::wall_live() && self.panel.knob_held().is_none() && self.quick.knob_held().is_none() {
             crate::palette::set_wall_live(None);
         }
+        // (Set when this frame is drawn for the panel's orbit alone: the
+        // glass's light then stands still — `Renderer::hold_lights`.)
+        let mut orbit_only = false;
         let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
@@ -1561,11 +1564,13 @@ impl App {
             // the dev box's 165 Hz screen, and the MacBook's 12 % with the
             // compositor's (2026-10-22). Anything else moving, at full rate.
             if open {
-                if self.panel.calm() && self.panel_swap_t >= 1.0 {
+                let calm = self.panel.calm() && self.panel_swap_t >= 1.0;
+                if calm {
                     self.orbit_soon();
                 } else {
                     self.dirty = true;
                 }
+                orbit_only = calm;
             }
             Some(draw)
         } else {
@@ -1779,6 +1784,7 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        renderer.hold_lights(orbit_only);
         let (layer, qh, frame_pending) = (&self.layer, &self.qh, &mut self.frame_pending);
         let unchanged = match renderer.render(
             &scene,
