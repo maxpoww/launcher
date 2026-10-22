@@ -1040,8 +1040,9 @@ The big daemon files are cohesive but long — go straight to the function:
   Home, at "Golem Disk" outside it ("Golem Disk › tmp"). What a CHANGE may do depends on where — THREE
   ZONES (`filer/zones.rs`: `zone_of` a thing changed, `zone_in` a folder changed inside; remembered
   3 s; `Win::zone` is its folder's): YOURS (Home and below but the delicate places, your sticks,
-  phones and disks, /tmp, /var/tmp — no question, Undo covers it; /tmp and /var/tmp wear a dim chip
-  "Emptied at restart" at the end of the path line); DELICATE (`delicate_at`: ~/Golem and all in it,
+  phones and disks, /tmp, /var/tmp — no question, Undo covers it; /tmp and /var/tmp wear a quiet chip
+  "Emptied at restart" at the end of the path line — words at the ink, three quarters, on a fill a step
+  stronger than a field's, `tones.chip_on`); DELICATE (`delicate_at`: ~/Golem and all in it,
   Home's top dot entries and all in them, the owner's folders THEMSELVES — not what is in them —,
   ~/Phones and all in it) — a change asks first, `filer/confirm.rs`: a panel in the menus' paint,
   centred over the window, ~360 wide, a shield, the act named in the title ("Move “.config” to the
@@ -1049,8 +1050,10 @@ The big daemon files are cohesive but long — go straight to the function:
   “Golem”?" — `confirm_title`, one panel an action), ONE sentence for the place (`Why::sentence`:
   Golem, settings, keys, the browser — `.mozilla` and Seam's `.local/share/seam` —, the main
   folders, Phones, else "It's part of how Golem works."), [Cancel] [<act> anyway] (`Act::anyway`);
-  Cancel has the focus (a ring of the accent), Tab/←/→ move it, Enter/Space press it, Escape or a
-  press off the panel cancels; THE SYSTEM'S (`system_tree`: `/`, /etc /nix /boot /usr /proc /sys
+  Cancel has the focus, Tab/←/→ move it, Enter/Space press it, Escape or a press off the panel
+  cancels; the buttons are a menu's rows (Max: no rings, no hairline round the panel): the focused or
+  pointed one tinted as a hovered row (`MenuPaint::row_tint`), the act's words ALWAYS the menus' red
+  and its tint the red row's (`MenuPaint::red_tint`), Cancel never red; THE SYSTEM'S (`system_tree`: `/`, /etc /nix /boot /usr /proc /sys
   /dev /root /srv /opt /bin /sbin /lib*, /var but /var/tmp, /run but the owner's media and gvfs;
   and whatever the owner cannot write or does not own) — looked at, copied, never changed: no row
   that changes files (`Action::changes`, `Ctx::readonly`; Set as wallpaper stays), no Move/Rename/
