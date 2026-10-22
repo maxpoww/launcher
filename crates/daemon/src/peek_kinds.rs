@@ -801,17 +801,30 @@ pub(crate) struct Stream {
 
 impl Stream {
     pub(crate) fn stop(&mut self) {
-        if let Ok(mut running) = self.ffmpeg.lock() {
+        let decoder = self.ffmpeg.lock().ok().and_then(|mut running| {
             running.1 = true;
-            if let Some(child) = running.0.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-        if let Some(child) = self.sound.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+            running.0.take()
+        });
+        reap(decoder);
+        reap(self.sound.take());
+    }
+}
+
+/// A player that is to end: killed now, its exit waited for on a thread of
+/// its own. One reading a file on a phone over MTP cannot leave before the
+/// phone answers the read it is in — seconds while the phone is busy — and
+/// waited for here, the whole shell stood still that long (2026-10-22: 2 s
+/// at the end of a phone's video in Quick Look).
+pub(crate) fn reap(child: Option<std::process::Child>) {
+    let Some(mut child) = child else {
+        return;
+    };
+    let _ = child.kill();
+    let reaped = std::thread::Builder::new().name("reap".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    if let Err(e) = reaped {
+        tracing::warn!("quick look: no thread to see a player out ({e})");
     }
 }
 
@@ -1071,10 +1084,8 @@ pub(crate) fn stream(
                         continue;
                     };
                     let out = child.stdout.take();
-                    // (The way before, which gave nothing: waited for.)
-                    if let Some(mut old) = r.0.take() {
-                        let _ = old.wait();
-                    }
+                    // (The way before, which gave nothing: seen out.)
+                    reap(r.0.take());
                     r.0 = Some(child);
                     out
                 };

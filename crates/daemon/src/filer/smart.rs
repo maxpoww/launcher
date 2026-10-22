@@ -208,14 +208,23 @@ fn kind_of_files(files: &[PathBuf]) -> Option<FolderKind> {
 /// (a phone over MTP through gvfs, sshfs, rclone…) or the network — by the
 /// kind of the mount it is on (the longest mount point it is under).
 pub(crate) fn slow_place(dir: &Path) -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
-        return false;
-    };
-    slow_in(&mounts, dir)
+    slow_mount(dir).is_some()
 }
 
-fn slow_in(mounts: &str, dir: &Path) -> bool {
-    let mut best: Option<(usize, bool)> = None;
+/// The slow place `dir` is on (`slow_place`): its mount point, and whether
+/// it is the desktop's own (gvfs: a phone over MTP, a camera, a share).
+/// The mount table is read again at most every 2 s (this is asked at draws).
+pub(crate) fn slow_mount(dir: &Path) -> Option<(PathBuf, bool)> {
+    static MOUNTS: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mutex::new(None);
+    let mut guard = MOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.as_ref().is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2)) {
+        *guard = Some((Instant::now(), std::fs::read_to_string("/proc/self/mounts").unwrap_or_default()));
+    }
+    slow_in(guard.as_ref().map_or("", |(_, m)| m.as_str()), dir)
+}
+
+fn slow_in(mounts: &str, dir: &Path) -> Option<(PathBuf, bool)> {
+    let mut best: Option<(String, &str)> = None;
     for line in mounts.lines() {
         let mut f = line.split(' ');
         let (Some(_), Some(at), Some(kind)) = (f.next(), f.next(), f.next()) else {
@@ -225,13 +234,14 @@ fn slow_in(mounts: &str, dir: &Path) -> bool {
         if !dir.starts_with(&at) {
             continue;
         }
-        let slow = kind.starts_with("fuse")
-            || matches!(kind, "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "davfs" | "ceph" | "afs");
-        if best.is_none_or(|(len, _)| at.len() >= len) {
-            best = Some((at.len(), slow));
+        if best.as_ref().is_none_or(|(len, _)| at.len() >= len.len()) {
+            best = Some((at, kind));
         }
     }
-    best.is_some_and(|(_, slow)| slow)
+    let (at, kind) = best?;
+    let slow = kind.starts_with("fuse")
+        || matches!(kind, "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "davfs" | "ceph" | "afs");
+    slow.then(|| (PathBuf::from(at), kind == "fuse.gvfsd-fuse"))
 }
 
 /// The actions a selection is for: the pill's one (its symbol, its words,
@@ -871,12 +881,14 @@ mod tests {
                       gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0\n\
                       /dev/sda1 /run/media/max/My\\040Stick exfat rw 0 0\n\
                       server:/srv /mnt/nas nfs4 rw 0 0\n";
-        let slow = |p: &str| slow_in(mounts, Path::new(p));
+        let slow = |p: &str| slow_in(mounts, Path::new(p)).is_some();
         assert!(slow("/run/user/1000/gvfs/mtp:host=Pixel/Internal shared storage/DCIM/Camera"));
         assert!(slow("/mnt/nas/photos"));
         assert!(!slow("/home/max/Pictures"));
         assert!(!slow("/run/media/max/My Stick/DCIM"), "a stick is read at once, as before");
         assert!(!slow("/run/user/1000/gvfsx"), "a name that only begins the same");
+        assert_eq!(slow_in(mounts, Path::new("/run/user/1000/gvfs/mtp:host=P")), Some((PathBuf::from("/run/user/1000/gvfs"), true)));
+        assert_eq!(slow_in(mounts, Path::new("/mnt/nas/a")), Some((PathBuf::from("/mnt/nas"), false)));
     }
 
     #[test]

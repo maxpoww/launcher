@@ -375,8 +375,42 @@ fn remove_any(path: &Path) -> io::Result<()> {
 /// - a volume's own folder (a stick is ejected, not binned).
 ///
 /// Inside those folders, what the owner put there is the owner's to throw.
+///
+/// Remembered a few seconds: it is asked at every frame of a file window
+/// with a selection (its pill) and of the dock while a drag is over it, for
+/// each thing — on a phone over MTP, each look at the disk could take
+/// seconds while the phone is busy.
 pub(crate) fn protected(path: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    type Seen = HashMap<PathBuf, (bool, Instant)>;
+    static SEEN: std::sync::Mutex<Option<Seen>> = std::sync::Mutex::new(None);
+    const KEEP: Duration = Duration::from_secs(3);
+    let lock = || SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(kept, at)) = lock().as_ref().and_then(|seen| seen.get(path)) {
+        if at.elapsed() < KEEP {
+            return kept;
+        }
+    }
+    let now = protected_now(path);
+    let mut seen = lock();
+    let seen = seen.get_or_insert_with(HashMap::new);
+    if seen.len() > 4096 {
+        seen.clear();
+    }
+    seen.insert(path.to_path_buf(), (now, Instant::now()));
+    now
+}
+
+fn protected_now(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
+    // On a slow place the disk is not asked at all: none of the system's
+    // folders is there. Kept: its mount point and, for a phone or a camera
+    // (gvfs), the device and its storage ("Internal shared storage").
+    if let Some((at, device)) = path.is_absolute().then(|| crate::filer::slow_mount(path)).flatten() {
+        let depth = path.strip_prefix(&at).map_or(0, |rest| rest.components().count());
+        return depth <= if device { 2 } else { 0 };
+    }
     // Its folder made real, its own name kept (a link is judged as itself).
     let abs = match (path.parent().filter(|p| !p.as_os_str().is_empty()), path.file_name()) {
         (Some(dir), Some(name)) => fs::canonicalize(dir).map(|d| d.join(name)),

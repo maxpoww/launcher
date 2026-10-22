@@ -66,7 +66,7 @@ mod recent;
 mod smart;
 
 pub(crate) use print::Can;
-pub(crate) use smart::smart_for;
+pub(crate) use smart::{slow_mount, smart_for};
 
 pub(crate) use history::say_quietly;
 

@@ -280,10 +280,7 @@ impl Up {
         if let Some(p) = self.play.take() {
             self.at = p.from + p.since.elapsed().as_secs_f32();
             match p.what {
-                Playing::Song(mut child) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+                Playing::Song(child) => crate::peek_kinds::reap(Some(child)),
                 Playing::Video { mut stream, .. } => stream.stop(),
             }
         }
@@ -1295,6 +1292,11 @@ impl App {
 
     /// What was prepared of `path`, if the file changed since: let go.
     fn peek_fresh(&mut self, path: &Path) {
+        // (Not asked of a slow place — a phone over MTP: on the loop, one
+        // look there can take seconds while the phone is busy.)
+        if crate::filer::slow_mount(path).is_some() {
+            return;
+        }
         let stale = self
             .peek
             .cache
