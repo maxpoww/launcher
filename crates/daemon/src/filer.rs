@@ -5797,26 +5797,11 @@ impl App {
         };
         let view = layout.in_view(win.scroll, win.items.len());
         let label_w = layout.label_w();
-        // Names are painted last of all: one under the menu or the box is
-        // left out, or it would show through (the desktop's lesson).
-        let cover = win
-            .menu
-            .as_ref()
-            .map(|m| m.rect)
-            .or(win.props.as_ref().map(|p| p.rect))
-            .or(win.confirm.as_ref().map(|(c, _)| c.rect))
-            .or(win.shortcuts.as_ref().map(|t| t.rect));
-        // (What covers the files is in the window's space; the files are
-        // laid out in their own, `zoom` times smaller from the body's corner.)
-        let into_field = |r: Rect| {
-            let z = layout.zoom;
-            let (bx, by) = (layout.body.x, layout.body.y);
-            Rect::new(bx + (r.x - bx) / z, by + (r.y - by) / z, r.w / z, r.h / z)
-        };
-        let cover = cover.map(into_field);
-        // (The i card over the files: a name under it is left out too —
-        // and the field a name is typed in, wider than its cell: the names
-        // beside it.)
+        // Names are painted last of all: one under what stands over the
+        // files is left out, or it would show through (the desktop's
+        // lesson) — by the width it is drawn at, once every word is laid
+        // (below, after `zoom_grid`). Here only the field a name is typed
+        // in, wider than its cell: the names beside it.
         let typing: Option<(usize, Rect)> = win.rename.as_ref().and_then(|r| {
             let i = win.items.iter().position(|it| it.path == r.path)?;
             let mut cell = layout.cell(i);
@@ -5831,9 +5816,15 @@ impl App {
             let x = if layout.list { cell.x + LIST_NAME_X - NAME_PAD.0 } else { name_field_x(&layout, cell.x + cell.w / 2.0, tw) };
             Some((i, Rect::new(x, top - NAME_PAD.1, tw + 2.0 * NAME_PAD.0, line + 2.0 * NAME_PAD.1)))
         });
-        let over = [into_field(hits.card), typing.map_or(Rect::default(), |(_, r)| r)];
         let meets = |c: &Rect, r: &Rect| r.x < c.x + c.w && c.x < r.x + r.w && r.y < c.y + c.h && c.y < r.y + r.h;
-        let covered = |r: Rect| cover.is_some_and(|c| meets(&c, &r)) || over.iter().any(|c| c.w > 0.0 && meets(c, &r));
+        let covered = |r: Rect| typing.is_some_and(|(_, t)| meets(&t, &r));
+        // The i card where the files are laid out (they are `zoom` times
+        // smaller from the body's corner): a list's names beside it end
+        // before it.
+        let card = (hits.card.w > 0.0).then(|| {
+            let (z, bx, by) = (layout.zoom, layout.body.x, layout.body.y);
+            Rect::new(bx + (hits.card.x - bx) / z, by + (hits.card.y - by) / z, hits.card.w / z, hits.card.h / z)
+        });
         // MAKE ROOM: what is in hand leaves its place, and while a drag is
         // over the window the rest part around where it would land — each
         // easing to its display slot at the Apps grid's rate.
@@ -5950,6 +5941,12 @@ impl App {
                 let (size_end, date_x) = layout.columns(&cell);
                 let name_x = cell.x + LIST_NAME_X;
                 let name_w = size_end.map_or(cell.x + cell.w, |x| x - LIST_SIZE_W) - name_x - 10.0;
+                // (Beside the i card a name ends before it, cut as names are,
+                // rather than reaching under it and being left out whole.)
+                let name_w = match card {
+                    Some(c) if top < c.y + c.h && c.y < top + TEXT_LINE => name_w.min(c.x - name_x - 10.0).max(0.0),
+                    _ => name_w,
+                };
                 // (The row whose name is being typed is not hidden by its own field.)
                 let own = typing.is_some_and(|(t, _)| t == i);
                 if !own && covered(Rect::new(name_x, top, cell.x + cell.w - name_x, TEXT_LINE)) {
@@ -6111,12 +6108,20 @@ impl App {
         }
         // (No scroll bars: Max, 2026-10-15, "get rid of the scrollbars".)
         zoom_grid(&mut grid, (layout.body.x, layout.body.y), layout.zoom);
-        // (The history stands over the files and words are painted last: a
-        // word under it is left out — by the width it is drawn at, so a
-        // list's names beside it stay.)
-        for panel in [hits.hist, hits.pill].into_iter().filter(|p| p.w > 0.0) {
-            if let Some(r) = win.renderer.as_mut() {
-                chrome::leave_out(&mut grid.labels, panel, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
+        // What stands over the files — the menu or a box, the i card, the
+        // history, the pill — leaves out the words under it, by the width
+        // each is drawn at: a list's names beside the i card stay (they all
+        // went, row by row, while the whole row was asked: 2026-10-22).
+        let panel = win
+            .menu
+            .as_ref()
+            .map(|m| Rect::new(m.rect.x, m.rect.y - 4.0 * m.scale, m.rect.w, m.rect.h + 4.0 * m.scale))
+            .or(win.props.as_ref().map(|p| p.rect))
+            .or(win.confirm.as_ref().map(|(c, _)| c.rect))
+            .or(win.shortcuts.as_ref().map(|t| t.rect));
+        if let Some(r) = win.renderer.as_ref() {
+            for over in [panel.unwrap_or_default(), hits.card, hits.hist, hits.pill].into_iter().filter(|p| p.w > 0.0) {
+                chrome::leave_out(&mut grid.labels, over, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
             }
         }
         // (The files under the top line, beside the sidebar — as it is drawn
@@ -6128,14 +6133,7 @@ impl App {
         // line's, the i card's — are left out as the files' names are: words
         // are painted after every grid and showed through a big menu.)
         let mut chrome = chrome;
-        let panel = win
-            .menu
-            .as_ref()
-            .map(|m| Rect::new(m.rect.x, m.rect.y - 4.0 * m.scale, m.rect.w, m.rect.h + 4.0 * m.scale))
-            .or(win.props.as_ref().map(|p| p.rect))
-            .or(win.confirm.as_ref().map(|(c, _)| c.rect))
-            .or(win.shortcuts.as_ref().map(|t| t.rect));
-        if let (Some(panel), Some(r)) = (panel, win.renderer.as_mut()) {
+        if let (Some(panel), Some(r)) = (panel, win.renderer.as_ref()) {
             for g in chrome.iter_mut() {
                 chrome::leave_out(&mut g.labels, panel, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
             }
