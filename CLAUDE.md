@@ -1165,8 +1165,10 @@ The big daemon files are cohesive but long — go straight to the function:
   (`symbol`: icon.wgsl's ghost, ring -1.17). THE i CARD (`Win::info_on`, `chrome::Info`, read off the
   loop by `filer_info_due` whenever the selection changes — `info_key`): preview, name, kind, Contains or
   Size (+ bytes), Modified, Where, Opens with (`quicklook::default_app` → the dock's index); its foot
-  "N items, X available" / "n of N selected, X available". Solid (no blur to frost it), names under it
-  left out (`covered`). SELECTION AND CLICKS, the mockup's (Max, 2026-10-21, "SELECTED: one soft box"): a selected
+  "N items, X available" / "n of N selected, X available". Solid (no blur to frost it); the words under it
+  left out by the width each is drawn at (`chrome::leave_out`, as under the menu, the boxes, the
+  history and the pill — not by the row: a list once lost every name beside the card, 2026-10-22),
+  and a list's names beside it end before it, cut as names are. SELECTION AND CLICKS, the mockup's (Max, 2026-10-21, "SELECTED: one soft box"): a selected
   thing in the grid wears ONE soft box over its picture AND its name (`SEL_TOP` 6 over what the
   picture shows, `SEL_PAD` 4 at the sides and under; radius 9; black 7.5 % / white 10 %, `pic_mark`,
   UNLIT), hugging that thing — a one-line name's box is not stretched — and its name in its own box of
