@@ -2728,15 +2728,20 @@ impl App {
     }
 
     /// Open the right-click menu at `at`: an item's (which becomes the
-    /// selection, unless it is in it already) or the wallpaper's.
+    /// selection, unless it is in it already) or the wallpaper's — with
+    /// nothing selected (Max, 2026-10-22: "the selection should be
+    /// cleared"), as in a file window.
     pub(crate) fn desktop_open_menu(&mut self, at: (f32, f32)) {
         let item = self.desktop.hit(at);
-        if let Some(i) = item {
-            let path = &self.desktop.items[i].path;
-            if !self.desktop.selected.contains(path) {
-                self.desktop.selected.clear();
-                self.desktop.selected.insert(path.clone());
+        match item {
+            Some(i) => {
+                let path = &self.desktop.items[i].path;
+                if !self.desktop.selected.contains(path) {
+                    self.desktop.selected.clear();
+                    self.desktop.selected.insert(path.clone());
+                }
             }
+            None => self.desktop.selected.clear(),
         }
         self.desktop.press = None;
         self.desktop.band = None;
@@ -6399,10 +6404,11 @@ impl App {
             let on = self.desktop.ptr.and_then(|p| self.desktop.hit(p)).map(|i| self.desktop.items[i].name.clone());
             let menu = self.desktop.menu.as_ref().map(|m| m.ctx.on);
             return format!(
-                "pointer {} at {:?} on {on:?}: band {}, menu {menu:?}",
+                "pointer {} at {:?} on {on:?}: band {}, menu {menu:?}, {} selected",
                 rest.trim(),
                 self.desktop.ptr,
-                self.desktop.band.is_some()
+                self.desktop.band.is_some(),
+                self.desktop.selected.len()
             );
         }
         if let Some(rest) = what.strip_prefix("band ") {
