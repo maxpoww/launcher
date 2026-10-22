@@ -190,7 +190,7 @@ impl Trash {
             fs::create_dir_all(parent)?;
         }
         let src = self.files_dir().join(name);
-        move_path(&src, &dest)?;
+        move_path(&src, &dest, 0)?;
         let _ = fs::remove_file(self.info_dir().join(format!("{name}.trashinfo")));
         Ok(dest)
     }
@@ -234,7 +234,7 @@ impl Trash {
         // Move the file into files/ under the reserved name. If the move fails,
         // release the reserved info file so the name isn't left dangling.
         let dest = self.files_dir().join(&name);
-        if let Err(e) = move_path(&abs, &dest) {
+        if let Err(e) = move_path(&abs, &dest, ROOM_KEPT) {
             let _ = fs::remove_file(self.info_dir().join(format!("{name}.trashinfo")));
             return Err(e);
         }
@@ -278,11 +278,11 @@ impl Trash {
 }
 
 /// Move `src` to `dst`, falling back to copy+remove across filesystems
-/// (`rename` returns `EXDEV`).
-fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
+/// (`rename` returns `EXDEV`), with `keep` bytes left free there.
+fn move_path(src: &Path, dst: &Path, keep: u64) -> io::Result<()> {
     match fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => move_across(src, dst),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => move_across(src, dst, keep),
         Err(e) => Err(e),
     }
 }
@@ -290,11 +290,18 @@ fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
 /// `src` moved to `dst` on another disk: copied as it is, then taken away.
 /// A folder used to be refused here ("cross-filesystem directory move not
 /// supported"), so nothing on a stick or a card could go to the bin.
-/// Nothing is overwritten (`dst` must not be there), and a copy that fails
-/// halfway is taken back with the original left as it was.
-fn move_across(src: &Path, dst: &Path) -> io::Result<()> {
+/// Nothing is overwritten (`dst` must not be there), it is not begun
+/// without room for it and `keep` bytes more, and a copy that fails halfway
+/// is taken back with the original left as it was.
+fn move_across(src: &Path, dst: &Path, keep: u64) -> io::Result<()> {
     if fs::symlink_metadata(dst).is_ok() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "something is already there"));
+    }
+    // (A big folder from a stick must not fill the home disk: every app
+    // that writes would stop. The bin keeps `ROOM_KEPT` free.)
+    let room = dst.parent().and_then(crate::desktop_props::space).map(|(_, free)| free);
+    if room.is_some_and(|free| free < size_as_is(src).saturating_add(keep)) {
+        return Err(io::Error::other("not enough room for it there"));
     }
     if let Err(e) = copy_as_is(src, dst) {
         let _ = remove_any(dst);
@@ -323,6 +330,25 @@ fn copy_as_is(src: &Path, dst: &Path) -> io::Result<()> {
         fs::copy(src, dst).map(|_| ())
     } else {
         Err(io::Error::other("not a file, a folder or a link"))
+    }
+}
+
+/// What is kept free on the disk the bin is on when a thing from another
+/// disk is copied in.
+const ROOM_KEPT: u64 = 512 << 20;
+
+/// How many bytes `path` holds, as `copy_as_is` would copy it (links not
+/// followed).
+fn size_as_is(path: &Path) -> u64 {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| size_as_is(&e.path()))
+            .sum(),
+        Ok(m) if m.is_file() => m.len(),
+        _ => 0,
     }
 }
 
@@ -575,7 +601,7 @@ mod tests {
         std::os::unix::fs::symlink(d.join("home"), src.join("to home")).unwrap();
         let dst = d.join("bin/Holiday");
         fs::create_dir_all(d.join("bin")).unwrap();
-        move_across(&src, &dst).unwrap();
+        move_across(&src, &dst, 0).unwrap();
         assert!(!src.exists(), "the original went");
         assert_eq!(fs::read(dst.join("day 1/a.jpg")).unwrap(), b"pixels");
         let link = dst.join("to home");
@@ -584,9 +610,23 @@ mod tests {
         assert!(d.join("home/big.iso").exists(), "what the link points at is untouched");
         // Nothing is ever copied over what is there.
         fs::create_dir_all(d.join("stick/again")).unwrap();
-        let err = move_across(&d.join("stick/again"), &dst).unwrap_err();
+        let err = move_across(&d.join("stick/again"), &dst, 0).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(d.join("stick/again").exists() && dst.join("day 1/a.jpg").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nothing_is_copied_in_without_room_for_it() {
+        let d = std::env::temp_dir().join(format!("wr-room-{}", unique_id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("stick/Films")).unwrap();
+        fs::write(d.join("stick/Films/a.mkv"), b"frames").unwrap();
+        // More kept free than any disk has: refused, nothing touched.
+        let err = move_across(&d.join("stick/Films"), &d.join("bin-Films"), u64::MAX / 2).unwrap_err();
+        assert!(err.to_string().contains("room"), "{err}");
+        assert!(d.join("stick/Films/a.mkv").exists());
+        assert!(fs::symlink_metadata(d.join("bin-Films")).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -601,7 +641,7 @@ mod tests {
         let fifo = std::ffi::CString::new(src.join("z-pipe").into_os_string().into_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let dst = d.join("bin-Mixed");
-        assert!(move_across(&src, &dst).is_err());
+        assert!(move_across(&src, &dst, 0).is_err());
         assert!(src.join("a.txt").exists(), "the original is as it was");
         assert!(fs::symlink_metadata(&dst).is_err(), "no half copy left");
         let _ = fs::remove_dir_all(&d);

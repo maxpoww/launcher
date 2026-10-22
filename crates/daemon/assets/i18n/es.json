@@ -373,6 +373,7 @@
  "Show hidden files": "Mostrar archivos ocultos",
  "Hide hidden files": "Ocultar archivos ocultos",
  "{n} could not be moved to the bin": "{n} no se pudieron mover a la papelera",
+ "{n} could not be put in the new folder": "{n} no se pudieron poner en la carpeta nueva",
  "Nothing to undo": "Nada que deshacer",
  "Undone: it has its old name again": "Deshecho: vuelve a tener su nombre anterior",
  "Undone: {n} moved back": "Deshecho: {n} devueltos a su sitio",

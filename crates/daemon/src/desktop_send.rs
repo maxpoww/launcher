@@ -446,7 +446,10 @@ pub(crate) fn send(paths: &[PathBuf], target: &Target) -> (String, Vec<PathBuf>)
             // Not in the stick's cache only: on it, so it can be pulled.
             let _ = Command::new("sync").arg("-f").arg(dir).status();
             let said = outcome(brought.len(), failed, tr("sent to"), &target.name);
-            (said, brought)
+            // What was there already (sent to the stick it is on) is no
+            // copy: undone as one, the original went to the bin.
+            let copies = brought.into_iter().filter(|b| !paths.contains(b)).collect();
+            (said, copies)
         }
         Place::Device(id) => {
             let (mut sent, mut failed) = (0, 0);

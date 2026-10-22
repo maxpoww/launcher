@@ -929,6 +929,11 @@ pub(crate) fn copy_name(dir: &Path, name: &str, folder: bool) -> PathBuf {
 
 /// Take `undo` back; what to say of it (`None`: nothing could be done).
 pub(crate) fn take_back(undo: Undo) -> Option<String> {
+    // One at a time: each runs on a thread of its own, and two quick Ctrl+Z
+    // both found a place free, then both moved into it (the first put back
+    // was lost under the second). Now the second looks after the first.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let trash = crate::trash::Trash::home();
     match undo {
         Undo::Renamed { from, to } => (to.exists() && !from.exists() && std::fs::rename(&to, &from).is_ok())
@@ -4285,15 +4290,26 @@ impl App {
             return;
         }
         let mut moved = Vec::new();
+        let mut failed = 0usize;
         for path in &selected {
             let from = PathBuf::from(path);
-            let to = folder.join(file_name(&from));
+            // Never over another of them: a search lists things of the
+            // folders below too, and two may share a name (`rename` would
+            // put one over the other, and that one was gone for good).
+            let to = crate::bt_files::free_name(&folder, &file_name(&from));
             match std::fs::rename(&from, &to) {
                 Ok(()) => moved.push((from, to)),
-                Err(e) => warn!("files: cannot put {} in the new folder: {e}", from.display()),
+                Err(e) => {
+                    warn!("files: cannot put {} in the new folder: {e}", from.display());
+                    failed += 1;
+                }
             }
         }
         info!("files: {} thing(s) put in {}", moved.len(), folder.display());
+        if failed > 0 {
+            let body = fill(tr("{n} could not be put in the new folder"), &[("n", &failed)]);
+            std::thread::spawn(move || crate::desktop_send_notify(&body));
+        }
         if let Some(win) = self.filer.win_mut(id) {
             win.rename_next = Some(folder.to_string_lossy().into_owned());
         }
