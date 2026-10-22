@@ -39,9 +39,47 @@ use crate::controls::{field_of, group_of, line_of, on_off_of, Choice, ControlVie
 use crate::i18n::{fill, tr};
 use crate::printing::{printer_name, problem_words, title_of};
 
-/// The printer the page is about (its queue's name), once one was picked
-/// or read.
+/// The printer asked for (its queue's name): a pick, or one just added.
 static PICKED: Mutex<Option<String>> = Mutex::new(None);
+/// The printer the page SHOWS — what its actions act on (a printer added a
+/// moment ago must not take a click meant for the one on screen).
+static SHOWN: Mutex<Option<String>> = Mutex::new(None);
+
+/// WHAT CUPS SAID, kept a few seconds: a key typed in the address field reads
+/// the page again, and must not ask CUPS each time. Any change (a pick, a
+/// printer added, the Brain's printing moving) lets it go (`stale`).
+type Kept<T> = Mutex<Option<(Instant, T)>>;
+static KEPT_STATE: Kept<PrintingState> = Mutex::new(None);
+static KEPT_ENDED: Kept<Vec<options_engine::PrintJob>> = Mutex::new(None);
+static KEPT_DEFAULTS: Kept<(String, cups::Defaults)> = Mutex::new(None);
+const KEEP: Duration = Duration::from_secs(5);
+
+/// What CUPS said is old: the next read asks it again.
+pub(crate) fn stale() {
+    if let Ok(mut k) = KEPT_STATE.lock() {
+        *k = None;
+    }
+    if let Ok(mut k) = KEPT_ENDED.lock() {
+        *k = None;
+    }
+    if let Ok(mut k) = KEPT_DEFAULTS.lock() {
+        *k = None;
+    }
+}
+
+/// What `slot` keeps if it is young (and `fits`), else `ask` — kept if it answered.
+fn kept<T: Clone>(slot: &Kept<T>, fits: impl Fn(&T) -> bool, ask: impl FnOnce() -> Result<T, cups::CupsError>) -> Result<T, cups::CupsError> {
+    if let Some((at, v)) = slot.lock().ok().and_then(|k| k.clone()) {
+        if at.elapsed() < KEEP && fits(&v) {
+            return Ok(v);
+        }
+    }
+    let v = ask()?;
+    if let Ok(mut k) = slot.lock() {
+        *k = Some((Instant::now(), v.clone()));
+    }
+    Ok(v)
+}
 
 /// THE INK of the printers that do not tell CUPS: each reading by the
 /// printer's device address — when, and what (`None`: it did not answer) —
@@ -63,7 +101,8 @@ const SCANNERS_OLD: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, PartialEq)]
 enum Adding {
     Trying(String),
-    Failed(String),
+    /// Nothing answered there (said for `ASKED_FOR`).
+    Failed(String, Instant),
 }
 static ADDING: Mutex<Option<Adding>> = Mutex::new(None);
 /// How long `lpadmin` may try one address (it asks the printer itself).
@@ -73,8 +112,10 @@ const ADD_PATIENCE: Duration = Duration::from_secs(30);
 /// scroll): the printers, or the scanners.
 static ON_SCANNERS: AtomicBool = AtomicBool::new(false);
 
-/// The printer asked about being removed (the second click removes it).
-static REMOVING: Mutex<Option<String>> = Mutex::new(None);
+/// The printer asked about being removed, and when (the second click
+/// removes it; the question goes after `ASKED_FOR`).
+static REMOVING: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+const ASKED_FOR: Duration = Duration::from_secs(60);
 
 /// The papers offered (PWG names), in this order, when the printer takes
 /// them; the one it is set to is always there.
@@ -194,7 +235,7 @@ fn printer_part(view: &mut ControlView, tabs: bool) {
         view.subtitle = tr("This computer has no printing.").to_owned();
         return;
     }
-    let state = match cups::snapshot() {
+    let state = match kept(&KEPT_STATE, |_| true, cups::snapshot) {
         Ok(s) => s,
         Err(e) => {
             warn!("printers: {e}");
@@ -206,8 +247,8 @@ fn printer_part(view: &mut ControlView, tabs: bool) {
         view.subtitle = tr("No printers. Plug one in, or turn on one on the network.").to_owned();
         return;
     };
-    if let Ok(mut picked) = PICKED.lock() {
-        *picked = Some(p.name.clone());
+    if let Ok(mut shown) = SHOWN.lock() {
+        *shown = Some(p.name.clone());
     }
     view.subtitle = how(&state, p);
     // WHICH ONE, with several.
@@ -234,7 +275,8 @@ fn printer_part(view: &mut ControlView, tabs: bool) {
         view.subtitle = format!("{}  ·  {}", view.subtitle, ink.join("  ·  "));
     }
     // WHAT A PRINT GETS unless its app asks otherwise.
-    match cups::defaults(&p.name) {
+    let name = p.name.clone();
+    match kept(&KEPT_DEFAULTS, |(n, _)| *n == p.name, || cups::defaults(&name).map(|d| (name.clone(), d))).map(|(_, d)| d) {
         Ok(d) => {
             if let Some(colour) = d.colour {
                 view.groups.push(words(
@@ -273,7 +315,7 @@ fn printer_part(view: &mut ControlView, tabs: bool) {
     let hour_ago = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs().saturating_sub(RECENT_SECS));
-    let ended = cups::ended_since(hour_ago).unwrap_or_default();
+    let ended = kept(&KEPT_ENDED, |_| true, || cups::ended_since(hour_ago)).unwrap_or_default();
     let recent = ended.iter().filter(|j| j.printer == p.name).take(RECENT_SHOWN);
     // As many as the box has rows left for (the section words, the address
     // field and the buttons still to come), and the one printing at least.
@@ -298,7 +340,7 @@ fn printer_part(view: &mut ControlView, tabs: bool) {
         }
     }
     // WHAT CAN BE DONE TO IT: removing it is asked once.
-    let asked = REMOVING.lock().ok().and_then(|r| r.clone()).is_some_and(|r| r == p.name);
+    let asked = REMOVING.lock().ok().and_then(|r| r.clone()).is_some_and(|(r, at)| r == p.name && at.elapsed() < ASKED_FOR);
     if asked {
         view.groups.push(Group {
             centred: true,
@@ -465,9 +507,9 @@ fn add_part(view: &mut ControlView) {
     if !cups::present() {
         return;
     }
-    let said = ADDING.lock().ok().and_then(|a| a.clone()).map(|a| match a {
-        Adding::Trying(at) => fill(tr("Looking for a printer at {address}…"), &[("address", &at)]),
-        Adding::Failed(at) => fill(tr("No printer answered at {address}."), &[("address", &at)]),
+    let said = ADDING.lock().ok().and_then(|a| a.clone()).and_then(|a| match a {
+        Adding::Trying(at) => Some(fill(tr("Looking for a printer at {address}…"), &[("address", &at)])),
+        Adding::Failed(at, when) => (when.elapsed() < ASKED_FOR).then(|| fill(tr("No printer answered at {address}."), &[("address", &at)])),
     });
     if let Some(said) = said {
         view.groups.push(Group { centred: true, ..line_of(said) });
@@ -492,7 +534,7 @@ pub(crate) fn add_typed(address: &str) {
                 Ok(_) => None,
                 Err(why) => {
                     warn!("printers: none added at {address}: {why}");
-                    Some(Adding::Failed(address.clone()))
+                    Some(Adding::Failed(address.clone(), Instant::now()))
                 }
             };
         }
@@ -502,6 +544,7 @@ pub(crate) fn add_typed(address: &str) {
                 *picked = Some(name);
             }
         }
+        stale();
         crate::controls::read_again("Printers");
     });
     if let Err(e) = spawned {
@@ -564,7 +607,9 @@ pub(crate) fn apply(key: &str, value: &str) {
         scan_with(value);
         return;
     }
-    let Some(name) = PICKED.lock().ok().and_then(|p| p.clone()) else {
+    // (Whatever is done, what CUPS said before is old.)
+    stale();
+    let Some(name) = SHOWN.lock().ok().and_then(|p| p.clone()) else {
         return;
     };
     let on = value == "on";
@@ -593,7 +638,7 @@ pub(crate) fn apply(key: &str, value: &str) {
         "printers-do" => match value {
             "remove" => {
                 if let Ok(mut r) = REMOVING.lock() {
-                    *r = Some(name.clone());
+                    *r = Some((name.clone(), Instant::now()));
                 }
                 Ok(())
             }
@@ -606,7 +651,7 @@ pub(crate) fn apply(key: &str, value: &str) {
         "printers-remove" => {
             let asked = REMOVING.lock().ok().and_then(|mut r| r.take());
             match (value, asked) {
-                ("yes", Some(n)) if n == name => {
+                ("yes", Some((n, at))) if n == name && at.elapsed() < ASKED_FOR => {
                     if let Ok(mut picked) = PICKED.lock() {
                         *picked = None;
                     }

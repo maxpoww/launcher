@@ -237,8 +237,17 @@ impl App {
     }
 }
 
-/// A desktop notification through the session bus (as the battery's).
+/// A desktop notification through the session bus (as the battery's), on
+/// a thread that waits for it (no process left behind).
 fn notify(title: &str, body: &str) {
+    let (title, body) = (title.to_owned(), body.to_owned());
+    let spawned = std::thread::Builder::new().name("scan-notice".into()).spawn(move || notify_now(&title, &body));
+    if let Err(e) = spawned {
+        warn!("scanners: no thread for a notice: {e}");
+    }
+}
+
+fn notify_now(title: &str, body: &str) {
     let r = Command::new("busctl")
         .args([
             "--user",
@@ -259,7 +268,7 @@ fn notify(title: &str, body: &str) {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .status();
     if let Err(e) = r {
         warn!("scanners: no notification: {e}");
     }

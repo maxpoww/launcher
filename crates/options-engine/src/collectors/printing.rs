@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use futures_core::Stream;
 use tokio::sync::{mpsc, watch};
@@ -48,9 +48,11 @@ const IDLE_BLIND: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_millis(150);
 /// How long a print that ended stays in the state.
 pub const ENDED_KEEP: Duration = Duration::from_secs(60);
-/// The subscription's lease, and how long before its end it is renewed.
-const LEASE: u32 = 3600;
-const RENEW_BEFORE: Duration = Duration::from_secs(300);
+/// The subscription's lease, and how long before its end it is renewed. On
+/// the wall clock: CUPS's lease runs on through a sleep, `Instant` does not.
+/// Short, so one left behind (a dock that ended) is gone soon.
+const LEASE: u32 = 600;
+const RENEW_BEFORE: Duration = Duration::from_secs(120);
 
 #[derive(Default)]
 pub struct PrintingCollector;
@@ -114,8 +116,13 @@ impl Collector for PrintingCollector {
                     };
                     events.wait(wait).await;
                 }
-                // CUPS went away: dark, rather than its last answer standing.
+                // CUPS went away: nothing printing as far as anyone can say
+                // (the bar's prints go), and dark, rather than its last
+                // answer standing.
                 events.end().await;
+                let _ = tx
+                    .send(Update::Delta(Layer::Printing, ContextDelta::Printing(PrintingState::default())))
+                    .await;
                 let _ = tx.send(Update::Health(Layer::Printing, false)).await;
                 tokio::time::sleep(RETRY).await;
             }
@@ -149,9 +156,15 @@ impl Seen {
     /// Add to a fresh snapshot how each print that left the list ended.
     async fn fold(&mut self, mut state: PrintingState) -> PrintingState {
         let now: BTreeSet<u32> = state.jobs.iter().map(|j| j.id).collect();
+        // A print back in the list (printed again: CUPS keeps its id) is no
+        // longer one that ended.
+        self.ended.retain(|(j, _)| !now.contains(&j.id));
         for &id in self.open.difference(&now) {
             match blocking(move || cups::job(id)).await {
-                Ok(Some(j)) if j.state.ended() => self.ended.push((j, Instant::now())),
+                Ok(Some(j)) if j.state.ended() => {
+                    self.ended.retain(|(e, _)| e.id != id);
+                    self.ended.push((j, Instant::now()));
+                }
                 // Not ended after all, or gone with no trace: nothing to say.
                 Ok(_) => {}
                 Err(e) => tracing::debug!("printing: how print {id} ended: {e}"),
@@ -177,7 +190,10 @@ fn merge_ended(state: &mut PrintingState, ended: &[(PrintJob, Instant)]) {
 /// them.
 struct Events {
     stream: Option<MessageStream>,
-    subscription: Option<(i32, Instant)>,
+    subscription: Option<(i32, SystemTime)>,
+    /// When a subscription was last asked for and refused (asked again after
+    /// `RETRY`).
+    refused: Option<Instant>,
     // Kept for the stream's life.
     _conn: Option<Connection>,
 }
@@ -189,6 +205,7 @@ impl Events {
         let mut ev = Events {
             stream: None,
             subscription: None,
+            refused: None,
             _conn: None,
         };
         let listened = async {
@@ -222,13 +239,15 @@ impl Events {
     async fn renew(&mut self) {
         match blocking(|| cups::subscribe(LEASE)).await {
             Ok(id) => {
-                if let Some((old, _)) = self.subscription.replace((id, Instant::now())) {
+                self.refused = None;
+                if let Some((old, _)) = self.subscription.replace((id, SystemTime::now())) {
                     let _ = blocking(move || cups::unsubscribe(old)).await;
                 }
             }
             Err(e) => {
                 tracing::debug!("printing: CUPS would not subscribe: {e}");
                 self.subscription = None;
+                self.refused = Some(Instant::now());
             }
         }
     }
@@ -236,10 +255,16 @@ impl Events {
     /// Until CUPS says something (and the burst it came in has settled), or
     /// `most` has passed. The subscription is renewed when it is due.
     async fn wait(&mut self, most: Duration) {
-        if let Some((_, at)) = self.subscription {
-            if at.elapsed() + RENEW_BEFORE >= Duration::from_secs(u64::from(LEASE)) {
-                self.renew().await;
+        let due = match self.subscription {
+            // (A clock set back reads as just renewed: the timer still looks.)
+            Some((_, at)) => {
+                at.elapsed().unwrap_or_default() + RENEW_BEFORE
+                    >= Duration::from_secs(u64::from(LEASE))
             }
+            None => self.stream.is_some() && self.refused.is_none_or(|at| at.elapsed() >= RETRY),
+        };
+        if due {
+            self.renew().await;
         }
         let Some(stream) = self.stream.as_mut() else {
             tokio::time::sleep(most).await;
@@ -301,6 +326,18 @@ mod tests {
         // 4 is still open in the fresh list: the open one wins.
         assert_eq!(ids, vec![4, 3]);
         assert_eq!(s.jobs[0].state, JobState::Printing);
+    }
+
+    #[tokio::test]
+    async fn a_print_printed_again_is_not_the_one_that_ended() {
+        let mut seen = Seen::default();
+        seen.ended.push((job(5, JobState::Aborted), Instant::now()));
+        // Print again: CUPS keeps the id, and it is in the list once more.
+        let state = PrintingState { printers: vec![], jobs: vec![job(5, JobState::Pending)] };
+        let state = seen.fold(state).await;
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].state, JobState::Pending);
+        assert!(seen.ended.is_empty());
     }
 
     #[test]

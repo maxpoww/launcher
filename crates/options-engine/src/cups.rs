@@ -470,16 +470,24 @@ fn send_ok(resource: &str, req: &Request) -> Result<Response, CupsError> {
     if r.ok() {
         Ok(r)
     } else {
-        let said = r
-            .first(OPERATION)
-            .map(|g| g.text("status-message"))
-            .unwrap_or_default();
-        Err(CupsError::Refused(if said.is_empty() {
-            format!("0x{:04x}", r.status)
-        } else {
-            said
-        }))
+        Err(refused(&r))
     }
+}
+
+/// IPP's client-error-not-found.
+const NOT_FOUND: u16 = 0x0406;
+
+/// An IPP refusal, in CUPS's own words.
+fn refused(r: &Response) -> CupsError {
+    let said = r
+        .first(OPERATION)
+        .map(|g| g.text("status-message"))
+        .unwrap_or_default();
+    CupsError::Refused(if said.is_empty() {
+        format!("0x{:04x}", r.status)
+    } else {
+        said
+    })
 }
 
 // --- what CUPS says, made the shell's ---------------------------------------
@@ -679,7 +687,12 @@ pub fn snapshot() -> Result<PrintingState, CupsError> {
     let mut req = Request::new(CUPS_GET_PRINTERS);
     req.attr(NAME, "requesting-user-name", &[&user()]);
     req.attr(KEYWORD, "requested-attributes", PRINTER_ATTRS);
-    let printers = send_ok("/", &req)?;
+    // (With no printer at all CUPS answers "not found" — "No destinations
+    // added." — which is an empty list, not a CUPS that does not answer.)
+    let printers = match send("/", &req)? {
+        r if r.ok() || r.status == NOT_FOUND => r,
+        r => return Err(refused(&r)),
+    };
 
     let mut req = Request::new(GET_JOBS);
     req.attr(URI, "printer-uri", &["ipp://localhost/"]);
