@@ -1441,8 +1441,7 @@ impl App {
         let ctx = crate::desktop_menu::Ctx::default();
         let mut menu = Menu::open(ctx, rows, None, false, (b.x, b.y + b.h), w, h);
         // (Its right edge under the button's: the menu opens leftward.)
-        menu.rect.x = (b.x + b.w - menu.rect.w).max(4.0);
-        menu.rect.y = b.y + b.h + 4.0;
+        menu.hang((b.x + b.w, b.y + b.h + 4.0), false, true);
         win.selected.clear();
         win.menu = Some(menu);
         win.menu_path = Some(SORT_MENU.to_owned());

@@ -479,6 +479,11 @@ pub(crate) struct Desktop {
     /// The desktop holds the keyboard: from a click on it until the pointer
     /// leaves it, or a window opens (see `App::desktop_take_keys`).
     pub keys: bool,
+    /// …taken only for its menu (Ctrl +/−/0, Escape): given back when
+    /// nothing is up any more (`sync_desktop_top_input`).
+    pub keys_for_menu: bool,
+    /// A wheel with Ctrl held over the menu, not yet a whole step.
+    pub menu_zoom_run: f32,
     /// The icons are put away (a click on bare wallpaper toggles it); the
     /// files stay. Kept in the settings store.
     pub hidden: bool,
@@ -2678,7 +2683,24 @@ impl App {
         let mut menu = Menu::new(ctx, item, many, at, w as f32, h as f32);
         menu.hover = menu.hit(at);
         self.desktop.menu = Some(menu);
+        // The keys for it (its size, Escape): the desktop takes the keyboard
+        // while it is up, and gives it back when it goes.
+        if !self.desktop.keys && self.desktop_top_ready() {
+            self.desktop_take_keys();
+            self.desktop.keys_for_menu = true;
+        }
         self.request_desktop_draw();
+    }
+
+    /// The menus' size changed (`zoom.rs`): the desktop's menu is laid out
+    /// again at once, the row under the pointer still the one under it.
+    pub(crate) fn desktop_menu_rescaled(&mut self) {
+        let at = self.desktop.ptr;
+        if let Some(menu) = self.desktop.menu.as_mut() {
+            menu.rescale(crate::desktop_menu::scale());
+            menu.hover = at.and_then(|p| menu.hit(p));
+            self.request_desktop_draw();
+        }
     }
 
     /// What the desktop's menu is made from: the wallpaper's (`item` none),
@@ -4184,13 +4206,27 @@ impl App {
             return;
         }
         let at = self.desktop.ptr.unwrap_or((self.desktop.grid.x0, MARGIN));
-        // A menu or a box up: Escape puts it away; nothing else is for it.
+        // A menu or a box up: Escape puts it away, Ctrl +/−/0 make a menu
+        // bigger or smaller; nothing else is for it.
         if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() {
-            if keysym == Keysym::Escape {
-                self.desktop.menu = None;
-                self.desktop.props = None;
-                self.desktop.config = None;
-                self.request_desktop_draw();
+            let menu = self.desktop.menu.is_some() && self.modifiers.ctrl;
+            match keysym {
+                Keysym::Escape => {
+                    self.desktop.menu = None;
+                    self.desktop.props = None;
+                    self.desktop.config = None;
+                    self.request_desktop_draw();
+                }
+                Keysym::plus | Keysym::equal | Keysym::KP_Add if menu => {
+                    self.zoom("menu", "in");
+                }
+                Keysym::minus | Keysym::KP_Subtract if menu => {
+                    self.zoom("menu", "out");
+                }
+                Keysym::_0 | Keysym::KP_0 if menu => {
+                    self.zoom("menu", "reset");
+                }
+                _ => {}
             }
             return;
         }
@@ -4612,6 +4648,20 @@ impl App {
             return;
         }
         match event {
+            // Ctrl and the wheel over a menu that is up: bigger or smaller,
+            // as Ctrl +/− (a notch a step).
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } if self.desktop.menu.is_some() && self.modifiers.ctrl => {
+                self.desktop.menu_zoom_run += value as f32;
+                let steps = (self.desktop.menu_zoom_run / 15.0).trunc();
+                if steps != 0.0 {
+                    self.desktop.menu_zoom_run -= steps * 15.0;
+                    self.zoom("menu", if steps < 0.0 { "in" } else { "out" });
+                }
+            }
             wl_pointer::Event::Enter {
                 serial,
                 surface_x,

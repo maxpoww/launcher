@@ -56,6 +56,9 @@ pub(crate) struct Settings {
     pub(crate) fast_zoom: f32,
     /// The same for the file manager's windows: their field (the things).
     pub(crate) files_zoom: f32,
+    /// The same for EVERY right-click menu (Max, 2026-10-21: Ctrl +/−/0
+    /// while one is open; `desktop_menu::scale`).
+    pub(crate) menu_zoom: f32,
     /// …and their PANEL — the places down the side and the head — apart
     /// (Max, 2026-10-14: "when I'm hovering it I grow that").
     pub(crate) files_panel_zoom: f32,

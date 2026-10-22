@@ -3553,10 +3553,10 @@ impl App {
         };
         let w = win.virt().0;
         if let Some(menu) = win.menu.as_mut() {
+            // (Hanging UP from over the pill, its right edge by the ⋯; a new
+            // page or size keeps its foot there.)
             let right = more.map_or(pill.x + pill.w, |r| r.x + r.w + 6.0);
-            menu.rect.x = (right - menu.rect.w).clamp(4.0, (w - menu.rect.w - 4.0).max(4.0));
-            menu.rect.y = (pill.y - 10.0 - menu.rect.h).max(4.0);
-            menu.up = true;
+            menu.hang((right.min(w - 4.0), pill.y - 10.0), false, false);
         }
         if open_with {
             self.filer_menu_apps(id);
@@ -4662,6 +4662,23 @@ impl App {
         }
     }
 
+    /// The menus' size changed (`zoom.rs`): a menu up in a window is laid
+    /// out again at once, the row under the pointer still the one under it.
+    pub(crate) fn filer_menus_rescaled(&mut self) {
+        let s = crate::desktop_menu::scale();
+        let mut ids = Vec::new();
+        for win in self.filer.wins.iter_mut() {
+            if let Some(menu) = win.menu.as_mut() {
+                menu.rescale(s);
+                menu.hover = win.ptr.and_then(|p| menu.hit(p));
+                ids.push(win.id);
+            }
+        }
+        for id in ids {
+            self.filer_request_draw(id);
+        }
+    }
+
     /// The size or the scale changed: keep the scroll inside and draw.
     pub(crate) fn filer_relayout(&mut self, id: u32) {
         let icon_scale = self.icon_scale();
@@ -5626,8 +5643,11 @@ impl App {
                     let steps = (win.zoom_run / 15.0).trunc();
                     if steps != 0.0 {
                         win.zoom_run -= steps * 15.0;
-                        // (Away from oneself is bigger.)
-                        let what = self.filer.win(id).map_or("files", Win::zoom_target);
+                        // (Away from oneself is bigger. A menu up: the menu.)
+                        let what = self
+                            .filer
+                            .win(id)
+                            .map_or("files", |w| if w.menu.is_some() { "menu" } else { w.zoom_target() });
                         self.zoom(what, if steps < 0.0 { "in" } else { "out" });
                     }
                     return;
@@ -7009,12 +7029,26 @@ impl App {
             return self.filer_request_draw(id);
         }
         if win.menu.is_some() || win.props.is_some() {
-            if keysym == Keysym::Escape {
-                win.menu = None;
-                win.menu_path = None;
-                win.props = None;
-                self.filer_hover(id);
-                self.filer_request_draw(id);
+            // (Ctrl +/−/0 make the MENU bigger or smaller, not the files.)
+            let menu = win.menu.is_some() && ctrl;
+            match keysym {
+                Keysym::Escape => {
+                    win.menu = None;
+                    win.menu_path = None;
+                    win.props = None;
+                    self.filer_hover(id);
+                    self.filer_request_draw(id);
+                }
+                Keysym::plus | Keysym::equal | Keysym::KP_Add if menu => {
+                    self.zoom("menu", "in");
+                }
+                Keysym::minus | Keysym::KP_Subtract if menu => {
+                    self.zoom("menu", "out");
+                }
+                Keysym::_0 | Keysym::KP_0 if menu => {
+                    self.zoom("menu", "reset");
+                }
+                _ => {}
             }
             return;
         }
@@ -7379,6 +7413,8 @@ impl App {
                 }
             }
             "key" => {
+                // (`key ctrl <name>`: with Ctrl held.)
+                let (ctrl, rest) = rest.strip_prefix("ctrl ").map_or((false, rest), |r| (true, r));
                 let key = match rest {
                     "left" => Keysym::Left,
                     "right" => Keysym::Right,
@@ -7405,7 +7441,10 @@ impl App {
                     "q" => Keysym::q,
                     _ => return format!("no key {rest}"),
                 };
+                let held = self.modifiers.ctrl;
+                self.modifiers.ctrl |= ctrl;
                 self.filer_key(id, key, None);
+                self.modifiers.ctrl = held;
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),

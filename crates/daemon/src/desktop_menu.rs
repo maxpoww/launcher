@@ -767,6 +767,31 @@ const TEXT_X: f32 = ICON_X + ICON + 8.0;
 const CHEV: f32 = 11.0;
 /// How far from the pointer the panel's corner sits.
 const GAP: f32 = 6.0;
+
+/// THE MENUS' SIZE (Max, 2026-10-21: "add ctrl +/-/0 to the context menus
+/// (make it bigger or smaller)" — for kids and grandmas): ONE for every
+/// menu, the owner's standing choice (`settings.menu_zoom`, `App::zoom`'s
+/// "menu"), a tenth a step from 80 % to 200 %. A menu is laid out at it as
+/// it opens, and again at once when it changes (`Menu::rescale`) — rows,
+/// words, symbols, air, corners and width together.
+static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+pub(crate) const SCALE_MIN: f32 = 0.8;
+pub(crate) const SCALE_MAX: f32 = 2.0;
+
+/// The menus' size now.
+pub(crate) fn scale() -> f32 {
+    f32::from_bits(SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Make every menu from now on this size (0: as shipped).
+pub(crate) fn set_scale(s: f32) {
+    let s = if s > 0.0 {
+        s.clamp(SCALE_MIN, SCALE_MAX)
+    } else {
+        1.0
+    };
+    SCALE.store(s.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 /// A symbol's ink (the mockup's 75 %), a note's, a rule's; a row that has
 /// nothing to do now.
 const ICON_INK: f32 = 0.75;
@@ -882,9 +907,14 @@ pub(crate) struct Menu {
     pub t: f32,
     /// Coming back from the Properties box: the shape it shrinks from.
     pub grow_from: Option<Rect>,
-    /// It hangs UP from its foot (the selection pill's ⋯): a new page
-    /// keeps the foot where it is.
-    pub up: bool,
+    /// Its size (`scale()` as it opened, or since).
+    pub scale: f32,
+    /// The corner that stays where it is — at the pointer, or by the button
+    /// it hangs from — whatever its size or page: its left edge or its
+    /// right, its top or its foot (`Menu::hang`).
+    anchor: (f32, f32),
+    from_left: bool,
+    from_top: bool,
 }
 
 impl Menu {
@@ -905,47 +935,72 @@ impl Menu {
         w: f32,
         h: f32,
     ) -> Self {
-        let (width, height) = (width_of(&rows), height_of(&rows));
-        let x = if at.0 + GAP + width <= w {
-            at.0 + GAP
-        } else {
-            (at.0 - GAP - width).max(0.0)
-        };
-        let y = if at.1 + GAP + height <= h {
-            at.1 + GAP
-        } else {
-            (at.1 - GAP - height).max(0.0)
-        };
-        Self {
+        let s = scale();
+        let (width, height, gap) = (width_of(&rows, s), height_of(&rows, s), GAP * s);
+        // To the right of the pointer and below it — or, with no room
+        // there, to its left, above it.
+        let from_left = at.0 + gap + width <= w;
+        let from_top = at.1 + gap + height <= h;
+        let anchor = (
+            if from_left { at.0 + gap } else { at.0 - gap },
+            if from_top { at.1 + gap } else { at.1 - gap },
+        );
+        let mut menu = Self {
             item,
             many,
             ctx,
             page: Page::Main,
             at,
             rows,
-            rect: Rect::new(x, y, width, height),
+            rect: Rect::new(0.0, 0.0, width, height),
             room: (w, h),
             hover: None,
             pressed: None,
             t: 0.0,
             grow_from: None,
-            up: false,
-        }
+            scale: s,
+            anchor,
+            from_left,
+            from_top,
+        };
+        menu.place();
+        menu
+    }
+
+    /// Hang it from `anchor` instead: that point its left edge or its
+    /// right (`from_left`), its top or its foot (`from_top`) — the
+    /// selection pill's ⋯ hangs UP from over the pill, the sort menu down
+    /// from its button.
+    pub fn hang(&mut self, anchor: (f32, f32), from_left: bool, from_top: bool) {
+        (self.anchor, self.from_left, self.from_top) = (anchor, from_left, from_top);
+        self.place();
+    }
+
+    /// Its panel: the size its rows want at its scale, its corner at its
+    /// anchor, shifted back onto the surface where it would leave it.
+    fn place(&mut self) {
+        let s = self.scale;
+        let (w, h) = (width_of(&self.rows, s), height_of(&self.rows, s));
+        let (ax, ay) = self.anchor;
+        let x = if self.from_left { ax } else { ax - w };
+        let y = if self.from_top { ay } else { ay - h };
+        let x = x.min(self.room.0 - w).max(0.0);
+        let y = y.min(self.room.1 - h).max(0.0);
+        self.rect = Rect::new(x, y, w, h);
+    }
+
+    /// At size `s` now (the owner's Ctrl +/−/0): laid out again at once,
+    /// its corner where it was.
+    pub fn rescale(&mut self, s: f32) {
+        self.scale = s;
+        self.place();
     }
 
     /// Put new rows in the panel where it stands: the same corner, the size
     /// that fits them, kept on the surface.
     fn set_rows(&mut self, rows: Vec<Row>) {
-        let (width, height) = (width_of(&rows), height_of(&rows));
-        let foot = self.rect.y + self.rect.h;
         self.rows = rows;
-        self.rect.w = width;
-        self.rect.h = height;
-        if self.up {
-            self.rect.y = (foot - height).max(0.0);
-        }
-        self.rect.x = self.rect.x.min((self.room.0 - width).max(0.0));
-        self.rect.y = self.rect.y.min((self.room.1 - height).max(0.0));
+        self.place();
         self.hover = None;
         self.pressed = None;
         self.grow_from = None;
@@ -965,12 +1020,13 @@ impl Menu {
 
     /// Each row's rectangle, in order (rules included).
     pub fn row_rects(&self) -> Vec<Rect> {
-        let mut y = self.rect.y + PAD;
+        let (s, pad) = (self.scale, PAD * self.scale);
+        let mut y = self.rect.y + pad;
         self.rows
             .iter()
             .map(|r| {
-                let h = row_h(r);
-                let rect = Rect::new(self.rect.x + PAD, y, self.rect.w - 2.0 * PAD, h);
+                let h = row_h(r) * s;
+                let rect = Rect::new(self.rect.x + pad, y, self.rect.w - 2.0 * pad, h);
                 y += h;
                 rect
             })
@@ -1012,12 +1068,14 @@ impl Menu {
     /// layer a symbol is in (none: the row has words alone).
     pub fn push(&self, scene: &mut Scene, paint: &MenuPaint, glyph: &dyn Fn(&str) -> Option<u32>) {
         let t = self.t.clamp(0.0, 1.0);
+        // (Everything at its size.)
+        let s = self.scale;
         // Its entrance: fading in while settling down from 4 px above — or,
         // back from the Properties box, that box's panel shrinking to ours.
         let lift = if self.grow_from.is_some() {
             0.0
         } else {
-            (1.0 - t) * -4.0
+            (1.0 - t) * -4.0 * s
         };
         let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * t];
         let ink_at = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a];
@@ -1036,7 +1094,7 @@ impl Menu {
         };
         grid.rects.push(RectInst {
             rect: panel,
-            radius: paint.radius,
+            radius: paint.radius * s,
             color: panel_fill,
             glass: paint.glass,
             border: 0.0,
@@ -1076,9 +1134,9 @@ impl Menu {
             match row {
                 Row::Sep => grid.rects.push(RectInst {
                     rect: Rect::new(
-                        rect.x + 6.0,
-                        rect.y + (rect.h - 1.0) / 2.0,
-                        rect.w - 12.0,
+                        rect.x + 6.0 * s,
+                        (rect.y + (rect.h - 1.0) / 2.0).round(),
+                        rect.w - 12.0 * s,
                         1.0,
                     ),
                     radius: 0.0,
@@ -1088,10 +1146,10 @@ impl Menu {
                 }),
                 Row::Note(text) => grid.labels.push(label(
                     text,
-                    (rect.x + 10.0, rect.y + rect.h - NOTE_PX - 7.0),
-                    rect.w - 20.0,
-                    NOTE_PX,
-                    NOTE_PX + 4.0,
+                    (rect.x + 10.0 * s, rect.y + rect.h - (NOTE_PX + 7.0) * s),
+                    rect.w - 20.0 * s,
+                    NOTE_PX * s,
+                    (NOTE_PX + 4.0) * s,
                     false,
                     ink_at(NOTE_INK),
                 )),
@@ -1118,7 +1176,7 @@ impl Menu {
                         };
                         grid.rects.push(RectInst {
                             rect,
-                            radius: ROW_RADIUS,
+                            radius: ROW_RADIUS * s,
                             color: fade(fill),
                             glass: 0.0,
                             border: 0.0,
@@ -1129,30 +1187,30 @@ impl Menu {
                     let cy = rect.y + rect.h / 2.0;
                     if !icon.is_empty() {
                         let r = Rect::new(
-                            (rect.x + ICON_X).round(),
-                            (cy - ICON / 2.0).round(),
-                            ICON,
-                            ICON,
+                            (rect.x + ICON_X * s).round(),
+                            (cy - ICON * s / 2.0).round(),
+                            ICON * s,
+                            ICON * s,
                         );
                         symbol(&mut grid, icon, r, at(ICON_INK));
                     }
                     let chev = turns_page(*action);
                     if chev {
                         let r = Rect::new(
-                            (rect.x + rect.w - 8.0 - CHEV).round(),
-                            (cy - CHEV / 2.0).round(),
-                            CHEV,
-                            CHEV,
+                            (rect.x + rect.w - (8.0 + CHEV) * s).round(),
+                            (cy - CHEV * s / 2.0).round(),
+                            CHEV * s,
+                            CHEV * s,
                         );
                         symbol(&mut grid, "chev", r, at(0.55));
                     }
-                    let room = rect.w - TEXT_X - if chev { CHEV + 12.0 } else { 8.0 };
+                    let room = rect.w - (TEXT_X + if chev { CHEV + 12.0 } else { 8.0 }) * s;
                     grid.labels.push(label(
                         words,
-                        (rect.x + TEXT_X, cy - LINE_PX / 2.0),
+                        (rect.x + TEXT_X * s, cy - LINE_PX * s / 2.0),
                         room,
-                        FONT_PX,
-                        LINE_PX,
+                        FONT_PX * s,
+                        LINE_PX * s,
                         *action == Action::Back,
                         at(1.0),
                     ));
@@ -1171,14 +1229,15 @@ fn row_h(row: &Row) -> f32 {
     }
 }
 
-fn height_of(rows: &[Row]) -> f32 {
-    PAD * 2.0 + rows.iter().map(row_h).sum::<f32>()
+/// Its height at size `s`.
+fn height_of(rows: &[Row], s: f32) -> f32 {
+    (PAD * 2.0 + rows.iter().map(row_h).sum::<f32>()) * s
 }
 
 /// As wide as its longest row's words want (an estimate of the words at
 /// the menu's size: a menu is laid out before anything is drawn), between
-/// the mockup's narrowest and a cap.
-fn width_of(rows: &[Row]) -> f32 {
+/// the mockup's narrowest and a cap — at size `s`.
+fn width_of(rows: &[Row], s: f32) -> f32 {
     let words = rows
         .iter()
         .map(|r| match r {
@@ -1195,7 +1254,7 @@ fn width_of(rows: &[Row]) -> f32 {
             Row::Sep => 0.0,
         })
         .fold(0.0, f32::max);
-    (words + 2.0 * PAD).clamp(WIDTH, WIDTH_MAX).ceil()
+    ((words + 2.0 * PAD).clamp(WIDTH, WIDTH_MAX) * s).ceil()
 }
 
 #[cfg(test)]
@@ -1407,10 +1466,44 @@ mod tests {
         let m = Menu::new(ctx.clone(), None, false, (100.0, 100.0), 1000.0, 800.0);
         assert_eq!((m.rect.x, m.rect.y), (106.0, 106.0));
         assert!(m.rect.w >= WIDTH);
-        assert_eq!(m.rect.h, height_of(&m.rows));
+        assert_eq!(m.rect.h, height_of(&m.rows, 1.0));
         let m = Menu::new(ctx, None, false, (950.0, 780.0), 1000.0, 800.0);
         assert_eq!(m.rect.x, 950.0 - GAP - m.rect.w);
         assert!(m.rect.y + m.rect.h <= 780.0 - GAP + 0.01);
+    }
+
+    /// Bigger or smaller (Ctrl +/−/0): everything together, the corner at
+    /// the pointer where it was, shifted back onto the surface where it
+    /// would leave it — and back where it was at its old size.
+    #[test]
+    fn a_menu_grows_from_its_corner_and_stays_on_the_surface() {
+        let ctx = Ctx {
+            on: On::File,
+            here: true,
+            ..Default::default()
+        };
+        let mut m = Menu::new(ctx.clone(), None, false, (100.0, 100.0), 1000.0, 800.0);
+        let (w, h) = (m.rect.w, m.rect.h);
+        let row = m.row_rects()[0];
+        m.rescale(1.6);
+        assert_eq!((m.rect.x, m.rect.y), (106.0, 106.0));
+        assert!((m.rect.w - (w * 1.6).ceil()).abs() <= 1.0 && (m.rect.h - h * 1.6).abs() < 0.01);
+        let big = m.row_rects()[0];
+        assert!((big.h - row.h * 1.6).abs() < 0.01);
+        // The row under a point stays the row under it, grown.
+        assert_eq!(m.hit((big.x + 5.0, big.y + big.h / 2.0)), Some(0));
+        // Flipped at the far corner: its right edge and its foot stay there.
+        let mut m = Menu::new(ctx.clone(), None, false, (950.0, 780.0), 1000.0, 800.0);
+        m.rescale(1.2);
+        assert!((m.rect.x + m.rect.w - (950.0 - GAP)).abs() < 0.01);
+        assert!((m.rect.y + m.rect.h - (780.0 - GAP)).abs() < 0.01);
+        // Grown past the surface's right side: shifted back in; at its old
+        // size, back where it was.
+        let mut m = Menu::new(ctx, None, false, (700.0, 100.0), 1000.0, 800.0);
+        m.rescale(2.0);
+        assert!(m.rect.x + m.rect.w <= 1000.0 + 0.01 && m.rect.x < 706.0);
+        m.rescale(1.0);
+        assert_eq!(m.rect.x, 706.0);
     }
 
     #[test]

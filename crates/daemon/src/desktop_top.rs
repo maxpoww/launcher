@@ -116,6 +116,10 @@ impl App {
     /// up, and nowhere otherwise.
     fn sync_desktop_top_input(&mut self) {
         let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up();
+        // (The keyboard taken only for a menu goes back with it.)
+        if !up && std::mem::take(&mut self.desktop.keys_for_menu) {
+            self.desktop_drop_keys();
+        }
         if up == self.desktop_top.input_on {
             return;
         }

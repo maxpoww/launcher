@@ -26,6 +26,12 @@
 //!   (`filer::Layout::zoom`), or its places — their ICONS only, not their
 //!   words, and further: up to `PANEL_MAX`.
 //!
+//! - **A right-click menu** (Max, 2026-10-21: "add ctrl +/-/0 to the
+//!   context menus") is zoomed while it is OPEN, wherever it is — a file
+//!   window's, the desktop's (which takes the keyboard while its menu is up):
+//!   ONE size for every menu (`desktop_menu::scale`), 80 % to 200 %, laid
+//!   out again at once. The keys are the menu's then, not the window's.
+//!
 //! All are the owner's standing choice (`settings.json`).
 
 use tracing::info;
@@ -129,7 +135,7 @@ impl App {
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
     /// to a number (`how`). What was done.
     pub(crate) fn zoom(&mut self, what: &str, how: &str) -> String {
-        const USAGE: &str = "zoom bar|desktop|stack|fast|files|files-panel in|out|reset|<n>";
+        const USAGE: &str = "zoom bar|desktop|stack|fast|files|files-panel|menu in|out|reset|<n>";
         let now = match what {
             "bar" => self.bar_zoom(),
             "desktop" => self.desktop_zoom(),
@@ -137,9 +143,14 @@ impl App {
             "fast" => self.fast_zoom(),
             "files" => self.files_zoom(),
             "files-panel" => self.files_panel_zoom(),
+            "menu" => crate::desktop_menu::scale(),
             _ => return USAGE.to_owned(),
         };
-        let (min, max) = if what == "files-panel" { (PANEL_MIN, PANEL_MAX) } else { (MIN, MAX) };
+        let (min, max) = match what {
+            "files-panel" => (PANEL_MIN, PANEL_MAX),
+            "menu" => (crate::desktop_menu::SCALE_MIN, crate::desktop_menu::SCALE_MAX),
+            _ => (MIN, MAX),
+        };
         let Some(to) = stepped_to(now, how, min, max) else {
             return USAGE.to_owned();
         };
@@ -172,6 +183,13 @@ impl App {
             }
             self.settings.save();
             self.filer_zoomed();
+        } else if what == "menu" {
+            self.settings.menu_zoom = to;
+            self.settings.save();
+            crate::desktop_menu::set_scale(to);
+            // Every menu that is up, at the new size at once.
+            self.filer_menus_rescaled();
+            self.desktop_menu_rescaled();
         } else if what == "stack" {
             self.settings.stack_zoom = to;
             self.settings.save();
