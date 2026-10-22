@@ -1111,11 +1111,18 @@ The big daemon files are cohesive but long — go straight to the function:
   while on; one choice for every window, remembered (`settings.files_keys`, `filer_keys`). While on,
   plain letters (no Ctrl/Alt/Super) are commands in `filer_key` — W A S D walk as the arrows (Shift
   stretches), Q back, E opens (Enter), Z undoes, X / C / V cut, copy, paste (the menu's own acts, so the
-  pill's flow and the zones' gate), R names the one selected; Delete as ever; no other letter types and
-  nothing searches by itself (Ctrl+F and the magnifier still do). A field that is up (search, path,
+  pill's flow and the zones' gate), R names the one selected; Delete as ever; and THE EIGHT MORE (Max,
+  2026-10-22: "constrúilos todos"): U up (`..`; nothing at `/`), N a new folder with its name typed (the
+  zones ask or refuse as ever), F the search, G the first thing and Shift+G the last (plain moves, not
+  visual mode), I the i card, H hidden files (the eye's own state), L grid ↔ list, T a tab on this folder
+  and Shift+T closes it (nothing on the last). The letters and their words are `chrome::KEYS` (Spanish
+  in es.json; said in the log as the mode turns on — the button's words once the top line's buttons are
+  named: `keys_words`). No other letter types and nothing searches by itself (Ctrl+F and the magnifier
+  still do). A field that is up (search, path,
   name, a menu's search) and a menu take their keys first, as before; Alt+W/A/S/D/Q/E still work with it
   off. Quiet: the pressed button is the only sign. Rig: `files keymode on|off`, `files where keys`,
-  `files key w|a|s|d|e|q|z|x|c|v|r`. Buttons 22×20, 12 px
+  `files key w|a|s|d|e|q|z|x|c|v|r|u|n|f|g|G|i|h|l|t|T` (the state names the cursor's thing, the search,
+  the i card, hidden, list, the tabs). Buttons 22×20, 12 px
   symbols — the mockup's own strokes written as SVGs into `~/.cache/waverunner/files-glyphs/` once
   (`chrome::write_glyphs`, `glyph`) and read by the icon loader by path, washed with their colour
   (`symbol`: icon.wgsl's ghost, ring -1.17). THE i CARD (`Win::info_on`, `chrome::Info`, read off the
