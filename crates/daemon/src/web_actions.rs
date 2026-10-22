@@ -1067,21 +1067,71 @@ fn pictured(browser: &Browser, pages: Vec<(Visit, String)>) -> Vec<Recent> {
         .collect()
 }
 
-/// What a webapp of `site` showed lately (Seam's history): its pages worth
-/// showing, newest first, each once, at most `max`.
-pub(crate) fn site_recents(site: &Site, max: usize) -> Vec<Recent> {
-    let browser = seam();
+/// A path that is not a place one went to (signing in or out, paying).
+fn passing_path(url: &str) -> bool {
+    let path = url.split_once("://").map_or("", |(_, r)| r.find('/').map_or("", |i| &r[i..])).to_lowercase();
+    const WORDS: [&str; 10] = ["login", "signin", "sign-in", "signup", "sign-up", "logout", "oauth", "auth", "register", "checkout"];
+    path.split(['/', '?', '#', '&', '=']).any(|seg| WORDS.iter().any(|w| seg == *w || seg.starts_with(&format!("{w}."))))
+}
+
+/// `title` without the app's own name at either end ("R2 | Cloudflare").
+fn without_name(title: &str, name: &str) -> String {
+    let (lower, n) = (title.to_lowercase(), name.to_lowercase());
+    for sep in [" | ", " - ", " · ", " – ", " — ", ": "] {
+        // (`get`: a letter whose lower case is longer leaves the title whole.)
+        if let Some(cut) = lower.strip_suffix(&format!("{sep}{n}")).and_then(|c| title.get(..c.len())) {
+            return cut.trim().to_owned();
+        }
+        if let Some(rest) = lower.starts_with(&format!("{n}{sep}")).then(|| title.get(n.len() + sep.len()..)).flatten() {
+            return rest.trim().to_owned();
+        }
+    }
+    title.trim().to_owned()
+}
+
+/// Of a history, the pages of a webapp worth showing — of its `site` when
+/// Golem knows it (its kinds of page: a video, a product), else any page of
+/// its own host but its start, a sign-in or one titled only with its name —,
+/// newest first, each once, at most `max`, with their titles cleaned.
+fn webapp_pages(visits: Vec<Visit>, site: Option<&Site>, start: &str, name: &str, max: usize) -> Vec<(Visit, String)> {
+    // (A site Golem knows with no kind of page worth it: none, on purpose.)
+    if site.is_some_and(|s| s.pages.is_empty()) {
+        return Vec::new();
+    }
+    let host = origin(start).map(|(_, h)| h.to_lowercase()).unwrap_or_default();
+    let start = start.trim_end_matches('/');
+    let worth = |url: &str| match site {
+        Some(site) => is_page(site, url),
+        None => {
+            let path = url.split_once("://").map_or("", |(_, r)| r.find('/').map_or("", |i| &r[i..]));
+            origin(url).is_some_and(|(_, h)| h.to_lowercase() == host)
+                && url.trim_end_matches('/') != start
+                && path.trim_matches('/').split(['?', '#']).next().is_some_and(|p| !p.is_empty())
+        }
+    };
+    let names: Vec<String> = [Some(name), site.map(|s| s.name)].into_iter().flatten().map(str::to_lowercase).collect();
     let mut seen = HashSet::new();
-    let pages: Vec<(Visit, String)> = history(&browser, 4000)
+    visits
         .into_iter()
-        .filter(|v| is_page(site, &v.url))
+        .filter(|v| worth(&v.url) && !passing_path(&v.url))
         .map(|v| {
-            let title = clean_title(Some(site), &v.title);
+            let title = without_name(&clean_title(site, &v.title), name);
             (v, title)
         })
-        .filter(|(v, title)| !title.is_empty() && seen.insert(video_id(&v.url).map_or_else(|| title.clone(), str::to_owned)))
+        .filter(|(v, title)| {
+            !title.is_empty()
+                && !names.contains(&title.to_lowercase())
+                && seen.insert(video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned))
+        })
         .take(max)
-        .collect();
+        .collect()
+}
+
+/// What a webapp (named `name`, opening at `start`; of `site` when Golem
+/// knows it) showed lately: from Seam's history, where every webapp lives.
+pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, max: usize) -> Vec<Recent> {
+    let browser = seam();
+    let pages = webapp_pages(history(&browser, 4000), site, start, name, max);
     pictured(&browser, pages)
 }
 
@@ -1090,20 +1140,38 @@ fn passing(host: &str) -> bool {
     host.starts_with("accounts.") || host.starts_with("login.") || host == "localhost" || host.starts_with("127.")
 }
 
-/// What a browser showed lately: the newest page of each site, newest first,
-/// at most `max`.
-pub(crate) fn browser_recents(browser: &Browser, max: usize) -> Vec<Recent> {
+/// Of a history, the newest page of each site, newest first, at most `max` —
+/// none of the sites in `skip` (patterns as a site's hosts: the installed
+/// webapps', whose pages are theirs, not the browser's).
+fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit, String)> {
+    let skip: Vec<&str> = skip.iter().map(String::as_str).collect();
     let mut hosts = HashSet::new();
-    let pages: Vec<(Visit, String)> = history(browser, 3000)
+    visits
         .into_iter()
         .filter_map(|v| {
             let (_, host) = origin(&v.url)?;
             let title = clean_title(site_of_host(&host), &v.title);
-            (!title.is_empty() && !passing(&host) && hosts.insert(host)).then_some((v, title))
+            let mine = !host_is(&host, &skip) && !passing(&host) && !passing_path(&v.url);
+            (mine && !title.is_empty() && hosts.insert(host)).then_some((v, title))
         })
         .take(max)
-        .collect();
+        .collect()
+}
+
+/// What a browser showed lately: the newest page of each site but those in
+/// `skip`, newest first, at most `max`.
+pub(crate) fn browser_recents(browser: &Browser, skip: &[String], max: usize) -> Vec<Recent> {
+    let pages = browser_pages(history(browser, 3000), skip, max);
     pictured(browser, pages)
+}
+
+/// The hosts a webapp's pages are on, as patterns: its site's when Golem
+/// knows it, else its own.
+pub(crate) fn webapp_hosts(site: Option<&Site>, start: &str) -> Vec<String> {
+    match site {
+        Some(site) => site.hosts.iter().map(|h| (*h).to_owned()).collect(),
+        None => origin(start).map(|(_, h)| vec![h.to_lowercase()]).unwrap_or_default(),
+    }
 }
 
 /// The recents read lately, by app (its desktop id), so typing over a lone
@@ -1207,6 +1275,53 @@ mod tests {
         assert_eq!(picture_rank("maxresdefault.jpg"), 0);
     }
 
+    fn visit(url: &str, title: &str) -> Visit {
+        Visit { url: url.into(), title: title.into() }
+    }
+
+    #[test]
+    fn a_webapp_golem_does_not_know_shows_its_own_pages_only() {
+        let history = vec![
+            visit("https://dash.cloudflare.com/abc/r2/overview", "R2 Object Storage | Cloudflare"),
+            visit("https://dash.cloudflare.com/abc/r2/overview", "R2 Object Storage | Cloudflare"),
+            visit("https://dash.cloudflare.com/login", "Cloudflare Dashboard"),
+            visit("https://dash.cloudflare.com/oauth2/auth?x=1", ""),
+            visit("https://dash.cloudflare.com/", "Cloudflare | Web Performance"),
+            visit("https://www.youtube.com/watch?v=9d9PQ1hrhBk", "A video - YouTube"),
+            visit("https://dash.cloudflare.com/abc/home", "Account home"),
+        ];
+        let got = webapp_pages(history, None, "https://dash.cloudflare.com", "Cloudflare", 8);
+        let titles: Vec<&str> = got.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(titles, ["R2 Object Storage", "Account home"]);
+        // Pages titled only with the app's name say nothing: none.
+        let keep = vec![
+            visit("https://keep.google.com/", "Google Keep"),
+            visit("https://keep.google.com/#NOTE/1idy", "Google Keep"),
+        ];
+        assert!(webapp_pages(keep, None, "https://keep.google.com", "Google Keep", 8).is_empty());
+        // A site Golem knows with no kind of page worth it: none, on purpose.
+        let mail = vec![visit("https://mail.google.com/mail/u/0/#inbox/abc", "Hello - Gmail")];
+        assert!(webapp_pages(mail, site("gmail"), "https://mail.google.com", "Gmail", 8).is_empty());
+    }
+
+    #[test]
+    fn a_browser_leaves_out_the_installed_webapps_sites() {
+        let history = vec![
+            visit("https://www.youtube.com/watch?v=9d9PQ1hrhBk", "A video - YouTube"),
+            visit("https://m.youtube.com/", "YouTube"),
+            visit("https://www.nytimes.com/a", "News"),
+            visit("https://keep.google.com/", "Google Keep"),
+            visit("https://www.nytimes.com/b", "Older news"),
+            visit("https://accounts.google.com/signin", "Sign in"),
+        ];
+        let mut skip = webapp_hosts(site("youtube"), "https://www.youtube.com");
+        skip.extend(webapp_hosts(None, "https://keep.google.com"));
+        let got = browser_pages(history, &skip, 8);
+        assert_eq!(got.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["News"]);
+        assert_eq!(without_name("Cloudflare - R2", "cloudflare"), "R2");
+        assert!(passing_path("https://x.com/i/flow/login") && !passing_path("https://x.com/author/alice"));
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wr-web-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1256,16 +1371,39 @@ mod tests {
     fn real_recents() {
         for slug in ["youtube", "claude", "amazon", "github", "google-docs", "chatgpt"] {
             let at = Instant::now();
-            let got = site_recents(site(slug).unwrap(), 8);
+            let s = site(slug).unwrap();
+            let got = webapp_recents(Some(s), &format!("https://{}", s.hosts[0]), s.name, 8);
             println!("{slug}: {} in {:?}", got.len(), at.elapsed());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.picture.map(|p| p.display().to_string()).unwrap_or_default());
             }
         }
+        for (name, start) in [("Google Keep", "https://keep.google.com"), ("Cloudflare", "https://dash.cloudflare.com")] {
+            let got = webapp_recents(None, start, name, 8);
+            println!("{name}: {}", got.len());
+            for r in got {
+                println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);
+            }
+        }
+        // The installed webapps' sites, as the dock leaves them out of Seam's.
+        let home = crate::filer::home();
+        let installed: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".local/share/waverunner/managed-webapps.json")).unwrap_or_default())
+                .unwrap_or_default();
+        let skip: Vec<String> = installed
+            .iter()
+            .filter_map(|slug| {
+                let text = std::fs::read_to_string(home.join(format!(".local/share/applications/webapp-{slug}.desktop"))).ok()?;
+                let exec = text.lines().find_map(|l| l.strip_prefix("Exec="))?.to_owned();
+                let start = crate::webapps::exec_app_url(&exec)?.to_owned();
+                Some(webapp_hosts(site(slug).or_else(|| site_of_host(&origin(&start)?.1)), &start))
+            })
+            .flatten()
+            .collect();
         for prog in ["seam", "google-chrome-stable", "firefox"] {
             let Some(b) = browser_for(prog) else { continue };
             let at = Instant::now();
-            let got = browser_recents(&b, 8);
+            let got = browser_recents(&b, if prog == "seam" { &skip } else { &[] }, 8);
             println!("{prog}: {} in {:?}", got.len(), at.elapsed());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);

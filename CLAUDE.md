@@ -1425,7 +1425,11 @@ The big daemon files are cohesive but long — go straight to the function:
   Instagram's Messages, Amazon's orders… opened in its window by `seam -golem-app <slug> <url>`) and
   Uninstall last (asked twice); to its left, while it has windows, Show all (waveview's `spread_app`)
   and Close all; under it "Recent in <app>" (`AppsPart` room, `RECENT_ROOM`): its files (the system's
-  `recently-used.xbel`, VLC's list) or, for a webapp or a BROWSER, its pages — read OFF THE LOOP from
+  `recently-used.xbel`, VLC's list; the program names the app only when no other app shares it) or,
+  for EVERY webapp (never the files: its program is Seam's) and a BROWSER, its pages — a webapp's
+  from Seam's history, its site's kinds of page when `SITES` knows it, else any page of its own host
+  but its start, a sign-in or one titled only with its name (`webapp_pages`; Keep's are all
+  "Google Keep": none); Seam's own without the installed webapps' sites — read OFF THE LOOP from
   the browser's own history (Seam/Firefox/LibreWolf `places.sqlite`, Chrome/Chromium/Brave/Edge/
   Vivaldi `History`; each a copy, the browser holds the file; kept `FRESH` 60 s by app), pictured
   with no network: a YouTube video by its own picture from SEAM'S DISK CACHE (`cache2`, an index of

@@ -352,11 +352,15 @@ fn vlc_recents(text: &str) -> Vec<PathBuf> {
 }
 
 /// What `app` opened lately that is still there — files and folders,
-/// newest first, at most `max`.
-fn recent_for(app: &AppEntry, max: usize) -> Vec<PathBuf> {
+/// newest first, at most `max`. Its program names it too unless `shared`
+/// (other apps start through the same one: a wrapper's records are theirs).
+fn recent_for(app: &AppEntry, shared: bool, max: usize) -> Vec<PathBuf> {
     let home = crate::filer::home();
     let prog = program(&app.exec);
-    let mut keys = vec![app.name.to_lowercase(), app.id.to_lowercase(), prog.clone()];
+    let mut keys = vec![app.name.to_lowercase(), app.id.to_lowercase()];
+    if !shared {
+        keys.push(prog.clone());
+    }
     keys.extend(app.id.rsplit('.').next().map(str::to_lowercase));
     let mut all = Vec::new();
     if prog == "vlc" {
@@ -372,15 +376,10 @@ fn recent_for(app: &AppEntry, max: usize) -> Vec<PathBuf> {
     all.into_iter().filter(|p| p.exists() && seen.insert(p.clone())).take(max).collect()
 }
 
-/// Where an app's recent pages come from: a webapp's site (one Golem
-/// knows, by its slug or its address), or a browser's history.
-fn source_of(app: &AppEntry) -> Option<Source> {
-    if let Some(slug) = webapps::exec_app_slug(&app.exec) {
-        let host = webapps::exec_app_url(&app.exec).and_then(web_actions::origin).map(|(_, h)| h);
-        let site = web_actions::site(slug).or_else(|| web_actions::site_of_host(host.as_deref()?))?;
-        return Some(Source::Site(site, slug.to_owned()));
-    }
-    web_actions::browser_for(&program(&app.exec)).map(Source::Browser)
+/// A webapp's site, when Golem knows it (by its slug, else its address).
+fn site_of(slug: &str, start: &str) -> Option<&'static web_actions::Site> {
+    let host = web_actions::origin(start).map(|(_, h)| h);
+    web_actions::site(slug).or_else(|| web_actions::site_of_host(host.as_deref()?))
 }
 
 // ---- the actions ----------------------------------------------------------------
@@ -442,10 +441,13 @@ pub(crate) struct Actions {
 /// (`web_actions.rs`).
 #[derive(Clone)]
 enum Source {
-    /// A webapp's site: its pages in Seam's history, opened in its window.
-    Site(&'static web_actions::Site, String),
-    /// A browser: its own history, opened by it.
-    Browser(web_actions::Browser),
+    /// A webapp — EVERY one, never the files path (its program is Seam's,
+    /// whose records are the files Seam opened): its pages in Seam's
+    /// history, opened in its window. Its site when Golem knows it (`SITES`).
+    Webapp { site: Option<&'static web_actions::Site>, slug: String, start: String, name: String },
+    /// A browser: its own history, opened by it — none of the sites in its
+    /// second (Seam's: the installed webapps', whose pages are theirs).
+    Browser(web_actions::Browser, Vec<String>),
 }
 
 /// How many recent pages are read (a full line is at most this).
@@ -565,10 +567,9 @@ impl App {
             symbol: symbol(k.symbol),
         }));
         // A webapp: the pages Golem knows its site has, in its window.
-        let source = source_of(&entry);
-        if let Some(Source::Site(site, slug)) = &source {
-            let start = webapps::exec_app_url(&entry.exec).and_then(web_actions::origin).map(|(o, _)| o);
-            let start = start.unwrap_or_else(|| site.hosts.first().map(|h| format!("https://{h}")).unwrap_or_default());
+        let source = self.source_of(&entry);
+        if let Some(Source::Webapp { site: Some(site), slug, start, .. }) = &source {
+            let start = web_actions::origin(start).map_or_else(|| start.clone(), |(o, _)| o);
             right.extend(site.links.iter().map(|l| Action {
                 name: tr(l.name).to_string(),
                 does: Does::Run(webapps::app_open_exec(slug, &web_actions::link_url(l, &start))),
@@ -635,8 +636,8 @@ impl App {
             Some(source) => {
                 for page in self.web_recents(&entry.id, &source).into_iter().take(cols) {
                     let exec = match &source {
-                        Source::Site(_, slug) => webapps::app_open_exec(slug, &page.url),
-                        Source::Browser(_) => format!("{} {}", entry.exec, launch::shell_quote(&page.url)),
+                        Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &page.url),
+                        Source::Browser(..) => format!("{} {}", entry.exec, launch::shell_quote(&page.url)),
                     };
                     let at = self.push_web_recent(page, exec, (placeholder, layer));
                     self.search.actions.recents.push(at);
@@ -644,7 +645,10 @@ impl App {
                 }
             }
             None => {
-                for path in recent_for(&entry, cols) {
+                let prog = program(&entry.exec);
+                let base = &self.entries[..self.base_len.min(self.entries.len())];
+                let shared = base.iter().filter(|e| program(&e.exec) == prog).count() > 1;
+                for path in recent_for(&entry, shared, cols) {
                     let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
                     let exec = format!("{} {}", entry.exec, launch::shell_quote(&path.to_string_lossy()));
                     let at = self.push_transient_file(&path.to_string_lossy(), &name, exec, path.is_dir());
@@ -713,6 +717,32 @@ impl App {
         apps.insert(0, at);
     }
 
+    /// Where an app's recent pages come from: a webapp (every one), or a
+    /// browser's history — Seam's without the installed webapps' sites.
+    fn source_of(&self, app: &AppEntry) -> Option<Source> {
+        if let Some(slug) = webapps::exec_app_slug(&app.exec) {
+            let start = webapps::exec_app_url(&app.exec).unwrap_or_default().to_owned();
+            let site = site_of(slug, &start);
+            return Some(Source::Webapp { site, slug: slug.to_owned(), start, name: app.name.clone() });
+        }
+        let browser = web_actions::browser_for(&program(&app.exec))?;
+        let skip = if browser == web_actions::seam() {
+            let base = &self.entries[..self.base_len.min(self.entries.len())];
+            (0..base.len())
+                .filter(|&i| !self.is_catalog_webapp(i))
+                .filter_map(|i| {
+                    let exec = &base[i].exec;
+                    let (slug, start) = (webapps::exec_app_slug(exec)?, webapps::exec_app_url(exec)?);
+                    Some(web_actions::webapp_hosts(site_of(slug, start), start))
+                })
+                .flatten()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(Source::Browser(browser, skip))
+    }
+
     /// The recent pages of app `id` from `source`: those read lately, and a
     /// reading asked for off the loop when they are not fresh (the row is
     /// laid out again when it brings something new while the app is still
@@ -724,8 +754,8 @@ impl App {
             let (key, source) = (id.to_owned(), source.clone());
             self.desktop_off_loop(
                 move || match &source {
-                    Source::Site(site, _) => web_actions::site_recents(site, RECENT_MAX),
-                    Source::Browser(browser) => web_actions::browser_recents(browser, RECENT_MAX),
+                    Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, RECENT_MAX),
+                    Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, RECENT_MAX),
                 },
                 move |app, pages| {
                     app.search.web.asking.remove(&key);
