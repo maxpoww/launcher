@@ -522,7 +522,6 @@ fn main() -> anyhow::Result<()> {
     palette::settle_looks();
     palette::settle_lines();
     look::set_dark(palette::shell_dark());
-    desktop_menu::set_scale(settings::Settings::load().menu_zoom);
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
     // The nix thread owns the nixpkgs package index (Install-section

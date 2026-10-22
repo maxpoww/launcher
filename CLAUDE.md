@@ -469,7 +469,7 @@ The big daemon files are cohesive but long — go straight to the function:
   the context menus (make it bigger or smaller)" — for kids and grandmas): while a menu is OPEN, Ctrl + (=, keypad
   +) / Ctrl − / Ctrl 0 and Ctrl + the wheel over it make it bigger, smaller, as shipped — 80 % to 200 % a tenth a
   step, rows, words, symbols, air, corners and width together, at once (no motion). ONE size for every menu,
-  kept (`settings.menu_zoom`, `desktop_menu::scale`/`set_scale`, set at start; `App::zoom("menu", …)`): every menu
+  kept (`settings.menu_zoom`, `desktop_menu::scale`/`set_scale`, read the first time a menu opens; `App::zoom("menu", …)`): every menu
   opens at it and one that is up is laid out again (`Menu::rescale`, `filer_menus_rescaled`,
   `desktop_menu_rescaled`), its row under the pointer what is under it now. Its corner STAYS (`Menu::hang`: an
   anchor and which edges hang from it — the pointer's corner as it opened, the pill's ⋯ hanging up, the sort

@@ -773,13 +773,22 @@ const GAP: f32 = 6.0;
 /// menu, the owner's standing choice (`settings.menu_zoom`, `App::zoom`'s
 /// "menu"), a tenth a step from 80 % to 200 %. A menu is laid out at it as
 /// it opens, and again at once when it changes (`Menu::rescale`) — rows,
-/// words, symbols, air, corners and width together.
-static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+/// words, symbols, air, corners and width together. (0: not read yet.)
+static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub(crate) const SCALE_MIN: f32 = 0.8;
 pub(crate) const SCALE_MAX: f32 = 2.0;
 
-/// The menus' size now.
+/// The menus' size now (the first time asked, the owner's from the
+/// settings; as shipped in tests).
 pub(crate) fn scale() -> f32 {
+    let bits = SCALE.load(std::sync::atomic::Ordering::Relaxed);
+    if bits != 0 {
+        return f32::from_bits(bits);
+    }
+    #[cfg(not(test))]
+    set_scale(crate::settings::Settings::load().menu_zoom);
+    #[cfg(test)]
+    set_scale(0.0);
     f32::from_bits(SCALE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
