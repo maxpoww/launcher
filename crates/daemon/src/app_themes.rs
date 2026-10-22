@@ -469,13 +469,15 @@ fn set_attr(xml: &str, name: &str, value: &str) -> String {
 /// once nothing is playing (Max, 2026-10-17: "do the restart when there is
 /// no sound happening"): it waits for 10 s of silence; a newer change takes
 /// the place of a waiting one. It is not restarted for colours it already
-/// wears (the stamp is kept across dock starts).
+/// wears (the stamp is kept across dock starts), nor for the light's small
+/// steps through the day: only for a palette or a look (a restart is a window
+/// gone and back — Max, 2026-10-21: "no jumps at all").
 fn easyeffects(t: &Theme) {
     let picked = std::fs::read_to_string(config().join("easyeffectsrc")).is_ok_and(|s| s.contains("ColorScheme=Golem"));
     if !picked {
         return;
     }
-    let stamp = format!("{} {} {} {}", t.dark, hex(t.c[0]), hex(t.ink()), hex(t.accent()));
+    let stamp = format!("{} {} {}", t.name, t.dark, hex(t.accent()));
     let file = data().join("golem/easyeffects-stamp");
     if std::fs::read_to_string(&file).ok().as_deref() == Some(stamp.as_str()) {
         return;
