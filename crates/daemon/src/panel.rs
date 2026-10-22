@@ -3200,6 +3200,35 @@ impl Panel {
         }
     }
 
+    /// Whether nothing of the panel moves but its pills' orbits — then it
+    /// needs a frame about 30 times a second, not at every refresh of the
+    /// screen (`App::orbit_soon`). A pill gliding, growing, fading, under
+    /// the pointer, a layer turning, a setting opening: not calm.
+    pub(crate) fn calm(&self) -> bool {
+        const E: f32 = 0.002;
+        let still = |a: f32, b: f32| (a - b).abs() < E;
+        let open_still = self.open.as_ref().is_none_or(|o| {
+            if self.solo {
+                o.want > 0.0 && still(o.shown, 1.0) && still(o.pop, 1.0) && o.vel.abs() < E
+            } else {
+                still(o.k, o.want)
+            }
+        });
+        !self.tiles.is_settling()
+            && open_still
+            && self.pills.iter().enumerate().all(|(i, p)| {
+                let hot = self.hot == Some(i);
+                p.exit.is_none()
+                    && (p.anchor.0 - p.home.0).abs() < 0.05
+                    && (p.anchor.1 - p.home.1).abs() < 0.05
+                    && still(p.focus, self.focus_target(p))
+                    && still(p.rate, if hot { 0.0 } else { 1.0 })
+                    && still(p.lift, if hot { 1.0 } else { 0.0 })
+                    && still(p.sc, 1.0)
+                    && still(p.op, 1.0)
+            })
+    }
+
     /// Everything to draw this frame.
     fn draw(&self, paint: PanelPaint) -> PanelDraw {
         let mut out = PanelDraw::default();

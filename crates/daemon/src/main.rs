@@ -878,6 +878,7 @@ fn main() -> anyhow::Result<()> {
         paste_tx,
         hide_deadline: None,
         soft_frame_timer: false,
+        orbit_tick: false,
         last_input: Instant::now(),
         rest_hide_pending: false,
         kb_handback: None,
@@ -2014,6 +2015,8 @@ pub struct App {
     /// A frame-spacing timer is armed (software renderer, F12) — draw
     /// calls in the window coalesce into the timer's single redraw.
     soft_frame_timer: bool,
+    /// The control panel's orbit frame is armed (`frame::orbit_soon`).
+    orbit_tick: bool,
     /// Last pointer/keyboard activity — the F12 throttle stands down
     /// while the user is interacting, so scrolls and drags stay smooth
     /// even on a software renderer; only ambient animations (install
@@ -7076,7 +7079,10 @@ impl CompositorHandler for App {
         if self.ui.is_animating() || self.bounce.is_some() || self.dock_hop.is_some() || self.dirty {
             self.draw();
         } else {
-            self.last_frame = None;
+            // (An orbit frame of the panel is coming: its time runs on.)
+            if !self.orbit_tick {
+                self.last_frame = None;
+            }
             // The deferred half of the focus hand-back (armed in the keyboard
             // `leave` handler): now that the card has shrunk out from under
             // the pointer and gone quiet, a dispatched focus won't be

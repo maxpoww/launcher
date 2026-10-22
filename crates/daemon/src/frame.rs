@@ -40,6 +40,10 @@ const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
 /// in flight draws again after this instead.
 const UNCHANGED_RETRY: Duration = Duration::from_millis(8);
 
+/// The time between two frames of the control panel while only its pills'
+/// orbit moves (`App::orbit_soon`): about 30 a second.
+const ORBIT_FRAME: Duration = Duration::from_millis(33);
+
 /// How long a surface waits for its frame callback before it draws without
 /// one (see `draw_options`). Far above any healthy frame time.
 const FRAME_OVERDUE: Duration = Duration::from_millis(100);
@@ -1547,12 +1551,23 @@ impl App {
         }
         let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
-            if open {
-                self.dirty = true;
-            }
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
             let paint = crate::panel::PanelPaint { ink: dock_ink, bright };
-            Some(self.panel_frame(&layout, if open { dt } else { 0.0 }, paint))
+            let draw = self.panel_frame(&layout, if open { dt } else { 0.0 }, paint);
+            // Frames keep coming while the panel is up — but when nothing of
+            // it moves except the pills' orbit (a pixel round their spots, a
+            // turn in 12–18 s), about 30 a second, not one at every refresh
+            // of the screen: the panel sitting open cost 19 % of a core on
+            // the dev box's 165 Hz screen, and the MacBook's 12 % with the
+            // compositor's (2026-10-22). Anything else moving, at full rate.
+            if open {
+                if self.panel.calm() && self.panel_swap_t >= 1.0 {
+                    self.orbit_soon();
+                } else {
+                    self.dirty = true;
+                }
+            }
+            Some(draw)
         } else {
             None
         };
@@ -1816,6 +1831,30 @@ impl App {
         // damages only what a commit changed (see `Renderer::render`).
         if unchanged && (self.ui.is_animating() || self.bounce.is_some() || self.dock_hop.is_some() || self.dirty) {
             self.redraw_soon();
+        }
+    }
+
+    /// Draw again in [`ORBIT_FRAME`]: the control panel's pills' orbit is all
+    /// that moves. (The frame callback that comes meanwhile keeps the time
+    /// of this frame, so the orbit goes on by the clock: `orbit_tick`.)
+    fn orbit_soon(&mut self) {
+        if self.orbit_tick {
+            return;
+        }
+        let timer = calloop::timer::Timer::from_duration(ORBIT_FRAME);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, app: &mut App| {
+                app.orbit_tick = false;
+                app.dirty = true;
+                app.draw();
+                calloop::timer::TimeoutAction::Drop
+            })
+            .is_ok();
+        if armed {
+            self.orbit_tick = true;
+        } else {
+            self.dirty = true;
         }
     }
 
