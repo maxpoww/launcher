@@ -389,6 +389,7 @@
  "Compress": "Comprimir",
  "Moving {what} to {where}": "Moviendo {what} a {where}",
  "Copying {what} to {where}": "Copiando {what} a {where}",
+ "Moving {what} back to {where}": "Devolviendo {what} a {where}",
  "{n} things": "{n} elementos",
  "{n} could not be copied": "{n} no se pudieron copiar",
  "Put back": "Restaurar",

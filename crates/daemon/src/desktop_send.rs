@@ -263,6 +263,11 @@ pub(crate) fn will_copy(paths: &[PathBuf], dir: &Path, moving: bool) -> bool {
     if !moving {
         return paths.iter().any(|p| p.parent() != Some(dir));
     }
+    // (Another mount is another disk to a rename — two mounts of one device
+    // too: the bytes are copied. Told from the mount table, nothing touched.)
+    if paths.iter().any(|p| !crate::filer::same_disk(p, dir)) {
+        return true;
+    }
     let Ok(here) = std::fs::metadata(dir).map(|m| m.dev()) else {
         return false;
     };

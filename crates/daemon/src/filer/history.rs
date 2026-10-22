@@ -23,8 +23,10 @@ const KEEP: usize = 100;
 
 /// One thing done in a window.
 pub(super) struct Did {
-    /// Its number in the window (what a reading of the disk answers to).
-    n: u64,
+    /// Its number in the window — what a reading of the disk answers to,
+    /// and what a row of the history and its Undo stand for: the places of
+    /// the things done move when the oldest goes (past `KEEP`).
+    pub(super) n: u64,
     pub(super) undo: Undo,
     /// What the history says of it, and its symbol (a chrome glyph).
     pub(super) text: String,
@@ -285,16 +287,7 @@ impl App {
             return;
         }
         self.desktop_off_loop(
-            move || {
-                let bin = if ask.iter().any(|(_, u)| matches!(u, Undo::Binned(_))) {
-                    crate::trash::Trash::home().list()
-                } else {
-                    Vec::new()
-                };
-                ask.into_iter()
-                    .map(|(n, u)| (n, can_undo(&u, &bin)))
-                    .collect::<Vec<_>>()
-            },
+            move || can_take_back_each(ask),
             move |app, read: Vec<(u64, bool)>| {
                 let Some(win) = app.filer.win_mut(id) else {
                     return;
@@ -321,40 +314,45 @@ impl App {
     /// Ctrl+Z, or the ↶: take back the newest thing done in window `id`
     /// that still can be.
     pub(super) fn filer_undo(&mut self, id: u32) {
-        let k = self
+        let n = self
             .filer
             .win(id)
-            .and_then(|w| w.history.iter().rposition(|d| !d.done && d.can));
-        match k {
-            Some(k) => self.filer_undo_at(id, k),
+            .and_then(|w| w.history.iter().rev().find(|d| !d.done && d.can))
+            .map(|d| d.n);
+        match n {
+            Some(n) => self.filer_undo_at(id, n),
             None => info!("files: nothing to undo in window {id}"),
         }
     }
 
-    /// Take back thing `k` of window `id`'s history (an older one too: the
-    /// newer stay as they are). Off the loop — a move back across disks is
-    /// a copy.
-    pub(super) fn filer_undo_at(&mut self, id: u32, k: usize) {
+    /// Take back thing number `n` of window `id`'s history (an older one
+    /// too: the newer stay as they are). Off the loop — a move back across
+    /// disks is a copy, on the bar as a task (`undo_task`).
+    pub(super) fn filer_undo_at(&mut self, id: u32, n: u64) {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
-        let Some(did) = win.history.get_mut(k).filter(|d| !d.done && d.can) else {
+        let Some(did) = win.history.iter_mut().find(|d| d.n == n && !d.done && d.can) else {
             return;
         };
         // (Marked at once: the row says "Undone" and the ↶ moves on to the
         // one before; if it could not be done after all, it is undone no
         // more and a notice says so.)
         did.done = true;
-        let (n, undo) = (did.n, did.undo.clone());
+        let undo = did.undo.clone();
         info!("files: undo {undo:?}");
         if !win.undoable() {
             win.hist_open = false;
         }
         self.filer_hover(id);
         self.filer_request_draw(id);
+        let task = self.undo_task(&undo);
         self.desktop_off_loop(
-            move || take_back(undo),
-            move |app, said: Option<String>| {
+            move || {
+                let said = take_back(undo, task.as_ref());
+                (said, task.as_ref().is_some_and(|t| t.cancelled()))
+            },
+            move |app, (said, off): (Option<String>, bool)| {
                 match said {
                     Some(said) => say_quietly(said),
                     None => {
@@ -365,8 +363,13 @@ impl App {
                         {
                             d.done = false;
                         }
-                        let said = tr("That could not be undone").to_owned();
-                        std::thread::spawn(move || crate::desktop_send_notify(&said));
+                        // (Called off from the bar: it can still be taken back.)
+                        if off {
+                            info!("files: the undo was called off");
+                        } else {
+                            let said = tr("That could not be undone").to_owned();
+                            std::thread::spawn(move || crate::desktop_send_notify(&said));
+                        }
                     }
                 }
                 app.refilter();

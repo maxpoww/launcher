@@ -66,7 +66,7 @@ mod recent;
 mod smart;
 
 pub(crate) use print::Can;
-pub(crate) use smart::{slow_mount, smart_for};
+pub(crate) use smart::{same_disk, slow_mount, smart_for};
 
 pub(crate) use history::say_quietly;
 
@@ -400,10 +400,10 @@ enum Spot {
     View(bool),
     Find,
     /// The ↶ (left of sort, while something can be taken back); a row of
-    /// its history, that row's Undo (by the row's number in the history).
+    /// its history, that row's Undo (by the thing's number, `Did::n`).
     Undo,
-    HistRow(usize),
-    HistUndo(usize),
+    HistRow(u64),
+    HistUndo(u64),
     /// The selection pill's `n`th button; the folder's own action.
     Pill(usize),
     Here,
@@ -930,7 +930,10 @@ pub(crate) fn copy_name(dir: &Path, name: &str, folder: bool) -> PathBuf {
 }
 
 /// Take `undo` back; what to say of it (`None`: nothing could be done).
-pub(crate) fn take_back(undo: Undo) -> Option<String> {
+/// What goes back across disks — a copy — is measured on `task` (the
+/// bar's, `undo_task`) and called off with it: what was not reached stays
+/// where it is.
+pub(crate) fn take_back(undo: Undo, task: Option<&crate::tasks::TaskHandle>) -> Option<String> {
     // One at a time: each runs on a thread of its own, and two quick Ctrl+Z
     // both found a place free, then both moved into it (the first put back
     // was lost under the second). Now the second looks after the first.
@@ -941,27 +944,58 @@ pub(crate) fn take_back(undo: Undo) -> Option<String> {
         Undo::Renamed { from, to } => (to.exists() && !from.exists() && std::fs::rename(&to, &from).is_ok())
             .then(|| tr("Undone: it has its old name again").to_owned()),
         Undo::Moved(pairs) => {
+            use crate::desktop_send::{copy_all_metered, weigh, Meter};
+            // (What crosses to another disk is copied: weighed for the task.)
+            let total = task.map_or(0, |_| {
+                let far: Vec<PathBuf> = pairs
+                    .iter()
+                    .filter(|(from, now)| !same_disk(now, from))
+                    .map(|(_, now)| now.clone())
+                    .collect();
+                weigh(&far)
+            });
+            let tell = |done, total| {
+                if let Some(task) = task {
+                    task.set(done, total);
+                }
+            };
+            let stopped = || task.is_some_and(|t| t.cancelled());
+            let mut meter = Meter::new(total, &tell, &stopped);
             // Each back where it was — never over something there now.
-            let n = pairs
-                .iter()
-                .filter(|(from, now)| {
-                    now.exists()
-                        && !from.exists()
-                        && (std::fs::rename(now, from).is_ok()
-                            || (crate::desktop_send::copy_all_metered(now, from, None).is_ok()
-                                && std::process::Command::new("sync")
-                                    .arg("-f")
-                                    .arg(from)
-                                    .status()
-                                    .is_ok_and(|s| s.success())
-                                && (if now.is_dir() {
-                                    std::fs::remove_dir_all(now)
-                                } else {
-                                    std::fs::remove_file(now)
-                                })
-                                .is_ok()))
-                })
-                .count();
+            let mut n = 0usize;
+            for (from, now) in &pairs {
+                if stopped() {
+                    break;
+                }
+                if !now.exists() || from.exists() {
+                    continue;
+                }
+                if std::fs::rename(now, from).is_ok() {
+                    n += 1;
+                    continue;
+                }
+                let gone = |p: &Path| {
+                    if p.is_dir() {
+                        std::fs::remove_dir_all(p)
+                    } else {
+                        std::fs::remove_file(p)
+                    }
+                };
+                if copy_all_metered(now, from, task.is_some().then_some(&mut meter)).is_err() {
+                    // Half a copy is worse than none (and `from` was free).
+                    let _ = gone(from);
+                    continue;
+                }
+                // The original goes only once the copy is on its disk.
+                let landed = std::process::Command::new("sync")
+                    .arg("-f")
+                    .arg(from)
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if landed && gone(now).is_ok() {
+                    n += 1;
+                }
+            }
             (n > 0).then(|| fill(tr("Undone: {n} moved back"), &[("n", &n)]))
         }
         Undo::Copied(copies, at) => {
@@ -1044,10 +1078,16 @@ pub(crate) fn changed_since(path: &Path, at: std::time::SystemTime) -> bool {
     false
 }
 
-/// Whether `undo` can still be taken back, the disk as it is now.
-pub(crate) fn can_take_back(undo: &Undo) -> bool {
-    let bin = if matches!(undo, Undo::Binned(_)) { crate::trash::Trash::home().list() } else { Vec::new() };
-    history::can_undo(undo, &bin)
+/// Whether each `(number, undo)` can still be taken back, the disk as it
+/// is now — the bin read once for them all. Off the loop: a stick or a
+/// phone is slow to answer, and the bin can hold thousands.
+pub(crate) fn can_take_back_each(ask: Vec<(u64, Undo)>) -> Vec<(u64, bool)> {
+    let bin = if ask.iter().any(|(_, u)| matches!(u, Undo::Binned(_))) {
+        crate::trash::Trash::home().list()
+    } else {
+        Vec::new()
+    };
+    ask.into_iter().map(|(n, u)| (n, history::can_undo(&u, &bin))).collect()
 }
 
 /// The folder a typed path stands for: `~` is Home; a file's is the one
@@ -1394,8 +1434,8 @@ struct Hits {
     /// in the history) and the row itself.
     undo: Rect,
     hist: Rect,
-    hist_undo: Vec<(Rect, usize)>,
-    hist_rows: Vec<(Rect, usize)>,
+    hist_undo: Vec<(Rect, u64)>,
+    hist_rows: Vec<(Rect, u64)>,
     /// The folder's own action by the ↶ ("Play all", "Slideshow").
     here: Option<(Rect, Action)>,
     /// THE SELECTION PILL, and its buttons.
@@ -1866,7 +1906,7 @@ impl Win {
         }
         // (The history stands over everything but the menus.)
         if self.hist_open && h.hist.contains(pos) {
-            let at = |list: &[(Rect, usize)]| list.iter().find(|(r, _)| r.contains(pos)).map(|(_, k)| *k);
+            let at = |list: &[(Rect, u64)]| list.iter().find(|(r, _)| r.contains(pos)).map(|(_, n)| *n);
             return at(&h.hist_undo)
                 .map(Spot::HistUndo)
                 .or_else(|| at(&h.hist_rows).map(Spot::HistRow))
@@ -4185,19 +4225,43 @@ impl App {
             [one] => file_name(one),
             many => crate::i18n::fill(tr("{n} things"), &[("n", &many.len())]),
         };
-        let place = self
-            .filer
-            .wins
-            .iter()
-            .flat_map(|w| w.places.iter())
-            .find(|p| p.path == dir && p.name != UP)
-            .map_or_else(|| file_name(dir), |p| p.name.clone());
+        let place = self.filer_place_name(dir);
         let words = if says_move {
             tr("Moving {what} to {where}")
         } else {
             tr("Copying {what} to {where}")
         };
         Some(self.task_begin(&crate::i18n::fill(words, &[("what", &what), ("where", &place)])))
+    }
+
+    /// What folder `dir` is called: its place's name in the sidebar
+    /// ("Home" is the owner's name), else its own.
+    fn filer_place_name(&self, dir: &Path) -> String {
+        self.filer
+            .wins
+            .iter()
+            .flat_map(|w| w.places.iter())
+            .find(|p| p.path == dir && p.name != UP)
+            .map_or_else(|| file_name(dir), |p| p.name.clone())
+    }
+
+    /// The bar's task for taking `undo` back when that is a COPY — things
+    /// moved back across disks (a file window's Ctrl+Z, the desktop's): the
+    /// copy is measured there and its Cancel stops it. Told from the mount
+    /// table: nothing is touched on the loop (a phone can be slow).
+    pub(crate) fn undo_task(&mut self, undo: &Undo) -> Option<crate::tasks::TaskHandle> {
+        let Undo::Moved(pairs) = undo else {
+            return None;
+        };
+        let far: Vec<&(PathBuf, PathBuf)> = pairs.iter().filter(|(from, now)| !same_disk(now, from)).collect();
+        let (from, now) = far.first()?;
+        let what = match far.as_slice() {
+            [_] => file_name(now),
+            many => crate::i18n::fill(tr("{n} things"), &[("n", &many.len())]),
+        };
+        let place = from.parent().map(|dir| self.filer_place_name(dir)).unwrap_or_default();
+        let words = crate::i18n::fill(tr("Moving {what} back to {where}"), &[("what", &what), ("where", &place)]);
+        Some(self.task_begin(&words))
     }
 
     /// Throw `paths` away, remembering their names in the bin so window
@@ -7716,7 +7780,7 @@ impl App {
                     "undo" => Some(mid(win.hits.undo)),
                     "histrow" => win.hits.hist_rows.get(n).map(|(r, _)| mid(*r)),
                     "histundo" => {
-                        let k = win.history.len().checked_sub(n + 1);
+                        let k = win.history.iter().rev().nth(n).map(|d| d.n);
                         win.hits.hist_undo.iter().find(|(_, j)| Some(*j) == k).map(|(r, _)| mid(*r))
                     }
                     "info" => Some(mid(win.hits.info)),
@@ -7750,9 +7814,9 @@ impl App {
                     (Some("open"), _) if !self.filer.win(id).is_some_and(|w| w.hist_open) => self.filer_history_toggle(id),
                     (Some("close"), _) if self.filer.win(id).is_some_and(|w| w.hist_open) => self.filer_history_toggle(id),
                     (Some("undo"), Some(row)) => {
-                        let k = self.filer.win(id).and_then(|w| w.history.len().checked_sub(row + 1));
-                        if let Some(k) = k {
-                            self.filer_undo_at(id, k);
+                        let n = self.filer.win(id).and_then(|w| w.history.iter().rev().nth(row)).map(|d| d.n);
+                        if let Some(n) = n {
+                            self.filer_undo_at(id, n);
                         }
                     }
                     _ => {}
@@ -8423,7 +8487,7 @@ mod tests {
         let at = std::time::SystemTime::now();
         let undo = Undo::Copied(vec![d.join("copy.txt"), d.join("folder")], at);
         assert!(!changed_since(&d.join("copy.txt"), at) && !changed_since(&d.join("folder"), at));
-        assert!(can_take_back(&undo));
+        assert!(can_take_back_each(vec![(0, undo.clone())])[0].1);
         // The owner writes in the copy later: it is theirs now.
         let later = at + Duration::from_secs(60);
         std::fs::File::options().write(true).open(d.join("copy.txt")).unwrap().set_modified(later).unwrap();
@@ -8432,7 +8496,7 @@ mod tests {
         std::fs::write(d.join("folder/notes.txt"), "mine").unwrap();
         std::fs::File::options().write(true).open(d.join("folder/notes.txt")).unwrap().set_modified(later).unwrap();
         assert!(changed_since(&d.join("folder"), at));
-        assert!(!can_take_back(&undo), "nothing of it can be taken back now");
+        assert!(!can_take_back_each(vec![(0, undo.clone())])[0].1, "nothing of it can be taken back now");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -8452,7 +8516,7 @@ mod tests {
         let undos = undo_of(&sources, &brought);
         assert_eq!(undos.len(), 2);
         assert_eq!(undos[0], Undo::Moved(vec![(d.join("a/x.txt"), d.join("b/x.txt"))]));
-        assert!(take_back(undos[0].clone()).is_some());
+        assert!(take_back(undos[0].clone(), None).is_some());
         assert!(d.join("a/x.txt").exists() && !d.join("b/x.txt").exists());
         // Not every one arrived: nothing is guessed.
         assert!(undo_of(&sources, &brought[..1]).is_empty());
@@ -8462,10 +8526,10 @@ mod tests {
             from: d.join("a/x.txt"),
             to: d.join("a/z.txt"),
         };
-        assert!(take_back(renamed).is_some() && d.join("a/x.txt").exists());
-        assert!(take_back(Undo::Made(d.join("a"))).is_none());
+        assert!(take_back(renamed, None).is_some() && d.join("a/x.txt").exists());
+        assert!(take_back(Undo::Made(d.join("a")), None).is_none());
         std::fs::create_dir(d.join("new")).unwrap();
-        assert!(take_back(Undo::Made(d.join("new"))).is_some());
+        assert!(take_back(Undo::Made(d.join("new")), None).is_some());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -1586,7 +1586,7 @@ impl App {
         win.hist_first = win.hist_first.min((len - rows) as f32);
         // (What each row says, and what stands at its right: Undo, Undone,
         // Can't undo.)
-        let shown: Vec<(usize, String, &'static str, String, bool, &'static str)> = (0..len)
+        let shown: Vec<(u64, String, &'static str, String, bool, &'static str)> = (0..len)
             .rev()
             .skip(first)
             .take(rows)
@@ -1600,7 +1600,7 @@ impl App {
                     (tr("Can’t undo"), false)
                 };
                 let under = format!("{} · {}", d.place, super::history::ago(d.at));
-                (k, d.text.clone(), d.sign, under, button, right)
+                (d.n, d.text.clone(), d.sign, under, button, right)
             })
             .collect();
         let right_w = |win: &mut Win, words: &str, button: bool| {
@@ -1658,11 +1658,11 @@ impl App {
             )
         });
         let mut y = panel.y + HIST_PAD + HIST_HEAD;
-        for (k, text, sign, under, button, right) in shown {
+        for (n, text, sign, under, button, right) in shown {
             let row = Rect::new(panel.x + HIST_PAD, y, width - 2.0 * HIST_PAD, HIST_ROW);
             y += HIST_ROW;
-            hits.hist_rows.push((row, k));
-            let hot = matches!(win.hover, Spot::HistRow(n) | Spot::HistUndo(n) if n == k);
+            hits.hist_rows.push((row, n));
+            let hot = matches!(win.hover, Spot::HistRow(m) | Spot::HistUndo(m) if m == n);
             // (What lies under the row's button: the panel, or the row
             // washed by the pointer.)
             let mut ground = fill;
@@ -1686,7 +1686,7 @@ impl App {
             let rx = row.x + row.w - 6.0 - rw;
             if button {
                 let b = Rect::new(rx, cy - HIST_BTN_H / 2.0, rw, HIST_BTN_H);
-                let pressed = win.hover == Spot::HistUndo(k);
+                let pressed = win.hover == Spot::HistUndo(n);
                 g.rects.push(rect(
                     b,
                     5.0,
@@ -1702,7 +1702,7 @@ impl App {
                         [paint.ink[0], paint.ink[1], paint.ink[2], 1.0],
                     )
                 });
-                hits.hist_undo.push((b, k));
+                hits.hist_undo.push((b, n));
             } else {
                 g.labels.push(Label {
                     clip: Some(panel),

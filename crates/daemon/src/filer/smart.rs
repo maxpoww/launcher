@@ -213,17 +213,38 @@ pub(crate) fn slow_place(dir: &Path) -> bool {
 
 /// The slow place `dir` is on (`slow_place`): its mount point, and whether
 /// it is the desktop's own (gvfs: a phone over MTP, a camera, a share).
-/// The mount table is read again at most every 2 s (this is asked at draws).
 pub(crate) fn slow_mount(dir: &Path) -> Option<(PathBuf, bool)> {
+    with_mounts(|mounts| slow_in(mounts, dir))
+}
+
+/// Whether `a` and `b` are on one disk (the same mount): a move between
+/// them is a rename, not a copy. Told from the mount table alone — neither
+/// is touched (a phone's storage can be slow to answer, or gone).
+pub(crate) fn same_disk(a: &Path, b: &Path) -> bool {
+    with_mounts(|mounts| mount_in(mounts, a).map(|m| m.0) == mount_in(mounts, b).map(|m| m.0))
+}
+
+/// `f` of the mount table, read again at most every 2 s (this is asked at
+/// draws).
+fn with_mounts<R>(f: impl FnOnce(&str) -> R) -> R {
     static MOUNTS: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mutex::new(None);
     let mut guard = MOUNTS.lock().unwrap_or_else(|e| e.into_inner());
     if guard.as_ref().is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2)) {
         *guard = Some((Instant::now(), std::fs::read_to_string("/proc/self/mounts").unwrap_or_default()));
     }
-    slow_in(guard.as_ref().map_or("", |(_, m)| m.as_str()), dir)
+    f(guard.as_ref().map_or("", |(_, m)| m.as_str()))
 }
 
 fn slow_in(mounts: &str, dir: &Path) -> Option<(PathBuf, bool)> {
+    let (at, kind) = mount_in(mounts, dir)?;
+    let slow = kind.starts_with("fuse")
+        || matches!(kind, "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "davfs" | "ceph" | "afs");
+    slow.then(|| (PathBuf::from(at), kind == "fuse.gvfsd-fuse"))
+}
+
+/// The mount `dir` is on — the longest mount point it is under (the last
+/// mounted there, of several): its point and its kind.
+fn mount_in<'a>(mounts: &'a str, dir: &Path) -> Option<(String, &'a str)> {
     let mut best: Option<(String, &str)> = None;
     for line in mounts.lines() {
         let mut f = line.split(' ');
@@ -238,10 +259,7 @@ fn slow_in(mounts: &str, dir: &Path) -> Option<(PathBuf, bool)> {
             best = Some((at, kind));
         }
     }
-    let (at, kind) = best?;
-    let slow = kind.starts_with("fuse")
-        || matches!(kind, "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "davfs" | "ceph" | "afs");
-    slow.then(|| (PathBuf::from(at), kind == "fuse.gvfsd-fuse"))
+    best
 }
 
 /// The actions a selection is for: the pill's one (its symbol, its words,
@@ -889,6 +907,18 @@ mod tests {
         assert!(!slow("/run/user/1000/gvfsx"), "a name that only begins the same");
         assert_eq!(slow_in(mounts, Path::new("/run/user/1000/gvfs/mtp:host=P")), Some((PathBuf::from("/run/user/1000/gvfs"), true)));
         assert_eq!(slow_in(mounts, Path::new("/mnt/nas/a")), Some((PathBuf::from("/mnt/nas"), false)));
+    }
+
+    #[test]
+    fn one_disk_is_told_by_the_mount_each_path_is_under() {
+        let mounts = "/dev/nvme0n1p2 / ext4 rw 0 0\n\
+                      /dev/nvme0n1p3 /home ext4 rw 0 0\n\
+                      /dev/sda1 /run/media/max/My\\040Stick exfat rw 0 0\n";
+        let on = |p: &str| mount_in(mounts, Path::new(p)).map(|m| m.0);
+        assert_eq!(on("/home/max/a.txt"), on("/home/max/Pictures/not-there-yet"));
+        assert_ne!(on("/home/max/a.txt"), on("/run/media/max/My Stick/a.txt"));
+        assert_ne!(on("/home/max/a.txt"), on("/tmp/a.txt"), "another mount of one device is another disk to a rename");
+        assert_eq!(on("/run/media/max/My Stick/DCIM"), Some("/run/media/max/My Stick".to_owned()));
     }
 
     #[test]

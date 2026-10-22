@@ -386,6 +386,20 @@ pub(crate) enum SendFor {
 /// How many things done the desktop keeps to take back.
 const KEEP_DONE: usize = 30;
 
+/// One thing done on the desktop.
+pub struct Done {
+    /// Its number: what a reading of the disk answers to (the places in
+    /// the history move as things are taken back and the oldest go).
+    pub n: u64,
+    pub undo: crate::filer::Undo,
+    /// What it is called ("Renamed “a” to “b”").
+    pub what: String,
+    /// Whether it can still be taken back, as last read — off the loop
+    /// (`desktop_history_check`): a stick or a phone is slow to answer, and
+    /// the bin can hold thousands.
+    pub can: bool,
+}
+
 /// The desktop's state on the loop.
 #[derive(Default)]
 pub(crate) struct Desktop {
@@ -421,9 +435,11 @@ pub(crate) struct Desktop {
     pub send_for: Option<SendFor>,
     /// The apps of the menu's Open with page: name, command, in a terminal.
     pub open_with: Vec<(String, String, bool)>,
-    /// What was done on the desktop, the newest last, each with its name —
-    /// what "Undo <it>" on the wallpaper's menu takes back (and Ctrl+Z).
-    pub history: Vec<(crate::filer::Undo, String)>,
+    /// What was done on the desktop, the newest last — what "Undo <it>" on
+    /// the wallpaper's menu takes back (and Ctrl+Z) — and the number the
+    /// next one gets.
+    pub history: Vec<Done>,
+    pub done_n: u64,
     /// The order its icons were last put in by Sort by (key, descending).
     pub sort: (u8, bool),
     /// The phones being used as a camera: volume path → the pid of the
@@ -2688,6 +2704,11 @@ impl App {
         let mut menu = Menu::new(ctx, item, many, at, w as f32, h as f32);
         menu.pointer(Some(at));
         self.desktop.menu = Some(menu);
+        // (The wallpaper's "Undo <it>" is as last read; read again now, the
+        // menu following the answer.)
+        if item.is_none() {
+            self.desktop_history_check();
+        }
         // The keys for it (its size, Escape): the desktop takes the keyboard
         // while it is up, and gives it back when it goes.
         if !self.desktop.keys && self.desktop_top_ready() {
@@ -2717,7 +2738,7 @@ impl App {
             let now = crate::controls::wallpaper_now();
             return Ctx {
                 on: On::Desk,
-                undo: self.desktop_undoable().map(|(_, what)| what),
+                undo: self.desktop_undoable(None).map(|(_, what)| what),
                 clip,
                 icons_hidden: self.desktop.hidden,
                 moving: now
@@ -2810,44 +2831,113 @@ impl App {
         self.smart_act(SendFor::Desktop, action, picked, here, one_folder);
     }
 
-    /// The newest thing done on the desktop that can still be taken back,
-    /// and its name.
-    fn desktop_undoable(&self) -> Option<(usize, String)> {
+    /// The newest thing done on the desktop that can still be taken back
+    /// (as last read: `desktop_history_check`) and older than number
+    /// `before`, and its name.
+    fn desktop_undoable(&self, before: Option<u64>) -> Option<(u64, String)> {
         self.desktop
             .history
             .iter()
-            .enumerate()
             .rev()
-            .find(|(_, (undo, _))| crate::filer::can_take_back(undo))
-            .map(|(k, (_, what))| (k, what.clone()))
+            .find(|d| d.can && before.is_none_or(|b| d.n < b))
+            .map(|d| (d.n, d.what.clone()))
     }
 
     /// Something was done on the desktop, called `what`: kept to be taken
     /// back.
     pub(crate) fn desktop_did(&mut self, undo: crate::filer::Undo, what: String) {
-        self.desktop.history.push((undo, what));
+        let n = self.desktop.done_n;
+        self.desktop.done_n += 1;
+        self.desktop.history.push(Done { n, undo, what, can: true });
         if self.desktop.history.len() > KEEP_DONE {
             self.desktop.history.remove(0);
         }
+        self.desktop_history_check();
+    }
+
+    /// Read again — off the loop — which things done on the desktop can
+    /// still be taken back. The wallpaper's menu, when it is up on its
+    /// first page, follows the answer ("Undo <it>" comes, goes or changes).
+    pub(crate) fn desktop_history_check(&mut self) {
+        let ask: Vec<(u64, crate::filer::Undo)> =
+            self.desktop.history.iter().map(|d| (d.n, d.undo.clone())).collect();
+        if ask.is_empty() {
+            return;
+        }
+        self.desktop_off_loop(
+            move || crate::filer::can_take_back_each(ask),
+            |app, read: Vec<(u64, bool)>| {
+                for (n, can) in read {
+                    if let Some(d) = app.desktop.history.iter_mut().find(|d| d.n == n) {
+                        d.can = can;
+                    }
+                }
+                let undo = app.desktop_undoable(None).map(|(_, what)| what);
+                let at = app.desktop.ptr;
+                let Some(menu) = app.desktop.menu.as_mut() else {
+                    return;
+                };
+                if menu.ctx.on == crate::desktop_menu::On::Desk
+                    && menu.page == crate::desktop_menu::Page::Main
+                    && menu.ctx.undo != undo
+                {
+                    menu.ctx.undo = undo;
+                    menu.show_main();
+                    menu.pointer(at);
+                    app.request_desktop_draw();
+                }
+            },
+        );
     }
 
     /// Take back the newest thing done on the desktop that still can be
     /// (the wallpaper's "Undo <it>", Ctrl+Z). Off the loop; said quietly.
     pub(crate) fn desktop_undo(&mut self) {
-        let Some((k, _)) = self.desktop_undoable() else {
+        self.desktop_undo_before(None);
+    }
+
+    /// [`desktop_undo`](Self::desktop_undo), among the things older than
+    /// number `before`: one that turns out not to be possible any more (the
+    /// last reading is a little old) gives way to the one before it, as
+    /// when the disk was asked on the loop.
+    fn desktop_undo_before(&mut self, before: Option<u64>) {
+        let Some((n, what)) = self.desktop_undoable(before) else {
             info!("desktop: nothing to undo");
             return;
         };
-        let (undo, what) = self.desktop.history.remove(k);
+        let Some(d) = self.desktop.history.iter_mut().find(|d| d.n == n) else {
+            return;
+        };
+        // (Not again meanwhile: a second Ctrl+Z takes the one before.)
+        d.can = false;
+        let undo = d.undo.clone();
         info!("desktop: undo {what} ({undo:?})");
+        let task = self.undo_task(&undo);
         self.desktop_off_loop(
-            move || crate::filer::take_back(undo),
-            |app, said: Option<String>| {
-                if let Some(said) = said {
-                    crate::filer::say_quietly(said);
+            move || {
+                let said = crate::filer::take_back(undo, task.as_ref());
+                (said, task.as_ref().is_some_and(|t| t.cancelled()))
+            },
+            move |app, (said, off): (Option<String>, bool)| {
+                match said {
+                    Some(said) => {
+                        app.desktop.history.retain(|d| d.n != n);
+                        crate::filer::say_quietly(said);
+                    }
+                    // (Called off from the bar: it can still be taken back.)
+                    None if off => {
+                        if let Some(d) = app.desktop.history.iter_mut().find(|d| d.n == n) {
+                            d.can = true;
+                        }
+                    }
+                    None => {
+                        app.desktop.history.retain(|d| d.n != n);
+                        app.desktop_undo_before(Some(n));
+                    }
                 }
                 app.refilter();
                 app.reload_desktop();
+                app.desktop_history_check();
             },
         );
     }
@@ -6146,6 +6236,11 @@ impl App {
             let said = self.desktop_menu_row(row);
             info!("debug-desktop: pick {row}: {said}");
             return said;
+        }
+        // `undo`: as Ctrl+Z on the desktop (its history as last read).
+        if what.trim() == "undo" {
+            self.desktop_undo();
+            return "undo".to_owned();
         }
         if what.trim() == "rows" {
             let said = self.desktop.menu.as_ref().map_or_else(
