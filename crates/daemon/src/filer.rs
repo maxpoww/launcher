@@ -394,10 +394,11 @@ enum Spot {
     /// The current tab's pencil: its path as a field to type in.
     Pencil,
     /// The top line's right end: the sort menu, the i, the view (a list?),
-    /// the magnifier.
+    /// the eye (hidden files shown?), the magnifier.
     Sort,
     Info,
     View(bool),
+    Hidden,
     Find,
     /// The ↶ (left of sort, while something can be taken back); a row of
     /// its history, that row's Undo (by the thing's number, `Did::n`).
@@ -1520,6 +1521,7 @@ struct Hits {
     info: Rect,
     grid: Rect,
     list: Rect,
+    hidden: Rect,
     seek: Rect,
     card: Rect,
     /// The ↶, the history under it, and each row's Undo (the row's number
@@ -2038,6 +2040,7 @@ impl Win {
                 (h.info, Spot::Info),
                 (h.grid, Spot::View(false)),
                 (h.list, Spot::View(true)),
+                (h.hidden, Spot::Hidden),
                 (h.find, Spot::Find),
             ] {
                 if r.contains(pos) {
@@ -5894,7 +5897,7 @@ impl App {
                 .is_some_and(|it| matches!(it.kind, Kind::Folder | Kind::Volume)),
             Spot::Up => win.dir.parent().is_some(),
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
-            Spot::Place(_) | Spot::View(_) | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
+            Spot::Place(_) | Spot::View(_) | Spot::Hidden | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
             Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
             Spot::Undo | Spot::HistUndo(_) | Spot::Pill(_) | Spot::Here => true,
             Spot::Mode(n) => (n == 1) != win.media,
@@ -7272,6 +7275,8 @@ impl App {
                 self.filer_request_draw(id);
             }
             Spot::View(list) => self.filer_set_list(list),
+            // The eye: the ground menu's "Show / Hide hidden files", one state.
+            Spot::Hidden => self.filer_act(id, Action::ToggleHidden, None, (0.0, 0.0)),
             Spot::Find => {
                 let open = win.find.is_none();
                 self.filer_find(id, open.then(String::new));
@@ -7928,6 +7933,7 @@ impl App {
                     "grid" => Some(mid(win.hits.grid)),
                     "list" => Some(mid(win.hits.list)),
                     "find" => Some(mid(win.hits.find)),
+                    "hidden" => Some(mid(win.hits.hidden)),
                     "seek" => Some(mid(win.hits.seek)),
                     "sort" => Some(mid(win.hits.sort)),
                     "undo" => Some(mid(win.hits.undo)),

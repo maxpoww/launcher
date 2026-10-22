@@ -119,9 +119,9 @@ pub(super) struct Info {
 // ── the chrome's own symbols ────────────────────────────────────────────
 
 /// The symbols the chrome wears (the shell's own set: `glyphs.rs`).
-const CHROME: [&str; 31] = [
-    "clock", "pin", "files", "media", "sort", "info", "grid", "list", "search", "pen", "x", "plus",
-    "chev", "folder", "undo", "rename", "trash", "newf", "copy", "open", "dup",
+const CHROME: [&str; 33] = [
+    "clock", "pin", "files", "media", "sort", "info", "grid", "list", "eye", "eyeoff", "search",
+    "pen", "x", "plus", "chev", "folder", "undo", "rename", "trash", "newf", "copy", "open", "dup",
     // (The selection pill's: there at once when it rises.)
     "move", "openwith", "usb", "more", "paste",
     // (And what a kind of thing is for: the pill's, and by the ↶.)
@@ -700,7 +700,7 @@ impl App {
     }
 
     /// THE TOP LINE: the tabs and the way here, then sort · i · grid/list ·
-    /// search at its right end.
+    /// the eye · search at its right end.
     #[allow(clippy::too_many_arguments)]
     fn filer_head(
         &mut self,
@@ -736,7 +736,18 @@ impl App {
         let e = smooth(win.find_t);
         let find = Rect::new(w - 10.0 - BTN_W, cy - BTN_H / 2.0, BTN_W, BTN_H);
         let seek = Rect::new(find.x - 6.0 * e - SEEK_W * e, cy - 9.0, SEEK_W * e, 18.0);
-        let more = seek.x - 4.0 * e;
+        // SHOW HIDDEN FILES (Max, 2026-10-22: "agrega a los botones 'see
+        // hidden files' a la izquierda de buscar"): left of where the search
+        // field slides out, its symbol the state — the slashed eye while
+        // they are not shown, the eye, pressed, while they are ("el icono
+        // debería cambiar").
+        let hidden = Rect::new(
+            seek.x - 4.0 * e - 1.0 - BTN_W,
+            cy - BTN_H / 2.0,
+            BTN_W,
+            BTN_H,
+        );
+        let more = hidden.x;
         let at = |dx: f32| Rect::new(more - 107.0 + dx, cy - BTN_H / 2.0, BTN_W, BTN_H);
         let (sort, info, grid, list) = (at(0.0), at(23.0), at(54.0), at(77.0));
         let rules = [more - 107.0 + 49.0, more - 107.0 + 103.0];
@@ -842,10 +853,18 @@ impl App {
         }
         button(&mut g, win, grid, "grid", !win.list, Spot::View(false));
         button(&mut g, win, list, "list", win.list, Spot::View(true));
+        let eye = if win.hidden { "eye" } else { "eyeoff" };
+        button(&mut g, win, hidden, eye, win.hidden, Spot::Hidden);
         button(&mut g, win, find, "search", win.find.is_some(), Spot::Find);
         (
-            hits.sort, hits.info, hits.grid, hits.list, hits.find, hits.seek,
-        ) = (sort, info, grid, list, find, seek);
+            hits.sort,
+            hits.info,
+            hits.grid,
+            hits.list,
+            hits.hidden,
+            hits.find,
+            hits.seek,
+        ) = (sort, info, grid, list, hidden, find, seek);
         if seek.w > 1.0 {
             // The search: what is typed, or what it searches.
             let typed = win.find.clone().unwrap_or_default();
