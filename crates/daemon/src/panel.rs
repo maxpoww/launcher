@@ -5006,7 +5006,7 @@ impl App {
             // was 90 % of the screen each way, centred, and its foot lay on
             // the dock's top edge).
             let (top, room) = self.quick_wall_room();
-            let w = (sw * QUICK_WHOLE).max(200.0);
+            let w = self.quick_beside_dock((sw * QUICK_WHOLE).max(200.0), g.card.x + g.card.w / 2.0);
             // As tall as its wall and no taller, in the middle of that room
             // (Max, 2026-10-14: "hay mucho real estate que estamos
             // desperdiciando en la caja, sobre todo abajo" — it ran to the
@@ -5030,7 +5030,7 @@ impl App {
         // four rows to three (`cards_overflow`).
         if wide {
             let (top, room) = self.quick_wall_room();
-            let w = (sw * QUICK_COLOURS).max(200.0);
+            let w = self.quick_beside_dock((sw * QUICK_COLOURS).max(200.0), g.card.x + g.card.w / 2.0);
             let h = (self.quick.open_height().unwrap_or(0.0) + QUICK_FOOT * s).max(QUICK_MIN_H * s).min(room);
             let cx = g.card.x + g.card.w / 2.0;
             return Rect::new(cx - w / 2.0, top + (room - h) / 2.0, w, h);
@@ -5072,9 +5072,27 @@ impl App {
         let s = self.options_scale() * self.fast_zoom();
         let sh = self.buffer_size.1 as f32;
         let screen_h = self.dock_screen_h().unwrap_or(sh).min(sh);
-        let (dock_h, _) = self.scaled_extents();
+        // The dock's band comes off the bottom only where the dock is: beside
+        // a side dock the box keeps the screen's height, and its width keeps
+        // clear of the dock instead (`quick_beside_dock`).
+        let dock_h = if self.dock_side() == crate::launcher_prefs::Side::Bottom { self.scaled_extents().0 } else { 0.0 };
         let top = self.options_pill_h() + 16.0 * s;
         (top, (screen_h - dock_h - QUICK_OFF_DOCK * s - top).max(QUICK_MIN_H * s))
+    }
+
+    /// A wide box's width `w` about `cx`, kept clear of a side dock (the
+    /// same air as above a bottom one), still centred: on a small screen
+    /// with big icons it would touch the dock.
+    fn quick_beside_dock(&self, w: f32, cx: f32) -> f32 {
+        let s = self.options_scale() * self.fast_zoom();
+        let sw = self.buffer_size.0 as f32;
+        let band = self.scaled_extents().0 + QUICK_OFF_DOCK * s;
+        let half = match self.dock_side() {
+            crate::launcher_prefs::Side::Left => cx - band,
+            crate::launcher_prefs::Side::Right => sw - band - cx,
+            crate::launcher_prefs::Side::Bottom => return w,
+        };
+        w.min(2.0 * half).max(200.0)
     }
 
     fn quick_ensure(&mut self, rect: Rect) {
