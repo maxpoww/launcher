@@ -2854,133 +2854,6 @@ fn zone_state_from(
     Ok(ZoneState { occupied })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// One mode kills the other: whatever combination of the compositor's
-    /// overlapping flags a window is carrying, it reads back as exactly ONE of
-    /// the four modes, with fullscreen winning over floating and floating over
-    /// pseudo — because that is their order of visibility.
-    #[test]
-    fn a_window_is_in_exactly_one_mode() {
-        let win = |fullscreen: i64, floating: bool, pseudo: bool| {
-            serde_json::json!({
-                "address": "0x1",
-                "fullscreen": fullscreen,
-                "floating": floating,
-                "tags": if pseudo { vec![PSEUDO_TAG] } else { vec![] },
-            })
-        };
-        // The clean cases.
-        assert_eq!(mode_of(&win(0, false, false)), WindowMode::Tiled);
-        assert_eq!(mode_of(&win(0, false, true)), WindowMode::Pseudo);
-        assert_eq!(mode_of(&win(0, true, false)), WindowMode::Floating);
-        assert_eq!(mode_of(&win(2, false, false)), WindowMode::Fullscreen);
-        // The overlaps the compositor allows and the bar does not: every one
-        // resolves to the mode you can actually see.
-        assert_eq!(mode_of(&win(2, true, true)), WindowMode::Fullscreen);
-        assert_eq!(mode_of(&win(2, false, true)), WindowMode::Fullscreen);
-        assert_eq!(mode_of(&win(0, true, true)), WindowMode::Floating);
-        // Maximized (fullscreen == 1) is still fullscreen as far as the mode
-        // controls are concerned — only the bar's auto-hide distinguishes it.
-        assert_eq!(mode_of(&win(1, false, false)), WindowMode::Fullscreen);
-        // Missing fields (an older compositor, a partial reply) must not panic
-        // or invent a mode.
-        assert_eq!(
-            mode_of(&serde_json::json!({ "address": "0x1" })),
-            WindowMode::Tiled
-        );
-    }
-
-    /// The real dock zone at default config: 720 wide centered on a
-    /// 1280x800 layout, bottom 60 px.
-    const ZONE: (f64, f64, f64, f64) = (280.0, 740.0, 720.0, 60.0);
-
-    fn client(ws: i64, at: (i64, i64), size: (i64, i64)) -> String {
-        format!(
-            r#"{{"workspace": {{"id": {ws}}}, "mapped": true, "hidden": false,
-                "fullscreen": 0, "at": [{}, {}], "size": [{}, {}]}}"#,
-            at.0, at.1, size.0, size.1,
-        )
-    }
-
-    fn occupied(clients: &[String], ws: i64) -> bool {
-        let json = format!("[{}]", clients.join(","));
-        zone_state_from(&json, ZONE, ws).unwrap().occupied
-    }
-
-    #[test]
-    fn empty_workspace_is_free() {
-        assert!(!occupied(&[], 9));
-    }
-
-    #[test]
-    fn fullscreen_sized_tiled_window_occupies() {
-        assert!(occupied(&[client(1, (0, 0), (1280, 800))], 1));
-    }
-
-    #[test]
-    fn window_on_other_workspace_does_not_occupy() {
-        assert!(!occupied(&[client(1, (0, 0), (1280, 800))], 9));
-    }
-
-    #[test]
-    fn small_float_away_from_zone_is_free() {
-        // The case from the field: a floating window parked at the top
-        // must leave the dock zone free.
-        assert!(!occupied(&[client(1, (100, 50), (400, 300))], 1));
-    }
-
-    #[test]
-    fn small_float_over_zone_occupies() {
-        assert!(occupied(&[client(1, (400, 700), (400, 300))], 1));
-    }
-
-    #[test]
-    fn float_beside_zone_horizontally_is_free() {
-        // Bottom-left corner, outside the centered zone's x-range.
-        assert!(!occupied(&[client(1, (0, 700), (250, 100))], 1));
-    }
-
-    #[test]
-    fn fullscreen_flag_occupies_regardless_of_geometry() {
-        let c =
-            client(1, (0, 0), (100, 100)).replacen(r#""fullscreen": 0"#, r#""fullscreen": 2"#, 1);
-        assert!(occupied(&[c], 1));
-    }
-
-    #[test]
-    fn hidden_or_unmapped_windows_do_not_occupy() {
-        let hidden = client(1, (400, 700), (400, 300)).replacen(
-            r#""hidden": false"#,
-            r#""hidden": true"#,
-            1,
-        );
-        let unmapped = client(1, (400, 700), (400, 300)).replacen(
-            r#""mapped": true"#,
-            r#""mapped": false"#,
-            1,
-        );
-        assert!(!occupied(&[hidden, unmapped], 1));
-    }
-
-    #[test]
-    fn browser_class_match_is_case_insensitive_and_substring() {
-        // Real Hyprland class strings vary in case and carry suffixes.
-        assert!(is_browser_class("firefox"));
-        assert!(is_browser_class("Firefox"));
-        assert!(is_browser_class("org.mozilla.firefox"));
-        assert!(is_browser_class("Google-chrome"));
-        assert!(is_browser_class("Brave-browser"));
-        assert!(is_browser_class("zen-alpha"));
-        // Not browsers — the copy-link / find offers must not fire here.
-        assert!(!is_browser_class("foot"));
-        assert!(!is_browser_class("org.gnome.Nautilus"));
-        assert!(!is_browser_class(""));
-    }
-}
-
 /// The name of the window rule that makes every window OPEN floating — one
 /// named rule, re-declared to flip it, because this fork addresses rules by
 /// name and has no "remove".
@@ -3161,4 +3034,131 @@ fn cascade_at(m: &MonitorInfo, size: (i64, i64), i: usize) -> (i64, i64) {
     // (A move is in the layout's coordinates: from the screen's own corner,
     // which is not the origin on a second screen.)
     ((m.x + x).round() as i64, (m.y + y).round() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One mode kills the other: whatever combination of the compositor's
+    /// overlapping flags a window is carrying, it reads back as exactly ONE of
+    /// the four modes, with fullscreen winning over floating and floating over
+    /// pseudo — because that is their order of visibility.
+    #[test]
+    fn a_window_is_in_exactly_one_mode() {
+        let win = |fullscreen: i64, floating: bool, pseudo: bool| {
+            serde_json::json!({
+                "address": "0x1",
+                "fullscreen": fullscreen,
+                "floating": floating,
+                "tags": if pseudo { vec![PSEUDO_TAG] } else { vec![] },
+            })
+        };
+        // The clean cases.
+        assert_eq!(mode_of(&win(0, false, false)), WindowMode::Tiled);
+        assert_eq!(mode_of(&win(0, false, true)), WindowMode::Pseudo);
+        assert_eq!(mode_of(&win(0, true, false)), WindowMode::Floating);
+        assert_eq!(mode_of(&win(2, false, false)), WindowMode::Fullscreen);
+        // The overlaps the compositor allows and the bar does not: every one
+        // resolves to the mode you can actually see.
+        assert_eq!(mode_of(&win(2, true, true)), WindowMode::Fullscreen);
+        assert_eq!(mode_of(&win(2, false, true)), WindowMode::Fullscreen);
+        assert_eq!(mode_of(&win(0, true, true)), WindowMode::Floating);
+        // Maximized (fullscreen == 1) is still fullscreen as far as the mode
+        // controls are concerned — only the bar's auto-hide distinguishes it.
+        assert_eq!(mode_of(&win(1, false, false)), WindowMode::Fullscreen);
+        // Missing fields (an older compositor, a partial reply) must not panic
+        // or invent a mode.
+        assert_eq!(
+            mode_of(&serde_json::json!({ "address": "0x1" })),
+            WindowMode::Tiled
+        );
+    }
+
+    /// The real dock zone at default config: 720 wide centered on a
+    /// 1280x800 layout, bottom 60 px.
+    const ZONE: (f64, f64, f64, f64) = (280.0, 740.0, 720.0, 60.0);
+
+    fn client(ws: i64, at: (i64, i64), size: (i64, i64)) -> String {
+        format!(
+            r#"{{"workspace": {{"id": {ws}}}, "mapped": true, "hidden": false,
+                "fullscreen": 0, "at": [{}, {}], "size": [{}, {}]}}"#,
+            at.0, at.1, size.0, size.1,
+        )
+    }
+
+    fn occupied(clients: &[String], ws: i64) -> bool {
+        let json = format!("[{}]", clients.join(","));
+        zone_state_from(&json, ZONE, ws).unwrap().occupied
+    }
+
+    #[test]
+    fn empty_workspace_is_free() {
+        assert!(!occupied(&[], 9));
+    }
+
+    #[test]
+    fn fullscreen_sized_tiled_window_occupies() {
+        assert!(occupied(&[client(1, (0, 0), (1280, 800))], 1));
+    }
+
+    #[test]
+    fn window_on_other_workspace_does_not_occupy() {
+        assert!(!occupied(&[client(1, (0, 0), (1280, 800))], 9));
+    }
+
+    #[test]
+    fn small_float_away_from_zone_is_free() {
+        // The case from the field: a floating window parked at the top
+        // must leave the dock zone free.
+        assert!(!occupied(&[client(1, (100, 50), (400, 300))], 1));
+    }
+
+    #[test]
+    fn small_float_over_zone_occupies() {
+        assert!(occupied(&[client(1, (400, 700), (400, 300))], 1));
+    }
+
+    #[test]
+    fn float_beside_zone_horizontally_is_free() {
+        // Bottom-left corner, outside the centered zone's x-range.
+        assert!(!occupied(&[client(1, (0, 700), (250, 100))], 1));
+    }
+
+    #[test]
+    fn fullscreen_flag_occupies_regardless_of_geometry() {
+        let c =
+            client(1, (0, 0), (100, 100)).replacen(r#""fullscreen": 0"#, r#""fullscreen": 2"#, 1);
+        assert!(occupied(&[c], 1));
+    }
+
+    #[test]
+    fn hidden_or_unmapped_windows_do_not_occupy() {
+        let hidden = client(1, (400, 700), (400, 300)).replacen(
+            r#""hidden": false"#,
+            r#""hidden": true"#,
+            1,
+        );
+        let unmapped = client(1, (400, 700), (400, 300)).replacen(
+            r#""mapped": true"#,
+            r#""mapped": false"#,
+            1,
+        );
+        assert!(!occupied(&[hidden, unmapped], 1));
+    }
+
+    #[test]
+    fn browser_class_match_is_case_insensitive_and_substring() {
+        // Real Hyprland class strings vary in case and carry suffixes.
+        assert!(is_browser_class("firefox"));
+        assert!(is_browser_class("Firefox"));
+        assert!(is_browser_class("org.mozilla.firefox"));
+        assert!(is_browser_class("Google-chrome"));
+        assert!(is_browser_class("Brave-browser"));
+        assert!(is_browser_class("zen-alpha"));
+        // Not browsers — the copy-link / find offers must not fire here.
+        assert!(!is_browser_class("foot"));
+        assert!(!is_browser_class("org.gnome.Nautilus"));
+        assert!(!is_browser_class(""));
+    }
 }

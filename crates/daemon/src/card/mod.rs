@@ -6769,7 +6769,7 @@ mod tests {
         assert!(card.lose(b).is_some());
         assert_eq!(card.items.len(), 1);
         assert_eq!(card.session_for("0x2", Some("Desktop")), Some(a));
-        assert!(card.titles.get("Desktop").is_none());
+        assert!(!card.titles.contains_key("Desktop"));
     }
 
     #[test]

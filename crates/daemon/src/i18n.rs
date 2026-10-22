@@ -311,6 +311,50 @@ mod tests {
         found
     }
 
+    /// `src` without what is there for the tests alone: each item under a
+    /// `#[cfg(test)]` of the file's own (its tests, a helper or a constant
+    /// of theirs) — the rest of the file is read, wherever they stand.
+    fn without_tests(src: &str) -> String {
+        let mut out = String::new();
+        let mut lines = src.lines();
+        while let Some(line) = lines.next() {
+            if line.trim_end() != "#[cfg(test)]" {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            // The item it covers: past its own attributes and words, to its
+            // `;`, or to the `}` that closes it (the file's own items close at
+            // the left edge).
+            for item in lines.by_ref() {
+                let item = item.trim_end();
+                if item.starts_with("#[") || item.starts_with("///") || item.starts_with("//") {
+                    continue;
+                }
+                if item.ends_with(';') && !item.contains('{') {
+                    break;
+                }
+                if item.contains('{') && !item.ends_with('}') {
+                    for inner in lines.by_ref() {
+                        if inner.trim_end() == "}" {
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_scan_leaves_out_test_items_only() {
+        let src = "fn a() { tr(\"A\"); }\n#[cfg(test)]\nconst W: f32 = 1.0;\nfn b() { tr(\"B\"); }\n\
+                   #[cfg(test)]\n/// helper\npub fn h() {\n    tr(\"T\");\n}\nfn c() { tr(\"C\"); }\n\
+                   #[cfg(test)]\nmod tests {\n    fn t() { tr(\"U\"); }\n}\n";
+        assert_eq!(tr_literals(&without_tests(src)), ["A", "B", "C"]);
+    }
+
     fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
@@ -336,8 +380,7 @@ mod tests {
         for file in files {
             let src = std::fs::read_to_string(&file).unwrap_or_default();
             // (Tests hand `tr` strings of their own.)
-            let body = src.split("\n#[cfg(test)]").next().unwrap_or(&src);
-            for key in tr_literals(body) {
+            for key in tr_literals(&without_tests(&src)) {
                 if !es.contains_key(&key) && !missing.contains(&key) {
                     missing.push(key);
                 }

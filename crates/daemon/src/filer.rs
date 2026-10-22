@@ -8156,7 +8156,7 @@ mod tests {
         assert!(!places[1].gap && places[1].path == home.path);
         // At the root, at Home (the floor) and at Recents (a root of its
         // own): no `..`.
-        assert_eq!(with_up(std::slice::from_ref(&home), Path::new("/"), None), [home.clone()]);
+        assert_eq!(with_up(std::slice::from_ref(&home), Path::new("/"), None), std::slice::from_ref(&home));
         let roots = [PathBuf::from("/home/max"), recent::root()];
         assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max"), Some(&roots)).iter().all(|p| p.name != UP));
         assert!(with_up(std::slice::from_ref(&home), &recent::root(), Some(&roots)).iter().all(|p| p.name != UP));

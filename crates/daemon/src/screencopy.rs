@@ -1586,40 +1586,6 @@ impl Dispatch<WlBuffer, ()> for App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::clean_cols;
-
-    /// With nothing of ours in the way the walk is just "every second column,
-    /// outward from the anchor" — in both directions.
-    #[test]
-    fn walks_outward_from_the_anchor() {
-        assert_eq!(clean_cols(10, 1, 3, 0, 100, &[]), vec![10, 12, 14]);
-        assert_eq!(clean_cols(10, -1, 3, 0, 100, &[]), vec![10, 8, 6]);
-    }
-
-    /// A run of our own paint is JUMPED, not abandoned: the walk comes out the
-    /// far side and keeps collecting. This is what stops a box wider than the
-    /// sample from starving it (the settings readout over the clip band).
-    #[test]
-    fn jumps_over_our_own_paint() {
-        let ours = [(12, 40)];
-        assert_eq!(clean_cols(10, 1, 3, 0, 100, &ours), vec![10, 40, 42]);
-        // …and leftward, landing one column clear of the run's near edge.
-        assert_eq!(clean_cols(45, -1, 3, 0, 100, &ours), vec![45, 43, 41]);
-        assert_eq!(clean_cols(41, -1, 2, 0, 100, &ours), vec![41, 11]);
-    }
-
-    /// Bounds end the walk; an anchor with no room at all yields nothing
-    /// (the caller keeps the previous colour rather than inventing one).
-    #[test]
-    fn stops_at_the_bounds() {
-        assert_eq!(clean_cols(6, -1, 9, 4, 100, &[]), vec![6, 4]);
-        assert!(clean_cols(50, 1, 9, 0, 50, &[]).is_empty());
-        assert!(clean_cols(10, 1, 9, 0, 100, &[(0, 100)]).is_empty());
-    }
-}
-
 /// The colour a picture will give the dock, read from its PREVIEW the
 /// moment it is picked — the way the dock itself will read the screen once
 /// the picture is up, so the two agree (Max, 2026-10-14: "el rojo del
@@ -1679,4 +1645,38 @@ pub(crate) fn preview_colour(pixels: &[u8], screen_aspect: f32, card: f32) -> Op
     (count > 0.0).then(|| {
         [srgb_to_linear(sum[0] / count), srgb_to_linear(sum[1] / count), srgb_to_linear(sum[2] / count), 1.0]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_cols;
+
+    /// With nothing of ours in the way the walk is just "every second column,
+    /// outward from the anchor" — in both directions.
+    #[test]
+    fn walks_outward_from_the_anchor() {
+        assert_eq!(clean_cols(10, 1, 3, 0, 100, &[]), vec![10, 12, 14]);
+        assert_eq!(clean_cols(10, -1, 3, 0, 100, &[]), vec![10, 8, 6]);
+    }
+
+    /// A run of our own paint is JUMPED, not abandoned: the walk comes out the
+    /// far side and keeps collecting. This is what stops a box wider than the
+    /// sample from starving it (the settings readout over the clip band).
+    #[test]
+    fn jumps_over_our_own_paint() {
+        let ours = [(12, 40)];
+        assert_eq!(clean_cols(10, 1, 3, 0, 100, &ours), vec![10, 40, 42]);
+        // …and leftward, landing one column clear of the run's near edge.
+        assert_eq!(clean_cols(45, -1, 3, 0, 100, &ours), vec![45, 43, 41]);
+        assert_eq!(clean_cols(41, -1, 2, 0, 100, &ours), vec![41, 11]);
+    }
+
+    /// Bounds end the walk; an anchor with no room at all yields nothing
+    /// (the caller keeps the previous colour rather than inventing one).
+    #[test]
+    fn stops_at_the_bounds() {
+        assert_eq!(clean_cols(6, -1, 9, 4, 100, &[]), vec![6, 4]);
+        assert!(clean_cols(50, 1, 9, 0, 50, &[]).is_empty());
+        assert!(clean_cols(10, 1, 9, 0, 100, &[(0, 100)]).is_empty());
+    }
 }

@@ -437,67 +437,6 @@ impl Config {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn a_box() -> Config {
-        Config::open("/run/x/phone", "3A301FDJG000UW", "Pixel 8 Pro", Phone::new("Pixel 8 Pro"), (100.0, 100.0), 1600.0, 1000.0)
-    }
-
-    #[test]
-    fn every_part_of_the_box_can_be_reached() {
-        let config = a_box();
-        let built = config.build([1.0; 4], [1.0; 4]);
-        let hits: Vec<Hit> = built.hits.iter().map(|(h, _)| *h).collect();
-        // Sync is off: its two settings are not for clicking.
-        assert_eq!(
-            hits,
-            vec![
-                Hit::Name,
-                Hit::Sync,
-                Hit::Kind(0),
-                Hit::Kind(1),
-                Hit::Kind(2),
-                Hit::Kind(3),
-                Hit::Kind(4),
-                Hit::Kind(5),
-                Hit::Clean,
-                Hit::After,
-                Hit::Cancel,
-                Hit::Apply,
-            ]
-        );
-        // Everything is inside the box, and each is found under its middle.
-        for (hit, r) in &built.hits {
-            assert!(r.x >= config.rect.x && r.x + r.w <= config.rect.x + config.rect.w, "{hit:?} is in the box");
-            assert!(r.y + r.h <= config.rect.y + config.rect.h, "{hit:?} is in the box");
-            assert_eq!(config.hit((r.x + r.w / 2.0, r.y + r.h / 2.0)), Some(*hit));
-        }
-        assert_eq!(config.hit((config.rect.x + 4.0, config.rect.y + 4.0)), None);
-    }
-
-    #[test]
-    fn sync_on_and_the_question_before_a_clean_add_their_parts() {
-        let mut config = a_box();
-        let rest = config.rect.h;
-        config.phone.sync = true;
-        let hits: Vec<Hit> = config.build([1.0; 4], [1.0; 4]).hits.iter().map(|(h, _)| *h).collect();
-        assert!(hits.contains(&Hit::Every) && hits.contains(&Hit::Charging));
-        // Asked: the chip gives way to the question, and the box grows.
-        config.confirm = true;
-        config.fit(1000.0);
-        let hits: Vec<Hit> = config.build([1.0; 4], [1.0; 4]).hits.iter().map(|(h, _)| *h).collect();
-        assert!(!hits.contains(&Hit::Clean) && hits.contains(&Hit::Really) && hits.contains(&Hit::NotNow));
-        assert!(config.rect.h > rest);
-        // What a clean would free is what is ticked.
-        config.sizes = HashMap::from([("photos", 1000), ("music", 10), ("whatsapp", 500)]);
-        assert_eq!(config.would_free(), Some(1010));
-        assert_eq!(config.folder_text(), "~/Phones/Pixel 8 Pro");
-        assert!(wrapped(&"word ".repeat(60)).iter().all(|l| l.chars().count() <= SAY_CHARS));
-    }
-}
-
 // ── The box on the desktop: opening it, the pointer, the keys, what it does ──
 
 use smithay_client_toolkit::reexports::client::protocol::wl_pointer;
@@ -1116,5 +1055,66 @@ impl App {
                 }
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a_box() -> Config {
+        Config::open("/run/x/phone", "3A301FDJG000UW", "Pixel 8 Pro", Phone::new("Pixel 8 Pro"), (100.0, 100.0), 1600.0, 1000.0)
+    }
+
+    #[test]
+    fn every_part_of_the_box_can_be_reached() {
+        let config = a_box();
+        let built = config.build([1.0; 4], [1.0; 4]);
+        let hits: Vec<Hit> = built.hits.iter().map(|(h, _)| *h).collect();
+        // Sync is off: its two settings are not for clicking.
+        assert_eq!(
+            hits,
+            vec![
+                Hit::Name,
+                Hit::Sync,
+                Hit::Kind(0),
+                Hit::Kind(1),
+                Hit::Kind(2),
+                Hit::Kind(3),
+                Hit::Kind(4),
+                Hit::Kind(5),
+                Hit::Clean,
+                Hit::After,
+                Hit::Cancel,
+                Hit::Apply,
+            ]
+        );
+        // Everything is inside the box, and each is found under its middle.
+        for (hit, r) in &built.hits {
+            assert!(r.x >= config.rect.x && r.x + r.w <= config.rect.x + config.rect.w, "{hit:?} is in the box");
+            assert!(r.y + r.h <= config.rect.y + config.rect.h, "{hit:?} is in the box");
+            assert_eq!(config.hit((r.x + r.w / 2.0, r.y + r.h / 2.0)), Some(*hit));
+        }
+        assert_eq!(config.hit((config.rect.x + 4.0, config.rect.y + 4.0)), None);
+    }
+
+    #[test]
+    fn sync_on_and_the_question_before_a_clean_add_their_parts() {
+        let mut config = a_box();
+        let rest = config.rect.h;
+        config.phone.sync = true;
+        let hits: Vec<Hit> = config.build([1.0; 4], [1.0; 4]).hits.iter().map(|(h, _)| *h).collect();
+        assert!(hits.contains(&Hit::Every) && hits.contains(&Hit::Charging));
+        // Asked: the chip gives way to the question, and the box grows.
+        config.confirm = true;
+        config.fit(1000.0);
+        let hits: Vec<Hit> = config.build([1.0; 4], [1.0; 4]).hits.iter().map(|(h, _)| *h).collect();
+        assert!(!hits.contains(&Hit::Clean) && hits.contains(&Hit::Really) && hits.contains(&Hit::NotNow));
+        assert!(config.rect.h > rest);
+        // What a clean would free is what is ticked.
+        config.sizes = HashMap::from([("photos", 1000), ("music", 10), ("whatsapp", 500)]);
+        assert_eq!(config.would_free(), Some(1010));
+        assert_eq!(config.folder_text(), "~/Phones/Pixel 8 Pro");
+        assert!(wrapped(&"word ".repeat(60)).iter().all(|l| l.chars().count() <= SAY_CHARS));
     }
 }

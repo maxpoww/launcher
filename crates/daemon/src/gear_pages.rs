@@ -2494,107 +2494,6 @@ fn health_word(pct: u8) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_label_of_nothing_fat_can_take_is_none() {
-        assert_eq!(label_for(":/?*", "vfat"), None);
-        assert_eq!(label_for("   ", "ext4"), None);
-        assert_eq!(label_for("  NIKON 1 V2 ", "vfat").as_deref(), Some("NIKON 1 V2"));
-        assert_eq!(label_for("a very long name indeed", "exfat").as_deref(), Some("a very long"));
-    }
-
-    #[test]
-    fn a_fat_label_loses_what_fat_refuses() {
-        assert_eq!(clean_label("My: Pics/2026?", "vfat"), "My Pics2026");
-        assert_eq!(clean_label("a\u{7}b", "ext4"), "ab");
-        assert_eq!(clean_label("Pics/2026", "ext4"), "Pics/2026");
-    }
-
-    const BASE: &str = "general {\n  lock_cmd=/nix/store/x-golem-lock\n}\n\nlistener {\n  on-timeout=/nix/store/x-golem-lock\n  timeout=300\n}\n\nlistener {\n  on-resume=/nix/store/y-golem-dpms on\n  on-timeout=/nix/store/y-golem-dpms off\n  timeout=360\n}\n\nlistener {\n  on-timeout=/nix/store/z-golem-idle-suspend\n  timeout=900\n}\n";
-
-    #[test]
-    fn a_drive_name_is_cut_to_what_its_file_system_holds() {
-        assert_eq!(fit_label("GEARXGEARWIN", "exfat"), "GEARXGEARWI");
-        assert_eq!(fit_label("short", "exfat"), "short");
-        assert_eq!(
-            fit_label("ñandú ñandú ñandú", "ext4").len(),
-            15,
-            "cut on a character, not inside one"
-        );
-        assert_eq!(fit_label(&"x".repeat(40), "ntfs").chars().count(), 32);
-        assert_eq!(fit_label("ten chars  and", "vfat"), "ten chars");
-    }
-
-    #[test]
-    fn the_idle_steps_are_read_from_the_systems_own_config() {
-        assert_eq!(idle_base(BASE), (Some(360), Some(900)));
-        assert_eq!(idle_base("general {\n}\n"), (None, None));
-    }
-
-    #[test]
-    fn the_owners_times_replace_only_their_own_step() {
-        let out = idle_with(BASE, Some(120), None);
-        assert_eq!(idle_base(&out), (Some(120), Some(900)));
-        assert!(
-            out.contains("timeout=300"),
-            "the lock step is not ours to move"
-        );
-        assert!(
-            out.contains("golem-dpms on"),
-            "the commands are kept as they are"
-        );
-        let never = idle_with(BASE, Some(0), Some(3600));
-        assert_eq!(
-            idle_base(&never),
-            (None, Some(3600)),
-            "never = the step is gone"
-        );
-        assert_eq!(never.matches("listener").count(), 2);
-        assert_eq!(idle_with(BASE, None, None), BASE, "no choice, no change");
-    }
-
-    #[test]
-    fn sizes_and_spans_read_plainly() {
-        assert_eq!(size_text(512 * 1024 * 1024), "512 MB");
-        assert_eq!(
-            size_text(3 * 1024 * 1024 * 1024 + 200 * 1024 * 1024),
-            "3.2 GB"
-        );
-        assert_eq!(size_text(512 * 1024 * 1024 * 1024), "512 GB");
-        assert_eq!(span_text(35), "35 min");
-        assert_eq!(span_text(200), "3 h 20 min");
-        assert_eq!(span_text(120), "2 h");
-        assert_eq!(span_text(3 * 24 * 60), "3 days");
-    }
-
-    #[test]
-    fn a_tile_wears_the_apps_first_letter() {
-        assert_eq!(monogram("seam"), "S");
-        assert_eq!(monogram("7zip"), "Z");
-        assert_eq!(monogram("123"), G_WINDOW);
-    }
-
-    #[test]
-    fn a_failed_act_is_told_in_plain_words() {
-        assert_eq!(
-            plain_problem("Failed to activate device: Incorrect passphrase."),
-            "Wrong password"
-        );
-        assert!(plain_problem("Input/output error while writing").contains("stopped responding"));
-        assert_eq!(plain_problem("something else"), "something else");
-    }
-
-    #[test]
-    fn battery_health_has_three_words() {
-        assert_eq!(health_word(88), "Good");
-        assert_eq!(health_word(70), "Worn");
-        assert_eq!(health_word(40), "Needs replacing");
-    }
-}
-
 /// The disk service's reason, in a person's words where we know the case.
 fn plain_problem(reason: &str) -> &str {
     let r = reason.to_lowercase();
@@ -3158,5 +3057,106 @@ impl App {
             }
         }
         self.gear_changed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_label_of_nothing_fat_can_take_is_none() {
+        assert_eq!(label_for(":/?*", "vfat"), None);
+        assert_eq!(label_for("   ", "ext4"), None);
+        assert_eq!(label_for("  NIKON 1 V2 ", "vfat").as_deref(), Some("NIKON 1 V2"));
+        assert_eq!(label_for("a very long name indeed", "exfat").as_deref(), Some("a very long"));
+    }
+
+    #[test]
+    fn a_fat_label_loses_what_fat_refuses() {
+        assert_eq!(clean_label("My: Pics/2026?", "vfat"), "My Pics2026");
+        assert_eq!(clean_label("a\u{7}b", "ext4"), "ab");
+        assert_eq!(clean_label("Pics/2026", "ext4"), "Pics/2026");
+    }
+
+    const BASE: &str = "general {\n  lock_cmd=/nix/store/x-golem-lock\n}\n\nlistener {\n  on-timeout=/nix/store/x-golem-lock\n  timeout=300\n}\n\nlistener {\n  on-resume=/nix/store/y-golem-dpms on\n  on-timeout=/nix/store/y-golem-dpms off\n  timeout=360\n}\n\nlistener {\n  on-timeout=/nix/store/z-golem-idle-suspend\n  timeout=900\n}\n";
+
+    #[test]
+    fn a_drive_name_is_cut_to_what_its_file_system_holds() {
+        assert_eq!(fit_label("GEARXGEARWIN", "exfat"), "GEARXGEARWI");
+        assert_eq!(fit_label("short", "exfat"), "short");
+        assert_eq!(
+            fit_label("ñandú ñandú ñandú", "ext4").len(),
+            15,
+            "cut on a character, not inside one"
+        );
+        assert_eq!(fit_label(&"x".repeat(40), "ntfs").chars().count(), 32);
+        assert_eq!(fit_label("ten chars  and", "vfat"), "ten chars");
+    }
+
+    #[test]
+    fn the_idle_steps_are_read_from_the_systems_own_config() {
+        assert_eq!(idle_base(BASE), (Some(360), Some(900)));
+        assert_eq!(idle_base("general {\n}\n"), (None, None));
+    }
+
+    #[test]
+    fn the_owners_times_replace_only_their_own_step() {
+        let out = idle_with(BASE, Some(120), None);
+        assert_eq!(idle_base(&out), (Some(120), Some(900)));
+        assert!(
+            out.contains("timeout=300"),
+            "the lock step is not ours to move"
+        );
+        assert!(
+            out.contains("golem-dpms on"),
+            "the commands are kept as they are"
+        );
+        let never = idle_with(BASE, Some(0), Some(3600));
+        assert_eq!(
+            idle_base(&never),
+            (None, Some(3600)),
+            "never = the step is gone"
+        );
+        assert_eq!(never.matches("listener").count(), 2);
+        assert_eq!(idle_with(BASE, None, None), BASE, "no choice, no change");
+    }
+
+    #[test]
+    fn sizes_and_spans_read_plainly() {
+        assert_eq!(size_text(512 * 1024 * 1024), "512 MB");
+        assert_eq!(
+            size_text(3 * 1024 * 1024 * 1024 + 200 * 1024 * 1024),
+            "3.2 GB"
+        );
+        assert_eq!(size_text(512 * 1024 * 1024 * 1024), "512 GB");
+        assert_eq!(span_text(35), "35 min");
+        assert_eq!(span_text(200), "3 h 20 min");
+        assert_eq!(span_text(120), "2 h");
+        assert_eq!(span_text(3 * 24 * 60), "3 days");
+    }
+
+    #[test]
+    fn a_tile_wears_the_apps_first_letter() {
+        assert_eq!(monogram("seam"), "S");
+        assert_eq!(monogram("7zip"), "Z");
+        assert_eq!(monogram("123"), G_WINDOW);
+    }
+
+    #[test]
+    fn a_failed_act_is_told_in_plain_words() {
+        assert_eq!(
+            plain_problem("Failed to activate device: Incorrect passphrase."),
+            "Wrong password"
+        );
+        assert!(plain_problem("Input/output error while writing").contains("stopped responding"));
+        assert_eq!(plain_problem("something else"), "something else");
+    }
+
+    #[test]
+    fn battery_health_has_three_words() {
+        assert_eq!(health_word(88), "Good");
+        assert_eq!(health_word(70), "Worn");
+        assert_eq!(health_word(40), "Needs replacing");
     }
 }

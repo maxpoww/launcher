@@ -1245,5 +1245,20 @@
   "No app is called that": "Ninguna app se llama así",
   "Always use for {kind}": "Usar siempre para {kind}",
   "Type to find an app": "Escribe para buscar una app",
-  "Undone: {kind} open as before": "Deshecho: {kind} se abre como antes"
+  "Undone: {kind} open as before": "Deshecho: {kind} se abre como antes",
+ "turn on USB debugging on the phone to configure it.": "activa la depuración USB en el teléfono para configurarlo.",
+ "It could not be allowed over Wi-Fi. Plug it in, connect it to the Wi-Fi, and Apply again.": "No se pudo permitir por Wi-Fi. Conéctalo por cable, conéctalo al Wi-Fi y vuelve a pulsar Aplicar.",
+ "Cleaning": "Limpiando",
+ "It could not be reached. Plug it in and unlock it, then clean again.": "No se pudo llegar a él. Conéctalo y desbloquéalo, y vuelve a limpiar.",
+ "Clean stopped.": "Limpieza detenida.",
+ "copied; nothing was taken off the phone.": "copiados; no se quitó nada del teléfono.",
+ "There was nothing to clean.": "No había nada que limpiar.",
+ "moved off the phone. Click to view.": "sacados del teléfono. Clic para ver.",
+ "moved off the phone;": "sacados del teléfono;",
+ "could not be copied and stayed on it. Click to view.": "no se pudieron copiar y siguen en él. Clic para ver.",
+ "is fixed — you can unplug it, it will keep syncing over Wi-Fi": "quedó listo: puedes desconectarlo, seguirá sincronizándose por Wi-Fi",
+ "can't sync over Wi-Fi — plug it in to fix it": "no puede sincronizarse por Wi-Fi: conéctalo por cable para arreglarlo",
+ "Syncing": "Sincronizando",
+ "1 new file synced. Click to view.": "1 archivo nuevo sincronizado. Clic para ver.",
+ "new files synced. Click to view.": "archivos nuevos sincronizados. Clic para ver."
 }

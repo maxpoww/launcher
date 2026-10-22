@@ -268,6 +268,11 @@ pub(crate) fn will_copy(paths: &[PathBuf], dir: &Path, moving: bool) -> bool {
     if paths.iter().any(|p| !crate::filer::same_disk(p, dir)) {
         return true;
     }
+    // (On a phone or a share every question is slow, and this is asked on
+    // the loop: there the table's word is taken — one mount, a rename.)
+    if crate::filer::slow_mount(dir).is_some() {
+        return false;
+    }
     let Ok(here) = std::fs::metadata(dir).map(|m| m.dev()) else {
         return false;
     };

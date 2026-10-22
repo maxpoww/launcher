@@ -1431,7 +1431,7 @@ mod tests {
         let y = tile_y(200.0, 0.0);
         assert_eq!(y, 200.0 - BOTTOM_MARGIN - TILE_H);
         assert_eq!(200.0 - (y + TILE_H), BOTTOM_MARGIN);
-        assert!(BOTTOM_MARGIN < 12.0, "the row should hug the bottom edge");
+        const { assert!(BOTTOM_MARGIN < 12.0, "the row should hug the bottom edge") };
     }
 
     #[test]

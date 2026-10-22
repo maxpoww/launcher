@@ -8547,6 +8547,18 @@ pub(crate) fn save_icon_size(size: usize) {
 
 smithay_client_toolkit::delegate_data_device!(App);
 
+/// The veil's surface, when the compositor offers `wp_viewporter` (without it
+/// there is nothing to stretch the pixel with, and the wallpaper stays as it is).
+fn veil_layer_new(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<App>,
+    globals: &wayland_client::globals::GlobalList,
+) -> Option<veil::VeilLayer> {
+    let viewporter = globals.bind::<wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter, App, _>(qh, 1..=1, ()).ok()?;
+    Some(veil::create(compositor, layer_shell, qh, &viewporter, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8583,16 +8595,4 @@ mod tests {
         let foot = entry("org.codeberg.dnkl.foot", "/usr/bin/foot", None);
         assert!(App::app_match_keys(&foot, apps::EntryKind::App).contains(&"foot".to_owned()));
     }
-}
-
-/// The veil's surface, when the compositor offers `wp_viewporter` (without it
-/// there is nothing to stretch the pixel with, and the wallpaper stays as it is).
-fn veil_layer_new(
-    compositor: &CompositorState,
-    layer_shell: &LayerShell,
-    qh: &QueueHandle<App>,
-    globals: &wayland_client::globals::GlobalList,
-) -> Option<veil::VeilLayer> {
-    let viewporter = globals.bind::<wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter, App, _>(qh, 1..=1, ()).ok()?;
-    Some(veil::create(compositor, layer_shell, qh, &viewporter, None))
 }

@@ -464,6 +464,21 @@ impl App {
     }
 }
 
+/// A thumbnail's picture shape, width over height: the thumbnail is the
+/// picture centred on a clear square, so its shape is the box of what is
+/// not clear (read from the first, full-size level of its pixels).
+pub(crate) fn thumb_aspect(pixels: &[u8]) -> f32 {
+    let n = crate::apps::ICON_SIZE as usize;
+    if pixels.len() < n * n * 4 {
+        return 1.0;
+    }
+    let solid = |x: usize, y: usize| pixels[(y * n + x) * 4 + 3] > 8;
+    // The middle row and column are enough: the picture is a centred box.
+    let w = (0..n).filter(|&x| solid(x, n / 2)).count();
+    let h = (0..n).filter(|&y| solid(n / 2, y)).count();
+    if w == 0 || h == 0 { 1.0 } else { w as f32 / h as f32 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,19 +499,4 @@ mod tests {
         // bashrc, which is unknown → generic (not a crash, not code).
         assert_eq!(file_asset_name(".bashrc"), "asset-file");
     }
-}
-
-/// A thumbnail's picture shape, width over height: the thumbnail is the
-/// picture centred on a clear square, so its shape is the box of what is
-/// not clear (read from the first, full-size level of its pixels).
-pub(crate) fn thumb_aspect(pixels: &[u8]) -> f32 {
-    let n = crate::apps::ICON_SIZE as usize;
-    if pixels.len() < n * n * 4 {
-        return 1.0;
-    }
-    let solid = |x: usize, y: usize| pixels[(y * n + x) * 4 + 3] > 8;
-    // The middle row and column are enough: the picture is a centred box.
-    let w = (0..n).filter(|&x| solid(x, n / 2)).count();
-    let h = (0..n).filter(|&y| solid(n / 2, y)).count();
-    if w == 0 || h == 0 { 1.0 } else { w as f32 / h as f32 }
 }
