@@ -914,6 +914,7 @@ fn main() -> anyhow::Result<()> {
         bin_layer: 0,
         files_layer: None,
         act_symbol_layer: None,
+        name_fit: HashMap::new(),
         apps_stencil: None,
         pkg_state: PkgIndexState::Loading,
         pkg_load_kicked: false,
@@ -2114,6 +2115,9 @@ pub struct App {
     /// The first texture layer of the lone app's action symbols, in
     /// `app_actions::SYMBOLS` order (`app_actions::figures`).
     act_symbol_layer: Option<u32>,
+    /// Grid names as fitted, by the cell's room (whole px) and the name —
+    /// `None`: it fits on one line (`App::fitted_names`).
+    name_fit: HashMap<u32, HashMap<String, Option<content::NameFit>>>,
     /// The apps button's stencil layer (`apps_icon::stencil_svg`).
     apps_stencil: Option<u32>,
     /// Whether the package index is usable yet (drives the Install hint).

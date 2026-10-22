@@ -2053,9 +2053,26 @@ pub struct DragFrame {
     pub over_dock: Option<usize>,
 }
 
+/// A grid name too long for its cell's one line (Max, 2026-10-22: "dos
+/// líneas cuando sea necesario" — "YouTube Music" read as "YouTube" cut at a
+/// word, "Google Calendar" as "Google"): broken between words onto two, and
+/// on one with "…" where the second has no room (`App::fitted_names`). Not a
+/// file's: those are cut in the middle, their ending kept (`tile_label`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameFit {
+    pub one: String,
+    pub two: (String, String),
+}
+
+/// How far under the first line a grid name's second sits: a little closer
+/// than a line, so it stays clear of the next row's icons.
+const SECOND_LINE: f32 = 14.0;
+
 /// Per-frame dynamic inputs to scene assembly.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameInput<'a> {
+    /// The grid cells whose names need two lines, by entry (`NameFit`).
+    pub names: Option<&'a std::collections::HashMap<usize, NameFit>>,
     /// Item under the pointer (hover highlight).
     pub hover: Option<Hit>,
     /// Shaped pixel width of the live query (the caret anchor).
@@ -2415,6 +2432,7 @@ pub fn scene(
     frame: &FrameInput,
 ) -> Scene {
     let FrameInput {
+        names,
         hover,
         query_px,
         search_pill,
@@ -3563,6 +3581,10 @@ pub fn scene(
             let (x1, y1) = corner(i0 + 1);
             (lerp(x0, x1, frac), lerp(y0, y1, frac))
         };
+        // The slots taken, to know whose name has room for a second line.
+        let display = |i: usize| if s == SECTION_APPS { apps_slide.get(i).copied().unwrap_or(i as f32) } else { i as f32 };
+        let taken: std::collections::HashSet<usize> =
+            (0..sec.cells.min(visible[s].len())).map(|i| display(i).round().max(0.0) as usize).collect();
         for i in 0..sec.cells {
             let Some(&entry_idx) = visible[s].get(i) else {
                 break;
@@ -3880,6 +3902,37 @@ pub fn scene(
             } else {
                 tile_label(entry, kinds.get(entry_idx), cell.w - 12.0, LABEL_FONT_PX)
             };
+            // A name too long for one line: two, broken between words, where
+            // the space under it is free — no cell below it, a last row with
+            // no page dots under it, the row a box or a lone app parts —; else
+            // one with "…" (the rows are a line apart).
+            let fit = names.and_then(|n| n.get(&entry_idx)).filter(|_| !is_busy && !is_failed);
+            let slot = di.round().max(0.0) as usize;
+            let row = (slot % cells_per_page) / sec.cols.max(1);
+            let parted = s == SECTION_APPS && layout.apps_part.is_some_and(|p| row as isize == p.row);
+            let bottom = cell.y + grid_cell_h > sec.viewport.y + sec.viewport.h - 0.5;
+            let room_under = parted || if bottom { sec.n_pages <= 1 } else { !taken.contains(&(slot + sec.cols)) };
+            let (name, second) = match fit {
+                Some(fit) if !room_under => (fit.one.clone(), None),
+                Some(fit) => (fit.two.0.clone(), Some(fit.two.1.clone())),
+                None => (name, None),
+            };
+            if let (Some(second), false) = (second, covered) {
+                let v = sec.viewport;
+                g.labels.push(Label {
+                    text: second,
+                    pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP + SECOND_LINE),
+                    max_w: cell.w - 12.0,
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: None,
+                    color: None,
+                    clip: Some(reveal_clip(Rect::new(v.x, v.y, v.w, v.h + 2.0 * LABEL_LINE_PX))),
+                });
+            }
             if !covered {
                 g.labels.push(Label {
                     text: name,

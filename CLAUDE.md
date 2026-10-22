@@ -1470,7 +1470,12 @@ The big daemon files are cohesive but long — go straight to the function:
   Google, agrego un espacio y aparece la grilla sin Google"; `narrow`): a query that IS an app's name
   leaves that app alone (Golem's own also by their name without "Golem"; the most used of several
   of one name), and a SPACE after it the apps whose names go on past it, without it ("youtube " →
-  YouTube Music). On a short screen the card GROWS for the recents (a negative trim,
+  YouTube Music). NAMES TOO LONG FOR A LINE (Max: "dos líneas cuando sea necesario"; they were
+  cut at a word by the estimate, so "YouTube Music" read "YouTube"): measured once a cell's room
+  (`App::fitted_names`, `name_fit`), TWO lines broken between words where the space under the cell
+  is free (no cell below, a last row with no page dots, the parted row), else ONE with "…" — the
+  rows are a line apart (`content::NameFit`, `SECOND_LINE`); files keep their middle cut
+  (`tile_label`). On a short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
   Real data: `cargo test -- --ignored real_recents --nocapture`.
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.

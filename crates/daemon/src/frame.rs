@@ -1703,6 +1703,7 @@ impl App {
         });
         // The lone app's action cells (`app_actions.rs`).
         let (act_cells, act_asking, act_wide) = self.action_draw();
+        let names = self.fitted_names(&layout);
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -1711,6 +1712,7 @@ impl App {
             &self.search.visible,
             (self.buffer_size.0 as f32, self.buffer_size.1 as f32),
             &content::FrameInput {
+                names: Some(&names),
                 // Suppress hover highlight and magnification while dragging.
                 hover: if drag_frame.is_none() {
                     self.hover

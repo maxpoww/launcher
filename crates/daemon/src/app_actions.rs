@@ -41,6 +41,7 @@
 //! "Again to uninstall"; a second uninstalls (`uninstall_app`). Escape, the
 //! keys or the pointer leaving it, or `ARM_FOR` with nothing done put it back.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -249,7 +250,7 @@ fn known_for(id: &str) -> impl Iterator<Item = &'static Known> + '_ {
 /// fit on the first, the rest on the second (cut with "…" if still too
 /// long); a first word too long for the line is broken as Files breaks a
 /// name (`filer::two_lines_of_words`).
-fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
+pub(crate) fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
     let words: Vec<&str> = text.split_whitespace().collect();
     let fits = |n: usize, measure: &mut dyn FnMut(&str) -> f32| measure(&words[..n].join(" ")) <= room - crate::desktop::FIT_SLACK;
     let mut n = 0;
@@ -895,6 +896,51 @@ impl App {
             self.restore_minimized(addr);
         }
         self.dismiss();
+    }
+
+    /// The grid's cells whose names do not fit on one line, by entry: each
+    /// measured once a room (`name_fit`), then two lines between words and
+    /// one with "…" (`content::NameFit`). Files with a path keep their own
+    /// cut (`content::tile_label`); the actions have theirs already.
+    pub(crate) fn fitted_names(&mut self, layout: &content::Layout) -> HashMap<usize, content::NameFit> {
+        let mut out = HashMap::new();
+        for s in 0..content::N_SECTIONS {
+            let sec = &layout.sections[s];
+            let room = sec.viewport.w / sec.cols.max(1) as f32 - 12.0;
+            if room <= 0.0 {
+                continue;
+            }
+            let key = room.round() as u32;
+            for &e in &self.search.visible[s] {
+                let Some(entry) = self.entries.get(e) else {
+                    continue;
+                };
+                let file = self.kinds.get(e) == Some(&apps::EntryKind::File) && entry.description.is_some();
+                if file || entry.name.contains('\n') || entry.name.is_empty() {
+                    continue;
+                }
+                if let Some(known) = self.name_fit.get(&key).and_then(|m| m.get(entry.name.as_str())) {
+                    if let Some(fit) = known {
+                        out.insert(e, fit.clone());
+                    }
+                    continue;
+                }
+                let name = entry.name.clone();
+                let mut measure = |t: &str| match self.renderer.as_mut() {
+                    Some(r) => r.measure_text(t, content::LABEL_FONT_PX, None),
+                    None => crate::options::est_text_w(t, content::LABEL_FONT_PX),
+                };
+                let fit = (measure(&name) > room - crate::desktop::FIT_SLACK).then(|| content::NameFit {
+                    one: crate::desktop::fit_label(&name, room, &mut measure),
+                    two: by_words(&name, room, &mut measure),
+                });
+                if let Some(fit) = &fit {
+                    out.insert(e, fit.clone());
+                }
+                self.name_fit.entry(key).or_default().insert(name, fit);
+            }
+        }
+        out
     }
 
     /// The lone app's display slots (`refilter`, after the search's dense
