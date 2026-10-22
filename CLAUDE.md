@@ -596,7 +596,12 @@ The big daemon files are cohesive but long — go straight to the function:
   thumbnails ride the Files thumbnailer (`desktop_on_thumb`). `[desktop] enabled/render_scale`
   in config; `WAVERUNNER_DESKTOP_DIR` overrides the folder (test rigs). Pointer-free:
   SELECTION: a press on bare wallpaper that travels draws a rubber band (`band_hits`: icons
-  + names it touches are selected, by path); a press on an unselected icon selects it alone;
+  + names it touches are selected, by path); AN ITEM IS ITS PICTURE AND ITS NAME (Max, 2026-10-22,
+  as in Files: `Desktop::thing` — what its picture shows, `seen` from `filer::ink_box` as it goes
+  into its layer, and its name's width as last written, `names_w`): `hit` finds nothing on the rest
+  of a cell, so a band starts and the wallpaper's menu opens between icons, and a drop there is not
+  into a folder (rig: move the pointer, then `debug-desktop "pointer press|release|rclick"`);
+  a press on an unselected icon selects it alone;
   a drag of a selected icon takes the whole selection (`Drag.items`, grabbed one first;
   payload = all URIs; a drop on the desktop lands them keeping their arrangement via
   `place_group`, on the bin trashes them all); a click on wallpaper clears, opening clears.
@@ -1062,7 +1067,18 @@ The big daemon files are cohesive but long — go straight to the function:
   typed. Where two selected things stand one above the other the lower box begins under the upper's
   (the rows are close). PICTURES SIT ON THE BOTTOM of their space and the name is ~3 px under what
   they show (`LABEL_GAP` 4 with the name box's pixel): each picture's empty rows above and under are
-  read once from its pixels (`ink_rows`, `Win::ink`) and it is moved down by those under. The list's
+  read once from its pixels (`ink_box`, `Win::ink`: rows AND columns) and it is moved down by those
+  under. A THING IS ITS PICTURE AND ITS NAME (Max, 2026-10-22: "selection have to happen only clicking
+  the icon or text, the rest should be empty space, so i can right click on the bg (dir) and use the
+  rubber band"): in the grid only what the picture shows (`ink_box`) and the name's own box (`NAME_PAD`),
+  ±2 px (`THING_SLOP`) with the strip between them, are the thing (`Thing`, `thing_in`, `Win::thing`,
+  `Win::thing_at` — the cell under the pointer, the one above it and either side, for a second line or
+  a wide name). The rest of a cell is the folder's ground: a press there draws a band, a right click
+  has the folder's menu, a click clears, the cursor is the arrow; the band takes what it TOUCHES of a
+  picture or a name (`band_hits`, a thing per cell); a drag is let go INTO a folder only on its picture
+  or name, its bare ground makes room in this folder (`filer_drag_over`'s `onto`; springs follow). The
+  soft box is drawn from the same `Thing`. A LIST keeps its rows: a row is the thing (Finder's). Rig:
+  `files press <x> <y>` / `drag <x> <y>` / `unband`, `files where corner <n>` (a cell's bare corner). The list's
   zebra is the A mockup's faint one (3.5 % / 4 %), so a selected row stands out of it; its stripes are
   SQUARE and run EDGE TO EDGE (sidebar to window side, the grid's clip cuts them) and on PAST the last
   row to the bottom of what is seen, scrolling with the rows (Max, 2026-10-21, mockup v44: a stripe
