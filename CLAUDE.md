@@ -466,6 +466,19 @@ The big daemon files are cohesive but long — go straight to the function:
   (`phone_pill_reserve`: the task pill's fallback place, the camera pill's right end), and what
   it opens over leaves the bar while it is out (`options_pills`, as for the bell). Pointer-free:
   `debug-desktop "phonepill fake [words]|gone|open|close|free"` — never a click (it ejects).
+  ITS BOX'S MENU IS THE ONE MENU (Max, 2026-10-21: "in the one menu look"): the first page of the
+  box is a `desktop_menu::Menu` (`phone_menu_ctx` → `phone_menu_sync`, every frame of the bar),
+  HELD by the box (`Menu::fit`: its corner, its width, at most its height — past that it scrolls)
+  and drawn by the menu's painter with the panel left to the box (`Menu::push_rows`): the same
+  symbols (from the desktop's warmed glyphs, put after the covers in the bar's icon array —
+  `phone_glyphs_sync`, `set_options_icons`' 4th slice), the quiet accent tint, the red, the menus'
+  Ctrl +/−/0 size (the bar's own zoom binds act on `menu` while the box holds the keys). The box
+  keeps its header (the long pill) and its place under the pill. The KEYBOARD is the box's while
+  it is open (not on the Configure page, whose fields want it; `set_phone_keyboard`, shared with
+  the clipboard's and the gear's grabs): `Menu::key` on the menu (a page row turns the box's page —
+  `menu_act`), ← / Escape / Backspace back to the menu from a page. Rig: `phonepill fakehelp` (a
+  phone whose USB debugging is off: the help rows), `phonepill key down|up|home|end|enter|left|right|
+  escape|<letter>` (a fake phone turns pages and does nothing else).
 - `desktop_menu.rs` + `glyphs.rs` — THE ONE MENU (Max, 2026-10-21, mockups v50/v52 "All menus":
   "Build all of it"): EVERY right-click — Files' file / folder / several / archive / app shortcut /
   empty space / bin item / bin / sidebar place, the desktop's wallpaper and what stands on it, a
