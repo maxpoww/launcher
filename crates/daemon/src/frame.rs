@@ -1612,7 +1612,7 @@ impl App {
             .renderer
             .as_mut()
             .map(|r| {
-                let mut m = |t: &str| r.measure_text(t, fast_geo.font_px, crate::options::TEXT_FONT);
+                let m = |t: &str| r.measure_text(t, fast_geo.font_px, crate::options::TEXT_FONT);
                 (m(&fast_typed), m(&fast_rest))
             })
             .unwrap_or((0.0, 0.0));

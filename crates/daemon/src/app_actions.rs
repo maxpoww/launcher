@@ -248,7 +248,7 @@ fn known_for(id: &str) -> impl Iterator<Item = &'static Known> + '_ {
 /// A name on two lines under its tile, broken between WORDS: as many as
 /// fit on the first, the rest on the second (cut with "…" if still too
 /// long); a first word too long for the line is broken as Files breaks a
-/// name (`filer::two_lines`).
+/// name (`filer::two_lines_of_words`).
 fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
     let words: Vec<&str> = text.split_whitespace().collect();
     let fits = |n: usize, measure: &mut dyn FnMut(&str) -> f32| measure(&words[..n].join(" ")) <= room - crate::desktop::FIT_SLACK;
@@ -260,7 +260,7 @@ fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (Str
         return hyphenated(text, room, measure);
     }
     if n == 0 || n == words.len() {
-        return crate::filer::two_lines(text, room, measure);
+        return crate::filer::two_lines_of_words(text, room, measure);
     }
     (words[..n].join(" "), crate::desktop::fit_label(&words[n..].join(" "), room, measure))
 }

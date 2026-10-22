@@ -742,7 +742,12 @@ impl App {
                 picture(&mut list, win, &key, at, dim);
             }
             if open > 0.0 {
-                let name = place.name.clone();
+                // (Cut in the middle as names are, to the sidebar open: it
+                // holds still while the sidebar slides.)
+                let full = place.name.clone();
+                let room = win.side_open_w() - 2.0 * SIDE_PAD - icon - 25.0;
+                let name =
+                    crate::desktop::fit_name(&full, room, &mut |t| measure(win, t, 13.0, None));
                 list.labels.push(Label {
                     clip: Some(row),
                     ..words(
@@ -1014,15 +1019,27 @@ impl App {
         });
         let tail = IN_GAP + PEN_BOX + if many { IN_GAP + X_BOX } else { 0.0 } + tag_w;
         let room = (tools_left - x0 - others - TAB_GAP - ADD_BOX - tail).max(40.0);
-        let steps = crumbs(&win.dir, &win.places);
-        let widths: Vec<f32> = steps
+        let mut steps = crumbs(&win.dir, &win.places);
+        let mut widths: Vec<f32> = steps
             .iter()
             .map(|(n, _)| measure(win, n, LINE_PX, None))
             .collect();
         // (The first steps give way when the line is short.)
-        let mut from = steps.len().saturating_sub(1);
+        let last = steps.len().saturating_sub(1);
+        let mut from = last;
         while from > 0 && steps_w(&widths, from - 1) <= room {
             from -= 1;
+        }
+        // The folder shown alone and still too long: its name cut in the
+        // middle, as names are.
+        if let Some((name, _)) = steps
+            .get_mut(last)
+            .filter(|_| steps_w(&widths, last) > room)
+        {
+            *name = crate::desktop::fit_name(name, room - step_w(last, 0.0), &mut |t| {
+                measure(win, t, LINE_PX, None)
+            });
+            widths[last] = measure(win, name, LINE_PX, None);
         }
         let field_w = (win.edit_w - tail).max(EDIT_MIN);
         let current_w = if editing {
@@ -1209,7 +1226,7 @@ impl App {
                 let (name, nw) = (chip_name.clone(), *chip_tw);
                 let room = (chip.w - (8.0 + CHIP_ICON + 5.0) - (5.0 + X_BOX + 3.0)).max(0.0);
                 let shown =
-                    crate::desktop::fit_label(&name, room, &mut |t| measure(win, t, LINE_PX, None));
+                    crate::desktop::fit_name(&name, room, &mut |t| measure(win, t, LINE_PX, None));
                 g.labels.push(Label {
                     clip: Some(chip),
                     ..words(
@@ -1361,13 +1378,10 @@ impl App {
         let fit = |win: &mut Win, text: &str, room: f32, px: f32, family: Option<&str>| {
             crate::desktop::fit_label(text, room, &mut |t| measure(win, t, px, family))
         };
-        let name = fit(
-            win,
-            &info_name,
-            inner,
-            13.0,
-            Some(crate::content::FONT_BOLD),
-        );
+        // (Its name cut in the middle, as names are: `desktop::fit_name`.)
+        let name = crate::desktop::fit_name(&info_name, inner, &mut |t| {
+            measure(win, t, 13.0, Some(crate::content::FONT_BOLD))
+        });
         g.labels.push(Label {
             family: Some(crate::content::FONT_BOLD),
             centered: true,
@@ -2268,9 +2282,20 @@ impl App {
         let bold_room = (pill.w - lead - right - parts_w - dim_w - gap)
             .min(name_max + 4.0)
             .max(30.0);
-        let shown = crate::desktop::fit_label(&view.bold, bold_room, &mut |t| {
-            measure(win, t, px, Some(crate::content::FONT_MEDIUM))
-        });
+        let mut bold_w = |t: &str| measure(win, t, px, Some(crate::content::FONT_MEDIUM));
+        // One thing's name ("“x”", `pill_words`) is cut in the middle, inside
+        // its quotes; other words at their end.
+        let shown = match view
+            .bold
+            .strip_prefix('“')
+            .and_then(|b| b.strip_suffix('”'))
+        {
+            Some(name) => format!(
+                "“{}”",
+                crate::desktop::fit_name(name, bold_room, &mut |t| bold_w(&format!("“{t}”")))
+            ),
+            None => crate::desktop::fit_label(&view.bold, bold_room, &mut bold_w),
+        };
         g.labels.push(Label {
             clip: Some(pill),
             family: Some(crate::content::FONT_MEDIUM),

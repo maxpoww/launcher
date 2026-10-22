@@ -2894,8 +2894,13 @@ impl App {
             parts.open.h,
         );
         let text_w = (open_rect.x - (r.x + 46.0) - 12.0).max(20.0);
+        // (Cut in the middle, as names are: `desktop::fit_name`.)
+        let name = self.desktop_top.renderer.as_ref().map_or_else(
+            || up.name.clone(),
+            |r| crate::desktop::fit_name(&up.name, text_w, &mut |t| r.measure_text(t, 13.5, Some(FONT_BOLD))),
+        );
         g.labels.push(text_label(
-            &up.name,
+            &name,
             (r.x + 46.0, r.y + 7.0),
             text_w,
             13.5,

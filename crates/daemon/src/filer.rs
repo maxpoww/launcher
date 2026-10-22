@@ -2242,8 +2242,8 @@ impl Win {
                 // Found below: its name on one line, its folder dim on the
                 // other.
                 (
-                    crate::desktop::fit_label(&item.name, label_w, &mut measure),
-                    crate::desktop::fit_label(&below(&item.path, &self.dir), label_w, &mut measure),
+                    crate::desktop::fit_name(&item.name, label_w, &mut measure),
+                    crate::desktop::fit_name(&below(&item.path, &self.dir), label_w, &mut measure),
                 )
             } else {
                 let lines = two_lines(&item.name, label_w, &mut measure);
@@ -2718,15 +2718,44 @@ pub(crate) fn by_name(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// A name on two lines under its icon: the first as much as fits (broken
-/// after a space or a mark when one is near its end), the second the rest,
-/// cut with an ellipsis if that is still too long.
+/// after a space or a mark when one is near its end), the second the rest.
+/// A name two lines cannot hold is cut in the MIDDLE (Max, 2026-10-22: "as
+/// macOS does it" — `desktop::fit_name`): the first line as much of its
+/// start as it holds, the second "…" and its end, the ending with it.
 pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
-    // (Clear of the edge: see `desktop::FIT_SLACK`.)
-    let room = max_w - crate::desktop::FIT_SLACK;
-    if measure(name) <= room {
+    let Some((first, rest, most)) = first_line(name, max_w, measure) else {
         return (name.to_owned(), String::new());
+    };
+    if measure(&rest) <= max_w - crate::desktop::FIT_SLACK {
+        return (first, rest);
     }
     let chars: Vec<char> = name.chars().collect();
+    let head: String = chars[..most].iter().collect();
+    let tail: String = chars[most..].iter().collect();
+    (
+        head.trim_end().to_owned(),
+        crate::desktop::fit_end(tail.trim_start(), max_w, measure),
+    )
+}
+
+/// Words that are not a name (an app's action) on two lines as a name
+/// breaks, the second cut at its end if it is still too long.
+pub(crate) fn two_lines_of_words(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
+    match first_line(text, max_w, measure) {
+        Some((first, rest, _)) => (first, crate::desktop::fit_label(&rest, max_w, measure)),
+        None => (text.to_owned(), String::new()),
+    }
+}
+
+/// Text too long for one line of `max_w`, broken: its first line, the rest
+/// (trimmed), and the most characters a first line holds. `None`: it fits.
+fn first_line(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> Option<(String, String, usize)> {
+    // (Clear of the edge: see `desktop::FIT_SLACK`.)
+    let room = max_w - crate::desktop::FIT_SLACK;
+    if measure(text) <= room {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
     // The longest head that fits: binary search over measured widths.
     let (mut lo, mut hi) = (1usize, chars.len());
     while lo < hi {
@@ -2745,10 +2774,7 @@ pub(crate) fn two_lines(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
         .map_or(lo, |i| i + 1);
     let first: String = chars[..cut].iter().collect();
     let rest: String = chars[cut..].iter().collect();
-    (
-        first.trim_end().to_owned(),
-        crate::desktop::fit_label(rest.trim_start(), max_w, measure),
-    )
+    Some((first.trim_end().to_owned(), rest.trim_start().to_owned(), lo))
 }
 
 /// The window's colours in the present look (Max, 2026-10-14: "do the dark
@@ -5085,7 +5111,7 @@ impl App {
             return;
         };
         let (w, h) = win.virt();
-        let props = Props::open(item, at, menu, w, h, &home());
+        let mut props = Props::open(item, at, menu, w, h, &home());
         if item.kind == Kind::Folder {
             let path = item.path.clone();
             let (tx, rx) = calloop::channel::channel::<(String, u64, u64)>();
@@ -5104,6 +5130,9 @@ impl App {
         }
         info!("files: properties of {}", props.title);
         if let Some(win) = self.filer.win_mut(id) {
+            if let Some(r) = win.renderer.as_ref() {
+                props.fit_title(r);
+            }
             win.menu = None;
             win.props = Some(props);
         }
@@ -5938,7 +5967,7 @@ impl App {
                     } else {
                         item.name.clone()
                     };
-                    let name = crate::desktop::fit_label(&full, name_w, &mut |t| {
+                    let name = crate::desktop::fit_name(&full, name_w, &mut |t| {
                         renderer.measure_text(t, TEXT_PX, None)
                     });
                     // (Selected: the name in its own soft box too, a step darker.)
@@ -9083,9 +9112,15 @@ mod tests {
         assert_eq!(two_lines("short.txt", 100.0 + crate::desktop::FIT_SLACK, &mut measure), ("short.txt".to_owned(), String::new()));
         let (a, b) = two_lines("holiday photos.zip", 100.0 + crate::desktop::FIT_SLACK, &mut measure);
         assert_eq!((a.as_str(), b.as_str()), ("holiday", "photos.zip"));
+        // Past two lines, cut in the MIDDLE: the start on the first, "…" and
+        // the end (its ending with it) on the second.
         let (a, b) = two_lines("abcdefghijklmnopqrstuvwxyz0123456789", 100.0 + crate::desktop::FIT_SLACK, &mut measure);
-        assert_eq!(a, "abcdefghij");
-        assert!(b.ends_with('…') && b.chars().count() <= 10);
+        assert_eq!((a.as_str(), b.as_str()), ("abcdefghij", "…123456789"));
+        let (a, b) = two_lines("Screenshot 2026-10-22 at 10.32.15.png", 160.0 + crate::desktop::FIT_SLACK, &mut measure);
+        assert_eq!((a.as_str(), b.as_str()), ("Screenshot 2026-", "…at 10.32.15.png"));
+        // Words that are not a name keep their cut at the end.
+        let (a, b) = two_lines_of_words("abcdefghijklmnopqrstuvwxyz0123456789", 100.0 + crate::desktop::FIT_SLACK, &mut measure);
+        assert_eq!((a.as_str(), b.as_str()), ("abcdefghij", "klmnopqrs…"));
     }
 
     #[test]

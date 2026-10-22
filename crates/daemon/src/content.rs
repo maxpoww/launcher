@@ -634,6 +634,20 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// A grid tile's name: an app's cut at its end (`truncate_label`), a
+/// FILE's or a folder's — one with a path, not a web page's title — cut in
+/// the middle with its ending kept (`desktop::fit_name`; Max, 2026-10-22),
+/// by the same estimate.
+pub(crate) fn tile_label(entry: &AppEntry, kind: Option<&crate::apps::EntryKind>, max_w: f32, font_px: f32) -> String {
+    if kind != Some(&crate::apps::EntryKind::File) || entry.description.is_none() {
+        return truncate_label(&entry.name, max_w, font_px);
+    }
+    let avg_char_w = font_px * 0.52;
+    crate::desktop::fit_name(&entry.name, max_w + crate::desktop::FIT_SLACK, &mut |t| {
+        t.chars().count() as f32 * avg_char_w
+    })
+}
+
 /// Truncate a label to fit within `max_w` pixels, appending "…" when
 /// the text is longer. Uses an average-character-width estimate (0.52×
 /// font size) rather than shaping — close enough for app names.
@@ -3864,7 +3878,7 @@ pub fn scene(
             } else if is_failed {
                 crate::i18n::tr("Failed").to_string()
             } else {
-                truncate_label(&entry.name, cell.w - 12.0, LABEL_FONT_PX)
+                tile_label(entry, kinds.get(entry_idx), cell.w - 12.0, LABEL_FONT_PX)
             };
             if !covered {
                 g.labels.push(Label {
@@ -4304,7 +4318,7 @@ pub fn scene(
             // Each member's name rides under its icon.
             if let Some(entry) = entries.get(idx) {
                 boxgrid.labels.push(Label {
-                    text: truncate_label(&entry.name, name_w, name_px),
+                    text: tile_label(entry, kinds.get(idx), name_w, name_px),
                     pos: (cx, cy + size / 2.0 + GRID_LABEL_GAP),
                     max_w: name_w,
                     font_px: name_px,

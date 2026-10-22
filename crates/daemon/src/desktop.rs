@@ -1860,11 +1860,6 @@ fn label_max_w(cell: &Rect) -> f32 {
     cell.w - 12.0
 }
 
-/// A name on one line under its icon: whole, or cut with an ellipsis where
-/// the SHAPED text would run past `max_w` (`measure` is the renderer's
-/// cached shaping). Not the grid's per-character estimate: file names are
-/// any length in any script, and the estimate let "Holiday photos" wrap
-/// onto a second line the one-line label never shows.
 /// What a fitted name keeps clear of its width (logical px): a name that
 /// fits by less, measured at its logical size, can be wider drawn at a
 /// fractional scale — and the renderer then breaks it into a line that is
@@ -1872,6 +1867,12 @@ fn label_max_w(cell: &Rect) -> f32 {
 /// and came out as "h-": 2026-10-17).
 pub(crate) const FIT_SLACK: f32 = 1.5;
 
+/// Words on one line: whole, or cut at their END with an ellipsis where
+/// the SHAPED text would run past `max_w` (`measure` is the renderer's
+/// cached shaping). Not the grid's per-character estimate: words are any
+/// length in any script, and the estimate let "Holiday photos" wrap onto a
+/// second line the one-line label never shows. A file's or a folder's
+/// NAME is cut in the middle instead (`fit_name`).
 pub(crate) fn fit_label(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
     let max_w = max_w - FIT_SLACK;
     if measure(text) <= max_w {
@@ -1896,6 +1897,67 @@ pub(crate) fn fit_label(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) ->
     cut(lo)
 }
 
+/// Of a name cut in the middle, the end's part of the room: just under
+/// half, so the start keeps a little more.
+const END_SHARE: f32 = 0.45;
+
+/// A file or folder NAME on one line: whole, or cut in the MIDDLE (Max,
+/// 2026-10-22: "i want the … in the middle as macOS does it, like:
+/// dhadjk…kjhasoj.mp4") — its start and its end kept, the end with the
+/// name's ending (`ending`) and three characters before it whenever the
+/// room holds that much. Measured as `fit_label` is; words that are not
+/// names keep its cut at the end.
+pub(crate) fn fit_name(name: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
+    let room = max_w - FIT_SLACK;
+    let chars: Vec<char> = name.chars().collect();
+    if chars.is_empty() || measure(name) <= room {
+        return name.to_owned();
+    }
+    let n = chars.len();
+    let head = |k: usize| chars[..k].iter().collect::<String>().trim_end().to_owned();
+    let tail = |k: usize| chars[n - k..].iter().collect::<String>().trim_start().to_owned();
+    let budget = room - measure("…");
+    let least = ending(name).map_or(0, |e| e.chars().count() + 4).min(n - 1);
+    let share = (budget * END_SHARE).max(measure(&tail(least))).min(budget);
+    let t = longest(n - 1, |k| measure(&tail(k)) <= share);
+    let end = tail(t);
+    let left = budget - measure(&end);
+    let mut h = longest(n - 1 - t, |k| measure(&head(k)) <= left);
+    // (The halves were measured apart; joined, they may shape a hair wider.)
+    while h > 0 && measure(&format!("{}…{end}", head(h))) > room {
+        h -= 1;
+    }
+    format!("{}…{end}", head(h))
+}
+
+/// A name's last line when the name runs on past it: "…" and as much of
+/// its end as fits (`filer::two_lines`).
+pub(crate) fn fit_end(text: &str, max_w: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
+    let room = max_w - FIT_SLACK;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() || measure(text) <= room {
+        return text.to_owned();
+    }
+    let n = chars.len();
+    let cut = |k: usize| format!("…{}", chars[n - k..].iter().collect::<String>().trim_start());
+    cut(longest(n - 1, |k| measure(&cut(k)) <= room))
+}
+
+/// The largest `k` up to `most` that `fits`, for a `fits` that holds below
+/// every `k` it holds for: a binary search, log₂ measurements.
+fn longest(most: usize, mut fits: impl FnMut(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0usize, most);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// One tile to draw: an item's icon square and fitted name.
 struct Tile<'a> {
     item: &'a Item,
@@ -1903,6 +1965,7 @@ struct Tile<'a> {
     layer: u32,
     /// Where the icon goes; the name sits under it.
     icon: Rect,
+    /// Its name as written: one line, or two with a `\n` between.
     name: &'a str,
     max_w: f32,
     /// Whether the picture has arrived (else the name alone).
@@ -1962,7 +2025,8 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     let (font_px, line_px) = (LABEL_FONT_PX * k, LABEL_LINE_PX * k);
     let cx = icon.x + icon.w / 2.0;
     let top = icon.y + icon.h + LABEL_GAP;
-    let name_rect = Rect::new(cx - tile.max_w / 2.0, top, tile.max_w, line_px + 1.0);
+    let lines: Vec<&str> = tile.name.split('\n').collect();
+    let name_rect = Rect::new(cx - tile.max_w / 2.0, top, tile.max_w, lines.len() as f32 * line_px + 1.0);
     if tile.cover.is_some_and(|c| intersects(&c, &name_rect)) {
         return;
     }
@@ -2021,19 +2085,21 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     let chosen = tile.ink.map_or(crate::desktop_ink::LIGHT, |(map, veil)| map.ink(name_rect, veil));
     let halo: &[(f32, f32)] = if chosen.outline { &[(0.0, 1.0), (0.0, -1.0), (1.0, 0.0), (-1.0, 0.0)] } else { &[(0.0, 1.0)] };
     for (dx, dy, color) in halo.iter().map(|&(dx, dy)| (dx, dy, chosen.halo)).chain([(0.0, 0.0, chosen.ink)]) {
-        scene.labels.push(Label {
-            text: tile.name.to_owned(),
-            pos: (cx + dx, top + dy),
-            max_w: tile.max_w,
-            font_px,
-            line_px,
-            centered: true,
-            dim: false,
-            cache: true,
-            clip: None,
-            family: None,
-            color: Some(color),
-        });
+        for (n, line) in lines.iter().enumerate() {
+            scene.labels.push(Label {
+                text: (*line).to_owned(),
+                pos: (cx + dx, top + dy + n as f32 * line_px),
+                max_w: tile.max_w,
+                font_px,
+                line_px,
+                centered: true,
+                dim: false,
+                cache: true,
+                clip: None,
+                family: None,
+                color: Some(color),
+            });
+        }
     }
 }
 
@@ -2092,6 +2158,26 @@ pub(crate) fn scene(
         alpha: 1.0,
         ..Default::default()
     };
+    // A selected item's wash reaches down over a second line of its name;
+    // the rows stand close, so under one that does, the wash of the item
+    // below begins past it (as Files' soft boxes do).
+    let line = LABEL_LINE_PX * if live.text > 0.0 { live.text } else { 1.0 };
+    let two = |i: usize| names.get(i).is_some_and(|n| n.contains('\n'));
+    let at: HashMap<Slot, usize> = slots.iter().enumerate().filter_map(|(i, s)| s.map(|s| (s, i))).collect();
+    let wash = |i: usize, (col, row): Slot| {
+        let mut r = sel_rect(&grid.rect((col, row)));
+        if two(i) {
+            r.h += line;
+        }
+        let over = row.checked_sub(1).and_then(|up| at.get(&(col, up)).map(|&j| (j, up)));
+        if let Some((_, up)) = over.filter(|&(j, _)| two(j) && live.selected.get(j).copied().unwrap_or(false)) {
+            let above = sel_rect(&grid.rect((col, up)));
+            let from = above.y + above.h + line + 2.0;
+            r.h -= (from - r.y).max(0.0);
+            r.y = r.y.max(from);
+        }
+        r
+    };
     for (i, item) in items.iter().enumerate() {
         if live.in_hand.contains(&i) {
             // In hand: drawn where it travels — at its old offset from the
@@ -2145,7 +2231,7 @@ pub(crate) fn scene(
         }
         if live.selected.get(i).copied().unwrap_or(false) {
             scene.rects.push(crate::content::RectInst {
-                rect: sel_rect(&cell),
+                rect: wash(i, slot),
                 radius: SEL_RADIUS,
                 color: SEL_WASH,
                 glass: 0.0,
@@ -2229,11 +2315,13 @@ impl Desktop {
     /// name (`thing`): the rest of its cell is the wallpaper — a band starts
     /// there, a right click has the wallpaper's menu (Max, 2026-10-22).
     pub(crate) fn hit(&self, pos: (f32, f32)) -> Option<usize> {
-        let slot = self.grid.slot_at(pos)?;
-        let i = self.slots.iter().position(|s| *s == Some(slot))?;
-        if !self.thing(i).is_some_and(|t| t.contains(pos)) {
-            return None;
-        }
+        // The cell under the point, or the one above it: a name's second
+        // line reaches into the cell under its own.
+        let i = [pos, (pos.0, pos.1 - self.grid.ch)]
+            .into_iter()
+            .filter_map(|p| self.grid.slot_at(p))
+            .filter_map(|slot| self.slots.iter().position(|s| *s == Some(slot)))
+            .find(|&i| self.thing(i).is_some_and(|t| t.contains(pos)))?;
         // Put away, only a device shown alone is there to be hit.
         (!self.hidden || (self.solo_on && self.solo.contains(&self.items[i].path))).then_some(i)
     }
@@ -4028,9 +4116,12 @@ impl App {
                 tr("Plugged in, files open")
             };
             let rows = vec![(tr("Kind"), "Phone".to_owned()), (tr("State"), state.to_owned())];
-            let props = Props::open_rows(&item.path, item.name.clone(), rows.clone(), at, menu, w as f32, h as f32);
+            let mut props = Props::open_rows(&item.path, item.name.clone(), rows.clone(), at, menu, w as f32, h as f32);
             let (path, serial) = (item.path.clone(), phone_serial_of(v));
             info!("desktop: properties of {}", props.title);
+            if let Some(r) = self.desktop_renderer.as_ref().or(self.desktop_top.renderer.as_ref()) {
+                props.fit_title(r);
+            }
             self.desktop.props = Some(props);
             self.request_desktop_draw();
             self.desktop_off_loop(
@@ -4055,7 +4146,7 @@ impl App {
             );
             return;
         }
-        let props = Props::open(item, at, menu, w as f32, h as f32, &home);
+        let mut props = Props::open(item, at, menu, w as f32, h as f32, &home);
         if item.kind == Kind::Folder {
             let path = item.path.clone();
             let (tx, rx) = calloop::channel::channel::<(String, u64, u64)>();
@@ -4073,6 +4164,9 @@ impl App {
             });
         }
         info!("desktop: properties of {}", props.title);
+        if let Some(r) = self.desktop_renderer.as_ref().or(self.desktop_top.renderer.as_ref()) {
+            props.fit_title(r);
+        }
         self.desktop.props = Some(props);
         self.request_desktop_draw();
     }
@@ -4857,18 +4951,29 @@ impl App {
             .as_ref()
             .map(|r| (r.item, r.text.as_str(), r.all, renderer.measure_text(&r.text, name_px, None)));
         let max_w = label_max_w(&self.desktop.grid.rect((0, 0)));
+        // Names on up to TWO lines, as in Files (Max, 2026-10-22: "the same
+        // 2-line rule as the grid"), cut in the middle past that; a line
+        // break in a name is a space here.
         let names: Vec<String> = self
             .desktop
             .items
             .iter()
             .map(|item| {
-                fit_label(&item.name, max_w, &mut |t| {
-                    renderer.measure_text(t, name_px, None)
-                })
+                let name = item.name.replace('\n', " ");
+                match crate::filer::two_lines(&name, max_w, &mut |t| renderer.measure_text(t, name_px, None)) {
+                    (one, rest) if rest.is_empty() => one,
+                    (first, second) => format!("{first}\n{second}"),
+                }
             })
             .collect();
         // (What a name is, to the pointer: `Desktop::thing`.)
-        self.desktop.names_w = names.iter().map(|n| (renderer.measure_text(n, name_px, None), LABEL_LINE_PX * zoom)).collect();
+        self.desktop.names_w = names
+            .iter()
+            .map(|n| {
+                let w = n.split('\n').map(|l| renderer.measure_text(l, name_px, None)).fold(0.0, f32::max);
+                (w, LABEL_LINE_PX * zoom * n.split('\n').count() as f32)
+            })
+            .collect();
         let (ink_now, veil) = (self.desktop.ink.clone(), crate::lighting::veil_now());
         self.desktop.ink_veil = veil;
         let mut scene = scene(
@@ -7227,5 +7332,32 @@ mod tests {
         assert_eq!(fit_label("abc", w(6.0), &mut measure), "…");
         // Multi-byte names are cut on characters, never inside one.
         assert_eq!(fit_label("héllo wörld", w(36.0), &mut measure), "héllo…");
+    }
+
+    #[test]
+    fn a_name_is_cut_in_the_middle_keeping_its_ending() {
+        // A "font" 6 px per char, the ellipsis included; `w(n)` holds n.
+        let mut measure = |t: &str| t.chars().count() as f32 * 6.0;
+        let w = |chars: f32| chars * 6.0 + FIT_SLACK;
+        assert_eq!(fit_name("short.mp4", w(9.0), &mut measure), "short.mp4");
+        // 18 kept of 26: the start's ten, the end's eight with the ending.
+        assert_eq!(fit_name("dhadjkfhgkjsdfhkjhasoj.mp4", w(19.0), &mut measure), "dhadjkfhgk…asoj.mp4");
+        // Without an ending, the same split.
+        assert_eq!(fit_name("abcdefghijklmnopqrstuvwxyz", w(11.0), &mut measure), "abcdef…wxyz");
+        // A dotfile's dot is no ending: ".bashrc_backup_old" is all name.
+        assert_eq!(fit_name(".bashrc_backup_old", w(9.0), &mut measure), ".bash…old");
+        // A narrow room still keeps the ending and three before it…
+        assert_eq!(fit_name("Screenshot 2026-10-22.png", w(9.0), &mut measure), "S…-22.png");
+        // …and narrower, as much of the end as fits; at last "…" alone.
+        assert_eq!(fit_name("Screenshot 2026-10-22.png", w(5.0), &mut measure), "….png");
+        assert_eq!(fit_name("abc.png", w(1.0), &mut measure), "…");
+        assert_eq!(fit_name("abc.png", 0.0, &mut measure), "…");
+        // A space at either side of the cut is trimmed.
+        assert_eq!(fit_name("Holiday photos at sea.jpg", w(16.0), &mut measure), "Holiday…sea.jpg");
+        // Multi-byte names are cut on characters, never inside one.
+        assert_eq!(fit_name("ñandú-pingüino-año.mkv", w(13.0), &mut measure), "ñandú…año.mkv");
+        // A name's last line: "…" and its end.
+        assert_eq!(fit_end("10-22 at 10.32.15.png", w(13.0), &mut measure), "…10.32.15.png");
+        assert_eq!(fit_end("fits.png", w(13.0), &mut measure), "fits.png");
     }
 }

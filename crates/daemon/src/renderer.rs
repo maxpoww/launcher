@@ -1820,7 +1820,7 @@ impl Renderer {
         !self.gpu_busy.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub fn measure_text(&mut self, text: &str, font_px: f32, family: Option<&str>) -> f32 {
+    pub fn measure_text(&self, text: &str, font_px: f32, family: Option<&str>) -> f32 {
         if text.is_empty() {
             return 0.0;
         }

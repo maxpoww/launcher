@@ -365,6 +365,13 @@ impl Props {
         }
     }
 
+    /// Its title cut in the middle where it would run past the box (a
+    /// name: `desktop::fit_name`), measured by `renderer`.
+    pub fn fit_title(&mut self, renderer: &crate::renderer::Renderer) {
+        let room = self.rect.w - 2.0 * PAD;
+        self.title = crate::desktop::fit_name(&self.title, room, &mut |t| renderer.measure_text(t, TITLE_PX, Some(FONT_BOLD)));
+    }
+
     /// The Back row, when there is a menu to go back to.
     pub fn back_rect(&self) -> Option<Rect> {
         self.back.as_ref()?;
