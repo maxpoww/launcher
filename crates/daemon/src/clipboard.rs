@@ -2860,6 +2860,7 @@ impl App {
     pub(crate) fn options_keys_wanted(&self) -> bool {
         self.clip.keyboard_held
             || self.gear.keyboard_held
+            || self.phone_box_keys()
             || self
                 .desktop
                 .config
@@ -2873,6 +2874,7 @@ impl App {
             return;
         }
         let others = self.gear.keyboard_held
+            || self.phone_box_keys()
             || self
                 .desktop
                 .config

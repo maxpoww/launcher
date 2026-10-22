@@ -2887,6 +2887,7 @@ impl App {
         }
         // (The bar's surface is shared: the clipboard box may hold it too.)
         let others = self.clip.keyboard_held
+            || self.phone_box_keys()
             || self
                 .desktop
                 .config

@@ -1158,6 +1158,8 @@ impl App {
                 &self.notif_icon_chains,
                 &self.clip.icon_chains,
                 &self.play_art_chains,
+                // (Last: the phone pill box's menu's symbols.)
+                &self.phone_pill.glyph_chains,
             );
         }
     }

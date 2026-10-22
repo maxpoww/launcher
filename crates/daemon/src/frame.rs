@@ -1897,6 +1897,9 @@ impl App {
     /// that window's sampled top colour, opaque, so the two read as one
     /// surface (see [`crate::screencopy`]).
     pub(crate) fn draw_options(&mut self) {
+        // (The phone pill's box holds the one menu: placed as the box now
+        // stands, before the frame.)
+        self.phone_menu_sync();
         let (w, h) = self.options_size;
         // (Nor while its screen has gone and it is being made again.)
         if w == 0 || h == 0 || self.part_lost(crate::shell_screens::Part::Options) {

@@ -1580,14 +1580,15 @@ impl Renderer {
     /// each addressed by [`IconInst::layer`]. Re-uploaded wholesale whenever
     /// either set changes (see `App::upload_options_icons`).
     /// The OPTIONS surface's icon array: notification avatars, then clipboard
-    /// thumbnails, then the playing box's cover art. Order is the layer
-    /// numbering, so every caller offsets by the lengths of the arrays before
-    /// its own — see `App::play_art_slot`.
-    pub fn set_options_icons(&mut self, notif: &[Vec<u8>], clip: &[Vec<u8>], art: &[Vec<u8>]) {
+    /// thumbnails, then the playing box's cover art, then the symbols of the
+    /// phone pill box's menu. Order is the layer numbering, so every caller
+    /// offsets by the lengths of the arrays before its own — see
+    /// `App::play_art_slot`.
+    pub fn set_options_icons(&mut self, notif: &[Vec<u8>], clip: &[Vec<u8>], art: &[Vec<u8>], glyphs: &[Vec<u8>]) {
         self.upload_icon_array(
-            notif.len() + clip.len() + art.len(),
+            notif.len() + clip.len() + art.len() + glyphs.len(),
             0,
-            notif.iter().chain(clip.iter()).chain(art.iter()),
+            notif.iter().chain(clip.iter()).chain(art.iter()).chain(glyphs.iter()),
         );
     }
 

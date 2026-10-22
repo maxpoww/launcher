@@ -1113,6 +1113,9 @@ pub(crate) struct Menu {
     capped: bool,
     /// The Another app page, while it is up.
     pub other: Option<OtherApps>,
+    /// Held by a box (the phone pill's): its width and its tallest are the
+    /// box's (`fit`).
+    held: Option<(f32, f32)>,
 }
 
 impl Menu {
@@ -1165,9 +1168,20 @@ impl Menu {
             pinned: (0, 0),
             capped: false,
             other: None,
+            held: None,
         };
         menu.place();
         menu
+    }
+
+    /// Held in `area` (the phone pill's box): its corner at the area's, as
+    /// wide as it, at most as tall — scrolling past that, as a long page does.
+    pub fn fit(&mut self, area: Rect) {
+        self.anchor = (area.x, area.y);
+        (self.from_left, self.from_top) = (true, true);
+        self.room = (area.x + area.w, area.y + area.h);
+        self.held = Some((area.w, area.h));
+        self.place();
     }
 
     /// Hang it from `anchor` instead: that point its left edge or its
@@ -1183,7 +1197,10 @@ impl Menu {
     /// anchor, shifted back onto the surface where it would leave it.
     fn place(&mut self) {
         let s = self.scale;
-        let (w, h) = (width_of(&self.rows, s), self.height());
+        let w = self
+            .held
+            .map_or_else(|| width_of(&self.rows, s), |(w, _)| w);
+        let h = self.height();
         let (ax, ay) = self.anchor;
         let x = if self.from_left { ax } else { ax - w };
         let y = if self.from_top { ay } else { ay - h };
@@ -1455,7 +1472,10 @@ impl Menu {
     fn height(&self) -> f32 {
         let s = self.scale;
         let natural = height_of(&self.rows, s);
-        let room = (self.room.1 - 8.0).max(ROW_H * s * 3.0);
+        let room = self
+            .held
+            .map_or(self.room.1 - 8.0, |(_, h)| h)
+            .max(ROW_H * s * 3.0);
         let cap = if self.capped {
             let (top, foot) = self.pinned;
             let ends: f32 = self.rows.iter().take(top).map(row_h).sum::<f32>()
@@ -1608,6 +1628,27 @@ impl Menu {
     /// Draw the menu over everything in `scene`. `glyph` gives the icon
     /// layer a symbol is in (none: the row has words alone).
     pub fn push(&self, scene: &mut Scene, paint: &MenuPaint, glyph: &dyn Fn(&str) -> Option<u32>) {
+        self.push_with(scene, paint, glyph, true);
+    }
+
+    /// Its rows alone, its panel left to what holds it (the phone pill's
+    /// box: `fit`).
+    pub fn push_rows(
+        &self,
+        scene: &mut Scene,
+        paint: &MenuPaint,
+        glyph: &dyn Fn(&str) -> Option<u32>,
+    ) {
+        self.push_with(scene, paint, glyph, false);
+    }
+
+    fn push_with(
+        &self,
+        scene: &mut Scene,
+        paint: &MenuPaint,
+        glyph: &dyn Fn(&str) -> Option<u32>,
+        own_panel: bool,
+    ) {
         let t = self.t.clamp(0.0, 1.0);
         // (Everything at its size.)
         let s = self.scale;
@@ -1633,13 +1674,15 @@ impl Menu {
             clip: panel,
             ..Default::default()
         };
-        grid.rects.push(RectInst {
-            rect: panel,
-            radius: paint.radius * s,
-            color: panel_fill,
-            glass: paint.glass,
-            border: 0.0,
-        });
+        if own_panel {
+            grid.rects.push(RectInst {
+                rect: panel,
+                radius: paint.radius * s,
+                color: panel_fill,
+                glass: paint.glass,
+                border: 0.0,
+            });
+        }
         // (The rows between the pinned ones scroll: drawn in a grid of their
         // own, cut to where they are seen.)
         let (middle, view) = self.middle();

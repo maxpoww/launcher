@@ -21,9 +21,11 @@
 
 use std::time::Instant;
 
+use smithay_client_toolkit::seat::keyboard::Keysym;
+
 use crate::animation::{self, ease_toward, lerp, lerp4};
 use crate::desktop::Debugging;
-use crate::desktop_menu::{Action, Row};
+use crate::desktop_menu::{Action, Menu, MenuKey, MenuPaint, Row};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::options::{hover_grow, push_neumorph, PillId, FONT_PX, LINE_PX, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
 use crate::App;
@@ -135,6 +137,19 @@ struct Line {
     sub: bool,
     /// Said lighter (a heading's second line, a closing remark).
     dim: bool,
+}
+
+/// What a row of the phone's menu does in the box: what it opened
+/// elsewhere turned into a page of the box, the rest the phone's.
+fn menu_act(action: Action) -> Act {
+    match action {
+        Action::Configure => Act::Turn(Page::Configure),
+        Action::Properties => Act::Turn(Page::Properties),
+        Action::CameraSettings => Act::Turn(Page::Camera),
+        Action::HelpDebugging => Act::Turn(Page::Debugging),
+        Action::HelpFiles => Act::Turn(Page::Files),
+        other => Act::Menu(other),
+    }
 }
 
 fn line(label: &str, value: &str, act: Act) -> Line {
@@ -351,6 +366,16 @@ pub(crate) struct PhonePill {
     facts: Option<Vec<(&'static str, String)>>,
     /// The measured widths of the words set at the lines' right ends.
     value_w: std::collections::HashMap<String, f32>,
+    /// THE PHONE'S MENU in the box (Max, 2026-10-21: "in the one menu
+    /// look"): the one builder's menu, held by the box (`Menu::fit`) and
+    /// drawn by its painter — symbols, the quiet tint, the keys, the size.
+    menu: Option<Menu>,
+    /// Its symbols in the bar's icon array (after the notifications', the
+    /// clipboard's and the covers'): their keys and pixels.
+    glyph_keys: Vec<String>,
+    pub(crate) glyph_chains: Vec<Vec<u8>>,
+    /// The box holds the keyboard (its menu's keys; ← and Escape on a page).
+    keyboard_held: bool,
 }
 
 /// "5 min ago", "2 h ago", "3 days ago".
@@ -685,6 +710,159 @@ impl App {
         self.phone_box_turn(page);
     }
 
+    /// What the phone's menu is made from (`None`: no phone). A phone that
+    /// is not there (`phonepill fake`) is one using its camera, all its
+    /// rows offered (`fakehelp`: one whose USB debugging is off, its help
+    /// rows).
+    fn phone_menu_ctx(&self) -> Option<crate::desktop_menu::Ctx> {
+        use crate::desktop_menu::{Ctx, Limits, On, Volume};
+        if let Some(fake) = self.phone_pill.fake.as_ref() {
+            let help = fake.debugging != Debugging::Ready;
+            let volume = Volume {
+                phone: true,
+                camera: !help,
+                limits: Limits { debugging_off: help, ..Default::default() },
+                ..Default::default()
+            };
+            return Some(Ctx { on: On::Phone, volume, ..Default::default() });
+        }
+        let (v, _, _) = self.phone_pill_volume()?;
+        let path = v.path.to_string_lossy().into_owned();
+        let camera = self.desktop.camera_on.as_ref().is_some_and(|c| c.path == path)
+            || self.desktop.cameras.lock().is_ok_and(|c| c.contains_key(&path));
+        let limits = self.phone_limits(v);
+        let volume = Volume { phone: true, closed: v.closed, camera, tether: v.tether, limits };
+        Some(Ctx { on: On::Phone, volume, ..Default::default() })
+    }
+
+    /// The box's menu made (again when what it is made of changed), held in
+    /// the box as it stands now, at the menus' size; its symbols in the
+    /// bar's icon array; the keyboard held while the box is open. Called
+    /// before every frame of the bar.
+    pub(crate) fn phone_menu_sync(&mut self) {
+        let open = self.phone_pill.box_open || self.phone_pill.box_e > 0.01;
+        let ctx = (open && self.phone_pill.page == Page::Menu).then(|| self.phone_menu_ctx()).flatten();
+        // (Where the pill stands is asked only with a box open on its menu.)
+        match ctx.and_then(|ctx| Some((ctx, self.phone_pill_on_bar()?))) {
+            Some((ctx, rect)) => {
+                let long = self.phone_pill_long(rect);
+                let ph = self.options_pill_h().min(long.h);
+                let top = long.y + ph + BOX_HEAD;
+                let area = Rect::new(long.x, top, long.w, (long.y + long.h - BOX_FOOT - top).max(1.0));
+                if self.phone_pill.menu.as_ref().is_none_or(|m| m.ctx != ctx) {
+                    self.phone_pill.menu = Some(Menu::new(ctx, None, false, (area.x, area.y), area.x + area.w, area.y + area.h));
+                }
+                let scale = crate::desktop_menu::scale();
+                let e = self.phone_pill.box_e;
+                if let Some(menu) = self.phone_pill.menu.as_mut() {
+                    menu.scale = scale;
+                    menu.t = e.clamp(0.0, 1.0);
+                    menu.fit(area);
+                }
+            }
+            _ => self.phone_pill.menu = None,
+        }
+        self.phone_glyphs_sync();
+        let want = self.phone_pill.box_open && self.phone_pill.shown.is_some() && self.phone_pill.page != Page::Configure;
+        self.set_phone_keyboard(want);
+    }
+
+    /// The symbols the box's menu wears, put in the bar's icon array (from
+    /// the pixels the desktop read of them ahead of its first menu); gone
+    /// again with the box.
+    fn phone_glyphs_sync(&mut self) {
+        let keys: Vec<String> = self.phone_pill.menu.as_ref().map_or_else(Vec::new, |m| {
+            m.glyphs().into_iter().map(crate::glyphs::key).filter(|k| self.desktop_top.glyphs.contains_key(k)).collect()
+        });
+        if keys == self.phone_pill.glyph_keys {
+            return;
+        }
+        self.phone_pill.glyph_chains = keys.iter().filter_map(|k| self.desktop_top.glyphs.get(k).cloned()).collect();
+        self.phone_pill.glyph_keys = keys;
+        self.upload_options_icons();
+    }
+
+    /// Take or give back the keyboard (the bar's surface is shared: the
+    /// clipboard's box or the gear's may hold it too).
+    fn set_phone_keyboard(&mut self, want: bool) {
+        if want == self.phone_pill.keyboard_held {
+            return;
+        }
+        let others = self.clip.keyboard_held
+            || self.gear.keyboard_held
+            || self.desktop.config.as_ref().is_some_and(|c| c.hosted && c.editing);
+        if want {
+            self.cancel_keyboard_handback(crate::KbSurface::Options);
+        } else if !others && !self.keyboard_handback_armed(crate::KbSurface::Options) {
+            self.begin_keyboard_handback(crate::KbSurface::Options, None);
+        }
+        self.phone_pill.keyboard_held = want;
+        tracing::debug!("phone pill: keyboard grab {}", if want { "on" } else { "off" });
+        let any = self.options_keys_wanted();
+        if let Some(layer) = &self.options_layer {
+            crate::surface::set_interactive(layer, any);
+        }
+    }
+
+    /// Whether the box holds the keyboard now.
+    pub(crate) fn phone_box_keys(&self) -> bool {
+        self.phone_pill.keyboard_held
+    }
+
+    /// A key while the box holds the keyboard: its menu's keys (`Menu::key`)
+    /// on the first page, ← / Escape / Backspace back to it on the others;
+    /// Ctrl +/−/0 the menus' size.
+    pub(crate) fn phone_box_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        if self.modifiers.ctrl {
+            match keysym {
+                Keysym::plus | Keysym::equal | Keysym::KP_Add => {
+                    self.zoom("menu", "in");
+                }
+                Keysym::minus | Keysym::KP_Subtract => {
+                    self.zoom("menu", "out");
+                }
+                Keysym::_0 | Keysym::KP_0 => {
+                    self.zoom("menu", "reset");
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.phone_pill.page != Page::Menu {
+            if matches!(keysym, Keysym::Left | Keysym::Escape | Keysym::BackSpace) {
+                self.phone_box_turn(Page::Menu);
+            }
+            return;
+        }
+        let ptr = self.options_ptr;
+        let Some(menu) = self.phone_pill.menu.as_mut() else {
+            return;
+        };
+        match menu.key(keysym, utf8, ptr) {
+            MenuKey::Moved => self.draw_options(),
+            MenuKey::Choose(row) => {
+                let Some(action) = menu.action(row) else {
+                    return;
+                };
+                let act = menu_act(action);
+                // (A phone that is not there turns its pages, and does
+                // nothing else.)
+                if self.phone_pill.fake.is_some() && matches!(act, Act::Menu(_)) {
+                    return;
+                }
+                let at = menu.rect;
+                tracing::info!("desktop: {action:?} from the bar's phone pill, by its keys");
+                self.phone_box_act(act, (at.x, at.y));
+            }
+            MenuKey::Close => {
+                self.phone_pill.box_open = false;
+                self.schedule_phone_pill_frame();
+                self.sync_options_input();
+            }
+            MenuKey::Back | MenuKey::Nothing => {}
+        }
+    }
+
     /// The lines of the box's page.
     fn phone_box_lines(&self) -> Vec<Line> {
         // (A phone that is not there has a box to look at all the same.)
@@ -727,17 +905,7 @@ impl App {
                         // (Said, not left out: a row that is simply not
                         // there reads as something broken.)
                         Row::Note(text) => Line { dim: true, ..line(&text, "", Act::Nothing) },
-                        Row::Item { label, action, .. } => {
-                            let act = match action {
-                                Action::Configure => Act::Turn(Page::Configure),
-                                Action::Properties => Act::Turn(Page::Properties),
-                                Action::CameraSettings => Act::Turn(Page::Camera),
-                                Action::HelpDebugging => Act::Turn(Page::Debugging),
-                                Action::HelpFiles => Act::Turn(Page::Files),
-                                other => Act::Menu(other),
-                            };
-                            line(&label, "", act)
-                        }
+                        Row::Item { label, action, .. } => line(&label, "", menu_act(action)),
                     };
                     lines.push(Line { air, ..l });
                     air = false;
@@ -1057,6 +1225,15 @@ impl App {
             }
             self.schedule_phone_pill_frame();
         }
+        // Its menu: the row under the pointer (unless the keys have it and
+        // the pointer has not moved).
+        if self.phone_pill.page == Page::Menu {
+            self.phone_menu_sync();
+            let ptr = self.options_ptr.filter(|_| on);
+            if self.phone_pill.menu.as_mut().is_some_and(|m| m.pointer(ptr)) {
+                self.draw_options();
+            }
+        }
         // The Configure box shown here: what of it is under the pointer.
         if self.phone_pill.page == Page::Configure {
             self.phone_config_place();
@@ -1136,6 +1313,16 @@ impl App {
                 return;
             }
             let long = self.phone_pill_long(rect);
+            // Its menu: the row under the pointer.
+            if self.phone_pill.page == Page::Menu {
+                self.phone_menu_sync();
+                let action = self.phone_pill.menu.as_ref().and_then(|m| m.hit(ptr).and_then(|row| m.action(row)));
+                if let Some(action) = action {
+                    tracing::info!("desktop: {action:?} from the bar's phone pill");
+                    self.phone_box_act(menu_act(action), (long.x, round.y + round.h + 8.0));
+                }
+                return;
+            }
             let hit = self.phone_box_placed(long).into_iter().find(|(r, _)| r.contains(ptr));
             if let Some((_, l)) = hit {
                 tracing::info!("desktop: \"{}\" from the bar's phone pill", l.label);
@@ -1218,6 +1405,19 @@ impl App {
                     known: true,
                 });
             }
+            // (A phone whose USB debugging is off: its menu's help rows.)
+            "fakehelp" => {
+                self.phone_pill.fake = Some(Shown {
+                    path: "/nowhere/a-phone".to_owned(),
+                    says: "Max's Pixel · Turn on USB debugging".to_owned(),
+                    battery: Some(66),
+                    button: Some(HOW),
+                    debugging: Debugging::Off,
+                    no_files: false,
+                    serial: None,
+                    known: true,
+                });
+            }
             "gone" => self.phone_pill.fake = None,
             "open" => self.phone_pill.forced = Some(true),
             // The box, as a scroll down and a scroll up do.
@@ -1252,9 +1452,33 @@ impl App {
                 }
             }
             "fold" => self.phone_pill.box_open = false,
+            // A key on the open box, as the keyboard would give it (`key
+            // down|up|home|end|enter|left|right|escape|<letter>`).
+            "key" => {
+                let name = rest.trim();
+                let key = match name {
+                    "down" => Keysym::Down,
+                    "up" => Keysym::Up,
+                    "home" => Keysym::Home,
+                    "end" => Keysym::End,
+                    "enter" => Keysym::Return,
+                    "left" => Keysym::Left,
+                    "right" => Keysym::Right,
+                    "escape" => Keysym::Escape,
+                    _ => Keysym::NoSymbol,
+                };
+                let letter = (key == Keysym::NoSymbol).then_some(name);
+                self.phone_menu_sync();
+                if !self.phone_box_keys() {
+                    return "the box does not hold the keyboard".to_owned();
+                }
+                self.phone_box_key(key, letter);
+                let hover = self.phone_pill.menu.as_ref().and_then(|m| m.hover.and_then(|i| m.rows.get(i).cloned()));
+                return format!("key {name}: {:?} on {hover:?}", self.phone_pill.page);
+            }
             "close" => self.phone_pill.forced = Some(false),
             "free" => self.phone_pill.forced = None,
-            _ => return "phonepill fake [words]|gone|open|close|free|box|fold|menu|camera|configure|properties|line <n>".to_owned(),
+            _ => return "phonepill fake [words]|fakehelp|gone|open|close|free|box|fold|menu|camera|configure|properties|line <n>|key <name>".to_owned(),
         }
         self.phone_pill_sync();
         self.update_phone_hover();
@@ -1307,10 +1531,28 @@ impl App {
                 border: 0.0,
             });
             let ink = lerp4(ink, box_ink, solid);
-            // The box's rows: the phone's menu, a line each, the one under
-            // the pointer on the hover wash. A row is drawn once the opening
-            // box has room for all of it.
-            if e > 0.01 {
+            // The phone's menu: drawn by the one menu's painter, its rows on
+            // the box's own panel (symbols, the quiet tint, the red). The
+            // other pages: a line each, the one under the pointer on the
+            // hover wash, a line drawn once the opening box has room for all
+            // of it.
+            if let (true, Some(menu)) = (e > 0.01, self.phone_pill.menu.as_ref().filter(|_| p.page == Page::Menu)) {
+                let paint = MenuPaint {
+                    fill: [panel[0], panel[1], panel[2], self.box_panel_alpha() * solid * out],
+                    ink: [box_ink[0], box_ink[1], box_ink[2], box_ink[3] * out],
+                    wash: self.options_hover_wash(),
+                    radius: crate::clipboard::BOX_RADIUS,
+                    glass: 0.0,
+                    accent: MenuPaint::accent_now(),
+                };
+                let base = (self.notif_icon_chains.len() + self.clip.icon_chains.len() + self.play_art_chains.len()) as u32;
+                let keys = &p.glyph_keys;
+                let glyph = |name: &str| {
+                    let key = crate::glyphs::key(name);
+                    keys.iter().position(|k| *k == key).map(|i| base + i as u32)
+                };
+                menu.push_rows(scene, &paint, &glyph);
+            } else if e > 0.01 {
                 let hover = self.options_hover_wash();
                 for (row, l) in self.phone_box_placed(long) {
                     // (Scrolled up past the pill, or not yet in the opening

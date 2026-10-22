@@ -6687,6 +6687,11 @@ impl App {
             self.clip_key(keysym, utf8);
             return;
         }
+        // The phone pill's box holds it while it is open: its menu's keys.
+        if self.phone_box_keys() {
+            self.phone_box_key(keysym, utf8);
+            return;
+        }
         // The gear box's Wi-Fi and Bluetooth pages hold it the same way: a
         // password, a search, a new name.
         if self.gear_wants_keys() {

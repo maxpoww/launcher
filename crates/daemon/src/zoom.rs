@@ -135,6 +135,10 @@ impl App {
     /// Zoom the bar, the desktop or a dock stack (`what`) in, out, back, or
     /// to a number (`how`). What was done.
     pub(crate) fn zoom(&mut self, what: &str, how: &str) -> String {
+        // (Ctrl +/−/0 on the bar while the phone pill's box is open: its
+        // menu's size, as in every menu — the bar's keys are compositor
+        // binds there, made on the pointer's enter.)
+        let what = if what == "bar" && self.phone_box_keys() { "menu" } else { what };
         const USAGE: &str = "zoom bar|desktop|stack|fast|files|files-panel|menu in|out|reset|<n>";
         let now = match what {
             "bar" => self.bar_zoom(),
@@ -190,6 +194,7 @@ impl App {
             // Every menu that is up, at the new size at once.
             self.filer_menus_rescaled();
             self.desktop_menu_rescaled();
+            self.draw_options();
         } else if what == "stack" {
             self.settings.stack_zoom = to;
             self.settings.save();
