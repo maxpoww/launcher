@@ -1,5 +1,6 @@
-//! THE SHORTCUTS TABLE (Max, 2026-10-22): `?` in keyboard mode — or a right
-//! click on its button — shows every key a file window answers, in the
+//! THE SHORTCUTS TABLE (Max, 2026-10-22): `?` in keyboard mode — or a click
+//! on its glyph in the selection pill — shows every key a file window
+//! answers, in the
 //! confirmation's material (the menus' paint), centred over the window:
 //! two columns of rows, each a small key cap and what it does, under the
 //! headings "Keyboard mode" and "Always". `?`, Escape or a press anywhere
@@ -45,6 +46,7 @@ const LINES: &[Line] = &[
     Line::Keys("Delete", "Move to bin"),
     Line::Keys("?", "Keyboard shortcuts"),
     Line::Heading("Always"),
+    Line::Keys("Ctrl+K", "Keyboard mode on/off"),
     Line::Keys("Ctrl+C X V", "Copy, cut, paste"),
     Line::Keys("Ctrl+Z", "Undo"),
     Line::Keys("Ctrl+F", "Search"),

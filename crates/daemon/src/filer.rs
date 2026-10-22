@@ -411,8 +411,6 @@ enum Spot {
     View(bool),
     Hidden,
     Find,
-    /// The top line's left end: keyboard mode (`settings.files_keys`).
-    Keys,
     /// The ↶ (left of sort, while something can be taken back); a row of
     /// its history, that row's Undo (by the thing's number, `Did::n`).
     Undo,
@@ -1623,7 +1621,6 @@ struct Hits {
     grid: Rect,
     list: Rect,
     hidden: Rect,
-    keys: Rect,
     seek: Rect,
     card: Rect,
     /// The ↶, the history under it, and each row's Undo (the row's number
@@ -2159,7 +2156,6 @@ impl Win {
                 (h.list, Spot::View(true)),
                 (h.hidden, Spot::Hidden),
                 (h.find, Spot::Find),
-                (h.keys, Spot::Keys),
             ] {
                 if r.contains(pos) {
                     return spot;
@@ -4016,6 +4012,11 @@ impl App {
                 self.filer_request_draw(id);
             }
             PillAct::Paste => self.filer_paste(id),
+            PillAct::Keys => self.filer_shortcuts(id),
+            PillAct::KeysOff => {
+                info!("files: {}", tr("Turn off keyboard mode (Ctrl+K)"));
+                self.filer_keys(false);
+            }
             PillAct::Forget => {
                 self.filer.clip_forgot = self
                     .clipboard_files()
@@ -6209,7 +6210,6 @@ impl App {
             Spot::Up => win.dir.parent().is_some(),
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
             Spot::Place(_) | Spot::View(_) | Spot::Hidden | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
-            Spot::Keys => true,
             Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
             Spot::Undo | Spot::HistUndo(_) | Spot::Pill(_) | Spot::Here => true,
             Spot::Mode(n) => (n == 1) != win.media,
@@ -6633,12 +6633,9 @@ impl App {
                     return;
                 };
                 let layout = win.layout(icon_scale);
-                // The ↶'s is its history; keyboard mode's, the shortcuts.
+                // The ↶'s is its history.
                 if win.hits.undo.contains(at) {
                     return self.filer_history_toggle(id);
-                }
-                if win.hits.keys.contains(at) {
-                    return self.filer_shortcuts(id);
                 }
                 // The icons' field has the menu of what is under the
                 // pointer (on a cell's bare ground, the folder's); a place
@@ -7653,10 +7650,6 @@ impl App {
             Spot::View(list) => self.filer_set_list(list),
             // The eye: the ground menu's "Show / Hide hidden files", one state.
             Spot::Hidden => self.filer_act(id, Action::ToggleHidden, None, (0.0, 0.0)),
-            Spot::Keys => {
-                let on = !self.settings.files_keys;
-                self.filer_keys(on);
-            }
             // The magnifier opens the search; its × (the search out) puts
             // it away, the text with it — what Escape in the field does.
             Spot::Find => {
@@ -7848,6 +7841,12 @@ impl App {
 
     /// A key while window `id` has the keyboard.
     pub(crate) fn filer_key(&mut self, id: u32, keysym: Keysym, utf8: Option<&str>) {
+        // CTRL+K: keyboard mode on or off (Max, 2026-10-22), anywhere in the
+        // window — a field that has the keys too.
+        if self.modifiers.ctrl && matches!(keysym, Keysym::k | Keysym::K) {
+            let on = !self.settings.files_keys;
+            return self.filer_keys(on);
+        }
         // A confirmation up takes every key (Tab, Enter, Space, Escape).
         if let Some((panel, _)) = self.filer.win_mut(id).and_then(|w| w.confirm.as_mut()) {
             let answer = panel.key(keysym);
@@ -8422,6 +8421,7 @@ impl App {
                     "3" => Keysym::_3,
                     "9" => Keysym::_9,
                     "u" => Keysym::u,
+                    "k" => Keysym::k,
                     "n" => Keysym::n,
                     "f" => Keysym::f,
                     "g" => Keysym::g,
@@ -8496,7 +8496,6 @@ impl App {
                     "list" => Some(mid(win.hits.list)),
                     "find" => Some(mid(win.hits.find)),
                     "hidden" => Some(mid(win.hits.hidden)),
-                    "keys" => Some(mid(win.hits.keys)),
                     "seek" => Some(mid(win.hits.seek)),
                     "sort" => Some(mid(win.hits.sort)),
                     "undo" => Some(mid(win.hits.undo)),

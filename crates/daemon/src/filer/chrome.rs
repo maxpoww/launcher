@@ -52,11 +52,9 @@ const CHIP_ICON: f32 = 13.0;
 const CRUMB_ICON: f32 = 14.0;
 const CHEV: f32 = 8.0;
 const PEN_BOX: f32 = 18.0;
-/// From keyboard mode's button to the first tab.
-const KEYS_GAP: f32 = 8.0;
-/// KEYBOARD MODE's letters and what each does (`filer_key`): the button's
-/// words for when the top line's buttons are named (and the log's now).
-pub(super) const KEYS: [(&str, &str); 25] = [
+/// KEYBOARD MODE's letters and what each does (`filer_key`): the pill's
+/// glyph's words for when the shell's buttons are named (and the log's now).
+pub(super) const KEYS: [(&str, &str); 26] = [
     ("W A S D", "Move around"),
     ("Shift", "Select a run"),
     ("Q", "Back"),
@@ -82,6 +80,7 @@ pub(super) const KEYS: [(&str, &str); 25] = [
     ("1–9", "A step of the path"),
     ("← →", "Previous or next tab"),
     ("?", "Keyboard shortcuts"),
+    ("Ctrl+K", "Keyboard mode on/off"),
 ];
 
 /// Keyboard mode's letters, said in the shell's language ("Q Back · …").
@@ -959,19 +958,7 @@ impl App {
 
         // ── the tabs ──
         let many = win.tabs.len() > 1;
-        // KEYBOARD MODE's button (Max, 2026-10-22): the left end, before
-        // the tabs and the way here, pressed while it is on.
-        let keys = Rect::new(left + LINE_PAD, cy - BTN_H / 2.0, BTN_W, BTN_H);
-        button(
-            &mut g,
-            win,
-            keys,
-            "keyboard",
-            self.settings.files_keys,
-            Spot::Keys,
-        );
-        hits.keys = keys;
-        let x0 = keys.x + BTN_W + KEYS_GAP;
+        let x0 = left + LINE_PAD;
         let mut cursor = x0;
         // (The others' chips first measured: the current tab gets what is left.)
         let chip_words: Vec<(String, f32)> = (0..win.tabs.len())
@@ -1895,6 +1882,11 @@ pub(crate) enum PillAct {
     /// The clipboard's files here; or forgotten.
     Paste,
     Forget,
+    /// Keyboard mode's glyph: the shortcuts table.
+    Keys,
+    /// The × of "Keyboard driven": keyboard mode off (as Ctrl+K) — for
+    /// whoever turned it on without meaning to (Max, 2026-10-22).
+    KeysOff,
 }
 
 /// One part of the pill after its words: a rule, or a button (its symbol,
@@ -1917,6 +1909,8 @@ pub(crate) struct PillView {
     pub(crate) bold: String,
     pub(crate) dim: String,
     pub(crate) parts: Vec<PillPart>,
+    /// Keyboard mode is on: its glyph at the pill's left end.
+    pub(crate) keys: bool,
 }
 
 /// How long a finished thing is said in the pill.
@@ -1970,6 +1964,7 @@ impl App {
                 bold: said.clone(),
                 dim: String::new(),
                 parts: Vec::new(),
+                keys: false,
             });
         }
         let button = |icon, words: &str, act| PillPart::Button {
@@ -2040,7 +2035,12 @@ impl App {
                 parts.push(PillPart::Rule);
             }
             parts.push(round("x", PillAct::Clear));
-            return Some(PillView { bold, dim, parts });
+            return Some(PillView {
+                bold,
+                dim,
+                parts,
+                keys: false,
+            });
         }
         let (paths, cut) = self.clipboard_files()?;
         let names: Vec<String> = paths
@@ -2073,6 +2073,7 @@ impl App {
                 PillPart::Rule,
                 round("x", PillAct::Forget),
             ],
+            keys: false,
         })
     }
 
@@ -2094,7 +2095,30 @@ impl App {
     ) -> Option<GridContent> {
         hits.pill = Rect::default();
         hits.pill_btns.clear();
-        let view = self.filer_pill_view(win);
+        // KEYBOARD MODE shows in the pill (Max, 2026-10-22): its glyph at the
+        // left of whatever the pill says — and, with nothing else to say,
+        // "Keyboard driven".
+        let keys = self.settings.files_keys;
+        let view = match self.filer_pill_view(win) {
+            Some(v) => Some(PillView { keys, ..v }),
+            // ("agregale la x a la píldora por si un usuario lo activa sin
+            // querer y no lo sabe desactivar": its × turns the mode off.)
+            None if keys => Some(PillView {
+                bold: tr("Keyboard driven").to_owned(),
+                dim: String::new(),
+                parts: vec![
+                    PillPart::Rule,
+                    PillPart::Button {
+                        icon: "x",
+                        words: String::new(),
+                        act: PillAct::KeysOff,
+                        off: false,
+                    },
+                ],
+                keys: true,
+            }),
+            None => None,
+        };
         win.pill_on = view.is_some();
         let (t, m) = crate::animation::ease_toward(
             win.pill_t,
@@ -2142,10 +2166,16 @@ impl App {
             PILL_RIGHT
         };
         let parts_w: f32 = widths.iter().sum::<f32>() + 2.0 * widths.len() as f32;
+        // (The glyph's place, when it is there, is the words' air.)
+        let lead = if view.keys {
+            PILL_RIGHT + PILL_BTN + 4.0
+        } else {
+            PILL_LEFT
+        };
         // (A few pixels to spare: the words are fitted with a little slack.)
         let words_w = bold_w + 4.0 + dim_w + if view.parts.is_empty() { 0.0 } else { 6.0 };
         let room = (w - left - 32.0).max(120.0);
-        let width = (PILL_LEFT + words_w + parts_w + right).min(room);
+        let width = (lead + words_w + parts_w + right).min(room);
         let cx = left + (w - left) / 2.0;
         let pill = Rect::new(
             (cx - width / 2.0).round(),
@@ -2200,9 +2230,25 @@ impl App {
         // The words: the first in full ink, a touch heavier where the font
         // has a medium (the mockup's 500 — never bold), fitted; the rest dim
         // after them.
-        let mut x = pill.x + PILL_LEFT;
+        // Keyboard mode's glyph first: a round button, the shortcuts table.
+        if view.keys {
+            let r = Rect::new(pill.x + PILL_RIGHT, cy - PILL_BTN / 2.0, PILL_BTN, PILL_BTN);
+            if win.hover == Spot::Pill(hits.pill_btns.len()) {
+                g.rects
+                    .push(rect(r, PILL_BTN / 2.0, a(mix(fill, toward, 0.07), 1.0)));
+            }
+            symbol(
+                &mut g,
+                win,
+                &glyph("keyboard"),
+                square(mid(r), PILL_ICON),
+                a(mix(fill, ink, 0.55), 1.0),
+            );
+            hits.pill_btns.push((r, PillAct::Keys));
+        }
+        let mut x = pill.x + lead;
         let gap = if view.parts.is_empty() { 0.0 } else { 6.0 };
-        let bold_room = (pill.w - PILL_LEFT - right - parts_w - dim_w - gap)
+        let bold_room = (pill.w - lead - right - parts_w - dim_w - gap)
             .min(name_max + 4.0)
             .max(30.0);
         let shown = crate::desktop::fit_label(&view.bold, bold_room, &mut |t| {

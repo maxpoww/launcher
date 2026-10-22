@@ -1371,5 +1371,8 @@
  "Next tab": "Pestaña siguiente",
  "Close or clear": "Cerrar o deseleccionar",
  "Menu": "Menú",
- "Menu size": "Tamaño del menú"
+ "Menu size": "Tamaño del menú",
+ "Keyboard driven": "Con el teclado",
+ "Keyboard mode on/off": "Activar o quitar el modo teclado",
+ "Turn off keyboard mode (Ctrl+K)": "Quitar el modo teclado (Ctrl+K)"
 }
