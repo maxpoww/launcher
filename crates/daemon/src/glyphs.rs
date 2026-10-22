@@ -150,6 +150,11 @@ pub(crate) const GLYPHS: &[(&str, &str)] = &[
         "shield",
         r#"<path d="M8 1.8 13 3.6v4c0 3.2-2.2 5.4-5 6.6-2.8-1.2-5-3.4-5-6.6v-4z"/><path d="m5.8 8 1.6 1.6 2.8-3"/>"#,
     ),
+    // (Keyboard mode: the left end of a file window's top line.)
+    (
+        "keyboard",
+        r#"<rect x="1.8" y="4.2" width="12.4" height="7.6" rx="1.6"/><path d="M4.4 6.7h.6M7.2 6.7h.6M10 6.7h.6M4.4 9.3h.6M10.9 9.3h.6M6.5 9.3h3"/>"#,
+    ),
     // (The system's: a file window's path line, `filer::zones`.)
     (
         "lock",

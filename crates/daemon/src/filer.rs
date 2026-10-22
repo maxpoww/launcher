@@ -410,6 +410,8 @@ enum Spot {
     View(bool),
     Hidden,
     Find,
+    /// The top line's left end: keyboard mode (`settings.files_keys`).
+    Keys,
     /// The ↶ (left of sort, while something can be taken back); a row of
     /// its history, that row's Undo (by the thing's number, `Did::n`).
     Undo,
@@ -1620,6 +1622,7 @@ struct Hits {
     grid: Rect,
     list: Rect,
     hidden: Rect,
+    keys: Rect,
     seek: Rect,
     card: Rect,
     /// The ↶, the history under it, and each row's Undo (the row's number
@@ -1739,6 +1742,11 @@ struct Win {
     cursor: Option<usize>,
     /// Where a selection began: Shift selects from here to the keys.
     anchor: Option<usize>,
+    /// VISUAL MODE (Max, 2026-10-22: "mantener apretado shift selecciones
+    /// como visual mode en vim"): Shift is held and the keys stretch the
+    /// selection from `anchor` — set where the cursor stood as Shift went
+    /// down (`filer_walk_to`); Shift let go ends it (`filer_shift_up`).
+    visual: bool,
     /// A drag held on a folder: which, and since when — held long enough,
     /// the folder opens under it.
     spring: Option<(usize, Instant)>,
@@ -2147,6 +2155,7 @@ impl Win {
                 (h.list, Spot::View(true)),
                 (h.hidden, Spot::Hidden),
                 (h.find, Spot::Find),
+                (h.keys, Spot::Keys),
             ] {
                 if r.contains(pos) {
                     return spot;
@@ -2263,6 +2272,7 @@ impl Win {
     }
 
     fn select_only(&mut self, i: usize) {
+        self.visual = false;
         self.selected.clear();
         if let Some(item) = self.items.get(i) {
             self.selected.insert(item.path.clone());
@@ -3076,6 +3086,7 @@ impl App {
             selected: HashSet::new(),
             cursor: None,
             anchor: None,
+            visual: false,
             spring: None,
             place_spring: None,
             place_blink: None,
@@ -6177,6 +6188,7 @@ impl App {
             Spot::Up => win.dir.parent().is_some(),
             Spot::Crumb(i) => i + 1 < win.hits.crumbs.len(),
             Spot::Place(_) | Spot::View(_) | Spot::Hidden | Spot::Find | Spot::Col(_) | Spot::Pin | Spot::Sort | Spot::Info => true,
+            Spot::Keys => true,
             Spot::Tab(_) | Spot::TabX(_) | Spot::TabAdd | Spot::Pencil => true,
             Spot::Undo | Spot::HistUndo(_) | Spot::Pill(_) | Spot::Here => true,
             Spot::Mode(n) => (n == 1) != win.media,
@@ -7578,15 +7590,18 @@ impl App {
                 // the release decides (see `filer_button`).
                 let of_group = !ctrl && !shift && win.selected.len() > 1 && win.selected.contains(&path);
                 if shift {
-                    // From where the selection began to here.
+                    // From where the selection began to here (the keys go on
+                    // from the same anchor while Shift is held).
                     win.select_to(i, ctrl);
+                    win.visual = true;
                 } else if ctrl {
-                    // One more, or one fewer.
+                    // One more, or one fewer: the cursor moves, the anchor
+                    // stays.
                     if !win.selected.remove(&path) {
                         win.selected.insert(path.clone());
                     }
                     win.cursor = Some(i);
-                    win.anchor = Some(i);
+                    win.visual = false;
                 } else if !of_group {
                     win.select_only(i);
                 }
@@ -7602,6 +7617,10 @@ impl App {
             Spot::View(list) => self.filer_set_list(list),
             // The eye: the ground menu's "Show / Hide hidden files", one state.
             Spot::Hidden => self.filer_act(id, Action::ToggleHidden, None, (0.0, 0.0)),
+            Spot::Keys => {
+                let on = !self.settings.files_keys;
+                self.filer_keys(on);
+            }
             // The magnifier opens the search; its × (the search out) puts
             // it away, the text with it — what Escape in the field does.
             Spot::Find => {
@@ -7752,7 +7771,15 @@ impl App {
         if i >= win.items.len() {
             return;
         }
+        // VISUAL MODE: the anchor is where the cursor stood as Shift went
+        // down (the first walk picks the first thing); the selection is the
+        // run between it and the cursor in reading order — back toward the
+        // anchor it shrinks, past it it turns. A plain walk is one thing.
         if shift {
+            if !win.visual {
+                win.anchor = win.cursor.or(Some(i));
+                win.visual = true;
+            }
             win.select_to(i, false);
         } else {
             win.select_only(i);
@@ -7760,6 +7787,14 @@ impl App {
         win.gliding = false;
         win.scroll_to = win.layout(icon_scale).reveal(i, win.scroll_to, win.items.len());
         self.filer_request_draw(id);
+    }
+
+    /// Shift let go: visual mode ends where it stands (the selection kept);
+    /// the next Shift begins again from the cursor.
+    pub(crate) fn filer_shift_up(&mut self) {
+        if let Some(win) = self.filer.keys.and_then(|id| self.filer.win_mut(id)) {
+            win.visual = false;
+        }
     }
 
     /// A key while window `id` has the keyboard.
@@ -7896,6 +7931,36 @@ impl App {
                 }
             }
         }
+        // KEYBOARD MODE (Max, 2026-10-22: "un botón de teclado … y activa
+        // 'keyboard mode' (awsd para navegar, q=back, e=enter, z=undo,
+        // x=cortar, c=copiar, v=pegar, r=rename, delete=delete)"): plain
+        // letters are commands — W A S D walk as the arrows (Shift stretches
+        // the selection), Q back, E opens, Z undoes, X C V cut, copy and
+        // paste, R names the one selected — and typing does not search (Ctrl+F
+        // and the magnifier still do). A field that is up has its keys first
+        // (above), and a menu before it.
+        let plain = !ctrl && !alt && !self.modifiers.logo;
+        let (keysym, utf8) = if self.settings.files_keys && plain {
+            let one = win.selected.len() == 1;
+            match keysym {
+                Keysym::w | Keysym::W => (Keysym::Up, None),
+                Keysym::a | Keysym::A => (Keysym::Left, None),
+                Keysym::s | Keysym::S => (Keysym::Down, None),
+                Keysym::d | Keysym::D => (Keysym::Right, None),
+                Keysym::e | Keysym::E => (Keysym::Return, None),
+                Keysym::q | Keysym::Q => return self.filer_back(id),
+                Keysym::z | Keysym::Z => return self.filer_undo(id),
+                Keysym::x | Keysym::X => return self.filer_act(id, Action::Cut, None, (0.0, 0.0)),
+                Keysym::c | Keysym::C => return self.filer_act(id, Action::Copy, None, (0.0, 0.0)),
+                Keysym::v | Keysym::V => return self.filer_act(id, Action::Paste, None, (0.0, 0.0)),
+                Keysym::r | Keysym::R if one => return self.filer_act(id, Action::Rename, None, (0.0, 0.0)),
+                // (No other letter or number types: nothing searches by itself.)
+                _ if utf8.is_some_and(|t| t.chars().any(char::is_alphanumeric)) => return,
+                _ => (keysym, utf8),
+            }
+        } else {
+            (keysym, utf8)
+        };
         let (n, cols) = (win.items.len(), win.layout(icon_scale).cols);
         let page = win.layout(icon_scale).body.h * 0.9;
         let at = win.cursor;
@@ -7936,7 +8001,9 @@ impl App {
                     self.filer_activate(id, i);
                 }
             }
+            // (Out of visual mode too, as vim's Escape.)
             Keysym::Escape => {
+                win.visual = false;
                 if !win.selected.is_empty() {
                     win.selected.clear();
                     self.filer_request_draw(id);
@@ -8211,6 +8278,11 @@ impl App {
                     "end" => Keysym::End,
                     "f2" => Keysym::F2,
                     "w" => Keysym::w,
+                    "r" => Keysym::r,
+                    "z" => Keysym::z,
+                    "x" => Keysym::x,
+                    "c" => Keysym::c,
+                    "v" => Keysym::v,
                     "a" => Keysym::a,
                     "s" => Keysym::s,
                     "d" => Keysym::d,
@@ -8227,6 +8299,10 @@ impl App {
                 (self.modifiers.ctrl, self.modifiers.shift) = held;
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
+            // `keymode on|off`: keyboard mode, as its button sets it.
+            "keymode" => self.filer_keys(rest.trim() == "on"),
+            // `shiftup`: Shift let go (`key shift <name>` holds it meanwhile).
+            "shiftup" => self.filer_shift_up(),
             "zoom" => return self.zoom("files", rest),
             "panel" => return self.zoom("files-panel", rest),
             "where" => {
@@ -8268,6 +8344,7 @@ impl App {
                     "list" => Some(mid(win.hits.list)),
                     "find" => Some(mid(win.hits.find)),
                     "hidden" => Some(mid(win.hits.hidden)),
+                    "keys" => Some(mid(win.hits.keys)),
                     "seek" => Some(mid(win.hits.seek)),
                     "sort" => Some(mid(win.hits.sort)),
                     "undo" => Some(mid(win.hits.undo)),
@@ -8508,7 +8585,7 @@ impl App {
         };
         let layout = win.layout(icon_scale);
         format!(
-            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}",
+            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}, keys on {:?}",
             win.size.0,
             win.size.1,
             win.dir.display(),
@@ -8526,6 +8603,7 @@ impl App {
             win.menu.as_ref().map_or(0, |m| m.rows.len()),
             win.props.as_ref().map_or("-", |p| p.title.as_str()),
             win.rename.as_ref().map(|r| r.text.as_str()),
+            win.cursor.and_then(|i| win.items.get(i)).map(|it| it.name.as_str()),
         )
     }
 }

@@ -68,6 +68,9 @@ pub(crate) struct Settings {
     /// …and keep their sidebar PINNED open beside the files (Max,
     /// 2026-10-21) instead of opening it over them on hover.
     pub(crate) files_pinned: bool,
+    /// …and are in KEYBOARD MODE (Max, 2026-10-22): plain letters are
+    /// commands (W A S D walk, Q back, E open, Z undo, X C V, R rename).
+    pub(crate) files_keys: bool,
     /// THE LAUNCHER PAGE (Max, 2026-10-20; `launcher_prefs.rs`). STAY AWAY:
     /// the dock is always off the screen and comes only when called —
     /// Super, or the pointer at its edge (no parking while nothing covers it).

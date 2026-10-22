@@ -52,6 +52,8 @@ const CHIP_ICON: f32 = 13.0;
 const CRUMB_ICON: f32 = 14.0;
 const CHEV: f32 = 8.0;
 const PEN_BOX: f32 = 18.0;
+/// From keyboard mode's button to the first tab.
+const KEYS_GAP: f32 = 8.0;
 /// `..` with nowhere up: a disabled menu row's ink (`desktop_menu`'s 0.38).
 const NOWHERE_INK: f32 = 0.35;
 /// The path line's chip (`zones`): its height, air, words and lock.
@@ -126,11 +128,11 @@ pub(super) struct Info {
 // ── the chrome's own symbols ────────────────────────────────────────────
 
 /// The symbols the chrome wears (the shell's own set: `glyphs.rs`).
-const CHROME: [&str; 35] = [
+const CHROME: [&str; 36] = [
     "clock", "pin", "files", "media", "sort", "info", "grid", "list", "eye", "eyeoff", "search",
     // (The system's chip on the path line; the confirmation's shield.)
-    "lock", "shield", "pen", "x", "plus", "chev", "folder", "undo", "rename", "trash", "newf",
-    "copy", "open", "dup", // (The selection pill's: there at once when it rises.)
+    "lock", "shield", "keyboard", "pen", "x", "plus", "chev", "folder", "undo", "rename", "trash",
+    "newf", "copy", "open", "dup", // (The selection pill's: there at once when it rises.)
     "move", "openwith", "usb", "more", "paste",
     // (And what a kind of thing is for: the pill's, and by the ↶.)
     "play", "slides", "pic", "print", "extract",
@@ -920,7 +922,19 @@ impl App {
 
         // ── the tabs ──
         let many = win.tabs.len() > 1;
-        let x0 = left + LINE_PAD;
+        // KEYBOARD MODE's button (Max, 2026-10-22): the left end, before
+        // the tabs and the way here, pressed while it is on.
+        let keys = Rect::new(left + LINE_PAD, cy - BTN_H / 2.0, BTN_W, BTN_H);
+        button(
+            &mut g,
+            win,
+            keys,
+            "keyboard",
+            self.settings.files_keys,
+            Spot::Keys,
+        );
+        hits.keys = keys;
+        let x0 = keys.x + BTN_W + KEYS_GAP;
         let mut cursor = x0;
         // (The others' chips first measured: the current tab gets what is left.)
         let chip_words: Vec<(String, f32)> = (0..win.tabs.len())
@@ -1415,6 +1429,19 @@ impl App {
                 }
                 calloop::timer::TimeoutAction::Drop
             });
+    }
+
+    /// KEYBOARD MODE on or off, for every window, remembered.
+    pub(super) fn filer_keys(&mut self, on: bool) {
+        if self.settings.files_keys != on {
+            self.settings.files_keys = on;
+            self.settings.save();
+            info!("files: keyboard mode {}", if on { "on" } else { "off" });
+        }
+        let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.filer_request_draw(id);
+        }
     }
 
     /// PIN the sidebar open beside the files, or let it rest again — every

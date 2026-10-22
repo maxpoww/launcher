@@ -7649,7 +7649,12 @@ impl KeyboardHandler for App {
         modifiers: Modifiers,
         _layout: u32,
     ) {
+        // (Shift let go ends a file window's visual mode.)
+        let shift_up = self.modifiers.shift && !modifiers.shift;
         self.modifiers = modifiers;
+        if shift_up {
+            self.filer_shift_up();
+        }
     }
 }
 
