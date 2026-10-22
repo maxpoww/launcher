@@ -478,7 +478,11 @@ The big daemon files are cohesive but long — go straight to the function:
   the window's zoom; the DESKTOP takes the keyboard while its menu is up (`Desktop::keys_for_menu`, given back
   when nothing is up — `sync_desktop_top_input`), so Escape closes it too. Rig: `files key ctrl plus|minus|zero`,
   `debug-desktop "zoom menu in|out|reset|<n>"`; real keys through the nested compositor with
-  `hl.dsp.send_shortcut({ mods = "CTRL", key = "equal" })` (no window: the keyboard's surface). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
+  `hl.dsp.send_shortcut({ mods = "CTRL", key = "equal" })` (no window: the keyboard's surface). ⚠ WORDS ARE
+  PAINTED AFTER EVERY GRID (the renderer's one text pass): a big menu over the selection pill covered its
+  symbols and showed its words — so in a file window every word of the chrome under the menu or the box (the
+  pill's, the top line's, the i card's) is LEFT OUT, as the files' names are (`chrome::leave_out`, by the width
+  it is drawn at). The symbols were never the matter: one picture a symbol, drawn at any size. NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
   `filer::copy_name`, undoable), Paste into folder, Select all, Copy to <the one stick plugged in>
   (`one_stick`), Send to › (a COPY now), New folder with these ("New folder with items", the selection
   moved in, its name typed; `Undo::Grouped`), Get info (Files: the i card; a place, the desktop: the
