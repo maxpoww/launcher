@@ -146,6 +146,17 @@ pub(crate) fn set_default(desktop: &str, mime: &str) -> bool {
 /// defaults: the file `xdg-mime default` writes), read at once — for what
 /// may be asked on the loop (whether a choice can still be taken back).
 pub(crate) fn chosen_default(mime: &str) -> Option<String> {
+    chosen_line(mime)?
+        .split(';')
+        .map(str::trim)
+        .find(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
+/// The owner's whole choice for `mime` as written (`a.desktop;b.desktop;`:
+/// the first, then the ones to try after it) — what a taking back puts
+/// back, all of it.
+pub(crate) fn chosen_line(mime: &str) -> Option<String> {
     let text = std::fs::read_to_string(mimeapps()).ok()?;
     let mut section = "";
     for line in text.lines() {
@@ -154,12 +165,8 @@ pub(crate) fn chosen_default(mime: &str) -> Option<String> {
             section = t;
         } else if section == "[Default Applications]" {
             if let Some((k, v)) = t.split_once('=') {
-                if k.trim() == mime {
-                    return v
-                        .split(';')
-                        .map(str::trim)
-                        .find(|v| !v.is_empty())
-                        .map(str::to_owned);
+                if k.trim() == mime && !v.trim().is_empty() {
+                    return Some(v.trim().to_owned());
                 }
             }
         }
@@ -177,15 +184,86 @@ fn mimeapps() -> PathBuf {
 /// The owner's own choice for `mime` taken away (none was set before it):
 /// its line out of `~/.config/mimeapps.list`'s defaults, the rest as it is.
 pub(crate) fn unset_default(mime: &str) -> bool {
-    let file = mimeapps();
-    let Ok(text) = std::fs::read_to_string(&file) else {
+    rewrite_mimeapps(|text| without_default(text, mime))
+}
+
+/// The owner's choice for `mime` put back as it was written (`line`: every
+/// app of it, in its order — `xdg-mime default` would keep only one).
+pub(crate) fn restore_default(mime: &str, line: &str) -> bool {
+    rewrite_mimeapps(|text| with_default(text, mime, line)) || chosen_line(mime).as_deref() == Some(line)
+}
+
+/// `~/.config/mimeapps.list` made `change(text)`, written whole (a file
+/// beside it, renamed over it). Where it is a LINK (dotfiles kept in a
+/// repository), what it points at is written and the link stays a link —
+/// the rename used to put a plain file in its place. Whether it changed.
+fn rewrite_mimeapps(change: impl FnOnce(&str) -> String) -> bool {
+    rewrite_at(&mimeapps(), change)
+}
+
+fn rewrite_at(file: &Path, change: impl FnOnce(&str) -> String) -> bool {
+    let real = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let Ok(text) = std::fs::read_to_string(&real) else {
         return false;
     };
-    let kept = without_default(&text, mime);
-    kept != text && {
-        let tmp = file.with_extension("list.tmp");
-        std::fs::write(&tmp, &kept).is_ok() && std::fs::rename(&tmp, &file).is_ok()
+    let kept = change(&text);
+    if kept == text {
+        return false;
     }
+    let tmp = real.with_extension("list.golem-tmp");
+    let written = std::fs::write(&tmp, &kept).is_ok()
+        && std::fs::metadata(&real).and_then(|m| std::fs::set_permissions(&tmp, m.permissions())).is_ok()
+        && std::fs::rename(&tmp, &real).is_ok();
+    if !written {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// `text` (a mimeapps.list) with `mime=line` in `[Default Applications]`:
+/// in place of its line there, or added to that section (made if missing).
+pub(crate) fn with_default(text: &str, mime: &str, line: &str) -> String {
+    let entry = format!("{mime}={line}");
+    let mut section = String::new();
+    let (mut out, mut done) = (Vec::new(), false);
+    let mut lines = text.lines().peekable();
+    while let Some(l) = lines.next() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            section = t.to_owned();
+        } else if section == "[Default Applications]" && t.split_once('=').is_some_and(|(k, _)| k.trim() == mime) {
+            if !done {
+                out.push(entry.clone());
+                done = true;
+            }
+            continue;
+        }
+        out.push(l.to_owned());
+        // The section's end (the next one, or the file's): added there.
+        let leaving = lines.peek().is_none_or(|n| n.trim().starts_with('['));
+        if !done && section == "[Default Applications]" && leaving {
+            // (Before blank lines that close the section.)
+            let mut blanks = Vec::new();
+            while out.last().is_some_and(|l: &String| l.trim().is_empty()) {
+                blanks.push(out.pop().unwrap_or_default());
+            }
+            out.push(entry.clone());
+            out.extend(blanks.into_iter().rev());
+            done = true;
+        }
+    }
+    if !done {
+        if out.last().is_some_and(|l| !l.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.push("[Default Applications]".to_owned());
+        out.push(entry);
+    }
+    let mut kept = out.join("\n");
+    if text.ends_with('\n') || text.is_empty() {
+        kept.push('\n');
+    }
+    kept
 }
 
 /// `text` (a mimeapps.list) with `mime`'s line in `[Default Applications]`
@@ -272,7 +350,7 @@ impl App {
             move || {
                 // (The owner's own choice before — none: the system's —
                 // so taking it back gives exactly what was.)
-                let was = chosen_default(&mime);
+                let was = chosen_line(&mime);
                 let took = set_default(&desktop, &mime);
                 (took, was, mime, desktop)
             },
@@ -331,6 +409,41 @@ mod tests {
             plural("Microsoft Word documents"),
             "Microsoft Word documents"
         );
+    }
+
+    #[test]
+    fn a_choice_is_put_back_whole_where_it_belongs() {
+        let text = "[Default Applications]\nimage/png=gimp.desktop\n\n[Added Associations]\nimage/png=gimp.desktop;\n";
+        // Replaced in place, every app of it.
+        assert_eq!(
+            with_default(text, "image/png", "org.gnome.Loupe.desktop;gimp.desktop;"),
+            "[Default Applications]\nimage/png=org.gnome.Loupe.desktop;gimp.desktop;\n\n[Added Associations]\nimage/png=gimp.desktop;\n"
+        );
+        // Added at the section's end (before the blank line that closes it).
+        assert_eq!(
+            with_default(text, "text/plain", "gedit.desktop;"),
+            "[Default Applications]\nimage/png=gimp.desktop\ntext/plain=gedit.desktop;\n\n[Added Associations]\nimage/png=gimp.desktop;\n"
+        );
+        // No such section: made.
+        assert_eq!(
+            with_default("[Added Associations]\nx/y=a.desktop;\n", "x/y", "b.desktop;"),
+            "[Added Associations]\nx/y=a.desktop;\n\n[Default Applications]\nx/y=b.desktop;\n"
+        );
+    }
+
+    #[test]
+    fn a_linked_mimeapps_list_stays_a_link() {
+        let d = std::env::temp_dir().join(format!("wr-mime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("dotfiles")).unwrap();
+        let real = d.join("dotfiles/mimeapps.list");
+        std::fs::write(&real, "[Default Applications]\nimage/png=gimp.desktop\n").unwrap();
+        let link = d.join("mimeapps.list");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(rewrite_at(&link, |t| without_default(t, "image/png")));
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "[Default Applications]\n");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
