@@ -2515,6 +2515,8 @@ impl App {
         }
         self.sync_desktop_input();
         self.top_glyphs_warm();
+        // (Whether there is a printer, asked ahead of the first menu.)
+        let _ = self.print_can();
         self.sync_desktop_icons();
         self.request_desktop_draw();
     }
@@ -2677,7 +2679,10 @@ impl App {
         self.desktop.band = None;
         self.desktop.props = None;
         crate::glyphs::write_all();
-        let ctx = self.desktop_menu_ctx(item);
+        // (Whether there is a printer: asked again when the answer is old —
+        // the desktop's menus print as the file windows' do.)
+        let can = self.print_can();
+        let ctx = self.desktop_menu_ctx(item, can);
         let (w, h) = self.desktop_size;
         let many = ctx.on == crate::desktop_menu::On::Many;
         let mut menu = Menu::new(ctx, item, many, at, w as f32, h as f32);
@@ -2705,7 +2710,7 @@ impl App {
 
     /// What the desktop's menu is made from: the wallpaper's (`item` none),
     /// a plugged-in volume's, or that of what stands on it.
-    fn desktop_menu_ctx(&self, item: Option<usize>) -> crate::desktop_menu::Ctx {
+    fn desktop_menu_ctx(&self, item: Option<usize>, can: crate::filer::Can) -> crate::desktop_menu::Ctx {
         use crate::desktop_menu::{Ctx, On};
         let clip = self.clipboard_files().is_some();
         let Some(it) = item.and_then(|i| self.desktop.items.get(i)) else {
@@ -2742,6 +2747,24 @@ impl App {
                 _ => On::File,
             }
         };
+        // What the selection is for (`filer::smart_for`, the file
+        // windows' own rules): files and folders only.
+        let things: Vec<(&str, bool)> = self
+            .desktop
+            .items
+            .iter()
+            .filter(|it| self.desktop.selected.contains(&it.path))
+            .filter_map(|it| match it.kind {
+                Kind::File => Some((it.path.as_str(), false)),
+                Kind::Folder => Some((it.path.as_str(), true)),
+                _ => None,
+            })
+            .collect();
+        let smart = if things.len() == self.desktop.selected.len() {
+            crate::filer::smart_for(&things, can).menu
+        } else {
+            Vec::new()
+        };
         Ctx {
             on,
             n: self.desktop.selected.len(),
@@ -2751,8 +2774,40 @@ impl App {
             desk: true,
             untrusted: locked_shortcut(it).is_some(),
             system: self.desktop.selected.iter().any(|p| crate::trash::protected(Path::new(p))),
+            smart,
             ..Default::default()
         }
+    }
+
+    /// An action by kind on the desktop's selection: the selected files in
+    /// the order of their cells (or the one folder), every file of the
+    /// desktop as "here" — a slideshow from a photo goes on through them.
+    fn desktop_smart_act(&mut self, action: Action) {
+        let in_cells = |items: &[Item], slots: &[Option<Slot>], pick: &dyn Fn(&Item) -> bool| -> Vec<PathBuf> {
+            let mut found: Vec<(Slot, PathBuf)> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, it)| it.kind == Kind::File && pick(it))
+                .filter_map(|(i, it)| slots.get(i).copied().flatten().map(|s| (s, PathBuf::from(&it.path))))
+                .collect();
+            found.sort();
+            found.into_iter().map(|(_, p)| p).collect()
+        };
+        let selected = &self.desktop.selected;
+        let picked = in_cells(&self.desktop.items, &self.desktop.slots, &|it| selected.contains(&it.path));
+        let here = in_cells(&self.desktop.items, &self.desktop.slots, &|_| true);
+        let folders: Vec<PathBuf> = self
+            .desktop
+            .items
+            .iter()
+            .filter(|it| it.kind == Kind::Folder && selected.contains(&it.path))
+            .map(|it| PathBuf::from(&it.path))
+            .collect();
+        let one_folder = match (folders.as_slice(), picked.len()) {
+            ([one], 0) => Some(one.clone()),
+            _ => None,
+        };
+        self.smart_act(SendFor::Desktop, action, picked, here, one_folder);
     }
 
     /// The newest thing done on the desktop that can still be taken back,
@@ -3373,14 +3428,16 @@ impl App {
             | Action::RemovePlace
             | Action::ToggleHidden
             | Action::OpenInTab
-            | Action::Play
-            | Action::Shuffle
             | Action::PlayHere
+            | Action::SlideshowHere => {}
+            // WHAT A KIND OF THING IS FOR, the file windows' own rules and
+            // doing (`filer/smart.rs`), Quick Look showing it from here.
+            Action::Play
+            | Action::Shuffle
             | Action::Slideshow
-            | Action::SlideshowHere
             | Action::SetWallpaper
             | Action::Rotate
-            | Action::Print => {}
+            | Action::Print => self.desktop_smart_act(action),
             Action::SortBy(_) | Action::SortDir(_) => self.desktop_sort(action),
             // Archives are the system archiver's work (File Roller).
             Action::Extract | Action::Compress => {

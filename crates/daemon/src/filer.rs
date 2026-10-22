@@ -65,6 +65,9 @@ mod print;
 mod recent;
 mod smart;
 
+pub(crate) use print::Can;
+pub(crate) use smart::smart_for;
+
 pub(crate) use history::say_quietly;
 
 /// The windows' class: what the compositor, the dock and window memory

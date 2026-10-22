@@ -13,6 +13,7 @@
 
 use super::print::Can;
 use super::*;
+use crate::desktop::SendFor;
 
 /// What a file is, as its actions see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,8 +133,8 @@ fn kind_of_folder(dir: &Path) -> Option<FolderKind> {
 /// what it does) and the menu's.
 #[derive(Debug)]
 pub(crate) struct Smart {
-    pub(super) bar: Option<(&'static str, &'static str, Action)>,
-    pub(super) menu: Vec<Row>,
+    pub(crate) bar: Option<(&'static str, &'static str, Action)>,
+    pub(crate) menu: Vec<Row>,
 }
 
 impl Smart {
@@ -201,32 +202,50 @@ pub(crate) fn smart_files(sorts: &[Sort], archive: bool, can: Can) -> Smart {
     Smart::none()
 }
 
+/// What the things at these paths are for (each with whether it is a
+/// folder): a folder that is mostly songs or photos by what it holds, the
+/// files by `smart_files` — for a file window's selection and the
+/// desktop's alike.
+pub(crate) fn smart_for(things: &[(&str, bool)], can: Can) -> Smart {
+    if let [(path, true)] = things {
+        let shuffle = ("shuffle", tr("Shuffle"), Action::Shuffle);
+        let slides = ("slides", tr("Slideshow"), Action::Slideshow);
+        return match kind_of_folder(Path::new(path)) {
+            Some(FolderKind::Play) => {
+                let all = ("play", tr("Play all"), Action::Play);
+                Smart::of(all, &[all, shuffle])
+            }
+            Some(FolderKind::Slides) => Smart::of(slides, &[slides]),
+            None => Smart::none(),
+        };
+    }
+    if things.is_empty() || things.iter().any(|(_, folder)| *folder) {
+        return Smart::none();
+    }
+    let names: Vec<String> = things
+        .iter()
+        .map(|(p, _)| file_name(Path::new(p)))
+        .collect();
+    let sorts: Vec<Sort> = names.iter().map(|n| sort_of(n)).collect();
+    let archive = matches!(names.as_slice(), [one] if is_archive(one));
+    smart_files(&sorts, archive, can)
+}
+
 impl App {
     /// What `sel` (in window `win`) is for (the mockup's `smartFor`).
     pub(super) fn filer_smart(&self, win: &Win, sel: &[&Item]) -> Smart {
         if sel.is_empty() || win.in_bin() != InBin::No {
             return Smart::none();
         }
-        if let [one] = sel {
-            if one.kind == Kind::Folder {
-                let shuffle = ("shuffle", tr("Shuffle"), Action::Shuffle);
-                let slides = ("slides", tr("Slideshow"), Action::Slideshow);
-                return match kind_of_folder(Path::new(&one.path)) {
-                    Some(FolderKind::Play) => {
-                        let all = ("play", tr("Play all"), Action::Play);
-                        Smart::of(all, &[all, shuffle])
-                    }
-                    Some(FolderKind::Slides) => Smart::of(slides, &[slides]),
-                    None => Smart::none(),
-                };
-            }
-        }
-        if sel.iter().any(|it| it.kind != Kind::File) {
+        let things: Vec<(&str, bool)> = sel
+            .iter()
+            .filter(|it| matches!(it.kind, Kind::File | Kind::Folder))
+            .map(|it| (it.path.as_str(), it.kind == Kind::Folder))
+            .collect();
+        if things.len() != sel.len() {
             return Smart::none();
         }
-        let sorts: Vec<Sort> = sel.iter().map(|it| sort_of(&it.name)).collect();
-        let archive = matches!(sel, [one] if is_archive(&one.name));
-        smart_files(&sorts, archive, self.filer.printers.can)
+        smart_for(&things, self.filer.printers.can)
     }
 
     /// What the folder window `win` shows is mostly (the button by the ↶):
@@ -281,6 +300,33 @@ impl App {
             .filter(|it| it.kind == Kind::File)
             .map(|it| PathBuf::from(&it.path))
             .collect();
+        self.smart_act(SendFor::Files(id), action, picked, here, one_folder);
+    }
+
+    /// What is printable now, as last asked (asked again when old): for
+    /// the desktop's menus too.
+    pub(crate) fn print_can(&mut self) -> Can {
+        self.filer_printers(false);
+        self.filer.printers.can
+    }
+
+    /// An action by kind for `whose` menu (a file window's, or the
+    /// desktop's): on `picked` (the files, in order) or `one_folder`, with
+    /// `here` the files of the place they are in, in its order. Played and
+    /// shown by Quick Look from there; what is done kept in its history,
+    /// what is said said in its way (a file window's pill, else quietly).
+    pub(crate) fn smart_act(
+        &mut self,
+        whose: SendFor,
+        action: Action,
+        picked: Vec<PathBuf>,
+        here: Vec<PathBuf>,
+        one_folder: Option<PathBuf>,
+    ) {
+        let peek = match whose {
+            SendFor::Files(id) => id,
+            SendFor::Desktop => crate::quicklook::DESKTOP,
+        };
         let playable = |list: Vec<PathBuf>| -> Vec<PathBuf> {
             list.into_iter()
                 .filter(|p| matches!(sort_of(&file_name(p)), Sort::Song | Sort::Video))
@@ -301,13 +347,13 @@ impl App {
                 if action == Action::Shuffle {
                     shuffle(&mut list);
                 }
-                self.peek_playlist(id, list, 0);
+                self.peek_playlist(peek, list, 0);
             }
             Action::Slideshow | Action::SlideshowHere => {
                 let (list, at) = match (action, one_folder, picked.as_slice()) {
                     (Action::SlideshowHere, ..) => (photos(here), 0),
                     (_, Some(dir), _) => (photos(files_in(&dir)), 0),
-                    // One photo: "from here", in the folder's order.
+                    // One photo: "from here", in the place's order.
                     (_, None, [one]) => {
                         let list = photos(here);
                         let at = list.iter().position(|p| p == one).unwrap_or(0);
@@ -315,7 +361,7 @@ impl App {
                     }
                     _ => (photos(picked), 0),
                 };
-                self.peek_slides(id, list, at);
+                self.peek_slides(peek, list, at);
             }
             Action::SetWallpaper => {
                 let Some(path) = picked.first().map(|p| p.to_string_lossy().into_owned()) else {
@@ -326,12 +372,13 @@ impl App {
                 let pick = path.clone();
                 crate::wall_follow::picked_other(move || crate::controls::pick_wallpaper(pick));
                 let name = file_name(Path::new(&path));
-                self.filer_flash(
-                    id,
+                self.smart_said(
+                    whose,
                     fill(tr("“{name}” is your wallpaper"), &[("name", &name)]),
+                    false,
                 );
                 if let Some(was) = was {
-                    self.filer_did(id, Undo::Wallpaper { was, now: path });
+                    self.smart_did(whose, Undo::Wallpaper { was, now: path });
                 }
             }
             Action::Rotate => {
@@ -352,13 +399,16 @@ impl App {
                             app.thumb_stale(&p.to_string_lossy());
                             app.peek_forget(p);
                         }
-                        app.filer_did(id, Undo::Rotated(turned));
-                        app.filer_list(id);
+                        app.smart_did(whose, Undo::Rotated(turned));
+                        match whose {
+                            SendFor::Files(id) => app.filer_list(id),
+                            SendFor::Desktop => app.reload_desktop(),
+                        }
                     },
                 );
             }
             Action::Print => {
-                let can = self.filer.printers.can;
+                let can = self.print_can();
                 let files: Vec<PathBuf> = picked
                     .into_iter()
                     .filter(|p| printable(sort_of(&file_name(p)), can))
@@ -368,14 +418,14 @@ impl App {
                 }
                 // (LibreOffice takes a while to make a PDF: said at once.)
                 if files.iter().any(|p| sort_of(&file_name(p)) == Sort::Office) {
-                    self.filer_flash(id, tr("Getting ready to print…").to_owned());
+                    self.smart_said(whose, tr("Getting ready to print…").to_owned(), false);
                 }
                 self.desktop_off_loop(
                     move || super::print::print(&files),
                     move |app, (said, failed): (Option<String>, Option<String>)| {
                         info!("files: print: {said:?}, {failed:?}");
                         if let Some(said) = said {
-                            app.filer_flash(id, said);
+                            app.smart_said(whose, said, true);
                         }
                         if let Some(failed) = failed {
                             say_quietly(failed);
@@ -384,6 +434,28 @@ impl App {
                 );
             }
             _ => {}
+        }
+    }
+
+    /// Say what was done by kind: in a file window's pill, else quietly
+    /// (`always`: a notice the desktop gives too — the desktop has no pill,
+    /// and says only what is worth a notice).
+    fn smart_said(&mut self, whose: SendFor, said: String, always: bool) {
+        match whose {
+            SendFor::Files(id) => self.filer_flash(id, said),
+            SendFor::Desktop if always => say_quietly(said),
+            SendFor::Desktop => {}
+        }
+    }
+
+    /// Keep what was done by kind in the history of `whose` menu.
+    fn smart_did(&mut self, whose: SendFor, undo: Undo) {
+        match whose {
+            SendFor::Files(id) => self.filer_did(id, undo),
+            SendFor::Desktop => {
+                let said = super::history::said_of(&undo);
+                self.desktop_did(undo, said);
+            }
         }
     }
 }
@@ -586,6 +658,43 @@ mod tests {
             assert_eq!(said(names, true, false), (None, vec![]), "{names:?}");
             assert_eq!(said(names, false, true), (None, vec![]), "{names:?}");
         }
+    }
+
+    /// The same rules for things given by path (the desktop's selection):
+    /// a folder of songs plays, a photo is for the wallpaper.
+    #[test]
+    fn things_by_path_are_for_what_their_kind_is_for() {
+        let dir = std::env::temp_dir().join(format!("golem-smart-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for n in ["a.mp3", "b.flac", "c.ogg"] {
+            let _ = std::fs::write(dir.join(n), b"x");
+        }
+        let acts = |s: Smart| -> (Option<Action>, Vec<Action>) {
+            let menu = s.menu.iter().filter_map(Row::action).collect();
+            (s.bar.map(|(_, _, a)| a), menu)
+        };
+        let folder = dir.to_string_lossy().into_owned();
+        assert_eq!(
+            acts(smart_for(&[(folder.as_str(), true)], Can::default())),
+            (Some(Action::Play), vec![Action::Play, Action::Shuffle])
+        );
+        let print = Can {
+            print: true,
+            office: false,
+        };
+        assert_eq!(
+            acts(smart_for(&[("/d/photo.jpg", false)], print)).1,
+            vec![Action::SetWallpaper, Action::Rotate, Action::Print]
+        );
+        // A folder among files, or nothing: nothing of a kind.
+        assert_eq!(
+            acts(smart_for(
+                &[("/d/photo.jpg", false), (folder.as_str(), true)],
+                print
+            )),
+            (None, vec![])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

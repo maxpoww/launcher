@@ -46,6 +46,11 @@ fn binned_text(names: &[String]) -> String {
 }
 
 /// What a thing done is called in the history, and its symbol.
+/// What `undo` is called (the desktop's history keeps it by its words).
+pub(super) fn said_of(undo: &Undo) -> String {
+    describe(undo).0
+}
+
 fn describe(undo: &Undo) -> (String, &'static str) {
     let folder = |p: &Path| p.parent().map(file_name).unwrap_or_default();
     match undo {
