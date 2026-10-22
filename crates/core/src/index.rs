@@ -113,6 +113,8 @@ pub fn parse_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
 /// Chrome's New Incognito Window, Seam's New Private Window…).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopAction {
+    /// Its id in the file (`new-private-window`).
+    pub id: String,
     /// Its localized `Name=`.
     pub name: String,
     /// Its `Exec=`, field codes stripped.
@@ -136,7 +138,7 @@ pub fn desktop_actions(path: &std::path::Path) -> Vec<DesktopAction> {
         .filter_map(|id| {
             let name = entry.action_name(id, &locales)?.trim().to_string();
             let exec = strip_field_codes(entry.action_exec(id)?);
-            (!name.is_empty() && !exec.is_empty()).then_some(DesktopAction { name, exec })
+            (!name.is_empty() && !exec.is_empty()).then(|| DesktopAction { id: id.to_string(), name, exec })
         })
         .collect()
 }
@@ -234,6 +236,7 @@ mod tests {
         let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
         assert!(names.len() == 2, "the one with nothing to run is left out: {names:?}");
         assert_eq!(actions[0].exec, "browser --new-window");
+        assert_eq!(actions[1].id, "new-private-window");
         assert_eq!(actions[1].exec, "browser --private-window");
         assert!(desktop_actions(&apps.join("missing.desktop")).is_empty());
     }

@@ -1539,6 +1539,12 @@ fn srgb_encode_lut() -> &'static [u8; ENC_LUT_MAX + 1] {
     })
 }
 
+/// The ready-to-upload tile of an SVG drawn whole (a symbol of the lone
+/// app's actions — `app_actions.rs`).
+pub(crate) fn svg_figure(svg: &str) -> Option<Vec<u8>> {
+    Some(with_mips(rasterize_svg(svg.as_bytes())?.take()))
+}
+
 /// Render an SVG into an `ICON_SIZE`² pixmap.
 fn rasterize_svg(data: &[u8]) -> Option<tiny_skia::Pixmap> {
     let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).ok()?;

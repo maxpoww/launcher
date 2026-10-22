@@ -3,142 +3,184 @@
 //! nueva ventana, cada app trae sus acciones — … y desinstalar, con
 //! confirmación"). A search that leaves ONE app in Apps puts that app's own
 //! desktop actions (its desktop file's `Actions=`: Chrome's New Incognito
-//! Window, Seam's New Private Window…) beside it as pills in the System
-//! row's look, the app and its pills centred together under the title; and,
-//! for an app the dock can take away (a package it installed, an installed
-//! webapp — never the system's own), "Uninstall <app>" last, a little apart.
+//! Window, Seam's New Private Window…) after it in the row, as cells of the
+//! grid — and, for an app the dock can take away (a package it installed,
+//! an installed webapp — never the system's own), "Uninstall <app>" last.
 //!
-//! The app stays the one selected: Enter opens it as ever. → or Tab walk
-//! onto the pills (← or Shift+Tab back to the app), Enter runs the one the
-//! keys are on; a click runs it too. An action starts the way its app does
-//! (`launch::launch`: its graphics card, its terminal) and the box goes.
-//! UNINSTALL ASKS ONCE: the first press turns it red, "Uninstall <app>?
-//! Again to confirm" (just "Again to uninstall" where that is too long), the
-//! app's other pills stepping aside meanwhile; a second press uninstalls
-//! (`uninstall_app`, the drag-to-Install road). Escape, the keys or the
-//! pointer leaving it, or `ARM_FOR` with nothing done put it back.
+//! THE LOOK (Max, 2026-10-22, the mockup's "3a — con su color, oscurecido";
+//! canvas https://claude.ai/artifact/9WByNs3AHU4wZNYCR9tUgi): each action
+//! is its app's own tile — the plate, the app's icon at half its light, its
+//! colours kept — with the action's SYMBOL big and white in the middle, a
+//! soft shadow under it, and its name under the tile on up to two lines.
+//! The symbols are the apps' own where Golem has them (Chrome's hat and
+//! glasses and its window, from its resources; Seam's mask and window, from
+//! Firefox's `omni.ja`), else one by what the action says (`symbol_for`:
+//! a window, home, the computer, a terminal, the bin), else an open arrow.
+//!
+//! They are cells like any other (temporary entries, id `act:<n>`, the
+//! minimized windows' way): the app stays the one selected — Enter opens it
+//! as ever; the arrows walk onto the actions, Enter or a click runs one; it
+//! starts the way its app does (`launch::launch`: its graphics card, its
+//! terminal) and the box goes. UNINSTALL ASKS ONCE: the first press turns
+//! its plate red and its name "Again to uninstall"; a second press
+//! uninstalls (`uninstall_app`, the drag-to-Install road). Escape, the keys
+//! or the pointer leaving it, or `ARM_FOR` with nothing done put it back.
 
 use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
 use smithay_client_toolkit::seat::keyboard::Keysym;
 use tracing::{error, info, warn};
+use waverunner_core::index::AppEntry;
 
 use crate::i18n::{fill, tr};
-use crate::{content, launch, options, panel, App};
+use crate::{apps, content, launch, App};
 
+/// The id prefix of an action's cell (`act:<n>`, n its place in the list).
+pub(crate) const PREFIX: &str = "act:";
 /// How long Uninstall waits for its second press.
 pub(crate) const ARM_FOR: Duration = Duration::from_secs(4);
-/// Uninstall stands this many of the pills' gaps from the one before it.
-const APART: f32 = 2.5;
+/// How big the symbol's square is, of its tile (the symbol itself takes the
+/// middle 16 of its 20 units, clear of the squircle's corners).
+pub(crate) const SYMBOL: f32 = 0.675;
+/// How much of its light the app's icon keeps under the symbol.
+pub(crate) const DIM: f32 = 0.5;
 
-/// What a pill does.
+/// Chrome's own symbols (its resources' New Window and Incognito, BSD-3 like
+/// Chromium) and Seam's (Firefox's `window.svg` and `privateBrowsing.svg`,
+/// MPL 2.0), each in a 16-unit box, drawn white.
+const CHROME_WINDOW: &str = r#"<path fill-rule="evenodd" clip-rule="evenodd" d="M1 3.5A1.5 1.5 0 0 1 2.5 2H13a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 13 14H2.5A1.5 1.5 0 0 1 1 12.5ZM2.5 5v7.5H13V5Z"/>"#;
+const INCOGNITO: &str = r#"<path d="M10.75 9c-.83 0-1.55.46-1.94 1.13-.26-.08-.53-.13-.81-.13s-.55.05-.81.13A2.249 2.249 0 0 0 5.25 9C4.01 9 3 10.01 3 11.25s1.01 2.25 2.25 2.25c1.12 0 2.04-.82 2.21-1.89.17-.07.35-.11.54-.11.19 0 .37.05.54.11.17 1.07 1.1 1.89 2.21 1.89 1.24 0 2.25-1.01 2.25-2.25S11.99 9 10.75 9Zm-5.5 3c-.41 0-.75-.34-.75-.75s.34-.75.75-.75.75.34.75.75-.34.75-.75.75Zm5.5 0c-.41 0-.75-.34-.75-.75s.34-.75.75-.75.75.34.75.75-.34.75-.75.75Zm.87-5.5-1.41-4a.763.763 0 0 0-.43-.45.787.787 0 0 0-.62.02L8 2.65l-1.16-.58a.764.764 0 0 0-1.05.43l-1.41 4H2V8h12V6.5h-2.38Zm-5.65 0 .95-2.7.74.37c.21.11.46.11.67 0l.74-.37.95 2.7H5.97Z"/>"#;
+const SEAM_WINDOW: &str = r#"<path d="M13 1 3 1a2 2 0 0 0-2 2l0 9a2 2 0 0 0 2 2l10 0a2 2 0 0 0 2-2l0-9a2 2 0 0 0-2-2zM2.85 2.25l10.3 0 .6.6 0 2.15-11.5 0 0-2.15.6-.6zm10.3 10.5-10.3 0-.6-.6 0-5.9 11.5 0 0 5.9-.6.6z"/>"#;
+const MASK: &str = r#"<path d="M15.931 5.479c-1.525-2.001-4.517-2.257-6.381-.545l-1.043.958-1.02 0-1.042-.958C4.581 3.223 1.589 3.478.064 5.479c-.197.78.108 3.66.28 4.113.347 1.83 1.842 3.206 3.635 3.206.895 0 1.706-.357 2.347-.929l.391-.334a1.936 1.936 0 0 1 2.511-.021l.586.486 0-.003c.617.497 1.375.801 2.203.801 1.792 0 3.288-1.376 3.635-3.206.172-.453.488-3.321.279-4.113zM6.232 8.452c-.427.482-1.088.792-1.832.792-.744 0-1.405-.31-1.832-.792a.693.693 0 0 1 0-.905c.427-.482 1.088-.792 1.832-.792.744 0 1.405.31 1.832.792a.693.693 0 0 1 0 .905zm7.2 0c-.427.482-1.088.792-1.832.792-.744 0-1.405-.31-1.832-.792a.693.693 0 0 1 0-.905c.427-.482 1.088-.792 1.832-.792.744 0 1.405.31 1.832.792a.693.693 0 0 1 0 .905z"/>"#;
+
+/// Every symbol an action can wear, in the order of their texture layers:
+/// a filled path of the apps', or one of Golem's own strokes by its name in
+/// `glyphs::GLYPHS`.
+const SYMBOLS: [(&str, Symbol); 9] = [
+    ("window", Symbol::Filled(CHROME_WINDOW)),
+    ("incognito", Symbol::Filled(INCOGNITO)),
+    ("seam-window", Symbol::Filled(SEAM_WINDOW)),
+    ("mask", Symbol::Filled(MASK)),
+    ("trash", Symbol::Stroke("trash")),
+    ("home", Symbol::Stroke("home")),
+    ("computer", Symbol::Stroke("pc")),
+    ("terminal", Symbol::Stroke("term")),
+    ("open", Symbol::Stroke("open")),
+];
+
+#[derive(Clone, Copy)]
+enum Symbol {
+    Filled(&'static str),
+    Stroke(&'static str),
+}
+
+impl Symbol {
+    fn svg(self) -> Option<String> {
+        let body = match self {
+            Symbol::Filled(body) => {
+                return Some(format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="-2 -2 20 20" fill="#fff">{body}</svg>"##
+                ))
+            }
+            Symbol::Stroke(name) => crate::glyphs::GLYPHS.iter().find(|(n, _)| *n == name)?.1,
+        };
+        Some(format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="-2 -2 20 20" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"##
+        ))
+    }
+}
+
+/// The symbols' tiles, one texture layer each in `SYMBOLS`' order (put
+/// after the entries' icons as the dock's other figures are).
+pub(crate) fn figures() -> Option<Vec<Vec<u8>>> {
+    SYMBOLS.iter().map(|(_, s)| apps::svg_figure(&s.svg()?)).collect()
+}
+
+/// Which symbol an action of `app` wears, by its id and name in its desktop
+/// file: the browsers' own for a new window and a private one, then by what
+/// it says, else the open arrow.
+fn symbol_for(app: &str, id: &str, name: &str) -> usize {
+    let (app, said) = (app.to_lowercase(), format!("{} {}", id.to_lowercase(), name.to_lowercase()));
+    let seam = app.contains("seam") || app.contains("firefox");
+    let named = |what: &str| SYMBOLS.iter().position(|(n, _)| *n == what).unwrap_or(SYMBOLS.len() - 1);
+    let says = |words: &[&str]| words.iter().any(|w| said.contains(w));
+    if says(&["private", "incognito", "privad", "incógnito"]) {
+        return named(if seam { "mask" } else { "incognito" });
+    }
+    if says(&["window", "ventana"]) {
+        return named(if seam { "seam-window" } else { "window" });
+    }
+    let by_word = [
+        ("home", "home"),
+        ("trash", "trash"),
+        ("papelera", "trash"),
+        ("computer", "computer"),
+        ("equipo", "computer"),
+        ("terminal", "terminal"),
+    ];
+    by_word
+        .iter()
+        .find(|(w, _)| said.contains(w))
+        .map_or(named("open"), |(_, s)| named(s))
+}
+
+/// A name on two lines under its tile, broken between WORDS: as many as
+/// fit on the first, the rest on the second (cut with "…" if still too
+/// long); a first word too long for the line is broken as Files breaks a
+/// name (`filer::two_lines`).
+fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (String, String) {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let fits = |n: usize, measure: &mut dyn FnMut(&str) -> f32| measure(&words[..n].join(" ")) <= room - crate::desktop::FIT_SLACK;
+    let mut n = 0;
+    while n < words.len() && fits(n + 1, measure) {
+        n += 1;
+    }
+    if n == 0 || n == words.len() {
+        return crate::filer::two_lines(text, room, measure);
+    }
+    (words[..n].join(" "), crate::desktop::fit_label(&words[n..].join(" "), room, measure))
+}
+
+/// What an action does.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Does {
     /// One of the app's desktop actions: its command.
     Run(String),
-    /// Take the app away; `asked` is what it says while asking to be sure,
-    /// and `short` where that does not fit — each with its words' width.
-    Uninstall { asked: (String, f32), short: (String, f32) },
+    /// Take the app away.
+    Uninstall,
 }
 
-/// One pill beside the lone app.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Pill {
-    pub label: String,
-    /// Its words' shaped width at the pill font.
-    pub w: f32,
+/// One of the lone app's actions.
+#[derive(Debug, Clone)]
+pub(crate) struct Action {
+    /// Its name, as its cell says it.
+    pub name: String,
     pub does: Does,
+    /// Its symbol (an index of `SYMBOLS`).
+    pub symbol: usize,
 }
 
-impl Pill {
-    /// Its words and their width as drawn now (`armed`: Uninstall asking —
-    /// its whole sentence where the pill, `pad` round its words, has `room`,
-    /// else the short one).
-    pub(crate) fn shown(&self, armed: bool, room: f32, pad: f32) -> (&str, f32) {
-        match &self.does {
-            Does::Uninstall { asked, short } if armed => {
-                let (text, w) = if asked.1 + pad <= room { asked } else { short };
-                (text, *w)
-            }
-            _ => (&self.label, self.w),
-        }
-    }
-
-    pub(crate) fn uninstalls(&self) -> bool {
-        matches!(self.does, Does::Uninstall { .. })
-    }
-}
-
-/// The lone app's pills and where the keys and the asking stand.
+/// The lone app's actions, the cells they stand in, and the asking.
 #[derive(Debug, Default)]
 pub(crate) struct Actions {
-    /// The app they are of (its desktop id); `None` with no pills.
+    /// The app they are of (its desktop id).
     pub app: Option<String>,
-    pub pills: Vec<Pill>,
-    /// Each pill's eased hover (the System row's `control_lift`).
-    pub lift: Vec<f32>,
-    /// The pill the keys are on; `None` = the app itself.
-    pub key: Option<usize>,
+    pub list: Vec<Action>,
+    /// The entry each action's cell is, this refilter (`list` order).
+    pub cells: Vec<usize>,
     /// Since when Uninstall has been asking to be sure.
     pub armed: Option<Instant>,
 }
 
 impl Actions {
-    /// The Uninstall pill's index, when there is one.
-    pub(crate) fn uninstall(&self) -> Option<usize> {
-        self.pills.iter().position(Pill::uninstalls)
+    /// The Uninstall action's place in `list`.
+    fn uninstall(&self) -> Option<usize> {
+        self.list.iter().position(|a| a.does == Does::Uninstall)
     }
-
-    /// Whether pill `i` is Uninstall asking to be sure.
-    pub(crate) fn asking(&self, i: usize) -> bool {
-        self.armed.is_some() && self.uninstall() == Some(i)
-    }
-}
-
-/// The gap before a pill: Uninstall's (`apart`) is wider when a pill
-/// stands before it (`first`: none does).
-fn gap_before(apart: bool, first: bool, gap: f32) -> f32 {
-    if apart && !first {
-        APART * gap
-    } else {
-        gap
-    }
-}
-
-/// Which pills of `widths` (Uninstall's flagged in `apart`) a `room` this
-/// wide holds, beside their app: the app's own actions give way from the
-/// last, Uninstall last of all. Returns the kept indices and their span
-/// (each with the gap before it).
-pub(crate) fn fitting(widths: &[f32], apart: &[bool], gap: f32, room: f32) -> (Vec<usize>, f32) {
-    let span = |kept: &[usize]| -> f32 {
-        kept.iter()
-            .enumerate()
-            .map(|(k, &i)| widths[i] + gap_before(apart[i], k == 0, gap))
-            .sum()
-    };
-    let mut kept: Vec<usize> = (0..widths.len()).collect();
-    while !kept.is_empty() && span(&kept) > room {
-        let k = kept.iter().rposition(|&i| !apart[i]).unwrap_or(kept.len() - 1);
-        kept.remove(k);
-    }
-    let total = span(&kept);
-    (kept, total)
 }
 
 impl App {
-    /// The one app a search leaves, while the box searches (not the resting
-    /// grid, not the control panel).
-    fn lone_app(&self) -> Option<usize> {
-        if self.control_panel || self.search.query.is_empty() || self.grid_resting() {
-            return None;
-        }
-        match self.search.visible[content::SECTION_APPS].as_slice() {
-            &[only] => Some(only),
-            _ => None,
-        }
-    }
-
     /// Whether the dock can uninstall `id`: a package it installed, or an
     /// installed webapp — as `uninstall_app` does them; nothing busy.
     pub(crate) fn can_uninstall(&self, id: &str) -> bool {
@@ -147,211 +189,178 @@ impl App {
                 || self.installed_webapp_slug(id).is_some())
     }
 
-    /// Make the lone app's pills again (every `refilter`). The same app keeps
-    /// where the keys were and its asking; another app starts afresh.
-    pub(crate) fn sync_app_actions(&mut self) {
-        let Some(entry) = self.lone_app().and_then(|i| self.entries.get(i)) else {
+    /// The action entry `index` is, as its place in the list.
+    pub(crate) fn action_of(&self, index: usize) -> Option<usize> {
+        self.entries.get(index)?.id.strip_prefix(PREFIX)?.parse().ok()
+    }
+
+    /// After a search's Apps are ranked (`refilter`): when they are ONE app,
+    /// its actions follow it in the row as cells of their own. The same app
+    /// keeps its asking; another starts afresh.
+    pub(crate) fn add_action_cells(&mut self, apps: &mut Vec<usize>, resting: bool) {
+        let lone = match apps.as_slice() {
+            &[only] if !resting && !self.control_panel && !self.search.query.is_empty() => Some(only),
+            _ => None,
+        };
+        let Some((index, entry)) = lone.and_then(|i| Some((i, self.entries.get(i)?.clone()))) else {
             self.search.actions = Actions::default();
             return;
         };
-        let (id, name) = (entry.id.clone(), entry.name.clone());
-        let mut made: Vec<(String, Does)> = entry
+        let mut list: Vec<Action> = entry
             .path
             .as_deref()
             .map(waverunner_core::index::desktop_actions)
             .unwrap_or_default()
             .into_iter()
-            .map(|a| (a.name, Does::Run(a.exec)))
+            .map(|a| Action { symbol: symbol_for(&entry.id, &a.id, &a.name), name: a.name, does: Does::Run(a.exec) })
             .collect();
-        if self.can_uninstall(&id) {
-            let asked = (fill(tr("Uninstall {app}? Again to confirm"), &[("app", &name)]), 0.0);
-            let short = (tr("Again to uninstall").to_string(), 0.0);
-            made.push((fill(tr("Uninstall {app}"), &[("app", &name)]), Does::Uninstall { asked, short }));
+        if self.can_uninstall(&entry.id) {
+            list.push(Action {
+                name: fill(tr("Uninstall {app}"), &[("app", &entry.name)]),
+                does: Does::Uninstall,
+                symbol: SYMBOLS.iter().position(|(n, _)| *n == "trash").unwrap_or(0),
+            });
         }
-        // The System row's type: the control panel's near layer.
-        let font = options::FONT_PX * self.options_scale() * panel::LAYER_SCALE[0];
-        let mut measure = |text: &str| match self.renderer.as_mut() {
-            Some(r) => r.measure_text(text, font, options::TEXT_FONT),
-            None => options::est_text_w(text, font),
-        };
-        let pills: Vec<Pill> = made
-            .into_iter()
-            .map(|(label, does)| {
-                let does = match does {
-                    Does::Uninstall { asked: (a, _), short: (b, _) } => {
-                        let (wa, wb) = (measure(&a), measure(&b));
-                        Does::Uninstall { asked: (a, wa), short: (b, wb) }
-                    }
-                    run => run,
-                };
-                Pill { w: measure(&label), label, does }
-            })
-            .collect();
-        let old = std::mem::take(&mut self.search.actions);
-        let same = old.app.as_deref() == Some(id.as_str()) && old.pills.len() == pills.len();
-        self.search.actions = Actions {
-            app: (!pills.is_empty()).then_some(id),
-            lift: if same { old.lift } else { vec![0.0; pills.len()] },
-            key: old.key.filter(|_| same),
-            armed: old.armed.filter(|_| same),
-            pills,
-        };
+        let same = self.search.actions.app.as_deref() == Some(entry.id.as_str());
+        let armed = self.search.actions.armed.filter(|_| same);
+        self.search.actions = Actions { app: Some(entry.id.clone()), list, cells: Vec::new(), armed };
+        let (placeholder, layer) = (
+            self.placeholders.get(index).copied().unwrap_or(false),
+            self.icon_layers.get(index).copied().unwrap_or(index as u32),
+        );
+        for n in 0..self.search.actions.list.len() {
+            let name = self.action_label(n);
+            let exec = match &self.search.actions.list[n].does {
+                Does::Run(exec) => exec.clone(),
+                Does::Uninstall => String::new(),
+            };
+            let cell = AppEntry {
+                id: format!("{PREFIX}{n}"),
+                name,
+                description: None,
+                exec,
+                icon: entry.icon.clone(),
+                startup_wm_class: None,
+                needs_terminal: entry.needs_terminal,
+                path: None,
+            };
+            let at = self.push_transient(cell, apps::EntryKind::App, placeholder, layer);
+            self.search.actions.cells.push(at);
+            apps.push(at);
+        }
     }
 
-    /// Place the lone app's pills (`layout_stretched`): the app steps left
-    /// by half of what its pills take, so the two stand centred together
-    /// under the title, and the pills sit beside its icon, centred on it.
-    /// While Uninstall asks it stands there alone. Not beside a side dock
-    /// (its Apps are one column).
-    pub(crate) fn place_app_actions(&self, layout: &mut content::Layout, gap: f32) {
+    /// What action `n`'s cell says: its name — Uninstall asking, "Again to
+    /// uninstall" — on up to two lines (a `\n` between them), broken where
+    /// the grid's label has room.
+    fn action_label(&mut self, n: usize) -> String {
         let a = &self.search.actions;
-        let sec = &mut layout.sections[content::SECTION_APPS];
-        if a.pills.is_empty() || sec.cells != 1 || sec.vertical || !sec.centre_rows {
-            return;
-        }
-        let scale = self.icon_scale();
-        let h = self.controls_pill_h();
-        let pad = 2.0 * options::PILL_PAD_X * self.options_scale() * panel::LAYER_SCALE[0];
-        let cell_w = sec.viewport.w / sec.cols.max(1) as f32;
-        // What the app leaves beside it in the grid's width.
-        let room = sec.viewport.w - cell_w;
-        let width = |i: usize| (a.pills[i].shown(a.asking(i), room - gap, pad).1 + pad).max(h);
-        let widths: Vec<f32> = (0..a.pills.len()).map(width).collect();
-        let apart: Vec<bool> = a.pills.iter().map(Pill::uninstalls).collect();
-        let (kept, span) = match a.uninstall().filter(|_| a.armed.is_some()) {
-            Some(u) => (vec![u], gap + widths[u].min(room - gap)),
-            None => fitting(&widths, &apart, gap, room),
+        let Some(action) = a.list.get(n) else {
+            return String::new();
         };
-        if kept.is_empty() {
-            return;
+        let text = if action.does == Does::Uninstall && a.armed.is_some() {
+            tr("Again to uninstall").to_string()
+        } else {
+            action.name.clone()
+        };
+        let layout = self.layout_at(self.ui.extent_of(crate::state::Target::Open));
+        let sec = &layout.sections[content::SECTION_APPS];
+        let room = sec.viewport.w / sec.cols.max(1) as f32 - 12.0;
+        let mut measure = |s: &str| match self.renderer.as_mut() {
+            Some(r) => r.measure_text(s, content::LABEL_FONT_PX, None),
+            None => crate::options::est_text_w(s, content::LABEL_FONT_PX),
+        };
+        let (first, second) = by_words(&text, room, &mut measure);
+        if second.is_empty() {
+            first
+        } else {
+            format!("{first}\n{second}")
         }
-        sec.lead = span / 2.0;
-        let mut x = sec.viewport.x + sec.row_shift(0) + cell_w;
-        let y = sec.viewport.y + (content::GRID_ICON_TOP + content::GRID_ICON / 2.0) * scale - h / 2.0;
-        let mut rects = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); a.pills.len()];
-        for (k, &i) in kept.iter().enumerate() {
-            x += gap_before(apart[i], k == 0, gap);
-            // (Never past the grid's edge: a sentence too long is cut there.)
-            let w = widths[i].min(sec.viewport.x + sec.viewport.w - x);
-            rects[i] = content::Rect::new(x, y, w, h);
-            x += w;
-        }
-        layout.app_actions = rects;
     }
 
-    /// Whether the keys can step onto the lone app's pills from where they
-    /// are: on the app itself, with pills placed beside it.
-    pub(crate) fn actions_reachable(&self) -> bool {
-        self.search.selected == Some(0)
-            && self.lone_app().is_some()
-            && self.current_layout().app_actions.iter().any(|r| r.w > 0.0)
-    }
-
-    /// The keys step `dir` (+1 right / Tab, -1 left / Shift+Tab) along the
-    /// app and its placed pills; `wrap` goes round (Tab). Returns whether
-    /// the step was theirs.
-    pub(crate) fn actions_step(&mut self, dir: i32, wrap: bool) -> bool {
-        if !self.actions_reachable() {
-            return false;
+    /// Write the actions' names into their cells again (the asking came or
+    /// went).
+    fn relabel_actions(&mut self) {
+        for n in 0..self.search.actions.cells.len() {
+            let name = self.action_label(n);
+            if let Some(entry) = self.search.actions.cells.get(n).and_then(|&i| self.entries.get_mut(i)) {
+                entry.name = name;
+            }
         }
-        let placed: Vec<usize> = self
-            .current_layout()
-            .app_actions
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.w > 0.0)
-            .map(|(i, _)| i)
-            .collect();
-        // 0 = the app, k = the k-th placed pill.
-        let n = placed.len() as i32 + 1;
-        let at = self.search.actions.key.and_then(|k| placed.iter().position(|&p| p == k)).map_or(0, |p| p as i32 + 1);
-        let to = if wrap { (at + dir).rem_euclid(n) } else { (at + dir).clamp(0, n - 1) };
-        if to == at && !wrap {
-            // ← on the app is the grid's own (its selection stays put).
-            return to != 0 || dir > 0;
-        }
-        self.search.actions.key = (to > 0).then(|| placed[to as usize - 1]);
-        self.actions_settle();
         self.schedule_frame();
-        true
     }
 
-    /// The dock box's keys, first, while the lone app has pills: → / ← and
-    /// Tab / Shift+Tab walk the app and its pills, Enter runs the pill the
-    /// keys are on, Escape puts an asking Uninstall back (the next Escape
-    /// is the box's), ↑ / ↓ leave the pills for the grid's walk. Returns
-    /// whether the key was theirs.
+    /// What the frame draws of them: each action cell's entry with its
+    /// symbol's texture layer, and the cell asking to be sure.
+    pub(crate) fn action_draw(&self) -> (Vec<(usize, u32)>, Option<usize>) {
+        let a = &self.search.actions;
+        let Some(base) = self.act_symbol_layer else {
+            return (Vec::new(), None);
+        };
+        let cells = a.cells.iter().zip(&a.list).map(|(&e, act)| (e, base + act.symbol as u32)).collect();
+        let asking = a.uninstall().filter(|_| a.armed.is_some()).and_then(|u| a.cells.get(u).copied());
+        (cells, asking)
+    }
+
+    /// Escape puts an asking Uninstall back (the next Escape is the box's).
     pub(crate) fn app_actions_key(&mut self, keysym: Keysym) -> bool {
-        if self.search.actions.pills.is_empty() {
-            return false;
+        if keysym == Keysym::Escape && self.search.actions.armed.is_some() {
+            self.actions_disarm();
+            return true;
         }
-        match keysym {
-            Keysym::Escape if self.search.actions.armed.is_some() => {
-                self.actions_disarm();
-                true
-            }
-            Keysym::Right => self.actions_step(1, false),
-            Keysym::Left => self.actions_step(-1, false),
-            Keysym::Tab => self.actions_step(if self.modifiers.shift { -1 } else { 1 }, true),
-            Keysym::ISO_Left_Tab => self.actions_step(-1, true),
-            Keysym::Return | Keysym::KP_Enter => match self.search.actions.key {
-                Some(i) if self.actions_reachable() => {
-                    self.run_app_action(i);
-                    true
-                }
-                _ => false,
-            },
-            Keysym::Up | Keysym::Down => {
-                self.search.actions.key = None;
-                self.actions_settle();
-                false
-            }
-            _ => false,
-        }
+        false
     }
 
-    /// Put Uninstall back once neither the keys nor the pointer are on it.
+    /// Put Uninstall back once neither the keys nor the pointer are on its
+    /// cell (every frame of the box).
     pub(crate) fn actions_settle(&mut self) {
         let a = &self.search.actions;
         let Some(u) = a.uninstall().filter(|_| a.armed.is_some()) else {
             return;
         };
-        if a.key != Some(u) && self.hover != Some(content::Hit::AppAction(u)) {
+        let Some(&entry) = a.cells.get(u) else {
+            return;
+        };
+        let at = self.search.visible[content::SECTION_APPS].iter().position(|&e| e == entry);
+        let keys_on = at.is_some() && self.search.selected == at;
+        let pointer_on = at.is_some_and(|i| self.hover == Some(content::Hit::GridCell(content::SECTION_APPS, i)));
+        if !keys_on && !pointer_on {
             self.actions_disarm();
         }
     }
 
     /// Uninstall stops asking.
-    pub(crate) fn actions_disarm(&mut self) {
+    fn actions_disarm(&mut self) {
         if self.search.actions.armed.take().is_some() {
-            self.schedule_frame();
+            self.relabel_actions();
         }
     }
 
-    /// Run pill `i`: an action starts and the box goes; Uninstall asks, and
-    /// uninstalls when asked again.
-    pub(crate) fn run_app_action(&mut self, i: usize) {
-        let Some(pill) = self.search.actions.pills.get(i).cloned() else {
+    /// Run action `n`: a command starts and the box goes; Uninstall asks,
+    /// and uninstalls when asked again.
+    pub(crate) fn run_app_action(&mut self, n: usize) {
+        let Some(action) = self.search.actions.list.get(n).cloned() else {
             return;
         };
-        let Some(index) = self.lone_app() else {
+        let Some(app) = self.search.actions.app.clone() else {
             return;
         };
-        let Some(entry) = self.entries.get(index) else {
+        let Some(index) = self.entries.iter().position(|e| e.id == app) else {
             return;
         };
-        let (id, needs_terminal) = (entry.id.clone(), entry.needs_terminal);
-        match pill.does {
+        let needs_terminal = self.entries[index].needs_terminal;
+        match action.does {
             Does::Run(exec) => {
-                info!("app action {:?} of {id}", pill.label);
-                let exec = self.gpu_exec(&id, exec);
+                info!("app action {:?} of {app}", action.name);
+                let exec = self.gpu_exec(&app, exec);
                 if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
-                    error!("app action failed for {id}: {e:#}");
+                    error!("app action failed for {app}: {e:#}");
                 }
                 self.launched(index);
             }
-            Does::Uninstall { .. } if self.search.actions.armed.is_none() => {
+            Does::Uninstall if self.search.actions.armed.is_none() => {
                 self.search.actions.armed = Some(Instant::now());
+                self.relabel_actions();
                 let timer = Timer::from_duration(ARM_FOR);
                 if let Err(e) = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
                     if app.search.actions.armed.is_some_and(|t| t.elapsed() >= ARM_FOR) {
@@ -361,13 +370,11 @@ impl App {
                 }) {
                     warn!("failed to arm the uninstall's wait: {e}");
                 }
-                self.schedule_frame();
             }
-            Does::Uninstall { .. } => {
+            Does::Uninstall => {
                 self.search.actions.armed = None;
-                self.search.actions.key = None;
-                if self.uninstall_app(&id) {
-                    info!("uninstalling {id} from its search");
+                if self.uninstall_app(&app) {
+                    info!("uninstalling {app} from its search");
                 }
                 self.refilter();
                 self.schedule_frame();
@@ -381,32 +388,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_apps_own_actions_give_way_before_uninstall() {
-        let widths = [100.0, 160.0, 140.0];
-        let apart = [false, false, true];
-        // Room for all: each with its gap, Uninstall's wider.
-        let (kept, span) = fitting(&widths, &apart, 10.0, 1000.0);
-        assert_eq!(kept, vec![0, 1, 2]);
-        assert!((span - (100.0 + 160.0 + 140.0 + 10.0 + 10.0 + 25.0)).abs() < 0.01);
-        // Too narrow for all three: the last action goes, Uninstall stays.
-        let (kept, _) = fitting(&widths, &apart, 10.0, 300.0);
-        assert_eq!(kept, vec![0, 2]);
-        // Too narrow for any action: Uninstall alone, then nothing.
-        assert_eq!(fitting(&widths, &apart, 10.0, 170.0).0, vec![2]);
-        assert!(fitting(&widths, &apart, 10.0, 100.0).0.is_empty());
-        // Alone (an app with no actions of its own), it is not set apart.
-        assert!((fitting(&[140.0], &[true], 10.0, 1000.0).1 - 150.0).abs() < 0.01);
+    fn each_action_wears_its_apps_own_symbol_or_one_by_what_it_says() {
+        let of = |app: &str, id: &str, name: &str| SYMBOLS[symbol_for(app, id, name)].0;
+        assert_eq!(of("google-chrome", "new-private-window", "New Incognito Window"), "incognito");
+        assert_eq!(of("google-chrome", "new-window", "New Window"), "window");
+        assert_eq!(of("seam", "new-private-window", "New Private Window"), "mask");
+        assert_eq!(of("seam", "new-window", "Nueva ventana"), "seam-window");
+        assert_eq!(of("code", "new-empty-window", "New Empty Window"), "window");
+        assert_eq!(of("thunar", "open-home", "Home"), "home");
+        assert_eq!(of("thunar", "open-computer", "Computer"), "computer");
+        assert_eq!(of("thunar", "open-trash", "Trash"), "trash");
+        assert_eq!(of("Alacritty", "New", "New Terminal"), "terminal");
+        assert_eq!(of("org.inkscape.Inkscape", "new-drawing", "New Drawing"), "open");
     }
 
     #[test]
-    fn uninstall_asks_in_a_sentence_where_it_fits_else_in_short() {
-        let pill = Pill {
-            label: "Uninstall Zeta".into(),
-            w: 100.0,
-            does: Does::Uninstall { asked: ("Uninstall Zeta? Again to confirm".into(), 250.0), short: ("Again to uninstall".into(), 120.0) },
-        };
-        assert_eq!(pill.shown(false, 50.0, 20.0).0, "Uninstall Zeta");
-        assert_eq!(pill.shown(true, 270.0, 20.0).0, "Uninstall Zeta? Again to confirm");
-        assert_eq!(pill.shown(true, 269.0, 20.0), ("Again to uninstall", 120.0));
+    fn a_name_breaks_between_words() {
+        // Ten pixels a letter, spaces too.
+        let mut w = |s: &str| s.chars().count() as f32 * 10.0;
+        let room = 140.0 + crate::desktop::FIT_SLACK;
+        assert_eq!(by_words("New Window", room, &mut w), ("New Window".into(), String::new()));
+        assert_eq!(by_words("New Incognito Window", room, &mut w), ("New Incognito".into(), "Window".into()));
+        assert_eq!(by_words("Uninstall Google Chrome", room, &mut w), ("Uninstall".into(), "Google Chrome".into()));
+    }
+
+    #[test]
+    fn every_symbol_is_drawn() {
+        for (name, s) in SYMBOLS {
+            let svg = s.svg().unwrap_or_else(|| panic!("{name} has no symbol"));
+            assert!(apps::svg_figure(&svg).is_some(), "{name} does not draw");
+        }
     }
 }

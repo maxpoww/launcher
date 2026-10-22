@@ -196,8 +196,6 @@ impl App {
         for sec in &mut layout.sections {
             sec.centre_rows = centre_rows;
         }
-        // One app left: its pills beside it, the two centred together.
-        self.place_app_actions(&mut layout, CONTROLS_GAP * self.options_scale());
         // The System row: the matching settings and modules as near-layer
         // pills, split about the title's centre (see `content::controls_rects`).
         // As many as the row's width holds, in their order: one too wide for
@@ -613,19 +611,8 @@ impl App {
                 *l = want;
             }
         }
-        // …and the lone app's, lifted under the pointer or the keys; an
-        // asking Uninstall left by both is put back.
+        // An asking Uninstall the keys and the pointer have left is put back.
         self.actions_settle();
-        let (hover, key) = (self.hover, self.search.actions.key);
-        for (i, l) in self.search.actions.lift.iter_mut().enumerate() {
-            let want = if hover == Some(content::Hit::AppAction(i)) || key == Some(i) { 1.0 } else { 0.0 };
-            if (*l - want).abs() > 0.002 {
-                *l += (want - *l) * rate;
-                lift_animating = true;
-            } else {
-                *l = want;
-            }
-        }
         self.search.lift = if lift_animating {
             self.search.lift + (lift_target - self.search.lift) * (1.0 - (-dt * crate::panel::LIFT_RATE).exp())
         } else {
@@ -1691,6 +1678,8 @@ impl App {
             line_px: fast_geo.line_px,
             ink: self.fast_backdrop.map(crate::options::ink_on).unwrap_or(dock_ink),
         });
+        // The lone app's action cells (`app_actions.rs`).
+        let (act_cells, act_asking) = self.action_draw();
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -1711,9 +1700,8 @@ impl App {
                 quick: quick_draw,
                 controls: &self.search.controls,
                 control_lift: &self.search.control_lift,
-                actions: &self.search.actions.pills,
-                action_lift: &self.search.actions.lift,
-                asking: self.search.actions.uninstall().filter(|_| self.search.actions.armed.is_some()),
+                act_cells: &act_cells,
+                act_asking,
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
@@ -1728,12 +1716,7 @@ impl App {
                 bounce,
                 dock_hop,
                 query: &self.search.query,
-                // (The keys on one of the lone app's pills: it is lit, not the app.)
-                selected: self
-                    .search
-                    .selected
-                    .filter(|_| self.search.actions.key.is_none())
-                    .and_then(|i| self.flat_to_pos(i)),
+                selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
                 kinds: &self.kinds,

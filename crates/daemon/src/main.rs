@@ -912,6 +912,7 @@ fn main() -> anyhow::Result<()> {
         pkg_layer_base: 0,
         bin_layer: 0,
         files_layer: None,
+        act_symbol_layer: None,
         apps_stencil: None,
         pkg_state: PkgIndexState::Loading,
         pkg_load_kicked: false,
@@ -2109,6 +2110,9 @@ pub struct App {
     bin_layer: u32,
     /// First of Golem Files' four launcher layers (`files_icon`), once drawn.
     files_layer: Option<u32>,
+    /// The first texture layer of the lone app's action symbols, in
+    /// `app_actions::SYMBOLS` order (`app_actions::figures`).
+    act_symbol_layer: Option<u32>,
     /// The apps button's stencil layer (`apps_icon::stencil_svg`).
     apps_stencil: Option<u32>,
     /// Whether the package index is usable yet (drives the Install hint).
@@ -4709,6 +4713,12 @@ impl App {
             icons.extend(figs);
             first
         });
+        // The symbols of a lone app's actions (`app_actions.rs`).
+        self.act_symbol_layer = app_actions::figures().map(|figs| {
+            let first = icons.len() as u32;
+            icons.extend(figs);
+            first
+        });
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
             Some(renderer) => {
@@ -5018,6 +5028,9 @@ impl App {
             // (everything but dotfiles).
             visible[content::SECTION_FILES] = self.home_listing();
         }
+        // One app left in a search: its actions follow it as cells of their
+        // own (`app_actions.rs`).
+        self.add_action_cells(&mut visible[content::SECTION_APPS], resting_grid);
         // Pinned filesystem paths render on the dock through transient
         // entries; an open directory stack lists its contents the same way.
         self.pinned_path_entries();
@@ -5064,8 +5077,6 @@ impl App {
             })
             .collect();
         self.search.control_lift = vec![0.0; self.search.controls.len()];
-        // One app left: its own actions (and Uninstall) beside it.
-        self.sync_app_actions();
         // Search results are a flat ranked list: dense identity slots. (A
         // resting grid keeps the paged slots built just above.)
         if !resting_grid {
@@ -5224,7 +5235,8 @@ impl App {
     }
 
     fn app_match_keys(entry: &AppEntry, kind: apps::EntryKind) -> Vec<String> {
-        if kind != apps::EntryKind::App {
+        // (A lone app's action cell is never a running window's.)
+        if kind != apps::EntryKind::App || entry.id.starts_with(app_actions::PREFIX) {
             return Vec::new();
         }
         let mut keys: Vec<String> = Vec::new();
@@ -5882,7 +5894,6 @@ impl App {
                     self.activate(entry_idx, LaunchFrom::Box);
                 }
             }
-            Hit::AppAction(i) => self.run_app_action(i),
             Hit::Control(i) => {
                 if let Some(&(label, _)) = self.search.controls.get(i) {
                     if self.search.control_modules.get(i).copied().unwrap_or(false) {
@@ -5996,6 +6007,11 @@ impl App {
     /// feedback), then the card gets out of the way. `from` decides what a
     /// running app means — see [`LaunchFrom`].
     fn activate(&mut self, index: usize, from: LaunchFrom) {
+        // One of the lone app's actions (`app_actions.rs`).
+        if let Some(n) = self.action_of(index) {
+            self.run_app_action(n);
+            return;
+        }
         let Some(entry) = self.entries.get(index) else {
             return;
         };
@@ -7924,7 +7940,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     Hit::GridCell(s, cell) => {
                                         app.search.visible[s].get(cell).copied()
                                     }
-                                    Hit::SearchButton | Hit::OpenBoxCell(_) | Hit::Control(_) | Hit::AppAction(_) => None,
+                                    Hit::SearchButton | Hit::OpenBoxCell(_) | Hit::Control(_) => None,
                                 };
                                 // Busy cells (a profile mutation in
                                 // flight) never start a drag; neither do
@@ -7934,6 +7950,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                     app.entries.get(i).is_some_and(|e| {
                                         app.busy_ids.contains(&e.id)
                                             || e.id.starts_with("min:")
+                                            || e.id.starts_with(app_actions::PREFIX)
                                             || apps::is_dock_fixed(&e.id)
                                     })
                                 });
