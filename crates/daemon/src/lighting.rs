@@ -50,13 +50,23 @@ use crate::App;
 /// the LINE (docs/colours-model.md) also has the Light look by day: see [`line`].
 pub(crate) const DAY: u8 = 50;
 pub(crate) const NIGHT: u8 = 20;
-/// The leap over the gap between the looks, in a fade that crosses it.
-const GAP: Duration = Duration::from_secs(2);
+/// The leap over the gap between the looks, in a fade that crosses it: the
+/// shell's two looks crossfade this long.
+const GAP: Duration = Duration::from_secs(8);
+/// DUSK (Max, 2026-10-22: "the sunset does not last 20 seconds, it should be
+/// smooth during 20 min, stronger than during the day… i dont want jumps at
+/// all"): in its last degrees above the horizon the light goes on down to
+/// its floor (Light 0), and in its first below it the dark starts from its
+/// lightest (Dark 100) — the two looks at their nearest where they meet, the
+/// darkening stronger than the day's on both sides: ~12 min above, ~25 below
+/// at this latitude.
+const DUSK_ABOVE: f64 = 2.5;
+const DUSK_BELOW: f64 = 5.0;
 /// The sun is looked at this often (seconds): tiny steps, never a jump
 /// (Max, 2026-10-20: "slow and smooth all the time"; 2026-10-21: "no jumps
 /// at all" — ten minutes let a step grow to three or more points, which the
 /// apps took in one frame).
-const SLOT_SECS: i64 = 120;
+const SLOT_SECS: i64 = 60;
 /// THE HOLD: the apps' look — the one step other people's programs cannot
 /// fade — stays the old one through the dock's fade across the looks and
 /// turns under the slow dissolve at its end. Should that never come (a
@@ -100,25 +110,25 @@ fn smoothstep(x: f64) -> f64 {
 
 /// THE SUN'S LINE: the Lighting the sun asks for, as the box's one line
 /// (`palette::line_of`, both looks). The Light look from the horizon up — one
-/// even slope through the afternoon, Light 15 at 0°, as designed near +25°,
-/// Light 60 from +45° (Max, 2026-10-21: "slightly stronger during the
-/// afternoon, we don't want a massive jump at 19"; it was flat at 50 down to
-/// +6° and then fell 35 in half an hour) — and the Dark look below it: Dark
-/// 60 at the horizon down to Dark 20 past −12° (the end of nautical
-/// twilight). The flip is the horizon (Max, 2026-10-20: "light in the
-/// morning, dark when it gets dark, like the Auto of macOS"); the gap between
-/// the halves is what a fade leaps.
+/// even slope through the afternoon, ~Light 15 a few degrees up, as designed
+/// near +25°, Light 60 from +45° (Max, 2026-10-21: "slightly stronger during
+/// the afternoon, we don't want a massive jump at 19") — and the Dark look
+/// below it, down to Dark 20 past −12° (the end of nautical twilight). Round
+/// the horizon, DUSK: the light down to Light 0 at it, the dark from Dark 100
+/// under it (`DUSK_ABOVE`, `DUSK_BELOW`). The flip is the horizon (Max,
+/// 2026-10-20: "light in the morning, dark when it gets dark, like the Auto
+/// of macOS"); the gap between the halves is what a fade leaps.
 pub(crate) fn line(elevation_deg: f64) -> u8 {
     if !elevation_deg.is_finite() {
         return palette::line_of(true, DAY);
     }
     let e = elevation_deg;
     let light = if e >= 0.0 {
-        15.0 + 45.0 * (e.min(45.0) / 45.0 * std::f64::consts::FRAC_PI_2).sin()
+        15.0 * smoothstep(e / DUSK_ABOVE) + 45.0 * (e.min(45.0) / 45.0 * std::f64::consts::FRAC_PI_2).sin()
     } else {
-        f64::from(NIGHT) + 40.0 * smoothstep((e + 12.0) / 12.0)
+        f64::from(NIGHT) + 40.0 * smoothstep((e + 12.0) / 12.0) + 40.0 * (1.0 - smoothstep(-e / DUSK_BELOW))
     };
-    palette::line_of(e < 0.0, light.round() as u8)
+    palette::line_of(e < 0.0, light.round().min(100.0) as u8)
 }
 
 /// Eased from `from` to `to` over `span`.
@@ -986,9 +996,11 @@ mod tests {
         near(45.0, (false, 60), "a high sun: Light 60");
         near(24.5, (false, 50), "the afternoon as designed");
         near(10.0, (false, 30), "an hour before dusk: well on the way down, not all at the end");
-        near(0.0, (false, 15), "the horizon, still Light: soft");
-        near(-0.1, (true, 60), "under the horizon: Dark 60 — the flip");
-        near(-6.0, (true, 40), "dusk");
+        near(2.5, (false, 21), "dusk begins: the light goes on down, stronger");
+        near(0.0, (false, 0), "the horizon: the light at its floor");
+        near(-0.1, (true, 100), "under the horizon: the lightest dark — the two looks at their nearest");
+        near(-2.5, (true, 75), "dusk below: the dark deepening, stronger than the night's");
+        near(-6.0, (true, 40), "dusk over");
         near(-12.0, (true, 20), "the night from -12°");
         near(-20.0, (true, 20), "night");
         near(f64::NAN, (true, DAY), "no reading: Dark as designed");
@@ -1003,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fade_across_the_looks_leaps_the_gap_in_two_seconds() {
+    fn a_fade_across_the_looks_leaps_the_gap_in_its_own_time() {
         use crate::palette::{line_of, line_to};
         let (from, to) = (line_of(false, 15), line_of(true, 60)); // dusk: Light 15 -> Dark 60
         assert_eq!(fade_line(from, to, secs(0)), from);
@@ -1013,7 +1025,7 @@ mod tests {
         let mut was_light = true;
         let mut gap_ms = 0;
         let mut prev = from;
-        for ms in (0..=22_000).step_by(66) {
+        for ms in (0..=(FADE + GAP).as_millis() as u64 + 500).step_by(66) {
             let v = fade_line(from, to, Duration::from_millis(ms));
             assert!(v <= prev, "monotone");
             if in_gap(v) {
@@ -1025,7 +1037,8 @@ mod tests {
             prev = v;
         }
         assert!(!was_light, "it ends Dark");
-        assert!((1_500..=2_600).contains(&gap_ms), "the leap is about {}: {gap_ms} ms", GAP.as_millis());
+        let want = GAP.as_millis() as u64;
+        assert!((want * 3 / 4..=want + 600).contains(&gap_ms), "the leap is about {want}: {gap_ms} ms");
         // Within one look it is the plain fade.
         assert_eq!(fade_line(line_of(true, 50), line_of(true, 20), secs(10)), fade_value(line_of(true, 50), line_of(true, 20), secs(10)));
     }
