@@ -604,7 +604,10 @@ The big daemon files are cohesive but long — go straight to the function:
   a press on an unselected icon selects it alone;
   a drag of a selected icon takes the whole selection (`Drag.items`, grabbed one first;
   payload = all URIs; a drop on the desktop lands them keeping their arrangement via
-  `place_group`, on the bin trashes them all); a click on wallpaper clears, opening clears.
+  `place_group`, on the bin trashes them all); a click on wallpaper clears, opening clears, and so
+  does a RIGHT click on it (Max, 2026-10-22: "the selection should be cleared" — `desktop_open_menu`:
+  the wallpaper's menu acts on the desktop; on an icon not selected it is selected alone first, on a
+  selected one the selection stays).
   Selected items wear one soft wash (`sel_rect`, the mockup at ~/desktop-menu-mockup).
   Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n> <col> <row>|import
   <col> <row> <uri…>|select <n…>|band <x0> <y0> <x1> <y1>|forget]`; the live daemon logs
@@ -1074,7 +1077,8 @@ The big daemon files are cohesive but long — go straight to the function:
   ±2 px (`THING_SLOP`) with the strip between them, are the thing (`Thing`, `thing_in`, `Win::thing`,
   `Win::thing_at` — the cell under the pointer, the one above it and either side, for a second line or
   a wide name). The rest of a cell is the folder's ground: a press there draws a band, a right click
-  has the folder's menu, a click clears, the cursor is the arrow; the band takes what it TOUCHES of a
+  clears the selection and has the folder's menu (`filer_open_menu`; in a list, under the last row),
+  a click clears, the cursor is the arrow; the band takes what it TOUCHES of a
   picture or a name (`band_hits`, a thing per cell); a drag is let go INTO a folder only on its picture
   or name, its bare ground makes room in this folder (`filer_drag_over`'s `onto`; springs follow). The
   soft box is drawn from the same `Thing`. A LIST keeps its rows: a row is the thing (Finder's). Rig:
