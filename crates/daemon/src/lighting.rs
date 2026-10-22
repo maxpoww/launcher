@@ -70,6 +70,11 @@ const QUIET_MS: u32 = 3_000;
 /// the very instant the idle notification of the same two minutes is sent.)
 const SETTLE: Duration = Duration::from_secs(120);
 const SETTLE_GRACE: Duration = Duration::from_secs(5);
+/// BACK FROM AWAY, the first touch is the cue: the catch-up starts this long
+/// after it (Max, 2026-10-20: "when the user touches something… after 2s the
+/// change is noticed, not a jump, the light goes down like dimming a light
+/// in a room"). It waited the two minutes of settling, and then a tick.
+const RETURN_CUE: Duration = Duration::from_secs(2);
 /// How often the scheduler looks up; the fade's frame; its length.
 const TICK: Duration = Duration::from_secs(30);
 const FRAME: Duration = Duration::from_millis(66);
@@ -230,6 +235,8 @@ pub(crate) struct Plan {
     since: Option<Duration>,
     /// The clock hour last looked at. None: look at once when settled.
     last: Option<i64>,
+    /// Back from away: settled at the cue, not after the two minutes.
+    returned: bool,
 }
 
 impl Plan {
@@ -239,7 +246,8 @@ impl Plan {
             return false;
         }
         let since = *self.since.get_or_insert(f.at);
-        if f.at.saturating_sub(since) < SETTLE + SETTLE_GRACE {
+        let settle = if self.returned { RETURN_CUE } else { SETTLE + SETTLE_GRACE };
+        if f.at.saturating_sub(since) < settle {
             return false;
         }
         // Not now, but not lost: the look stays owed until the room is right.
@@ -263,12 +271,22 @@ impl Plan {
     pub(crate) fn absent(&mut self) {
         self.since = None;
         self.last = None;
+        self.returned = false;
     }
 
-    /// The owner is back at `at`: settled two minutes from now.
+    /// The owner is here at `at` (the dock has just started): settled two
+    /// minutes from now.
     pub(crate) fn back(&mut self, at: Duration) {
         self.since = Some(at);
         self.last = None;
+        self.returned = false;
+    }
+
+    /// The owner came back from away and touched something at `at`: the
+    /// look is due [`RETURN_CUE`] from now.
+    pub(crate) fn returned(&mut self, at: Duration) {
+        self.back(at);
+        self.returned = true;
     }
 
     /// A look was taken outside the schedule (Auto just turned on).
@@ -853,8 +871,16 @@ impl App {
             self.lighting_stop();
         } else {
             let at = self.lighting.since_start();
-            self.lighting.plan.back(at);
+            self.lighting.plan.returned(at);
             self.lighting.returned = self.lighting.owed.is_some();
+            // The tick comes every 30 s: this one comes at the cue.
+            let cue = Timer::from_duration(RETURN_CUE + Duration::from_millis(100));
+            if let Err(e) = self.loop_handle.insert_source(cue, |_, _, app: &mut App| {
+                app.lighting_tick();
+                TimeoutAction::Drop
+            }) {
+                warn!("lighting: no timer for the return ({e}); the next tick looks");
+            }
         }
         debug!("lighting: owner {}", if away { "away" } else { "back" });
     }
@@ -1129,6 +1155,21 @@ mod tests {
         assert!(!plan.step(&here(0, 10)));
         assert!(!plan.step(&Facts { fading: true, ..here(150, 10) }));
         assert!(plan.step(&here(180, 10)), "still owed once it is over");
+    }
+
+    #[test]
+    fn back_from_away_the_look_comes_two_seconds_after_the_first_touch() {
+        let mut plan = Plan::default();
+        assert!(!plan.step(&here(0, 10)));
+        assert!(plan.step(&here(150, 10)));
+        plan.absent();
+        plan.returned(secs(5000));
+        assert!(!plan.step(&here(5001, 11)), "not in the same instant");
+        assert!(plan.step(&here(5002, 11)), "two seconds after the touch");
+        assert!(!plan.step(&here(5032, 11)));
+        // A dock start is not a return: it settles its two minutes.
+        plan.back(secs(9000));
+        assert!(!plan.step(&here(9002, 12)));
     }
 
     #[test]
