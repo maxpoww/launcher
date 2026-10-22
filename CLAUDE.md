@@ -483,7 +483,16 @@ The big daemon files are cohesive but long — go straight to the function:
   PAGE (`Page`: Open with · Send to · Sort by, each led back by "‹ <its name>"; `Menu::turn` /
   `show_main`; no flyouts); "…" = opens a window (Format…, Wallpapers…, Colours…, Display…,
   Configure…); RED only for what cannot be undone (Delete for good, Empty the bin, Format…). ⛔ NOTHING
-  OPENS ON HOVER (Max: "i dont want the open on hover on the menus"): pages and Get info on a CLICK.
+  OPENS ON HOVER (Max: "i dont want the open on hover on the menus"): pages and Get info on a CLICK. THE
+  KEYBOARD (Max, 2026-10-21; `Menu::key` → `MenuKey`, the hosts `filer_key` / `desktop_shortcut`): ↓/↑ the next
+  / previous row that does something (over rules, notes, rows with nothing to do; round the ends; none
+  highlighted: the first ↓ takes the first, the first ↑ the last), Home/End, Enter or Space choose, → on a ›
+  row turns its page with its first choice highlighted, ← back with the row that turned it highlighted
+  (`turn` / `show_main` when the keys drive), Escape closes, a letter the next row it begins. The keys'
+  highlight is the hover's tint and stays theirs until the pointer MOVES (`Menu::pointer`, by where the pointer
+  stood — hosts update the hover only through it). In Files Shift+F10 / the Menu key open the menu on the
+  selection or the folder (`filer_menu_from_keys`). Rig: `files key down|up|home|end|enter|space|right|left|
+  shift f10|menukey`, `files type <letter>`, `debug-desktop "key down|up|left|right|space|escape"`.
   The look: rows 29 px, 14 px symbols at 75 % of the ink, hairline rules between groups, the width the
   words want (214 at least, `width_of`). THE ROW UNDER THE POINTER is a QUIET HOVER (Max, 2026-10-21, after
   macOS and Windows: both are instant, and the blink was our accent band with white words flipping on every
