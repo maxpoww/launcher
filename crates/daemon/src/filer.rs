@@ -53,7 +53,7 @@ use crate::content::{
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
 use crate::desktop::{Item, Kind, PLAIN_TEXT, URI_LIST};
-use crate::desktop_menu::{Action, Menu, MenuPaint, Row};
+use crate::desktop_menu::{Action, Menu, MenuKey, MenuPaint, Row};
 use crate::desktop_props::Props;
 use crate::fractional::SurfaceKind;
 use crate::i18n::{fill, tr};
@@ -3445,6 +3445,30 @@ impl App {
         format!("{action:?}")
     }
 
+    /// The right-click's menu without a pointer (Shift+F10, the Menu key,
+    /// the rig): on thing `item` — at its middle, brought into view — or on
+    /// the folder, at the middle of the field.
+    fn filer_menu_from_keys(&mut self, id: u32, item: Option<usize>) {
+        let icon_scale = self.icon_scale();
+        if let (Some(i), Some(win)) = (item, self.filer.win_mut(id)) {
+            let layout = win.layout(icon_scale);
+            win.scroll_to = layout.reveal(i, win.scroll_to, win.items.len());
+            win.scroll = win.scroll_to;
+        }
+        let Some(win) = self.filer.win(id) else {
+            return;
+        };
+        let layout = win.layout(icon_scale);
+        let at = match item {
+            Some(i) => {
+                let c = layout.cell(i);
+                (c.x + c.w / 2.0, c.y + c.h / 2.0 - win.scroll)
+            }
+            None => (layout.body.x + layout.body.w / 2.0, layout.body.y + layout.body.h / 2.0),
+        };
+        self.filer_open_menu(id, at, item);
+    }
+
     /// The menu's "Open with": its page turns to the apps that say they
     /// open this kind of file — asked off the loop, "Looking for apps…"
     /// meanwhile — each by its name, the system's own choice first.
@@ -3503,7 +3527,7 @@ impl App {
             return false;
         };
         menu.turn(Page::Send, rows.to_vec());
-        menu.hover = at.and_then(|p| menu.hit(p));
+        menu.pointer(at);
         true
     }
 
@@ -4673,7 +4697,7 @@ impl App {
         for win in self.filer.wins.iter_mut() {
             if let Some(menu) = win.menu.as_mut() {
                 menu.rescale(s);
-                menu.hover = win.ptr.and_then(|p| menu.hit(p));
+                menu.pointer(win.ptr);
                 ids.push(win.id);
             }
         }
@@ -5524,9 +5548,7 @@ impl App {
         // — and only by their band: nothing opens on hover (Max,
         // 2026-10-21: "i dont want the open on hover on the menus").
         if let (Some(menu), Some(at)) = (win.menu.as_mut(), win.ptr) {
-            let over = menu.hit(at);
-            if over != menu.hover {
-                menu.hover = over;
+            if menu.pointer(Some(at)) {
                 self.filer_request_draw(id);
             }
             return;
@@ -5850,7 +5872,7 @@ impl App {
                 menu.grow_from = Some(props.rect);
                 menu.t = 0.0;
                 menu.pressed = None;
-                menu.hover = menu.hit(at);
+                menu.pointer(Some(at));
                 win.menu = Some(menu);
             }
             self.filer_hover(id);
@@ -7060,9 +7082,32 @@ impl App {
                 Keysym::_0 | Keysym::KP_0 if menu => {
                     self.zoom("menu", "reset");
                 }
+                // THE KEYS IN THE MENU (Max, 2026-10-21): walk, choose,
+                // turn its page and back, a letter, or what is typed for
+                // its search (`Menu::key`).
+                _ if !ctrl && !alt => {
+                    let at = win.ptr;
+                    let Some(m) = win.menu.as_mut() else {
+                        return;
+                    };
+                    match m.key(keysym, utf8, at) {
+                        MenuKey::Moved => self.filer_request_draw(id),
+                        MenuKey::Choose(row) => {
+                            self.filer_menu_row(id, row);
+                        }
+                        MenuKey::Back => self.filer_menu_back(id),
+                        MenuKey::Nothing | MenuKey::Close => {}
+                    }
+                }
                 _ => {}
             }
             return;
+        }
+        // Shift+F10 or the Menu key: the right-click's menu, on the
+        // selection (its first thing) or on the folder.
+        if keysym == Keysym::Menu || (keysym == Keysym::F10 && self.modifiers.shift) {
+            let first = win.items.iter().position(|it| win.selected.contains(&it.path));
+            return self.filer_menu_from_keys(id, first);
         }
         // THE LEFT HAND (Max, 2026-10-13): with Alt held, W A S D walk as
         // the arrows do, E is Enter and Q goes back — the mouse hand stays
@@ -7317,22 +7362,11 @@ impl App {
                 }
             }
             "menu" => {
-                let icon_scale = self.icon_scale();
                 let Some(win) = self.filer.win(id) else {
                     return "closed".to_owned();
                 };
-                let layout = win.layout(icon_scale);
                 let item = rest.parse::<usize>().ok().filter(|&i| i < win.items.len());
-                // Where a click would have been: the thing's middle, or the
-                // middle of the field.
-                let at = match item {
-                    Some(i) => {
-                        let c = layout.cell(i);
-                        (c.x + c.w / 2.0, c.y + c.h / 2.0 - win.scroll)
-                    }
-                    None => (layout.body.x + layout.body.w / 2.0, layout.body.y + layout.body.h / 2.0),
-                };
-                self.filer_open_menu(id, at, item);
+                self.filer_menu_from_keys(id, item);
             }
             // `pick <row>`: as a click on that row of the menu that is up (a
             // page turns, the menu stays; anything else is done).
@@ -7425,8 +7459,9 @@ impl App {
                 }
             }
             "key" => {
-                // (`key ctrl <name>`: with Ctrl held.)
+                // (`key ctrl <name>` / `key shift <name>`: with it held.)
                 let (ctrl, rest) = rest.strip_prefix("ctrl ").map_or((false, rest), |r| (true, r));
+                let (shift, rest) = rest.strip_prefix("shift ").map_or((false, rest), |r| (true, r));
                 let key = match rest {
                     "left" => Keysym::Left,
                     "right" => Keysym::Right,
@@ -7451,12 +7486,15 @@ impl App {
                     "d" => Keysym::d,
                     "e" => Keysym::e,
                     "q" => Keysym::q,
+                    "f10" => Keysym::F10,
+                    "menukey" => Keysym::Menu,
                     _ => return format!("no key {rest}"),
                 };
-                let held = self.modifiers.ctrl;
+                let held = (self.modifiers.ctrl, self.modifiers.shift);
                 self.modifiers.ctrl |= ctrl;
+                self.modifiers.shift |= shift;
                 self.filer_key(id, key, None);
-                self.modifiers.ctrl = held;
+                (self.modifiers.ctrl, self.modifiers.shift) = held;
             }
             "type" => self.filer_key(id, Keysym::NoSymbol, Some(rest)),
             "zoom" => return self.zoom("files", rest),

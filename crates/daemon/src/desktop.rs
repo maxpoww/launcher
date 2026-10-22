@@ -49,7 +49,7 @@ use crate::content::{
     IconInst, Label, Rect, Scene, GRID_CELL_W, GRID_ICON, GRID_ICON_TOP,
     LABEL_FONT_PX, LABEL_LINE_PX, NO_PLATE, PLATE_STATIC,
 };
-use crate::desktop_menu::{Action, Menu, MenuPaint};
+use crate::desktop_menu::{Action, Menu, MenuKey, MenuPaint};
 use crate::desktop_props::Props;
 use crate::launch;
 use crate::App;
@@ -2686,7 +2686,7 @@ impl App {
         let (w, h) = self.desktop_size;
         let many = ctx.on == crate::desktop_menu::On::Many;
         let mut menu = Menu::new(ctx, item, many, at, w as f32, h as f32);
-        menu.hover = menu.hit(at);
+        menu.pointer(Some(at));
         self.desktop.menu = Some(menu);
         // The keys for it (its size, Escape): the desktop takes the keyboard
         // while it is up, and gives it back when it goes.
@@ -2703,7 +2703,7 @@ impl App {
         let at = self.desktop.ptr;
         if let Some(menu) = self.desktop.menu.as_mut() {
             menu.rescale(crate::desktop_menu::scale());
-            menu.hover = at.and_then(|p| menu.hit(p));
+            menu.pointer(at);
             self.request_desktop_draw();
         }
     }
@@ -2876,13 +2876,13 @@ impl App {
             Action::SortPage => {
                 let (key, desc) = self.desktop.sort;
                 menu.turn(Page::Sort, crate::desktop_menu::sort_page(key, desc));
-                menu.hover = at.and_then(|p| menu.hit(p));
+                menu.pointer(at);
                 self.request_desktop_draw();
                 return "Sort by".to_owned();
             }
             Action::Back => {
                 menu.show_main();
-                menu.hover = at.and_then(|p| menu.hit(p));
+                menu.pointer(at);
                 self.request_desktop_draw();
                 return "Back".to_owned();
             }
@@ -3255,7 +3255,7 @@ impl App {
         let turn = |menu: &mut Menu, at: Option<(f32, f32)>| {
             if matches!(menu.page, Page::Main | Page::Send) {
                 menu.turn(Page::Send, rows.clone());
-                menu.hover = at.and_then(|p| menu.hit(p));
+                menu.pointer(at);
             }
         };
         let to = self.desktop.send_for;
@@ -3788,7 +3788,7 @@ impl App {
             menu.grow_from = Some(props.rect);
             menu.t = 0.0;
             menu.pressed = None;
-            menu.hover = menu.hit(at);
+            menu.pointer(Some(at));
             self.desktop.menu = Some(menu);
         }
         self.request_desktop_draw();
@@ -4253,6 +4253,8 @@ impl App {
     /// A key while the desktop holds the keyboard: a file manager's
     /// shortcuts, on what is selected.
     pub(crate) fn desktop_shortcut(&mut self, keysym: Keysym) {
+        // (A menu up has the keys as they are: its letters and its search.)
+        let typed = keysym;
         // (No letter is typed on the desktop: the left hand's keys walk,
         // open and go back as the arrows, Enter and Escape do. With Ctrl
         // they stay what they were — Ctrl+A, Ctrl+X…)
@@ -4267,6 +4269,8 @@ impl App {
         // bigger or smaller; nothing else is for it.
         if self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() {
             let menu = self.desktop.menu.is_some() && self.modifiers.ctrl;
+            // (A menu's keys are the keys as they are: no left hand there.)
+            let keysym = if self.desktop.menu.is_some() { typed } else { keysym };
             match keysym {
                 Keysym::Escape => {
                     self.desktop.menu = None;
@@ -4282,6 +4286,26 @@ impl App {
                 }
                 Keysym::_0 | Keysym::KP_0 if menu => {
                     self.zoom("menu", "reset");
+                }
+                // THE KEYS IN THE MENU (`Menu::key`): walk, choose, turn its
+                // page and back, a letter, or what its search is given.
+                _ if !self.modifiers.ctrl && !self.modifiers.alt => {
+                    let ptr = self.desktop.ptr;
+                    let Some(m) = self.desktop.menu.as_mut() else {
+                        return;
+                    };
+                    let letter = typed.key_char().map(String::from);
+                    match m.key(typed, letter.as_deref(), ptr) {
+                        MenuKey::Moved => self.request_desktop_draw(),
+                        MenuKey::Choose(row) => {
+                            self.desktop_menu_row(row);
+                        }
+                        MenuKey::Back => {
+                            m.show_main();
+                            self.request_desktop_draw();
+                        }
+                        MenuKey::Nothing | MenuKey::Close => {}
+                    }
                 }
                 _ => {}
             }
@@ -4951,9 +4975,7 @@ impl App {
         // it — nothing opens on hover (Max, 2026-10-21: "i dont want the
         // open on hover on the menus").
         if let Some(menu) = self.desktop.menu.as_mut() {
-            let over = menu.hit((x, y));
-            if over != menu.hover {
-                menu.hover = over;
+            if menu.pointer(Some((x, y))) {
                 self.request_desktop_draw();
             }
             self.desktop_cursor();

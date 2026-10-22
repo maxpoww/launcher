@@ -19,6 +19,8 @@
 //! and how they are drawn into a [`Scene`]. The desktop (`desktop.rs`) and
 //! the file windows (`filer.rs`) open them and act on a row.
 
+use smithay_client_toolkit::seat::keyboard::Keysym;
+
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, FONT_BOLD};
 use crate::i18n::{fill, tr};
 
@@ -829,6 +831,21 @@ fn red() -> [f32; 4] {
     lin(crate::palette::danger_srgb())
 }
 
+/// What a key on a menu asks of its host (`Menu::key`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MenuKey {
+    /// Nothing for it (or nothing to do).
+    Nothing,
+    /// The highlight moved: draw again.
+    Moved,
+    /// Row `n` chosen (Enter, Space, → on a page's row).
+    Choose(usize),
+    /// Back to the first page (←).
+    Back,
+    /// Put away (Escape).
+    Close,
+}
+
 /// What the menu is painted with: the OPTIONS boxes' adaptive surface
 /// (`App::box_surface_at`), read where the menu is.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -924,6 +941,9 @@ pub(crate) struct Menu {
     anchor: (f32, f32),
     from_left: bool,
     from_top: bool,
+    /// THE KEYS (Max, 2026-10-21): where the pointer stood when they last
+    /// took the highlight — it stays theirs until the pointer moves.
+    keys_at: Option<Option<(f32, f32)>>,
 }
 
 impl Menu {
@@ -971,6 +991,7 @@ impl Menu {
             anchor,
             from_left,
             from_top,
+            keys_at: None,
         };
         menu.place();
         menu
@@ -1015,16 +1036,156 @@ impl Menu {
         self.grow_from = None;
     }
 
-    /// Turn to `page`, made of `rows`.
+    /// Turn to `page`, made of `rows`. (Turned by the keys: its first
+    /// choice is highlighted.)
     pub fn turn(&mut self, page: Page, rows: Vec<Row>) {
         self.page = page;
         self.set_rows(rows);
+        if self.keys_at.is_some() {
+            self.hover = self.first_choice();
+        }
     }
 
-    /// Back to the first page.
+    /// Back to the first page. (By the keys: the row that turned to the
+    /// page left is highlighted.)
     pub fn show_main(&mut self) {
+        let from = self.page;
         let rows = rows_for(&self.ctx);
         self.turn(Page::Main, rows);
+        if self.keys_at.is_some() {
+            let to = match from {
+                Page::OpenWith => Some(Action::OpenWith),
+                Page::Send => Some(Action::SendPage),
+                Page::Sort => Some(Action::SortPage),
+                Page::Main => None,
+            };
+            if let Some(i) = to.and_then(|a| self.rows.iter().position(|r| r.action() == Some(a))) {
+                self.hover = Some(i);
+            }
+        }
+    }
+
+    // ── the keys ──────────────────────────────────────────────────────
+
+    /// A key while the menu is up (`at`: where the pointer is): ↓/↑ walk
+    /// the rows that do something, round the ends; Home/End; Enter or Space
+    /// choose; → turns a row's page, ← goes back; Escape closes; a letter
+    /// goes to the next row it begins. What the host is to do.
+    pub fn key(&mut self, keysym: Keysym, utf8: Option<&str>, at: Option<(f32, f32)>) -> MenuKey {
+        match keysym {
+            Keysym::Down | Keysym::KP_Down => self.key_step(true, at),
+            Keysym::Up | Keysym::KP_Up => self.key_step(false, at),
+            Keysym::Home | Keysym::KP_Home => self.key_end(false, at),
+            Keysym::End | Keysym::KP_End => self.key_end(true, at),
+            Keysym::Return | Keysym::KP_Enter | Keysym::space => {
+                return self.hover.map_or(MenuKey::Nothing, MenuKey::Choose);
+            }
+            Keysym::Right | Keysym::KP_Right => {
+                return match self.hover {
+                    Some(i) if self.action(i).is_some_and(turns_page) => MenuKey::Choose(i),
+                    _ => MenuKey::Nothing,
+                };
+            }
+            Keysym::Left | Keysym::KP_Left if self.page != Page::Main => {
+                self.keys_at = Some(at);
+                return MenuKey::Back;
+            }
+            Keysym::Escape => return MenuKey::Close,
+            _ => {
+                let Some(c) = utf8
+                    .and_then(|t| t.chars().next())
+                    .filter(|c| !c.is_control())
+                else {
+                    return MenuKey::Nothing;
+                };
+                if !self.key_letter(c, at) {
+                    return MenuKey::Nothing;
+                }
+            }
+        }
+        MenuKey::Moved
+    }
+
+    /// Whether row `i` does something (the keys stop only on those).
+    fn is_choice(&self, i: usize) -> bool {
+        matches!(self.rows.get(i), Some(Row::Item { off: false, .. }))
+    }
+
+    /// The first row that does something past the way back.
+    fn first_choice(&self) -> Option<usize> {
+        let choices: Vec<usize> = (0..self.rows.len())
+            .filter(|&i| self.is_choice(i))
+            .collect();
+        choices
+            .iter()
+            .copied()
+            .find(|&i| self.action(i) != Some(Action::Back))
+            .or(choices.first().copied())
+    }
+
+    /// ↓ / ↑: the next row that does something, or the one before, round
+    /// the ends; with none highlighted the first, or the last. `at`: where
+    /// the pointer is (the highlight is the keys' until it moves).
+    pub fn key_step(&mut self, down: bool, at: Option<(f32, f32)>) {
+        let n = self.rows.len();
+        let next = |i: usize| if down { (i + 1) % n } else { (i + n - 1) % n };
+        let start = match self.hover {
+            Some(i) => next(i),
+            None if down => 0,
+            None => n.saturating_sub(1),
+        };
+        let mut i = start;
+        for _ in 0..n {
+            if self.is_choice(i) {
+                self.hover = Some(i);
+                break;
+            }
+            i = next(i);
+        }
+        self.keys_at = Some(at);
+    }
+
+    /// Home / End: the first row that does something, or the last.
+    pub fn key_end(&mut self, last: bool, at: Option<(f32, f32)>) {
+        let mut choices = (0..self.rows.len()).filter(|&i| self.is_choice(i));
+        self.hover = if last {
+            choices.next_back()
+        } else {
+            choices.next()
+        };
+        self.keys_at = Some(at);
+    }
+
+    /// A letter: the next row whose words begin with it, round the end.
+    /// Whether there was one.
+    pub fn key_letter(&mut self, c: char, at: Option<(f32, f32)>) -> bool {
+        let c = c.to_lowercase().next().unwrap_or(c);
+        let n = self.rows.len();
+        let from = self.hover.map_or(0, |i| i + 1);
+        let found = (0..n).map(|k| (from + k) % n).find(|&i| {
+            self.is_choice(i)
+                && matches!(&self.rows[i], Row::Item { label, .. }
+                    if label.to_lowercase().starts_with(c))
+        });
+        if found.is_some() {
+            self.hover = found;
+            self.keys_at = Some(at);
+        }
+        found.is_some()
+    }
+
+    /// The pointer is at `at`: the row under it is highlighted — unless the
+    /// keys took the highlight and the pointer has not moved since.
+    /// Whether the highlight changed.
+    pub fn pointer(&mut self, at: Option<(f32, f32)>) -> bool {
+        if self.keys_at == Some(at) {
+            return false;
+        }
+        self.keys_at = None;
+        let over = at.and_then(|p| self.hit(p));
+        let changed = over != self.hover;
+        self.hover = over;
+        changed
     }
 
     /// Each row's rectangle, in order (rules included).
@@ -1629,6 +1790,118 @@ mod tests {
         let got = dark.hover(lavender, 0.9, 0.9, ink);
         assert!(contrast(ink, got) >= 4.5 && luma(got) > luma(dark.fill));
         assert_eq!(got[3], 1.0);
+    }
+
+    /// A file's menu at (10, 10) on a big surface.
+    fn file_menu() -> Menu {
+        Menu::new(
+            Ctx {
+                on: On::File,
+                here: true,
+                ..Default::default()
+            },
+            Some(0),
+            false,
+            (10.0, 10.0),
+            900.0,
+            900.0,
+        )
+    }
+
+    /// The words of row `i`.
+    fn words(m: &Menu, i: Option<usize>) -> String {
+        match i.and_then(|i| m.rows.get(i)) {
+            Some(Row::Item { label, .. }) => label.clone(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn the_keys_walk_the_rows_that_do_something_round_the_ends() {
+        let mut m = file_menu();
+        let at = Some((800.0, 800.0));
+        assert_eq!(m.key(Keysym::Down, None, at), MenuKey::Moved);
+        assert_eq!(words(&m, m.hover), "Open");
+        // Over the rule between Quick look and Copy, never onto it.
+        m.key(Keysym::Down, None, at);
+        m.key(Keysym::Down, None, at);
+        assert_eq!(words(&m, m.hover), "Quick look");
+        m.key(Keysym::Down, None, at);
+        assert_eq!(words(&m, m.hover), "Copy");
+        // Round the ends, both ways; Home and End.
+        m.key(Keysym::End, None, at);
+        assert_eq!(words(&m, m.hover), "Move to bin");
+        m.key(Keysym::Down, None, at);
+        assert_eq!(words(&m, m.hover), "Open");
+        m.key(Keysym::Up, None, at);
+        assert_eq!(words(&m, m.hover), "Move to bin");
+        m.key(Keysym::Home, None, at);
+        assert_eq!(words(&m, m.hover), "Open");
+        // A letter: the next row it begins, then the one after.
+        m.key(Keysym::c, Some("c"), at);
+        assert_eq!(words(&m, m.hover), "Copy");
+        m.key(Keysym::c, Some("c"), at);
+        assert_eq!(words(&m, m.hover), "Compress");
+        // Enter and Space choose; Escape closes.
+        assert_eq!(
+            m.key(Keysym::Return, None, at),
+            MenuKey::Choose(m.hover.unwrap())
+        );
+        assert_eq!(
+            m.key(Keysym::space, None, at),
+            MenuKey::Choose(m.hover.unwrap())
+        );
+        assert_eq!(m.key(Keysym::Escape, None, at), MenuKey::Close);
+        // With nothing highlighted, the first ↑ takes the last.
+        let mut m = file_menu();
+        m.key(Keysym::Up, None, at);
+        assert_eq!(words(&m, m.hover), "Move to bin");
+    }
+
+    #[test]
+    fn the_keys_keep_the_highlight_until_the_pointer_moves() {
+        let mut m = file_menu();
+        let at = Some((800.0, 800.0));
+        m.key(Keysym::Down, None, at);
+        m.key(Keysym::Down, None, at);
+        // The pointer still where it was: the highlight stays the keys'.
+        assert!(!m.pointer(at));
+        assert_eq!(words(&m, m.hover), "Open with");
+        // It moves (onto Copy): the highlight is the pointer's again, and
+        // the keys go on from there.
+        let copy = m
+            .rows
+            .iter()
+            .position(|r| r.action() == Some(Action::Copy))
+            .unwrap();
+        let r = m.row_rects()[copy];
+        assert!(m.pointer(Some((r.x + 5.0, r.y + r.h / 2.0))));
+        assert_eq!(m.hover, Some(copy));
+        m.key(Keysym::Down, None, Some((r.x + 5.0, r.y + r.h / 2.0)));
+        assert_eq!(words(&m, m.hover), "Move");
+    }
+
+    #[test]
+    fn right_turns_a_rows_page_and_left_comes_back_to_it() {
+        let mut m = file_menu();
+        let at = None;
+        m.key(Keysym::Down, None, at);
+        // → on a row with no page does nothing; on Open with it is chosen.
+        assert_eq!(m.key(Keysym::Right, None, at), MenuKey::Nothing);
+        m.key(Keysym::Down, None, at);
+        let open_with = m.hover.unwrap();
+        assert_eq!(m.key(Keysym::Right, None, at), MenuKey::Choose(open_with));
+        // (The host turns it.) The page's first choice is highlighted.
+        m.turn(
+            Page::OpenWith,
+            open_with_rows(Some(&["GIMP".to_owned(), "Seam".to_owned()])),
+        );
+        assert_eq!(words(&m, m.hover), "GIMP");
+        assert_eq!(m.key(Keysym::Left, None, at), MenuKey::Back);
+        m.show_main();
+        assert_eq!(m.hover, Some(open_with), "back on the row that turned it");
+        // ← on the first page is nothing.
+        assert_eq!(m.key(Keysym::Left, None, at), MenuKey::Nothing);
     }
 
     /// Every row wears a symbol that is drawn: a name `glyphs.rs` has (one
