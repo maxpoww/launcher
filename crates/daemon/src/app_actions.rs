@@ -1,31 +1,47 @@
-//! THE LONE APP'S ACTIONS (Max, 2026-10-22: "cuando el resultado sea una
-//! sola app quiero que se muestren más opciones — ventana de incógnito,
-//! nueva ventana, cada app trae sus acciones — … y desinstalar, con
-//! confirmación"). A search that leaves ONE app in Apps puts that app's own
-//! desktop actions (its desktop file's `Actions=`: Chrome's New Incognito
-//! Window, Seam's New Private Window…) after it in the row, as cells of the
-//! grid — and, for an app the dock can take away (a package it installed,
-//! an installed webapp — never the system's own), "Uninstall <app>" last.
+//! THE LONE APP (Max, 2026-10-22: "cuando el resultado sea una sola app
+//! quiero que se muestren más opciones … y desinstalar, con confirmación";
+//! then, seeing VLC alone with most of the box empty: "mostrar la app
+//! seleccionada en el medio, a la derecha las acciones, a la izquierda las
+//! de sus ventanas abiertas, y abajo «Recientes en VLC»"). A search that
+//! leaves ONE app in Apps lays the row out around it:
 //!
-//! THE LOOK (Max, 2026-10-22, the mockup's "3a — con su color, oscurecido";
-//! canvas https://claude.ai/artifact/9WByNs3AHU4wZNYCR9tUgi): each action
-//! is its app's own tile — the plate, the app's icon at half its light, its
-//! colours kept — with the action's SYMBOL big and white in the middle, a
-//! soft shadow under it, and its name under the tile on up to two lines.
-//! The symbols are the apps' own where Golem has them (Chrome's hat and
-//! glasses and its window, from its resources; Seam's mask and window, from
-//! Firefox's `omni.ja`), else one by what the action says (`symbol_for`:
-//! a window, home, the computer, a terminal, the bin), else an open arrow.
+//! - THE APP in the middle, under the title, the one selected — Enter opens
+//!   it as ever.
+//! - TO ITS RIGHT what can be done with it: its desktop file's own actions
+//!   (`Actions=`: Chrome's New Incognito Window, Seam's New Private
+//!   Window…), then Golem's own for apps it knows (`KNOWN`: VLC opens a
+//!   disc or the copied link, OBS starts recording…), and — for an app the
+//!   dock can take away (a package it installed, an installed webapp, never
+//!   the system's own) — Uninstall, last.
+//! - TO ITS LEFT, while it has windows open: Show all (the SPREAD of only
+//!   its windows, from every workspace: waveview's `spread_app`) and, past
+//!   it, Close all.
+//! - UNDER IT, "Recent in <app>": the files it opened lately (the system's
+//!   record, `recently-used.xbel`, by the app that opened each; and VLC's
+//!   own list) as the Files row shows things, a full line at most; a click
+//!   opens one in the app.
 //!
-//! They are cells like any other (temporary entries, id `act:<n>`, the
-//! minimized windows' way): the app stays the one selected — Enter opens it
-//! as ever; the arrows walk onto the actions, Enter or a click runs one; it
-//! starts the way its app does (`launch::launch`: its graphics card, its
-//! terminal) and the box goes. UNINSTALL ASKS ONCE: the first press turns
-//! its plate red and its name "Again to uninstall"; a second press
-//! uninstalls (`uninstall_app`, the drag-to-Install road). Escape, the keys
-//! or the pointer leaving it, or `ARM_FOR` with nothing done put it back.
+//! Each side holds what fits beside the centred app; past that the app's own
+//! actions give way from the end, Uninstall last of all.
+//!
+//! THE LOOK (Max's "3a", canvas https://claude.ai/artifact/9WByNs3AHU4wZNYCR9tUgi):
+//! an action is its app's own tile — the plate, the app's icon at half its
+//! light, its colours kept — with the action's SYMBOL big and white in the
+//! middle over a soft shadow, and its name under it on up to two lines. The
+//! symbols are the apps' own where Golem has them (Chrome's hat and glasses
+//! and its window, from its resources; Seam's mask and window, from
+//! Firefox's `omni.ja`), else one by what the action says, else an arrow.
+//!
+//! They are cells like any other (temporary entries: `act:<n>` for an
+//! action, the file's path for a recent), so hover, Enter and clicks are the
+//! grid's; the arrows walk the row and go down to the recents and back up to
+//! the app (`app_actions_key`). An action starts the way its app does
+//! (`launch::launch`: its graphics card, its terminal) and the box goes.
+//! UNINSTALL ASKS ONCE: the first press turns its plate red and its name
+//! "Again to uninstall"; a second uninstalls (`uninstall_app`). Escape, the
+//! keys or the pointer leaving it, or `ARM_FOR` with nothing done put it back.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
@@ -34,7 +50,7 @@ use tracing::{error, info, warn};
 use waverunner_core::index::AppEntry;
 
 use crate::i18n::{fill, tr};
-use crate::{apps, content, launch, App};
+use crate::{apps, content, hypr, launch, surface, App, KbSurface};
 
 /// The id prefix of an action's cell (`act:<n>`, n its place in the list).
 pub(crate) const PREFIX: &str = "act:";
@@ -45,6 +61,9 @@ pub(crate) const ARM_FOR: Duration = Duration::from_secs(4);
 pub(crate) const SYMBOL: f32 = 0.675;
 /// How much of its light the app's icon keeps under the symbol.
 pub(crate) const DIM: f32 = 0.5;
+/// The room opened under the app's row for the actions' second lines and
+/// the recents' title (px at icon scale 1).
+pub(crate) const RECENT_ROOM: f32 = 44.0;
 
 /// Chrome's own symbols (its resources' New Window and Incognito, BSD-3 like
 /// Chromium) and Seam's (Firefox's `window.svg` and `privateBrowsing.svg`,
@@ -53,26 +72,44 @@ const CHROME_WINDOW: &str = r#"<path fill-rule="evenodd" clip-rule="evenodd" d="
 const INCOGNITO: &str = r#"<path d="M10.75 9c-.83 0-1.55.46-1.94 1.13-.26-.08-.53-.13-.81-.13s-.55.05-.81.13A2.249 2.249 0 0 0 5.25 9C4.01 9 3 10.01 3 11.25s1.01 2.25 2.25 2.25c1.12 0 2.04-.82 2.21-1.89.17-.07.35-.11.54-.11.19 0 .37.05.54.11.17 1.07 1.1 1.89 2.21 1.89 1.24 0 2.25-1.01 2.25-2.25S11.99 9 10.75 9Zm-5.5 3c-.41 0-.75-.34-.75-.75s.34-.75.75-.75.75.34.75.75-.34.75-.75.75Zm5.5 0c-.41 0-.75-.34-.75-.75s.34-.75.75-.75.75.34.75.75-.34.75-.75.75Zm.87-5.5-1.41-4a.763.763 0 0 0-.43-.45.787.787 0 0 0-.62.02L8 2.65l-1.16-.58a.764.764 0 0 0-1.05.43l-1.41 4H2V8h12V6.5h-2.38Zm-5.65 0 .95-2.7.74.37c.21.11.46.11.67 0l.74-.37.95 2.7H5.97Z"/>"#;
 const SEAM_WINDOW: &str = r#"<path d="M13 1 3 1a2 2 0 0 0-2 2l0 9a2 2 0 0 0 2 2l10 0a2 2 0 0 0 2-2l0-9a2 2 0 0 0-2-2zM2.85 2.25l10.3 0 .6.6 0 2.15-11.5 0 0-2.15.6-.6zm10.3 10.5-10.3 0-.6-.6 0-5.9 11.5 0 0 5.9-.6.6z"/>"#;
 const MASK: &str = r#"<path d="M15.931 5.479c-1.525-2.001-4.517-2.257-6.381-.545l-1.043.958-1.02 0-1.042-.958C4.581 3.223 1.589 3.478.064 5.479c-.197.78.108 3.66.28 4.113.347 1.83 1.842 3.206 3.635 3.206.895 0 1.706-.357 2.347-.929l.391-.334a1.936 1.936 0 0 1 2.511-.021l.586.486 0-.003c.617.497 1.375.801 2.203.801 1.792 0 3.288-1.376 3.635-3.206.172-.453.488-3.321.279-4.113zM6.232 8.452c-.427.482-1.088.792-1.832.792-.744 0-1.405-.31-1.832-.792a.693.693 0 0 1 0-.905c.427-.482 1.088-.792 1.832-.792.744 0 1.405.31 1.832.792a.693.693 0 0 1 0 .905zm7.2 0c-.427.482-1.088.792-1.832.792-.744 0-1.405-.31-1.832-.792a.693.693 0 0 1 0-.905c.427-.482 1.088-.792 1.832-.792.744 0 1.405.31 1.832.792a.693.693 0 0 1 0 .905z"/>"#;
+/// Golem's own, in its strokes' manner: a disc, a link, a note, the
+/// spread's four windows, a cross, a dot for recording.
+const DISC: &str = r#"<circle cx="8" cy="8" r="6.6"/><circle cx="8" cy="8" r="1.9"/><path d="M8 3.6a4.4 4.4 0 0 1 4.4 4.4"/>"#;
+const LINK: &str = r#"<path d="M6.4 9.6l3.2-3.2M7.3 4.5l1.2-1.2a2.9 2.9 0 0 1 4.2 4.2l-1.2 1.2M8.7 11.5l-1.2 1.2a2.9 2.9 0 0 1-4.2-4.2l1.2-1.2"/>"#;
+const MUSIC: &str = r#"<path d="M6 12.2V3.8l7.2-1.6v8.4"/><circle cx="4.2" cy="12.3" r="1.8"/><circle cx="11.4" cy="10.7" r="1.8"/>"#;
+const SPREAD: &str = r#"<rect x="1.6" y="2.6" width="5.6" height="4.6" rx="1"/><rect x="8.8" y="2.6" width="5.6" height="4.6" rx="1"/><rect x="1.6" y="8.8" width="5.6" height="4.6" rx="1"/><rect x="8.8" y="8.8" width="5.6" height="4.6" rx="1"/>"#;
+const CLOSE: &str = r#"<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>"#;
+const RECORD: &str = r#"<circle cx="8" cy="8" r="5.2"/>"#;
 
-/// Every symbol an action can wear, in the order of their texture layers:
-/// a filled path of the apps', or one of Golem's own strokes by its name in
-/// `glyphs::GLYPHS`.
-const SYMBOLS: [(&str, Symbol); 9] = [
+/// Every symbol an action can wear, in the order of their texture layers.
+const SYMBOLS: [(&str, Symbol); 17] = [
     ("window", Symbol::Filled(CHROME_WINDOW)),
     ("incognito", Symbol::Filled(INCOGNITO)),
     ("seam-window", Symbol::Filled(SEAM_WINDOW)),
     ("mask", Symbol::Filled(MASK)),
-    ("trash", Symbol::Stroke("trash")),
-    ("home", Symbol::Stroke("home")),
-    ("computer", Symbol::Stroke("pc")),
-    ("terminal", Symbol::Stroke("term")),
-    ("open", Symbol::Stroke("open")),
+    ("trash", Symbol::Glyph("trash")),
+    ("home", Symbol::Glyph("home")),
+    ("computer", Symbol::Glyph("pc")),
+    ("terminal", Symbol::Glyph("term")),
+    ("open", Symbol::Glyph("open")),
+    ("picture", Symbol::Glyph("pic")),
+    ("camera", Symbol::Glyph("camera")),
+    ("disc", Symbol::Lines(DISC)),
+    ("link", Symbol::Lines(LINK)),
+    ("music", Symbol::Lines(MUSIC)),
+    ("spread", Symbol::Lines(SPREAD)),
+    ("close", Symbol::Lines(CLOSE)),
+    ("record", Symbol::Filled(RECORD)),
 ];
 
 #[derive(Clone, Copy)]
 enum Symbol {
+    /// A filled path of its own.
     Filled(&'static str),
-    Stroke(&'static str),
+    /// Strokes of its own.
+    Lines(&'static str),
+    /// One of Golem's own strokes, by its name in `glyphs::GLYPHS`.
+    Glyph(&'static str),
 }
 
 impl Symbol {
@@ -83,12 +120,18 @@ impl Symbol {
                     r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="-2 -2 20 20" fill="#fff">{body}</svg>"##
                 ))
             }
-            Symbol::Stroke(name) => crate::glyphs::GLYPHS.iter().find(|(n, _)| *n == name)?.1,
+            Symbol::Lines(body) => body,
+            Symbol::Glyph(name) => crate::glyphs::GLYPHS.iter().find(|(n, _)| *n == name)?.1,
         };
         Some(format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="-2 -2 20 20" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"##
         ))
     }
+}
+
+/// A symbol's place in `SYMBOLS` (the open arrow for one not there).
+fn symbol(name: &str) -> usize {
+    SYMBOLS.iter().position(|(n, _)| *n == name).unwrap_or(8)
 }
 
 /// The symbols' tiles, one texture layer each in `SYMBOLS`' order (put
@@ -97,19 +140,18 @@ pub(crate) fn figures() -> Option<Vec<Vec<u8>>> {
     SYMBOLS.iter().map(|(_, s)| apps::svg_figure(&s.svg()?)).collect()
 }
 
-/// Which symbol an action of `app` wears, by its id and name in its desktop
-/// file: the browsers' own for a new window and a private one, then by what
-/// it says, else the open arrow.
+/// Which symbol a desktop action of `app` wears, by its id and name: the
+/// browsers' own for a new window and a private one, then by what it says,
+/// else the open arrow.
 fn symbol_for(app: &str, id: &str, name: &str) -> usize {
     let (app, said) = (app.to_lowercase(), format!("{} {}", id.to_lowercase(), name.to_lowercase()));
     let seam = app.contains("seam") || app.contains("firefox");
-    let named = |what: &str| SYMBOLS.iter().position(|(n, _)| *n == what).unwrap_or(SYMBOLS.len() - 1);
     let says = |words: &[&str]| words.iter().any(|w| said.contains(w));
     if says(&["private", "incognito", "privad", "incógnito"]) {
-        return named(if seam { "mask" } else { "incognito" });
+        return symbol(if seam { "mask" } else { "incognito" });
     }
     if says(&["window", "ventana"]) {
-        return named(if seam { "seam-window" } else { "window" });
+        return symbol(if seam { "seam-window" } else { "window" });
     }
     let by_word = [
         ("home", "home"),
@@ -119,10 +161,51 @@ fn symbol_for(app: &str, id: &str, name: &str) -> usize {
         ("equipo", "computer"),
         ("terminal", "terminal"),
     ];
-    by_word
-        .iter()
-        .find(|(w, _)| said.contains(w))
-        .map_or(named("open"), |(_, s)| named(s))
+    by_word.iter().find(|(w, _)| said.contains(w)).map_or(symbol("open"), |(_, s)| symbol(s))
+}
+
+/// GOLEM'S OWN ACTIONS for apps it knows (their desktop files bring none):
+/// the apps (desktop ids, or their last dotted part), the action's name (in
+/// English, said in the shell's language), its command (run by `sh -c`)
+/// and its symbol.
+struct Known {
+    apps: &'static [&'static str],
+    name: &'static str,
+    exec: &'static str,
+    symbol: &'static str,
+}
+
+const KNOWN: &[Known] = &[
+    Known { apps: &["vlc"], name: "Open disc", exec: "vlc dvd://", symbol: "disc" },
+    Known { apps: &["vlc"], name: "Play copied link", exec: r#"vlc "$(wl-paste -n)""#, symbol: "link" },
+    Known { apps: &["vlc"], name: "Play Music", exec: r#"vlc "$(xdg-user-dir MUSIC)""#, symbol: "music" },
+    Known {
+        apps: &["mpv"],
+        name: "Play copied link",
+        exec: r#"mpv --force-window=immediate "$(wl-paste -n)""#,
+        symbol: "link",
+    },
+    Known {
+        apps: &["mpv"],
+        name: "Play Music",
+        exec: r#"mpv --force-window=immediate --shuffle "$(xdg-user-dir MUSIC)""#,
+        symbol: "music",
+    },
+    Known {
+        apps: &["gimp"],
+        name: "Open copied image",
+        exec: r#"f="$(mktemp --suffix=.png)" && wl-paste -t image/png > "$f" && gimp "$f""#,
+        symbol: "picture",
+    },
+    Known { apps: &["studio", "obs"], name: "Start recording", exec: "obs --startrecording", symbol: "record" },
+    Known { apps: &["studio", "obs"], name: "Start virtual camera", exec: "obs --startvirtualcam", symbol: "camera" },
+];
+
+/// Golem's own actions for the app of desktop id `id`.
+fn known_for(id: &str) -> impl Iterator<Item = &'static Known> + '_ {
+    let id = id.to_lowercase();
+    let last = id.rsplit('.').next().unwrap_or(&id).to_owned();
+    KNOWN.iter().filter(move |k| k.apps.iter().any(|a| *a == id || *a == last))
 }
 
 /// A name on two lines under its tile, broken between WORDS: as many as
@@ -142,13 +225,114 @@ fn by_words(text: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (Str
     (words[..n].join(" "), crate::desktop::fit_label(&words[n..].join(" "), room, measure))
 }
 
+// ---- the recents --------------------------------------------------------------
+
+/// The value of attribute `name` in a tag's text.
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!(" {name}=\"");
+    let at = tag.find(&key)? + key.len();
+    let len = tag[at..].find('"')?;
+    Some(&tag[at..at + len])
+}
+
+/// A command's program, as a name: `'/nix/store/…/bin/gimp-3.0 %U'` → `gimp-3.0`.
+fn program(exec: &str) -> String {
+    let exec = exec.replace("&apos;", "'").replace("&quot;", "\"");
+    let first = exec.trim().trim_matches(|c| c == '\'' || c == '"').split_whitespace().next().unwrap_or("");
+    first.rsplit('/').next().unwrap_or(first).to_lowercase()
+}
+
+/// Whether a record's app (its `name`, its `exec`) is the one `keys` names
+/// (lowercased: the app's name, its desktop id, its program).
+fn is_app(name: &str, exec: &str, keys: &[String]) -> bool {
+    let (name, prog) = (name.to_lowercase(), program(exec));
+    keys.iter().any(|k| *k == name || *k == prog || prog.strip_prefix(k.as_str()).is_some_and(|rest| rest.starts_with('-')))
+}
+
+/// The files of the system's record (`recently-used.xbel`) that the app
+/// `keys` names opened, newest first, each once.
+fn xbel_by_app(text: &str, keys: &[String]) -> Vec<PathBuf> {
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for part in text.split("<bookmark ").skip(1) {
+        let Some(tag) = part.split('>').next() else {
+            continue;
+        };
+        let tag = format!(" {tag}");
+        let Some(path) = attr(&tag, "href").and_then(|h| h.strip_prefix("file://")) else {
+            continue;
+        };
+        let mut when: Option<String> = None;
+        for app in part.split("<bookmark:application ").skip(1) {
+            let app = format!(" {}", app.split('>').next().unwrap_or(""));
+            if is_app(attr(&app, "name").unwrap_or(""), attr(&app, "exec").unwrap_or(""), keys) {
+                when = Some(attr(&app, "modified").unwrap_or("").to_owned());
+            }
+        }
+        let Some(when) = when else {
+            continue;
+        };
+        let when = ["visited", "modified", "added"].iter().filter_map(|k| attr(&tag, k)).chain([when.as_str()]).max().unwrap_or("");
+        let path = PathBuf::from(crate::trash::decode_path(&path.replace("&amp;", "&")));
+        found.push((when.to_owned(), path));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen = std::collections::HashSet::new();
+    found.into_iter().map(|(_, p)| p).filter(|p| seen.insert(p.clone())).collect()
+}
+
+/// VLC's own list (`vlc-qt-interface.conf`, `[RecentsMRL]` `list=`), newest
+/// first: its files and folders.
+fn vlc_recents(text: &str) -> Vec<PathBuf> {
+    let mut section = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            section = line == "[RecentsMRL]";
+        } else if let Some(list) = line.strip_prefix("list=").filter(|_| section) {
+            return list
+                .split(", ")
+                .filter_map(|mrl| mrl.trim().strip_prefix("file://").or_else(|| mrl.trim().strip_prefix("directory://")))
+                .map(|p| PathBuf::from(crate::trash::decode_path(p)))
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// What `app` opened lately that is still there — files and folders,
+/// newest first, at most `max`.
+fn recent_for(app: &AppEntry, max: usize) -> Vec<PathBuf> {
+    let home = crate::filer::home();
+    let prog = program(&app.exec);
+    let mut keys = vec![app.name.to_lowercase(), app.id.to_lowercase(), prog.clone()];
+    keys.extend(app.id.rsplit('.').next().map(str::to_lowercase));
+    let mut all = Vec::new();
+    if prog == "vlc" {
+        let conf = home.join(".config/vlc/vlc-qt-interface.conf");
+        all.extend(vlc_recents(&std::fs::read_to_string(conf).unwrap_or_default()));
+    }
+    let xbel = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("recently-used.xbel");
+    all.extend(xbel_by_app(&std::fs::read_to_string(xbel).unwrap_or_default(), &keys));
+    let mut seen = std::collections::HashSet::new();
+    all.into_iter().filter(|p| p.exists() && seen.insert(p.clone())).take(max).collect()
+}
+
+// ---- the actions ----------------------------------------------------------------
+
 /// What an action does.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Does {
-    /// One of the app's desktop actions: its command.
+    /// One of the app's desktop actions or Golem's: its command.
     Run(String),
     /// Take the app away.
     Uninstall,
+    /// Its windows, every one, in a spread (waveview's `spread_app`).
+    ShowAll,
+    /// Close every window it has.
+    CloseAll,
 }
 
 /// One of the lone app's actions.
@@ -161,14 +345,23 @@ pub(crate) struct Action {
     pub symbol: usize,
 }
 
-/// The lone app's actions, the cells they stand in, and the asking.
+/// The lone app's row: its actions, the cells they stand in, its recents.
 #[derive(Debug, Default)]
 pub(crate) struct Actions {
-    /// The app they are of (its desktop id).
+    /// The app they are of (its desktop id); `None` while no app is alone.
     pub app: Option<String>,
+    /// The actions in the row's order, left to right — the app not among
+    /// them: it stands after the first `left`.
     pub list: Vec<Action>,
+    pub left: usize,
     /// The entry each action's cell is, this refilter (`list` order).
     pub cells: Vec<usize>,
+    /// The recents' entries, in their row's order.
+    pub recents: Vec<usize>,
+    /// The recents' title ("Recent in VLC"), while there are any.
+    pub title: Option<String>,
+    /// The grid's columns the row was laid out for.
+    pub cols: usize,
     /// Since when Uninstall has been asking to be sure.
     pub armed: Option<Instant>,
 }
@@ -177,6 +370,20 @@ impl Actions {
     /// The Uninstall action's place in `list`.
     fn uninstall(&self) -> Option<usize> {
         self.list.iter().position(|a| a.does == Does::Uninstall)
+    }
+
+    /// How many cells the app's row has (the app and its actions).
+    fn row(&self) -> usize {
+        self.list.len() + 1
+    }
+}
+
+/// Which of `right` the room beside the app keeps: the app's own and
+/// Golem's actions give way from the end, Uninstall last of all.
+fn keep_right(right: &mut Vec<Action>, room: usize) {
+    while right.len() > room {
+        let at = right.iter().rposition(|a| a.does != Does::Uninstall).unwrap_or(right.len() - 1);
+        right.remove(at);
     }
 }
 
@@ -194,9 +401,38 @@ impl App {
         self.entries.get(index)?.id.strip_prefix(PREFIX)?.parse().ok()
     }
 
+    /// Whether entry `index` is one of the lone app's cells (an action or a
+    /// recent): nothing to drag.
+    pub(crate) fn lone_owns(&self, index: usize) -> bool {
+        let a = &self.search.actions;
+        a.cells.contains(&index) || a.recents.contains(&index)
+    }
+
+    /// Where the lone app stands in its row (the cell under the title),
+    /// while one is alone.
+    pub(crate) fn lone_anchor(&self) -> Option<usize> {
+        self.search.actions.app.as_ref().map(|_| self.search.actions.left)
+    }
+
+    /// The room opened under the app's row while it has recents.
+    pub(crate) fn lone_room(&self) -> f32 {
+        if self.search.actions.title.is_some() {
+            RECENT_ROOM * self.icon_scale()
+        } else {
+            0.0
+        }
+    }
+
+    /// The Apps grid's columns now.
+    fn apps_cols(&self) -> usize {
+        let layout = self.layout_at(self.ui.extent_of(crate::state::Target::Open));
+        layout.sections[content::SECTION_APPS].cols.max(1)
+    }
+
     /// After a search's Apps are ranked (`refilter`): when they are ONE app,
-    /// its actions follow it in the row as cells of their own. The same app
-    /// keeps its asking; another starts afresh.
+    /// lay its row out around it — its actions as cells of their own, its
+    /// windows' on the left, its recents under it. The same app keeps its
+    /// asking; another starts afresh.
     pub(crate) fn add_action_cells(&mut self, apps: &mut Vec<usize>, resting: bool) {
         let lone = match apps.as_slice() {
             &[only] if !resting && !self.control_panel && !self.search.query.is_empty() => Some(only),
@@ -206,7 +442,10 @@ impl App {
             self.search.actions = Actions::default();
             return;
         };
-        let mut list: Vec<Action> = entry
+        let cols = self.apps_cols();
+        let side = cols.saturating_sub(1) / 2;
+        // To the right: its own actions, Golem's, Uninstall.
+        let mut right: Vec<Action> = entry
             .path
             .as_deref()
             .map(waverunner_core::index::desktop_actions)
@@ -214,16 +453,39 @@ impl App {
             .into_iter()
             .map(|a| Action { symbol: symbol_for(&entry.id, &a.id, &a.name), name: a.name, does: Does::Run(a.exec) })
             .collect();
+        right.extend(known_for(&entry.id).map(|k| Action {
+            name: tr(k.name).to_string(),
+            does: Does::Run(k.exec.to_owned()),
+            symbol: symbol(k.symbol),
+        }));
         if self.can_uninstall(&entry.id) {
-            list.push(Action {
+            right.push(Action {
                 name: fill(tr("Uninstall {app}"), &[("app", &entry.name)]),
                 does: Does::Uninstall,
-                symbol: SYMBOLS.iter().position(|(n, _)| *n == "trash").unwrap_or(0),
+                symbol: symbol("trash"),
             });
         }
+        keep_right(&mut right, side);
+        // To the left, while it has windows: Show all beside it, Close all past it.
+        let mut left: Vec<Action> = Vec::new();
+        if self.running.get(&index).is_some_and(|w| !w.is_empty()) {
+            left.push(Action { name: tr("Show all windows").to_string(), does: Does::ShowAll, symbol: symbol("spread") });
+            left.push(Action { name: tr("Close all windows").to_string(), does: Does::CloseAll, symbol: symbol("close") });
+        }
+        left.truncate(side);
+        left.reverse();
         let same = self.search.actions.app.as_deref() == Some(entry.id.as_str());
         let armed = self.search.actions.armed.filter(|_| same);
-        self.search.actions = Actions { app: Some(entry.id.clone()), list, cells: Vec::new(), armed };
+        let n_left = left.len();
+        left.extend(right);
+        self.search.actions = Actions {
+            app: Some(entry.id.clone()),
+            list: left,
+            left: n_left,
+            cols,
+            armed,
+            ..Default::default()
+        };
         let (placeholder, layer) = (
             self.placeholders.get(index).copied().unwrap_or(false),
             self.icon_layers.get(index).copied().unwrap_or(index as u32),
@@ -232,7 +494,7 @@ impl App {
             let name = self.action_label(n);
             let exec = match &self.search.actions.list[n].does {
                 Does::Run(exec) => exec.clone(),
-                Does::Uninstall => String::new(),
+                _ => String::new(),
             };
             let cell = AppEntry {
                 id: format!("{PREFIX}{n}"),
@@ -246,8 +508,35 @@ impl App {
             };
             let at = self.push_transient(cell, apps::EntryKind::App, placeholder, layer);
             self.search.actions.cells.push(at);
+        }
+        let cells = &self.search.actions.cells;
+        *apps = cells[..n_left].iter().copied().chain([index]).chain(cells[n_left..].iter().copied()).collect();
+        // Under it: what it opened lately, opened again in it by a click.
+        for path in recent_for(&entry, cols) {
+            let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+            let exec = format!("{} {}", entry.exec, launch::shell_quote(&path.to_string_lossy()));
+            let at = self.push_transient_file(&path.to_string_lossy(), &name, exec, path.is_dir());
+            self.search.actions.recents.push(at);
             apps.push(at);
         }
+        if !self.search.actions.recents.is_empty() {
+            self.search.actions.title = Some(fill(tr("Recent in {app}"), &[("app", &entry.name)]));
+        }
+    }
+
+    /// The lone app's display slots (`refilter`, after the search's dense
+    /// ones): its row from the first slot, its recents from the second row.
+    pub(crate) fn lone_slots(&mut self) {
+        let a = &self.search.actions;
+        if a.app.is_none() {
+            return;
+        }
+        let row = a.row();
+        let cols = a.cols.max(row);
+        let mut slots: Vec<usize> = (0..row).collect();
+        slots.extend((0..a.recents.len()).map(|j| cols + j));
+        self.apps_span = slots.last().map_or(0, |s| s + 1);
+        self.apps_slots = slots;
     }
 
     /// What action `n`'s cell says: its name — Uninstall asking, "Again to
@@ -302,13 +591,62 @@ impl App {
         (cells, asking)
     }
 
-    /// Escape puts an asking Uninstall back (the next Escape is the box's).
+    /// The dock box's keys, first, while an app is alone: Escape puts an
+    /// asking Uninstall back (the next Escape is the box's); ← → walk ITS
+    /// row (the app's, or the recents'), never off its ends; ↓ from the
+    /// app's row goes to the recent under it, ↑ from the recents back to
+    /// the app, ↓ from the recents on to what follows. Returns whether the
+    /// key was theirs.
     pub(crate) fn app_actions_key(&mut self, keysym: Keysym) -> bool {
-        if keysym == Keysym::Escape && self.search.actions.armed.is_some() {
-            self.actions_disarm();
-            return true;
+        let a = &self.search.actions;
+        if a.app.is_none() {
+            return false;
         }
-        false
+        if keysym == Keysym::Escape {
+            if a.armed.is_some() {
+                self.actions_disarm();
+                return true;
+            }
+            return false;
+        }
+        let (row, recents) = (a.row(), a.recents.len());
+        let Some(cur) = self.search.selected.filter(|&c| c < row + recents) else {
+            return false;
+        };
+        let in_row = cur < row;
+        let to = match keysym {
+            Keysym::Left if in_row => Some(cur.saturating_sub(1)),
+            Keysym::Left => Some(cur.saturating_sub(1).max(row)),
+            Keysym::Right if in_row => Some((cur + 1).min(row - 1)),
+            Keysym::Right => Some((cur + 1).min(row + recents - 1)),
+            Keysym::Down if in_row && recents > 0 => Some(row + self.recent_under(cur)),
+            Keysym::Down if !in_row && self.flat_len() > row + recents => Some(row + recents),
+            Keysym::Down if !in_row => Some(cur),
+            Keysym::Up if in_row => Some(cur),
+            Keysym::Up => Some(a.left),
+            _ => None,
+        };
+        let Some(to) = to else {
+            return false;
+        };
+        self.search.selected = Some(to);
+        self.actions_settle();
+        self.schedule_frame();
+        true
+    }
+
+    /// The recent nearest under cell `cur` of the app's row (both rows are
+    /// centred on their own).
+    fn recent_under(&self, cur: usize) -> usize {
+        let a = &self.search.actions;
+        let layout = self.current_layout();
+        let sec = &layout.sections[content::SECTION_APPS];
+        let cw = sec.viewport.w / sec.cols.max(1) as f32;
+        let x = sec.row_shift(0) + cur as f32 * cw;
+        let below = sec.cols.max(a.row());
+        let x0 = sec.row_shift(below);
+        let j = ((x - x0) / cw).round().max(0.0) as usize;
+        j.min(a.recents.len().saturating_sub(1))
     }
 
     /// Put Uninstall back once neither the keys nor the pointer are on its
@@ -336,8 +674,20 @@ impl App {
         }
     }
 
-    /// Run action `n`: a command starts and the box goes; Uninstall asks,
-    /// and uninstalls when asked again.
+    /// The box goes, the keyboard back to where it was (Show all and Close
+    /// all leave no app starting to give it to).
+    fn lone_leave(&mut self) {
+        if self.interactive {
+            self.begin_keyboard_handback(KbSurface::Launcher, None);
+            surface::set_interactive(&self.layer, false);
+            self.interactive = false;
+        }
+        self.dismiss();
+    }
+
+    /// Run action `n`: a command starts and the box goes; Show all spreads
+    /// the app's windows, Close all closes them; Uninstall asks, and
+    /// uninstalls when asked again.
     pub(crate) fn run_app_action(&mut self, n: usize) {
         let Some(action) = self.search.actions.list.get(n).cloned() else {
             return;
@@ -349,6 +699,7 @@ impl App {
             return;
         };
         let needs_terminal = self.entries[index].needs_terminal;
+        let windows = self.running.get(&index).cloned().unwrap_or_default();
         match action.does {
             Does::Run(exec) => {
                 info!("app action {:?} of {app}", action.name);
@@ -357,6 +708,25 @@ impl App {
                     error!("app action failed for {app}: {e:#}");
                 }
                 self.launched(index);
+            }
+            Does::ShowAll => {
+                let class = hypr::running_windows().into_iter().find(|w| windows.contains(&w.address)).map(|w| w.class);
+                self.lone_leave();
+                match class {
+                    Some(class) => {
+                        info!("showing every window of {app} ({class})");
+                        let class = class.replace('\\', "\\\\").replace('"', "\\\"");
+                        hypr::eval(&format!("hl.plugin.waveview.spread_app(\"{class}\")"));
+                    }
+                    None => warn!("no window of {app} to show"),
+                }
+            }
+            Does::CloseAll => {
+                info!("closing every window of {app} ({})", windows.len());
+                for addr in &windows {
+                    hypr::close_window(addr);
+                }
+                self.lone_leave();
             }
             Does::Uninstall if self.search.actions.armed.is_none() => {
                 self.search.actions.armed = Some(Instant::now());
@@ -387,6 +757,11 @@ impl App {
 mod tests {
     use super::*;
 
+    /// The paths as text.
+    fn named(paths: &[PathBuf]) -> Vec<String> {
+        paths.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+    }
+
     #[test]
     fn each_action_wears_its_apps_own_symbol_or_one_by_what_it_says() {
         let of = |app: &str, id: &str, name: &str| SYMBOLS[symbol_for(app, id, name)].0;
@@ -403,6 +778,31 @@ mod tests {
     }
 
     #[test]
+    fn golem_knows_vlc_mpv_gimp_and_obs() {
+        let names = |id: &str| known_for(id).map(|k| k.name).collect::<Vec<_>>();
+        assert_eq!(names("vlc"), ["Open disc", "Play copied link", "Play Music"]);
+        assert_eq!(names("mpv"), ["Play copied link", "Play Music"]);
+        assert_eq!(names("org.gimp.GIMP"), ["Open copied image"]);
+        assert_eq!(names("com.obsproject.Studio"), ["Start recording", "Start virtual camera"]);
+        assert!(names("google-chrome").is_empty());
+        for k in KNOWN {
+            assert!(SYMBOLS.iter().any(|(n, _)| *n == k.symbol), "{} has no symbol {}", k.name, k.symbol);
+        }
+    }
+
+    #[test]
+    fn the_apps_own_actions_give_way_before_uninstall() {
+        let act = |does: Does| Action { name: String::new(), does, symbol: 0 };
+        let mut right = vec![act(Does::Run("a".into())), act(Does::Run("b".into())), act(Does::Uninstall)];
+        keep_right(&mut right, 2);
+        assert_eq!(right.iter().map(|a| a.does.clone()).collect::<Vec<_>>(), [Does::Run("a".into()), Does::Uninstall]);
+        keep_right(&mut right, 1);
+        assert_eq!(right[0].does, Does::Uninstall);
+        keep_right(&mut right, 0);
+        assert!(right.is_empty());
+    }
+
+    #[test]
     fn a_name_breaks_between_words() {
         // Ten pixels a letter, spaces too.
         let mut w = |s: &str| s.chars().count() as f32 * 10.0;
@@ -410,6 +810,38 @@ mod tests {
         assert_eq!(by_words("New Window", room, &mut w), ("New Window".into(), String::new()));
         assert_eq!(by_words("New Incognito Window", room, &mut w), ("New Incognito".into(), "Window".into()));
         assert_eq!(by_words("Uninstall Google Chrome", room, &mut w), ("Uninstall".into(), "Google Chrome".into()));
+    }
+
+    #[test]
+    fn the_record_gives_each_apps_own_files_newest_first() {
+        let xbel = r#"<?xml version="1.0"?>
+<xbel version="1.0" xmlns:bookmark="http://www.freedesktop.org/standards/desktop-bookmarks">
+  <bookmark href="file:///home/max/a%20b.png" added="2026-10-01T10:00:00Z" modified="2026-10-01T10:00:00Z" visited="2026-10-01T10:00:00Z">
+    <info><metadata owner="http://freedesktop.org"><bookmark:applications>
+      <bookmark:application name="GNU Image Manipulation Program" exec="&apos;gimp-3.0 %u&apos;" modified="2026-10-01T10:00:00Z" count="1"/>
+    </bookmark:applications></metadata></info>
+  </bookmark>
+  <bookmark href="file:///home/max/c.png" added="2026-10-03T10:00:00Z" modified="2026-10-03T10:00:00Z" visited="2026-10-03T10:00:00Z">
+    <info><metadata owner="http://freedesktop.org"><bookmark:applications>
+      <bookmark:application name="Golem Files" exec="&apos;waverunner-ctl files %u&apos;" modified="2026-10-03T10:00:00Z" count="1"/>
+      <bookmark:application name="gimp" exec="&apos;/nix/store/x/bin/gimp %u&apos;" modified="2026-10-04T10:00:00Z" count="1"/>
+    </bookmark:applications></metadata></info>
+  </bookmark>
+  <bookmark href="file:///home/max/notes.txt" added="2026-10-05T10:00:00Z" modified="2026-10-05T10:00:00Z" visited="2026-10-05T10:00:00Z">
+    <info><metadata owner="http://freedesktop.org"><bookmark:applications>
+      <bookmark:application name="Text Editor" exec="&apos;gnome-text-editor %U&apos;" modified="2026-10-05T10:00:00Z" count="1"/>
+    </bookmark:applications></metadata></info>
+  </bookmark>
+</xbel>"#;
+        let keys = vec!["gimp".to_owned(), "org.gimp.gimp".to_owned()];
+        assert_eq!(named(&xbel_by_app(xbel, &keys)), ["/home/max/c.png", "/home/max/a b.png"]);
+    }
+
+    #[test]
+    fn vlcs_own_list_is_read() {
+        let conf = "[General]\nfoo=1\n\n[RecentsMRL]\nlist=file:///home/max/Music/a.mp4, file:///home/max/2026-07-21%2014-40-10.avi, directory:///home/max\ntimes=0, 0, 0\n";
+        assert_eq!(named(&vlc_recents(conf)), ["/home/max/Music/a.mp4", "/home/max/2026-07-21 14-40-10.avi", "/home/max"]);
+        assert!(vlc_recents("[General]\nlist=file:///x\n").is_empty());
     }
 
     #[test]

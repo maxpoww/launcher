@@ -97,7 +97,8 @@ impl App {
         // (Pages wrap cyclically, so the pager's target can run past them.)
         let page = self.scroll.per[content::SECTION_APPS].page(sec.page_len().max(1.0)) % sec.n_pages.max(1);
         // The last filled slot on that page sets the rows it needs.
-        let slots: &[usize] = if self.grid_resting() { &self.apps_slots } else { &[] };
+        // (The lone app lays its rows out by slots too: `app_actions.rs`.)
+        let slots: &[usize] = if self.grid_resting() || self.lone_anchor().is_some() { &self.apps_slots } else { &[] };
         let last = if slots.is_empty() {
             // Search results: dense, one per cell.
             let n = self.search.visible[content::SECTION_APPS].len();
@@ -112,7 +113,8 @@ impl App {
         let box_room = if self.app_group.is_some() || self.dir_stack.as_ref().is_some_and(|ds| ds.in_grid) {
             cell
         } else {
-            0.0
+            // The lone app's recents' title, under its row.
+            self.lone_room()
         };
         // Aimed with the room the Controls band is heading for, so the Apps
         // viewport lands on exactly `keep` rows.
@@ -195,6 +197,15 @@ impl App {
         let centre_rows = !self.grid_resting();
         for sec in &mut layout.sections {
             sec.centre_rows = centre_rows;
+        }
+        // THE LONE APP (`app_actions.rs`): its row laid out round it, and
+        // room under that row for its recents' title.
+        if centre_rows {
+            layout.sections[content::SECTION_APPS].anchor = self.lone_anchor();
+            let room = self.lone_room();
+            if room > 0.0 {
+                layout.apps_part = Some(content::AppsPart { row: 0, up: 0.0, down: room });
+            }
         }
         // The System row: the matching settings and modules as near-layer
         // pills, split about the title's centre (see `content::controls_rects`).
@@ -1702,6 +1713,7 @@ impl App {
                 control_lift: &self.search.control_lift,
                 act_cells: &act_cells,
                 act_asking,
+                recent_title: self.search.actions.title.as_deref(),
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()

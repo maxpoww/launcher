@@ -683,6 +683,9 @@ pub struct SectionLayout {
     /// centre like the Controls row (see [`SectionLayout::row_shift`]).
     /// Off for the resting grid, which keeps the order Max arranged.
     pub centre_rows: bool,
+    /// THE LONE APP (`app_actions.rs`): the cell of the first row that
+    /// stands under the title, the row laid out round it; `None` otherwise.
+    pub anchor: Option<usize>,
     /// The pages go DOWN, not across (a side dock's box — Max, 2026-10-21):
     /// `scroll` is then along the height, a page `viewport.h` long.
     pub vertical: bool,
@@ -709,6 +712,9 @@ impl SectionLayout {
         }
         let per_page = cols * self.rows.max(1);
         let start = i / per_page * per_page + (i % per_page) / cols * cols;
+        if let Some(a) = self.anchor.filter(|_| start == 0) {
+            return self.viewport.w / 2.0 - (a as f32 + 0.5) * self.viewport.w / cols as f32;
+        }
         let k = self.cells.saturating_sub(start).min(cols);
         if k == 0 || k >= cols {
             return 0.0;
@@ -1309,6 +1315,7 @@ pub fn layout(
                     rows
                 },
             centre_rows: false,
+            anchor: None,
             vertical: false,
         }
     });
@@ -1634,6 +1641,7 @@ fn layout_side(
             cells: n_visible[s],
             cap: cols * fits,
             centre_rows: false,
+            anchor: None,
             vertical: true,
         }
     });
@@ -2048,6 +2056,9 @@ pub struct FrameInput<'a> {
     /// the texture layer of its symbol; and the one asking to be sure.
     pub act_cells: &'a [(usize, u32)],
     pub act_asking: Option<usize>,
+    /// The lone app's recents' title ("Recent in VLC"), drawn in the room
+    /// opened under its row.
+    pub recent_title: Option<&'a str>,
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
     pub quick: Option<QuickDraw<'a>>,
@@ -2394,6 +2405,7 @@ pub fn scene(
         control_lift,
         act_cells,
         act_asking,
+        recent_title,
         fast,
         quick,
         stretch,
@@ -3438,6 +3450,25 @@ pub fn scene(
             color: Some(title_ink),
             clip: Some(reveal_rect),
         });
+        // The lone app's recents' title (`app_actions.rs`), in the room
+        // opened under its row: below the second lines of its actions' names.
+        if let Some(text) = recent_title.filter(|_| s == SECTION_APPS) {
+            let room = crate::app_actions::RECENT_ROOM * icon_scale;
+            let y = sec.viewport.y + grid_cell_h + LABEL_LINE_PX + (room - LABEL_LINE_PX - TITLE_LINE_PX) / 2.0;
+            scene.labels.push(Label {
+                text: text.to_string(),
+                pos: (sec.title_pos.0, y),
+                max_w: sec.viewport.w,
+                font_px: TITLE_FONT_PX,
+                line_px: TITLE_LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: Some(FONT_BOLD),
+                color: Some(title_ink),
+                clip: Some(reveal_rect),
+            });
+        }
 
         let mut grid = GridContent {
             clip: reveal_clip(sec.viewport),

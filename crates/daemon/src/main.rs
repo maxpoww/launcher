@@ -5084,6 +5084,8 @@ impl App {
             self.apps_slots = (0..n).collect();
             self.apps_page_map.clear();
             self.apps_span = n;
+            // …but a lone app's row and its recents' row (`app_actions.rs`).
+            self.lone_slots();
         }
         // Boxes' entry indices just changed — re-resolve pinned dock items.
         self.recompute_dock_order();
@@ -5119,7 +5121,8 @@ impl App {
         self.search.selected = if resting_grid || self.flat_len() == 0 {
             None
         } else {
-            Some(0)
+            // (A lone app stands in its row's middle: `app_actions.rs`.)
+            Some(self.lone_anchor().unwrap_or(0))
         };
         if !resting_grid || grid_flip {
             // Entering / leaving the searched grid replaces the content
@@ -7947,7 +7950,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // minimized-window tiles — they are not
                                 // pins, and the plugin owns their lifetime.
                                 let undraggable = entry_idx.is_some_and(|i| {
-                                    app.entries.get(i).is_some_and(|e| {
+                                    // (A lone app's actions and recents.)
+                                    app.lone_owns(i) || app.entries.get(i).is_some_and(|e| {
                                         app.busy_ids.contains(&e.id)
                                             || e.id.starts_with("min:")
                                             || e.id.starts_with(app_actions::PREFIX)
