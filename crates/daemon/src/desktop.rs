@@ -141,6 +141,8 @@ pub(crate) struct Grid {
     /// whatever air the closer side margins left over, shared between the
     /// columns (Max, 2026-10-08: "closer to the edge, like half that air").
     pub pitch: f32,
+    /// The icon scale it was laid out at.
+    pub scale: f32,
 }
 
 impl Grid {
@@ -169,6 +171,7 @@ impl Grid {
             ch,
             x0,
             pitch,
+            scale: icon_scale,
         }
     }
 
@@ -530,6 +533,12 @@ pub(crate) struct Desktop {
     /// Icon pixels by key, kept so a new renderer or a reallocated array can
     /// be refilled without asking again.
     pub(crate) chains: HashMap<String, Vec<u8>>,
+    /// How much of each picture's square is empty round what it shows
+    /// (`filer::ink_box`), read as it goes into its layer: an item is hit
+    /// only where it is seen.
+    seen: HashMap<String, [f32; 4]>,
+    /// Each item's name as last written: its width and its line's height.
+    names_w: Vec<(f32, f32)>,
     /// Keys asked of the resolver and not answered yet.
     pending: HashSet<String>,
     /// Keys the theme had no icon for: asked once, not again until the
@@ -1664,18 +1673,10 @@ fn intersects(a: &Rect, b: &Rect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/// The items whose icon or name the band touches.
-pub(crate) fn band_hits(grid: &Grid, slots: &[Option<Slot>], icon_scale: f32, band: &Rect) -> Vec<usize> {
-    slots
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.map(|s| (i, grid.rect(s))))
-        .filter(|(_, cell)| {
-            let icon = icon_rect(cell, icon_scale);
-            let body = Rect::new(icon.x, icon.y, icon.w, icon.h + LABEL_GAP + LABEL_LINE_PX);
-            intersects(&body, band)
-        })
-        .map(|(i, _)| i)
+/// The items whose picture or name the band touches (`Desktop::thing`).
+pub(crate) fn band_hits(desktop: &Desktop, band: &Rect) -> Vec<usize> {
+    (0..desktop.slots.len())
+        .filter(|&i| desktop.thing(i).is_some_and(|t| t.touches(band)))
         .collect()
 }
 
@@ -2224,12 +2225,40 @@ impl Desktop {
     }
 
     /// The item under `pos`, if any (none while the icons are put away:
-    /// what cannot be seen cannot be hit).
+    /// what cannot be seen cannot be hit). An item is its picture and its
+    /// name (`thing`): the rest of its cell is the wallpaper — a band starts
+    /// there, a right click has the wallpaper's menu (Max, 2026-10-22).
     pub(crate) fn hit(&self, pos: (f32, f32)) -> Option<usize> {
         let slot = self.grid.slot_at(pos)?;
         let i = self.slots.iter().position(|s| *s == Some(slot))?;
+        if !self.thing(i).is_some_and(|t| t.contains(pos)) {
+            return None;
+        }
         // Put away, only a device shown alone is there to be hit.
         (!self.hidden || (self.solo_on && self.solo.contains(&self.items[i].path))).then_some(i)
+    }
+
+    /// Item `i` where it stands (`filer::Thing`): its picture as it is seen,
+    /// its name's box — as wide as a name may be until it is written.
+    pub(crate) fn thing(&self, i: usize) -> Option<crate::filer::Thing> {
+        let cell = self.grid.rect(self.slots.get(i).copied().flatten()?);
+        let icon = icon_rect(&cell, self.grid.scale);
+        let [top, under, left, right] = self.items.get(i).and_then(|it| self.seen.get(&it.icon)).copied().unwrap_or_default();
+        let pic = Rect::new(
+            icon.x + left * icon.w,
+            icon.y + top * icon.h,
+            icon.w * (1.0 - left - right).max(0.0),
+            icon.h * (1.0 - top - under).max(0.0),
+        );
+        let (w, line) = self.names_w.get(i).copied().unwrap_or((label_max_w(&cell), LABEL_LINE_PX));
+        let (pad_x, pad_y) = crate::filer::NAME_PAD;
+        let name = Rect::new(
+            icon.x + icon.w / 2.0 - w / 2.0 - pad_x,
+            icon.y + icon.h + LABEL_GAP - pad_y,
+            w + 2.0 * pad_x,
+            line + 2.0 * pad_y,
+        );
+        Some(crate::filer::Thing { pic, name })
     }
 
     /// The cells the placed items hold, less `except`'s.
@@ -2507,6 +2536,7 @@ impl App {
         // Drop the pictures nothing wears any more (a thumbnail is ~350 KB).
         let worn: HashSet<&str> = self.desktop.items.iter().map(|it| it.icon.as_str()).collect();
         self.desktop.chains.retain(|k, _| worn.contains(k.as_str()));
+        self.desktop.seen.retain(|k, _| worn.contains(k.as_str()));
         self.desktop.pending.retain(|k| worn.contains(k.as_str()));
         self.desktop.missing.clear();
         // Positions of files long gone are forgotten once they pile up.
@@ -2616,6 +2646,7 @@ impl App {
                 let free = self.desktop.uploaded.iter().position(Option::is_none);
                 if let (Some(layer), Some(r)) = (free, self.desktop_renderer.as_mut()) {
                     r.update_icon_layer(layer as u32, chain);
+                    self.desktop.seen.insert(key.clone(), crate::filer::ink_box(chain));
                     self.desktop.uploaded[layer] = Some(key);
                 }
             } else if !self.desktop.pending.contains(&key) && !self.desktop.missing.contains(&key)
@@ -4831,6 +4862,8 @@ impl App {
                 })
             })
             .collect();
+        // (What a name is, to the pointer: `Desktop::thing`.)
+        self.desktop.names_w = names.iter().map(|n| (renderer.measure_text(n, name_px, None), LABEL_LINE_PX * zoom)).collect();
         let (ink_now, veil) = (self.desktop.ink.clone(), crate::lighting::veil_now());
         self.desktop.ink_veil = veil;
         let mut scene = scene(
@@ -5224,7 +5257,7 @@ impl App {
         if let Some((from, _)) = self.desktop.band {
             self.desktop.band = Some((from, (x, y)));
             let band = band_rect(from, (x, y));
-            let hits = band_hits(&self.desktop.grid, &self.desktop.slots, self.desktop_icon_scale(), &band);
+            let hits = band_hits(&self.desktop, &band);
             self.desktop.selected = hits.into_iter().map(|i| self.desktop.items[i].path.clone()).collect();
             self.request_desktop_draw();
         } else if self.desktop.drag.is_none() {
@@ -6348,6 +6381,30 @@ impl App {
             self.request_desktop_draw();
             return format!("{} selected", self.desktop.selected.len());
         }
+        // `pointer press|release|rclick`: the left button pressed or let
+        // go, or a right click, where the pointer is — through the pointer's
+        // own handler (a rig moves the pointer, and has no buttons).
+        if let Some(rest) = what.strip_prefix("pointer ") {
+            let button = |button, state| wl_pointer::Event::Button { serial: 0, time: 0, button, state: WEnum::Value(state) };
+            let (down, up) = (wl_pointer::ButtonState::Pressed, wl_pointer::ButtonState::Released);
+            match rest.trim() {
+                "press" => self.desktop_pointer(button(crate::BTN_LEFT, down)),
+                "release" => self.desktop_pointer(button(crate::BTN_LEFT, up)),
+                "rclick" => {
+                    self.desktop_pointer(button(crate::BTN_RIGHT, down));
+                    self.desktop_pointer(button(crate::BTN_RIGHT, up));
+                }
+                _ => return "pointer press|release|rclick".to_owned(),
+            }
+            let on = self.desktop.ptr.and_then(|p| self.desktop.hit(p)).map(|i| self.desktop.items[i].name.clone());
+            let menu = self.desktop.menu.as_ref().map(|m| m.ctx.on);
+            return format!(
+                "pointer {} at {:?} on {on:?}: band {}, menu {menu:?}",
+                rest.trim(),
+                self.desktop.ptr,
+                self.desktop.band.is_some()
+            );
+        }
         if let Some(rest) = what.strip_prefix("band ") {
             // `band x0 y0 x1 y1` draws a rubber band there (and selects what
             // it touches), as a drag from bare wallpaper would; `band` alone
@@ -6357,12 +6414,7 @@ impl App {
                 return "band <x0> <y0> <x1> <y1>".to_owned();
             };
             self.desktop.band = Some(((x0, y0), (x1, y1)));
-            let hits = band_hits(
-                &self.desktop.grid,
-                &self.desktop.slots,
-                self.desktop_icon_scale(),
-                &band_rect((x0, y0), (x1, y1)),
-            );
+            let hits = band_hits(&self.desktop, &band_rect((x0, y0), (x1, y1)));
             self.desktop.selected = hits.iter().map(|&i| self.desktop.items[i].path.clone()).collect();
             self.request_desktop_draw();
             return format!("band over {} item(s)", hits.len());
@@ -6579,7 +6631,8 @@ mod tests {
         };
         d.slots = place(&d.items, &d.remembered, &d.grid);
         let cell = d.grid.rect((0, 1));
-        assert_eq!(d.hit((cell.x + 1.0, cell.y + 1.0)), Some(1));
+        let icon = icon_rect(&cell, 1.0);
+        assert_eq!(d.hit((icon.x + 1.0, icon.y + 1.0)), Some(1));
         assert_eq!(d.hit((d.grid.rect((1, 0)).x + 1.0, MARGIN + 1.0)), None);
         // Settle b onto a's cell: it goes to the nearest free one instead,
         // and is remembered there.
@@ -6600,10 +6653,49 @@ mod tests {
             slots: vec![Some((0, 0)), Some((0, 1)), Some((0, 2))],
             ..Default::default()
         };
-        assert_eq!(d.hit((g.x0 + 1.0, MARGIN + 1.0)), Some(0));
-        assert_eq!(d.hit((g.x0 + 1.0, MARGIN + CELL_H + 1.0)), Some(1));
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(d.hit(mid(icon_rect(&g.rect((0, 0)), 1.0))), Some(0));
+        assert_eq!(d.hit(mid(icon_rect(&g.rect((0, 1)), 1.0))), Some(1));
         assert_eq!(d.hit((1.0, 1.0)), None);
         assert_eq!(d.hit((g.x0 + g.pitch + 1.0, MARGIN + 1.0)), None);
+    }
+
+    #[test]
+    fn an_item_is_its_picture_and_its_name_the_rest_is_wallpaper() {
+        let g = Grid::new(1000.0, 400.0, 1.0);
+        let mut d = Desktop {
+            items: vec![item("a")],
+            grid: g,
+            slots: vec![Some((0, 0))],
+            ..Default::default()
+        };
+        // (A drawing with an eighth of its square empty all round, and a
+        // name 30 px wide.)
+        d.seen.insert(d.items[0].icon.clone(), [0.125; 4]);
+        d.names_w = vec![(30.0, LABEL_LINE_PX)];
+        let cell = g.rect((0, 0));
+        let icon = icon_rect(&cell, 1.0);
+        let t = d.thing(0).unwrap();
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(d.hit(mid(t.pic)), Some(0));
+        assert_eq!(d.hit(mid(t.name)), Some(0));
+        // Between the two: it still.
+        assert_eq!(d.hit((icon.x + icon.w / 2.0, icon.y + icon.h + 2.0)), Some(0));
+        // The cell's corners, the picture's empty corner, beside the name:
+        // the wallpaper.
+        for p in [
+            (cell.x + 1.0, cell.y + 1.0),
+            (cell.x + cell.w - 1.0, cell.y + cell.h - 1.0),
+            (icon.x + 2.0, icon.y + 2.0),
+            (t.name.x - 4.0, t.name.y + 3.0),
+        ] {
+            assert_eq!(d.hit(p), None, "{p:?} is wallpaper");
+        }
+        // A band through the air beside it: nothing; over its name: it.
+        let beside = band_rect((icon.x + icon.w + 6.0, cell.y), (cell.x + cell.w, cell.y + cell.h));
+        assert!(band_hits(&d, &beside).is_empty());
+        let over_name = band_rect((t.name.x + 2.0, t.name.y + 2.0), (t.name.x + 6.0, cell.y + cell.h));
+        assert_eq!(band_hits(&d, &over_name), vec![0]);
     }
 
     fn make_dir(files: &[(&str, &str)], dirs: &[&str]) -> PathBuf {
@@ -6967,14 +7059,20 @@ mod tests {
         let b = band_rect((60.0, 60.0), (20.0, 20.0));
         assert_eq!(a, b);
         assert_eq!(a, Rect::new(20.0, 20.0, 40.0, 40.0));
+        let d = Desktop {
+            items: vec![item("a"), item("b"), item("c")],
+            grid: g,
+            slots,
+            ..Default::default()
+        };
         // Touching the first icon only.
-        assert_eq!(band_hits(&g, &slots, 1.0, &a), vec![0]);
+        assert_eq!(band_hits(&d, &a), vec![0]);
         // Across two columns, through the names of the first row.
         let wide = band_rect((20.0, 80.0), (200.0, 90.0));
-        assert_eq!(band_hits(&g, &slots, 1.0, &wide), vec![0, 2]);
+        assert_eq!(band_hits(&d, &wide), vec![0, 2]);
         // In the margin: nothing.
         let none = band_rect((0.0, 0.0), (5.0, 5.0));
-        assert!(band_hits(&g, &slots, 1.0, &none).is_empty());
+        assert!(band_hits(&d, &none).is_empty());
     }
 
     #[test]

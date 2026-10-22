@@ -157,7 +157,7 @@ const LIST_DATE_W: f32 = 150.0;
 /// and down).
 const SEL_PAD: f32 = 4.0;
 const SEL_TOP: f32 = 6.0;
-const NAME_PAD: (f32, f32) = (5.0, 1.0);
+pub(crate) const NAME_PAD: (f32, f32) = (5.0, 1.0);
 /// The air beside the grid (inside `PAD`) and beside a list's rows, and
 /// where a list's first row begins.
 const GRID_AIR: f32 = 10.0;
@@ -437,6 +437,8 @@ pub(crate) struct Layout {
     /// Room under the last row (the selection pill floats there), in the
     /// field's own size.
     pub foot: f32,
+    /// The icons' scale it was laid out at.
+    pub icon_scale: f32,
 }
 
 impl Layout {
@@ -471,6 +473,7 @@ impl Layout {
                 list,
                 zoom,
                 foot: 0.0,
+                icon_scale,
             };
         }
         // As many columns as fit, the room left shared between them: the
@@ -489,7 +492,15 @@ impl Layout {
             list,
             zoom,
             foot: 0.0,
+            icon_scale,
         }
+    }
+
+    /// How wide a name under a picture may be: the whole column's width,
+    /// not only its cell's (the cells are narrow — Max wants the things
+    /// close — and a word should not break).
+    pub fn label_w(&self) -> f32 {
+        (self.pitch - 4.0).max(self.cw - 12.0)
     }
 
     /// The field as it is drawn: `body` at the zoom.
@@ -699,18 +710,99 @@ struct Hovering {
     offer: DragOffer,
 }
 
+/// How far round a thing's picture and name the pointer still finds it.
+const THING_SLOP: f32 = 2.0;
+
+/// A THING IS ITS PICTURE AND ITS NAME (Max, 2026-10-22: "selection have to
+/// happen only clicking the icon or text, the rest should be empty space, so
+/// i can right click on the bg (dir) and use the rubber band"): of a cell in
+/// the grid — a file window's or the desktop's — only the picture as it is
+/// seen and the name's box are the thing, the few pixels between them
+/// counted in. The rest of the cell is the ground: a press there starts a
+/// band, a right click has the folder's (or the wallpaper's) menu, a drop
+/// goes to the folder.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Thing {
+    /// What the picture shows of its square.
+    pub pic: Rect,
+    /// The name's box (the selected one's soft box).
+    pub name: Rect,
+}
+
+impl Thing {
+    /// The picture, the name, and the strip between them as wide as the
+    /// narrower of the two — so no dead line parts them.
+    fn parts(&self) -> [Rect; 3] {
+        let narrow = if self.pic.w < self.name.w { self.pic } else { self.name };
+        let (from, to) = (self.pic.y + self.pic.h, self.name.y);
+        let between = Rect::new(narrow.x, from.min(to), narrow.w, (to - from).abs());
+        [self.pic, between, self.name]
+    }
+
+    /// Whether the pointer at `p` is on it (`THING_SLOP` round it).
+    pub fn contains(&self, p: (f32, f32)) -> bool {
+        let s = THING_SLOP;
+        self.parts().iter().any(|r| Rect::new(r.x - s, r.y - s, r.w + 2.0 * s, r.h + 2.0 * s).contains(p))
+    }
+
+    /// Whether a rubber band over `band` touches its picture or its name.
+    pub fn touches(&self, band: &Rect) -> bool {
+        self.parts().iter().any(|r| {
+            let met = band.intersect(r);
+            met.w > 0.0 && met.h > 0.0
+        })
+    }
+}
+
+/// The thing in `cell` of a file window's grid: its picture in its space
+/// (`Layout::icon_in`), sitting on its bottom — `ink`, the empty shares of
+/// its square above, under, left and right (`ink_box`) — and its name,
+/// `name_w` wide on `lines` lines, centred under it in its soft box.
+pub(crate) fn thing_in(layout: &Layout, cell: &Rect, ink: [f32; 4], (name_w, lines): (f32, usize)) -> Thing {
+    let slot = layout.icon_in(cell, layout.icon_scale);
+    let [top, under, left, right] = ink;
+    // (Moved down by what is empty under it: what it shows ends at its
+    // space's foot.)
+    let pic = Rect::new(
+        slot.x + left * slot.w,
+        slot.y + (top + under) * slot.h,
+        slot.w * (1.0 - left - right).max(0.0),
+        slot.h * (1.0 - top - under).max(0.0),
+    );
+    let at = slot.y + slot.h + LABEL_GAP;
+    let cx = cell.x + cell.w / 2.0;
+    let name = Rect::new(
+        cx - name_w / 2.0 - NAME_PAD.0,
+        at - NAME_PAD.1,
+        name_w + 2.0 * NAME_PAD.0,
+        lines.max(1) as f32 * LABEL_LINE_PX + 2.0 * NAME_PAD.1,
+    );
+    Thing { pic, name }
+}
+
 /// The items a rubber band from `a` to `b` touches (both in the field's
-/// own, unscrolled coordinates): those whose cell, less its margins, it
-/// crosses.
-pub(crate) fn band_hits(layout: &Layout, a: (f32, f32), b: (f32, f32), n: usize) -> Vec<usize> {
-    let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
-    let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+/// own, unscrolled coordinates): in the grid, those whose picture or name
+/// it touches (`thing`: item `i` in its cell); in a list, those whose row,
+/// less its margins, it crosses.
+pub(crate) fn band_hits(
+    layout: &Layout,
+    a: (f32, f32),
+    b: (f32, f32),
+    n: usize,
+    thing: &mut dyn FnMut(usize, &Rect) -> Thing,
+) -> Vec<usize> {
+    let band = Rect::new(a.0.min(b.0), a.1.min(b.1), (a.0 - b.0).abs(), (a.1 - b.1).abs());
+    let meets = |r: &Rect| band.x < r.x + r.w && r.x < band.x + band.w && band.y < r.y + r.h && r.y < band.y + band.h;
     (0..n)
         .filter(|&i| {
             let c = layout.cell(i);
-            let (cx0, cx1) = (c.x + 10.0, c.x + c.w - 10.0);
-            let (cy0, cy1) = (c.y + 6.0, c.y + c.h - 6.0);
-            x0 < cx1 && cx0 < x1 && y0 < cy1 && cy0 < y1
+            if layout.list {
+                return meets(&Rect::new(c.x + 10.0, c.y + 6.0, c.w - 20.0, c.h - 12.0));
+            }
+            // (A name may reach past its cell: a wide one into the air
+            // beside it, a second line into the row under it.)
+            let near = Rect::new(c.x - 12.0, c.y, c.w + 24.0, c.h + 2.0 * LABEL_LINE_PX);
+            meets(&near) && thing(i, &c).touches(&band)
         })
         .collect()
 }
@@ -1589,9 +1681,10 @@ struct Win {
     root: Option<PathBuf>,
 
     chains: HashMap<String, Vec<u8>>,
-    /// How much of each picture's square is empty above and under what it
-    /// shows (`ink_rows`), for it to sit on the bottom of its space.
-    ink: HashMap<String, (f32, f32)>,
+    /// How much of each picture's square is empty round what it shows
+    /// (`ink_box`): for it to sit on the bottom of its space, and to be hit
+    /// only where it is seen.
+    ink: HashMap<String, [f32; 4]>,
     uploaded: Vec<Option<String>>,
     capacity: u32,
     pending: HashSet<String>,
@@ -1891,7 +1984,7 @@ impl Win {
             .map(|l| l as u32)
     }
 
-    fn spot(&self, pos: (f32, f32), layout: &Layout) -> Spot {
+    fn spot(&mut self, pos: (f32, f32), layout: &Layout) -> Spot {
         let h = &self.hits;
         if h.up.contains(pos) {
             return Spot::Up;
@@ -1959,9 +2052,84 @@ impl Win {
         if let Some(i) = h.cols.iter().position(|r| r.contains(pos)) {
             return Spot::Col(i);
         }
-        layout
-            .index_at(pos, self.scroll, self.items.len())
-            .map_or(Spot::Nothing, Spot::Item)
+        self.thing_at(pos, layout).map_or(Spot::Nothing, Spot::Item)
+    }
+
+    /// The thing at `pos` (a point of the field): in the grid, the one whose
+    /// picture or name it is on (`Thing`) — the rest of a cell is the
+    /// folder's ground; in a list, the row's.
+    fn thing_at(&mut self, pos: (f32, f32), layout: &Layout) -> Option<usize> {
+        let n = self.items.len();
+        if layout.list {
+            return layout.index_at(pos, self.scroll, n);
+        }
+        if !layout.body.contains(pos) {
+            return None;
+        }
+        // The cell under it, then those whose name may reach into it: the
+        // one above (a second line), either side (a name wider than its
+        // cell).
+        let (i, _) = layout.slot_at(pos, self.scroll);
+        let col = i % layout.cols;
+        let near = [
+            Some(i),
+            i.checked_sub(layout.cols),
+            (col > 0).then(|| i - 1),
+            (col + 1 < layout.cols).then_some(i + 1),
+        ];
+        near.into_iter().flatten().filter(|&j| j < n).find(|&j| {
+            let mut cell = layout.cell(j);
+            cell.y -= self.scroll;
+            self.thing(j, &cell, layout).contains(pos)
+        })
+    }
+
+    /// Thing `i` standing in `cell` of the grid: its picture as it is seen
+    /// and its name's box (`thing_in`).
+    fn thing(&mut self, i: usize, cell: &Rect, layout: &Layout) -> Thing {
+        let ink = self.items.get(i).and_then(|it| self.ink.get(&it.icon)).copied().unwrap_or_default();
+        let label_w = layout.label_w();
+        let lines: Vec<String> = self
+            .name_of(i, layout)
+            .map(|(a, b)| [a, b].into_iter().filter(|l| !l.is_empty()).cloned().collect())
+            .unwrap_or_default();
+        let widest = lines
+            .iter()
+            .map(|l| self.renderer.as_mut().map_or(0.0, |r| r.measure_text(l, LABEL_FONT_PX, None)))
+            .fold(0.0, f32::max)
+            .min(label_w);
+        thing_in(layout, cell, ink, (widest, lines.len()))
+    }
+
+    /// Thing `i`'s name as it is written under its picture: on one line or
+    /// two; found below, its folder on the second. Fitted once.
+    fn name_of(&mut self, i: usize, layout: &Layout) -> Option<&(String, String)> {
+        if self.names.0 != layout.icon_scale || self.names.1.len() != self.items.len() {
+            self.names = (layout.icon_scale, vec![None; self.items.len()]);
+        }
+        if self.names.1.get(i)?.is_none() {
+            let label_w = layout.label_w();
+            let (item, renderer) = (self.items.get(i)?, self.renderer.as_mut()?);
+            let mut measure = |t: &str| renderer.measure_text(t, LABEL_FONT_PX, None);
+            self.names.1[i] = Some(if i >= self.deep_from {
+                // Found below: its name on one line, its folder dim on the
+                // other.
+                (
+                    crate::desktop::fit_label(&item.name, label_w, &mut measure),
+                    crate::desktop::fit_label(&below(&item.path, &self.dir), label_w, &mut measure),
+                )
+            } else {
+                let lines = two_lines(&item.name, label_w, &mut measure);
+                tracing::debug!(
+                    "files: name {:?} within {label_w} (measured {}) → {:?}",
+                    item.name,
+                    measure(&item.name),
+                    lines
+                );
+                lines
+            });
+        }
+        self.names.1[i].as_ref()
     }
 
     /// Which part of thing `i` is at `at` (a point of the field): its
@@ -2634,19 +2802,26 @@ impl Typed {
     }
 }
 
-/// How much of a picture's square is empty above and under what it shows
-/// (shares of its height): rows of its largest image with nothing more
-/// than a faint shadow in them.
-pub(crate) fn ink_rows(chain: &[u8]) -> (f32, f32) {
+/// How much of a picture's square is empty round what it shows (shares of
+/// its side: above, under, left, right): rows and columns of its largest
+/// image with nothing more than a faint shadow in them.
+pub(crate) fn ink_box(chain: &[u8]) -> [f32; 4] {
     let n = crate::apps::ICON_SIZE as usize;
     if chain.len() < n * n * 4 {
-        return (0.0, 0.0);
+        return [0.0; 4];
     }
-    let inked = |y: usize| chain[y * n * 4..(y + 1) * n * 4].chunks_exact(4).any(|px| px[3] > 40);
-    let (Some(first), Some(last)) = ((0..n).find(|&y| inked(y)), (0..n).rev().find(|&y| inked(y))) else {
-        return (0.0, 0.0);
-    };
-    (first as f32 / n as f32, (n - 1 - last) as f32 / n as f32)
+    let (mut x0, mut y0, mut x1, mut y1) = (n, n, 0, 0);
+    for (k, px) in chain[..n * n * 4].chunks_exact(4).enumerate() {
+        if px[3] > 40 {
+            let (x, y) = (k % n, k / n);
+            (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+        }
+    }
+    if x0 > x1 {
+        return [0.0; 4];
+    }
+    let share = |k: usize| k as f32 / n as f32;
+    [share(y0), share(n - 1 - y1), share(x0), share(n - 1 - x1)]
 }
 
 fn rect(rect: Rect, radius: f32, color: [f32; 4]) -> RectInst {
@@ -5058,7 +5233,7 @@ impl App {
                     if win.ink.len() > 4000 {
                         win.ink.clear();
                     }
-                    win.ink.insert(key.to_owned(), ink_rows(chain));
+                    win.ink.insert(key.to_owned(), ink_box(chain));
                 }
                 let free = win.uploaded.iter().position(Option::is_none);
                 if let (Some(layer), Some(r)) = (free, win.renderer.as_mut()) {
@@ -5300,13 +5475,7 @@ impl App {
             ..Default::default()
         };
         let view = layout.in_view(win.scroll, win.items.len());
-        // (A name has the whole column's width, not only its cell's: the
-        // cells are narrow — Max wants the things close — and a word should
-        // not break.)
-        let label_w = (layout.pitch - 4.0).max(layout.cw - 12.0);
-        if win.names.0 != icon_scale || win.names.1.len() != win.items.len() {
-            win.names = (icon_scale, vec![None; win.items.len()]);
-        }
+        let label_w = layout.label_w();
         // Names are painted last of all: one under the menu or the box is
         // left out, or it would show through (the desktop's lesson).
         let cover = win.menu.as_ref().map(|m| m.rect).or(win.props.as_ref().map(|p| p.rect));
@@ -5405,12 +5574,15 @@ impl App {
             }
         }
         for i in view {
-            let item = &win.items[i];
-            if in_hand.contains(item.path.as_str()) {
+            if in_hand.contains(win.items[i].path.as_str()) {
                 continue;
             }
             let mut cell = layout.cell_at(win.slide[i]);
             cell.y -= win.scroll;
+            // (In the grid: what of its cell it is — its picture as seen and
+            // its name's box, `Thing`.)
+            let thing = (!layout.list).then(|| win.thing(i, &cell, &layout));
+            let item = &win.items[i];
             if layout.list && (win.selected.contains(&item.path) || win.drop_on == Some(i)) {
                 // A selected row: a square band of the soft selection colour
                 // across, over its stripe (no accent — the words stay as
@@ -5422,11 +5594,11 @@ impl App {
             // 2026-10-21: the name about 3 px under what is seen): a folder's
             // or a page's drawing has empty margin of its own, a wide photo
             // stands in the middle of its square — each is moved down by the
-            // empty rows under what it shows (`Win::ink`, `ink_rows`).
+            // empty rows under what it shows (`Win::ink`, `ink_box`).
             let slot = layout.icon_in(&cell, icon_scale);
-            let (ink_top, ink_bottom) = if layout.list { (0.0, 0.0) } else { win.ink.get(&item.icon).copied().unwrap_or((0.0, 0.0)) };
-            let icon = Rect::new(slot.x, slot.y + ink_bottom * slot.h, slot.w, slot.h);
-            let seen_top = icon.y + ink_top * icon.h;
+            let under = if layout.list { 0.0 } else { win.ink.get(&item.icon).map_or(0.0, |k| k[1]) };
+            let icon = Rect::new(slot.x, slot.y + under * slot.h, slot.w, slot.h);
+            let seen_top = thing.map_or(icon.y, |t| t.pic.y);
             let picked = win.selected.contains(&item.path);
             let faded = cut.contains(&item.path);
             if let Some(layer) = win.layer_of(&item.icon) {
@@ -5496,28 +5668,6 @@ impl App {
                 }
                 continue;
             }
-            if win.names.1[i].is_none() {
-                if let Some(renderer) = win.renderer.as_mut() {
-                    let mut measure = |t: &str| renderer.measure_text(t, LABEL_FONT_PX, None);
-                    win.names.1[i] = Some(if i >= win.deep_from {
-                        // Found below: its name on one line, its folder dim
-                        // on the other.
-                        (
-                            crate::desktop::fit_label(&item.name, label_w, &mut measure),
-                            crate::desktop::fit_label(&below(&item.path, &win.dir), label_w, &mut measure),
-                        )
-                    } else {
-                        let lines = two_lines(&item.name, label_w, &mut measure);
-                        tracing::debug!(
-                            "files: name {:?} within {label_w} (measured {}) → {:?}",
-                            item.name,
-                            measure(&item.name),
-                            lines
-                        );
-                        lines
-                    });
-                }
-            }
             // SELECTED, the mockup's "one soft box" (Max, 2026-10-21): ONE
             // soft box over the picture AND its name, hugging this thing (a
             // one-line name's box is not stretched to its neighbours'), the
@@ -5543,19 +5693,7 @@ impl App {
                     t.width() + 2.0 * NAME_PAD.0,
                     LABEL_LINE_PX + 2.0 * NAME_PAD.1,
                 ),
-                None => {
-                    let widest = lines
-                        .iter()
-                        .map(|l| win.renderer.as_mut().map_or(0.0, |r| r.measure_text(l, LABEL_FONT_PX, None)))
-                        .fold(0.0, f32::max)
-                        .min(label_w);
-                    Rect::new(
-                        cx - widest / 2.0 - NAME_PAD.0,
-                        top - NAME_PAD.1,
-                        widest + 2.0 * NAME_PAD.0,
-                        lines.len().max(1) as f32 * LABEL_LINE_PX + 2.0 * NAME_PAD.1,
-                    )
-                }
+                None => thing.map_or_else(Rect::default, |t| t.name),
             };
             if picked || win.drop_on == Some(i) {
                 let w = slot.w.max(name_box.w) + 2.0 * SEL_PAD;
@@ -6143,7 +6281,7 @@ impl App {
             0x110 => self.filer_click(id, serial),
             0x111 => {
                 let icon_scale = self.icon_scale();
-                let Some(win) = self.filer.win(id) else {
+                let Some(win) = self.filer.win_mut(id) else {
                     return;
                 };
                 let layout = win.layout(icon_scale);
@@ -6152,9 +6290,10 @@ impl App {
                     return self.filer_history_toggle(id);
                 }
                 // The icons' field has the menu of what is under the
-                // pointer; a place of the sidebar, its own.
+                // pointer (on a cell's bare ground, the folder's); a place
+                // of the sidebar, its own.
                 if !win.on_chrome(at) {
-                    let item = layout.index_at(at, win.scroll, win.items.len());
+                    let item = win.thing_at(at, &layout);
                     self.filer_open_menu(id, at, item);
                 } else if let Some(n) = win.hits.places.iter().position(|r| r.contains(at)) {
                     self.filer_place_menu(id, n, at);
@@ -6200,12 +6339,10 @@ impl App {
             *to = (at.0, at.1 + win.scroll);
             let kept = kept.clone();
             let (a, b) = win.band.as_ref().map_or(((0.0, 0.0), (0.0, 0.0)), |(a, b, _)| (*a, *b));
+            let n = win.items.len();
+            let hits = band_hits(&layout, a, b, n, &mut |i, cell| win.thing(i, cell, &layout));
             let mut selected = kept;
-            selected.extend(
-                band_hits(&layout, a, b, win.items.len())
-                    .into_iter()
-                    .map(|i| win.items[i].path.clone()),
-            );
+            selected.extend(hits.into_iter().map(|i| win.items[i].path.clone()));
             win.selected = selected;
             self.filer_request_draw(id);
             return true;
@@ -6497,14 +6634,20 @@ impl App {
         } else {
             None
         };
-        // On a folder's middle: into it, and nothing moves (the grid's
-        // "a neighbour holds still so it can be dropped onto"). Anywhere
-        // else in the field: the gap goes where the pointer is.
+        // On a folder — in the grid its picture or its name (`Thing`), in a
+        // list its row's middle: into it, and nothing moves (the grid's "a
+        // neighbour holds still so it can be dropped onto"). Anywhere else
+        // in the field, a folder's bare ground too: the gap goes where the
+        // pointer is.
         let onto = under.filter(|&i| {
-            layout.body.contains(at)
-                && place.is_none()
-                && matches!(win.items[i].kind, Kind::Folder | Kind::Volume)
-                && (0.22..0.78).contains(&fx)
+            let on = if layout.list {
+                (0.22..0.78).contains(&fx)
+            } else {
+                let mut cell = layout.cell(d);
+                cell.y -= win.scroll;
+                win.thing(i, &cell, &layout).contains(at)
+            };
+            layout.body.contains(at) && place.is_none() && matches!(win.items[i].kind, Kind::Folder | Kind::Volume) && on
         });
         let gap = if !in_field {
             None
@@ -7748,12 +7891,12 @@ impl App {
             "zoom" => return self.zoom("files", rest),
             "panel" => return self.zoom("files-panel", rest),
             "where" => {
-                // `where item <n>|place <n>|crumb <n>|up|view|find|field`: the
+                // `where item <n>|corner <n>|place <n>|crumb <n>|up|view|find|field`: the
                 // middle of that part, in the window's own pixels (what a
                 // pointer on the screen is moved to, from the window's
                 // corner) — for tests with a real pointer.
                 let icon_scale = self.icon_scale();
-                let Some(win) = self.filer.win(id) else {
+                let Some(win) = self.filer.win_mut(id) else {
                     return "closed".to_owned();
                 };
                 let layout = win.layout(icon_scale);
@@ -7765,9 +7908,19 @@ impl App {
                     "item" if n < win.items.len() => {
                         let mut c = layout.cell(n);
                         c.y -= win.scroll;
-                        // (On its icon: the middle of a cell is between icon and name.)
-                        let icon = layout.icon_in(&c, icon_scale);
-                        Some(mid(icon))
+                        // (On what its picture shows: the middle of a cell is
+                        // between picture and name; in a list, its icon.)
+                        if layout.list {
+                            Some(mid(layout.icon_in(&c, icon_scale)))
+                        } else {
+                            Some(mid(win.thing(n, &c, &layout).pic))
+                        }
+                    }
+                    // (A cell's top-left corner: its bare ground, beside
+                    // what the thing is.)
+                    "corner" if n < win.items.len() => {
+                        let c = layout.cell(n);
+                        Some((c.x + 3.0, c.y - win.scroll + 3.0))
                     }
                     "place" => win.hits.places.get(n).copied().map(mid),
                     "crumb" => win.hits.crumbs.get(n).map(|(r, _)| mid(*r)),
@@ -7799,7 +7952,7 @@ impl App {
                 };
                 return match at {
                     Some(p) => {
-                        let (x, y) = win.layout(self.icon_scale()).outward(p);
+                        let (x, y) = layout.outward(p);
                         format!("where {x:.0} {y:.0}")
                     }
                     None => format!("where nothing: {rest}"),
@@ -7900,6 +8053,31 @@ impl App {
                 let button = if verb == "rclick" { 0x111 } else { 0x110 };
                 self.filer_button(id, button, true, 0);
                 self.filer_button(id, button, false, 0);
+            }
+            "press" | "drag" => {
+                // `press <x> <y>`: the left button pressed there and held,
+                // through the real code; `drag <x> <y>`: the pointer
+                // travelling there with it held (a band, or the thing in
+                // hand); `unband` lets go.
+                let n: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                let [x, y] = n[..] else {
+                    return "press|drag <x> <y>".to_owned();
+                };
+                let icon_scale = self.icon_scale();
+                if let Some(win) = self.filer.win_mut(id) {
+                    win.at_win = Some((x, y));
+                    win.ptr = Some(win.point((x, y), icon_scale));
+                }
+                if verb == "press" {
+                    self.filer_hover(id);
+                    self.filer_button(id, 0x110, true, 0);
+                } else {
+                    self.filer_travel(id);
+                }
+                let win = self.filer.win(id);
+                let band = win.is_some_and(|w| w.band.is_some());
+                let on = win.and_then(|w| w.press.as_ref()).map(|p| p.path.clone());
+                return format!("{verb} {x} {y}: band {band}, pressed on {on:?}");
             }
             "find" => self.filer_find(id, (rest != "-").then(|| rest.to_owned())),
             "sort" => {
@@ -8120,15 +8298,17 @@ mod tests {
     fn a_picture_says_how_much_of_its_square_is_empty() {
         let n = crate::apps::ICON_SIZE as usize;
         let mut px = vec![0u8; n * n * 4];
-        // (Ink from a quarter down to the middle: a wide photo, say.)
+        // (Ink from a quarter down to the middle, an eighth in from either
+        // side: a wide photo, say.)
         for y in n / 4..n / 2 {
-            for x in 0..n {
+            for x in n / 8..n - n / 8 {
                 px[(y * n + x) * 4 + 3] = 255;
             }
         }
-        let (top, bottom) = ink_rows(&px);
+        let [top, bottom, left, right] = ink_box(&px);
         assert!((top - 0.25).abs() < 0.01 && (bottom - (0.5 - 1.0 / n as f32)).abs() < 0.01);
-        assert_eq!(ink_rows(&vec![0u8; n * n * 4]), (0.0, 0.0));
+        assert!((left - 0.125).abs() < 0.01 && (right - 0.125).abs() < 0.01);
+        assert_eq!(ink_box(&vec![0u8; n * n * 4]), [0.0; 4]);
     }
 
     #[test]
@@ -8282,15 +8462,53 @@ mod tests {
     #[test]
     fn a_rubber_band_selects_what_it_crosses_either_way_round() {
         let l = Layout::new((920, 600), 1.0);
+        let mut thing = |_: usize, c: &Rect| thing_in(&l, c, [0.0; 4], (30.0, 1));
         let (a, b) = (l.cell(1), l.cell(l.cols + 2));
         let from = (a.x + a.w / 2.0, a.y + a.h / 2.0);
         let to = (b.x + b.w / 2.0, b.y + b.h / 2.0);
         let want = vec![1, 2, l.cols + 1, l.cols + 2];
-        assert_eq!(band_hits(&l, from, to, 40), want);
-        assert_eq!(band_hits(&l, to, from, 40), want);
+        assert_eq!(band_hits(&l, from, to, 40, &mut thing), want);
+        assert_eq!(band_hits(&l, to, from, 40, &mut thing), want);
         // Only as far as there are things; a band in a cell's margin touches nothing.
-        assert_eq!(band_hits(&l, from, to, 3), vec![1, 2]);
-        assert!(band_hits(&l, (a.x, a.y), (a.x + 6.0, a.y + 4.0), 40).is_empty());
+        assert_eq!(band_hits(&l, from, to, 3, &mut thing), vec![1, 2]);
+        assert!(band_hits(&l, (a.x, a.y), (a.x + 6.0, a.y + 4.0), 40, &mut thing).is_empty());
+        // Down the air between two columns, beside the pictures and the
+        // short names: nothing; touching a name alone: its thing.
+        let gap_x = a.x + a.w + (l.pitch - a.w) / 2.0;
+        let (pic, name) = (thing(1, &a).pic, thing(1, &a).name);
+        let beside = (pic.x + pic.w).max(name.x + name.w) + 3.0;
+        assert!(band_hits(&l, (beside, a.y), (gap_x, a.y + a.h - 2.0), 3, &mut thing).is_empty());
+        let under_name = (name.x + 2.0, name.y + name.h - 2.0);
+        assert_eq!(band_hits(&l, under_name, (beside, a.y + a.h - 1.0), 3, &mut thing), vec![1]);
+    }
+
+    #[test]
+    fn a_thing_is_its_picture_and_its_name() {
+        let l = Layout::new((920, 600), 1.0);
+        let c = l.cell(0);
+        // (A folder's drawing: an eighth empty above and under it, and a
+        // tenth either side.)
+        let t = thing_in(&l, &c, [0.125, 0.125, 0.1, 0.1], (30.0, 1));
+        let slot = l.icon_in(&c, 1.0);
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        // Sitting on its space's foot, as wide as it shows.
+        assert!((t.pic.y + t.pic.h - (slot.y + slot.h)).abs() < 0.01);
+        assert!((t.pic.w - slot.w * 0.8).abs() < 0.01);
+        assert!(t.contains(mid(t.pic)) && t.contains(mid(t.name)));
+        // Between the picture and its name: the thing; a pixel or two off
+        // either: still it.
+        assert!(t.contains((c.x + c.w / 2.0, t.pic.y + t.pic.h + 1.0)));
+        assert!(t.contains((t.pic.x - 1.5, t.pic.y + 4.0)));
+        // A cell's corners, its air beside a short name, the empty top of
+        // the picture's square: the folder's ground.
+        for p in [
+            (c.x + 1.0, c.y + 1.0),
+            (c.x + c.w - 1.0, c.y + c.h - 1.0),
+            (t.name.x - 4.0, t.name.y + 4.0),
+            (c.x + c.w / 2.0, slot.y + 1.0),
+        ] {
+            assert!(!t.contains(p), "{p:?} is ground");
+        }
     }
 
     #[test]
