@@ -1360,5 +1360,16 @@
  "Hidden files": "Archivos ocultos",
  "Grid or list": "Cuadrícula o lista",
  "New tab": "Pestaña nueva",
- "Close tab": "Cerrar pestaña"
+ "Close tab": "Cerrar pestaña",
+ "Keyboard mode": "Modo teclado",
+ "A step of the path": "Un paso de la ruta",
+ "Previous or next tab": "Pestaña anterior o siguiente",
+ "Keyboard shortcuts": "Atajos de teclado",
+ "Always": "Siempre",
+ "Copy, cut, paste": "Copiar, cortar, pegar",
+ "Type a path": "Escribir una ruta",
+ "Next tab": "Pestaña siguiente",
+ "Close or clear": "Cerrar o deseleccionar",
+ "Menu": "Menú",
+ "Menu size": "Tamaño del menú"
 }

@@ -64,6 +64,7 @@ mod history;
 mod print;
 mod recent;
 mod confirm;
+mod shortcuts;
 mod smart;
 pub(crate) mod zones;
 
@@ -1733,6 +1734,9 @@ struct Win {
     /// A change that waits to be confirmed (a delicate place, `confirm.rs`):
     /// the panel, and what is done again once it is accepted.
     confirm: Option<(confirm::Confirm, Pending)>,
+    /// The shortcuts table, while it is up (`?` in keyboard mode, or a
+    /// right click on its button).
+    shortcuts: Option<shortcuts::Shortcuts>,
     items: Vec<Item>,
     /// Each item's name as it is written under it (two lines), shaped once
     /// per listing and icon size: `(icon scale, names)`.
@@ -2030,7 +2034,7 @@ impl Win {
     /// in the window's, and over the chrome.
     fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
         let at = raw;
-        if self.menu.is_some() || self.props.is_some() || self.confirm.is_some() || self.on_chrome(at) {
+        if self.menu.is_some() || self.props.is_some() || self.confirm.is_some() || self.shortcuts.is_some() || self.on_chrome(at) {
             return at;
         }
         self.layout(icon_scale).inward(at)
@@ -3081,6 +3085,7 @@ impl App {
             hidden: false,
             zone: zones::Zone::Yours,
             confirm: None,
+            shortcuts: None,
             items: Vec::new(),
             names: (0.0, Vec::new()),
             selected: HashSet::new(),
@@ -5758,7 +5763,8 @@ impl App {
             .as_ref()
             .map(|m| m.rect)
             .or(win.props.as_ref().map(|p| p.rect))
-            .or(win.confirm.as_ref().map(|(c, _)| c.rect));
+            .or(win.confirm.as_ref().map(|(c, _)| c.rect))
+            .or(win.shortcuts.as_ref().map(|t| t.rect));
         // (What covers the files is in the window's space; the files are
         // laid out in their own, `zoom` times smaller from the body's corner.)
         let into_field = |r: Rect| {
@@ -6086,7 +6092,8 @@ impl App {
             .as_ref()
             .map(|m| Rect::new(m.rect.x, m.rect.y - 4.0 * m.scale, m.rect.w, m.rect.h + 4.0 * m.scale))
             .or(win.props.as_ref().map(|p| p.rect))
-            .or(win.confirm.as_ref().map(|(c, _)| c.rect));
+            .or(win.confirm.as_ref().map(|(c, _)| c.rect))
+            .or(win.shortcuts.as_ref().map(|t| t.rect));
         if let (Some(panel), Some(r)) = (panel, win.renderer.as_mut()) {
             for g in chrome.iter_mut() {
                 chrome::leave_out(&mut g.labels, panel, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
@@ -6120,6 +6127,20 @@ impl App {
                 win.last_frame = Some(now);
             }
             panel.push(&mut scene, &self.filer_panel_paint(panel.rect, ground), shield);
+        }
+        if let Some(table) = win.shortcuts.as_mut() {
+            table.place(size);
+            if table.ease(dt) {
+                moving = true;
+                win.last_frame = Some(now);
+            }
+            let paint = self.filer_panel_paint(table.rect, ground);
+            let renderer = &mut win.renderer;
+            let mut measure =
+                |t: &str, px: f32| renderer.as_mut().map_or(t.chars().count() as f32 * px * 0.55, |r| r.measure_text(t, px, None));
+            if let Some(table) = win.shortcuts.as_ref() {
+                table.push(&mut scene, &paint, &mut measure);
+            }
         }
 
         let mut presented = false;
@@ -6208,6 +6229,10 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        // The shortcuts table up: nothing answers the pointer.
+        if win.shortcuts.is_some() {
+            return;
+        }
         // A confirmation up: only its buttons answer the pointer.
         if let Some((panel, _)) = win.confirm.as_mut() {
             if panel.pointer(win.ptr) {
@@ -6469,6 +6494,14 @@ impl App {
             return;
         };
         let at = win.ptr.unwrap_or_default();
+        // The shortcuts table up: any press puts it away.
+        if win.shortcuts.is_some() {
+            if pressed {
+                win.shortcuts = None;
+                self.filer_request_draw(id);
+            }
+            return;
+        }
         // A confirmation up takes every press: a left one on a button is
         // its answer, one anywhere off the panel cancels.
         if let Some((panel, _)) = win.confirm.as_ref() {
@@ -6600,9 +6633,12 @@ impl App {
                     return;
                 };
                 let layout = win.layout(icon_scale);
-                // The ↶'s is its history.
+                // The ↶'s is its history; keyboard mode's, the shortcuts.
                 if win.hits.undo.contains(at) {
                     return self.filer_history_toggle(id);
+                }
+                if win.hits.keys.contains(at) {
+                    return self.filer_shortcuts(id);
                 }
                 // The icons' field has the menu of what is under the
                 // pointer (on a cell's bare ground, the folder's); a place
@@ -7789,6 +7825,19 @@ impl App {
         self.filer_request_draw(id);
     }
 
+    /// THE SHORTCUTS TABLE up over window `id` (`shortcuts.rs`).
+    fn filer_shortcuts(&mut self, id: u32) {
+        if let Some(win) = self.filer.win_mut(id) {
+            let size = win.virt();
+            win.menu = None;
+            win.menu_path = None;
+            win.props = None;
+            win.shortcuts = Some(shortcuts::Shortcuts::new(size));
+            info!("files: the keyboard shortcuts");
+        }
+        self.filer_request_draw(id);
+    }
+
     /// Shift let go: visual mode ends where it stands (the selection kept);
     /// the next Shift begins again from the cursor.
     pub(crate) fn filer_shift_up(&mut self) {
@@ -7803,6 +7852,14 @@ impl App {
         if let Some((panel, _)) = self.filer.win_mut(id).and_then(|w| w.confirm.as_mut()) {
             let answer = panel.key(keysym);
             return self.filer_confirm_answer(id, answer);
+        }
+        // The shortcuts table up: `?` or Escape put it away, nothing else.
+        if let Some(win) = self.filer.win_mut(id).filter(|w| w.shortcuts.is_some()) {
+            if matches!(keysym, Keysym::question | Keysym::Escape) {
+                win.shortcuts = None;
+                self.filer_request_draw(id);
+            }
+            return;
         }
         // QUICK LOOK up for this window: its keys first (the arrows walk on
         // here, and it follows them).
@@ -7939,7 +7996,8 @@ impl App {
         // paste, R names the one selected — and typing does not search (Ctrl+F
         // and the magnifier still do). A field that is up has its keys first
         // (above), and a menu before it.
-        let plain = !ctrl && !alt && !self.modifiers.logo;
+        // (Alt held: W A S D were made arrows above, and stay that.)
+        let plain = !ctrl && !self.modifiers.alt && !self.modifiers.logo;
         let (keysym, utf8) = if self.settings.files_keys && plain {
             let one = win.selected.len() == 1;
             match keysym {
@@ -7999,6 +8057,35 @@ impl App {
                     if win.tabs.len() > 1 {
                         let n = win.tab;
                         self.filer_tab_close(id, n);
+                    }
+                    return;
+                }
+                // AND MORE (Max, 2026-10-22): `/` Golem Disk, `.` Home, `?`
+                // the shortcuts table, 1…9 the steps of the path line as shown,
+                // ← → the tabs round (↑ ↓ walk as ever).
+                Keysym::slash => return self.filer_go(id, PathBuf::from("/")),
+                Keysym::period => return self.filer_go(id, home()),
+                Keysym::question => return self.filer_shortcuts(id),
+                Keysym::_1
+                | Keysym::_2
+                | Keysym::_3
+                | Keysym::_4
+                | Keysym::_5
+                | Keysym::_6
+                | Keysym::_7
+                | Keysym::_8
+                | Keysym::_9 => {
+                    let n = (keysym.raw() - Keysym::_1.raw()) as usize;
+                    if let Some((_, dir)) = win.hits.crumbs.get(n).cloned() {
+                        self.filer_go(id, dir);
+                    }
+                    return;
+                }
+                Keysym::Left | Keysym::Right => {
+                    let n = win.tabs.len();
+                    if n > 1 {
+                        let to = if keysym == Keysym::Left { (win.tab + n - 1) % n } else { (win.tab + 1) % n };
+                        self.filer_tab_take(id, to);
                     }
                     return;
                 }
@@ -8327,6 +8414,13 @@ impl App {
                     "f2" => Keysym::F2,
                     "w" => Keysym::w,
                     "r" => Keysym::r,
+                    "slash" => Keysym::slash,
+                    "period" => Keysym::period,
+                    "question" => Keysym::question,
+                    "1" => Keysym::_1,
+                    "2" => Keysym::_2,
+                    "3" => Keysym::_3,
+                    "9" => Keysym::_9,
                     "u" => Keysym::u,
                     "n" => Keysym::n,
                     "f" => Keysym::f,

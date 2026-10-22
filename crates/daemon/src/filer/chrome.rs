@@ -56,7 +56,7 @@ const PEN_BOX: f32 = 18.0;
 const KEYS_GAP: f32 = 8.0;
 /// KEYBOARD MODE's letters and what each does (`filer_key`): the button's
 /// words for when the top line's buttons are named (and the log's now).
-pub(super) const KEYS: [(&str, &str); 20] = [
+pub(super) const KEYS: [(&str, &str); 25] = [
     ("W A S D", "Move around"),
     ("Shift", "Select a run"),
     ("Q", "Back"),
@@ -77,6 +77,11 @@ pub(super) const KEYS: [(&str, &str); 20] = [
     ("L", "Grid or list"),
     ("T", "New tab"),
     ("Shift+T", "Close tab"),
+    ("/", "Golem Disk"),
+    (".", "Home"),
+    ("1–9", "A step of the path"),
+    ("← →", "Previous or next tab"),
+    ("?", "Keyboard shortcuts"),
 ];
 
 /// Keyboard mode's letters, said in the shell's language ("Q Back · …").
