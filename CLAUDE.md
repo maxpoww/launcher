@@ -1106,9 +1106,14 @@ The big daemon files are cohesive but long — go straight to the function:
   `Action::ToggleHidden` (and Ctrl+H) — its symbol the state: the slashed eye (`eyeoff`) while hidden
   files are not shown, the eye PRESSED while they are ("el icono debería cambiar"); the tabs and the
   way here give way to it as to the other tools. Rig: `files where hidden`. KEYBOARD MODE (Max,
-  2026-10-22: "un botón de teclado pero del otro lado de la topbar … y activa 'keyboard mode'"): a
-  keyboard button at the top line's LEFT end, 8 px before the tabs (`Spot::Keys`, `Hits::keys`), pressed
-  while on; one choice for every window, remembered (`settings.files_keys`, `filer_keys`). While on,
+  2026-10-22: "… y activa 'keyboard mode'"; its top-line button was taken out the same day): CTRL+K
+  turns it on and off anywhere in a file window, a field that has the keys too (first in `filer_key`);
+  one choice for every window, remembered (`settings.files_keys`, `filer_keys`). It shows in the
+  SELECTION PILL: its keyboard glyph at the pill's LEFT end in every state (`PillView::keys`; a click on
+  it is the shortcuts table, `PillAct::Keys`), and with nothing else to say the pill stays as the glyph,
+  "Keyboard driven" and a × that turns the mode off ("agregale la x a la píldora por si un usuario lo
+  activa sin querer": `PillAct::KeysOff`, "Turn off keyboard mode (Ctrl+K)") — two clicks always get
+  out; off, an empty pill hides as ever. While on,
   plain letters (no Ctrl/Alt/Super) are commands in `filer_key` — W A S D walk as the arrows (Shift
   stretches), Q back, E opens (Enter), Z undoes, X / C / V cut, copy, paste (the menu's own acts, so the
   pill's flow and the zones' gate), R names the one selected; Delete as ever; and THE EIGHT MORE (Max,
@@ -1119,15 +1124,15 @@ The big daemon files are cohesive but long — go straight to the function:
   field while the mode is on — ✎ and Ctrl+L still do, mode or not), `.` Home, 1…9 the steps of the path
   line AS SHOWN (`Hits::crumbs`: inside Home 1 = the owner's name; outside, 1 = Golem Disk; past the last
   does nothing), ← → the tabs round (↑ ↓ walk as ever), `?` THE SHORTCUTS TABLE (`filer/shortcuts.rs`,
-  `filer_shortcuts`; also a right click on the keyboard button, mode on or off): the confirmation's
+  `filer_shortcuts`; also a click on the pill's glyph; Ctrl+K in its "Always"): the confirmation's
   material centred over the window, ~520 wide, two columns cut where they balance, a key cap and the
   words a row under "Keyboard mode" and "Always"; `?`, Escape or any press puts it away, and nothing else
   answers meanwhile. The letters and their words are `chrome::KEYS` (Spanish
   in es.json; said in the log as the mode turns on — the button's words once the top line's buttons are
-  named: `keys_words`). No other letter types and nothing searches by itself (Ctrl+F and the magnifier
+  named: `keys_words`; Ctrl+K among them). No other letter types and nothing searches by itself (Ctrl+F and the magnifier
   still do). A field that is up (search, path,
   name, a menu's search) and a menu take their keys first, as before; Alt+W/A/S/D/Q/E still work with it
-  off. Quiet: the pressed button is the only sign. Rig: `files keymode on|off`, `files where keys`,
+  off. Quiet: the pill's glyph is the only sign. Rig: `files keymode on|off`, `files key ctrl k`, `files pill <n>`,
   `files key w|a|s|d|e|q|z|x|c|v|r|u|n|f|g|G|i|h|l|t|T|slash|period|question|1|2|3|9|left|right`,
   `files key ctrl l` (the state names the cursor's thing, the search,
   the i card, hidden, list, the tabs). Buttons 22×20, 12 px
