@@ -247,7 +247,7 @@ mod tests {
                 crate::thumb_more::with_fonts(|fonts| {
                     let attrs = glyphon::Attrs::new().family(glyphon::Family::SansSerif);
                     for (dx, dy) in offsets {
-                        crate::thumb_more::draw_text_in(&mut layer, sw, "Documents", attrs.clone(), 13.0, (r.x + dx, r.y + dy), (0.0, 0.0, sw as f32, sh as f32), rgb(halo), fonts);
+                        crate::thumb_more::draw_text_in(&mut layer, sw, "Documents", attrs, 13.0, (r.x + dx, r.y + dy), (0.0, 0.0, sw as f32, sh as f32), rgb(halo), fonts);
                     }
                     Some(())
                 });
