@@ -1053,7 +1053,10 @@ The big daemon files are cohesive but long — go straight to the function:
   Escape, ✎ again or a press anywhere off the tab closes it. At its right end: sort (`filer_sort_menu`:
   Name · Date Modified · Size · Kind, Ascending · Descending — `Action::SortBy/SortDir`, `SORT_MENU`;
   `SortKey::Kind`; Name descending turns the folder's own order round) · i · grid | list · the EYE ·
-  search (a 170 px field slides out between the eye and the magnifier, `Win::find_t`). THE EYE (Max,
+  search (a 170 px field slides out between the eye and the magnifier, `Win::find_t`; while it is out,
+  with words or none, the magnifier is an × in the pressed look — "Cancel search", Max 2026-10-22 — and
+  a click on it puts the search away, its words with it, the folder whole again: `filer_find(id, None)`,
+  what Escape in the field does). THE EYE (Max,
   2026-10-22: "agrega a los botones 'see hidden files' a la izquierda de buscar"; `Spot::Hidden`,
   `Hits::hidden`) is the ground menu's "Show / Hide hidden files" — one state, `Win::hidden`, the same
   `Action::ToggleHidden` (and Ctrl+H) — its symbol the state: the slashed eye (`eyeoff`) while hidden
