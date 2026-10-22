@@ -1059,8 +1059,11 @@ impl App {
                     }
                     if let Some((lock, words_now)) = tag {
                         let chip = Rect::new(x + IN_GAP, cy - TAG_H / 2.0, tag_w - IN_GAP, TAG_H);
-                        g.rects
-                            .push(rect(chip, TAG_H / 2.0, faded(tones.field, 0.8)));
+                        // (Its words at the menus' ink, three quarters: read at
+                        // a glance, not shouting; its fill a step stronger
+                        // than a field's.)
+                        let tag_ink = faded(ink, 0.75);
+                        g.rects.push(rect(chip, TAG_H / 2.0, tones.chip_on));
                         let mut tx = chip.x + TAG_PAD;
                         if lock {
                             symbol(
@@ -1068,7 +1071,7 @@ impl App {
                                 win,
                                 &glyph("lock"),
                                 square((tx + TAG_ICON / 2.0, cy), TAG_ICON),
-                                tones.dim,
+                                mix(tones.chip_on, ink, 0.75),
                             );
                             tx += TAG_ICON + 4.0;
                         }
@@ -1079,7 +1082,7 @@ impl App {
                                 (tx, cy - (TAG_PX + 4.0) / 2.0),
                                 chip.w,
                                 TAG_PX,
-                                tones.dim_text,
+                                tag_ink,
                             )
                         });
                         x += tag_w;

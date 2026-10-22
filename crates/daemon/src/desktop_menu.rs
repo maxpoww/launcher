@@ -1074,6 +1074,19 @@ impl MenuPaint {
         danger_on(own, self.fill, luma(self.ink) > luma(self.fill)).0
     }
 
+    /// A row under the pointer (or the keys), as a menu's is: the panel
+    /// tinted toward the accent (`HOVER`), its words in the ink.
+    pub fn row_tint(&self) -> [f32; 4] {
+        self.hover(self.accent, HOVER.0, HOVER.1, self.ink)
+    }
+
+    /// A red row under the pointer (or the keys): tinted toward the red
+    /// (`HOVER_RED`), its words in the red.
+    pub fn red_tint(&self) -> [f32; 4] {
+        let red = self.danger();
+        self.hover(red, HOVER_RED.0, HOVER_RED.1, red)
+    }
+
     /// The row under the pointer: the panel tinted `k` of the way toward
     /// `tint` (`k_dark` in the dark), mixed as a page mixes them — and
     /// never so far that `ink`, the row's words as they are, reads much

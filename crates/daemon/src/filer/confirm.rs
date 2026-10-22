@@ -5,7 +5,9 @@
 //! to the bin?"), ONE plain sentence for that place, and [Cancel] [<the act>
 //! anyway]. Cancel has the focus; Enter or Space press the focused button,
 //! Tab and the arrows move it, Escape cancels. One panel an action, however
-//! many things it covers.
+//! many things it covers. The buttons are a menu's rows (Max, 2026-10-22: no
+//! rings): the focused one tinted as a hovered row — the act's, whose words
+//! are always the menus' red, as a hovered red row.
 
 use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, FONT_MEDIUM};
 use crate::desktop_menu::MenuPaint;
@@ -28,8 +30,6 @@ const BTN_TOP: f32 = 18.0;
 const BTN_RADIUS: f32 = 6.0;
 /// The buttons at rest: the panel a step toward the ink.
 const BTN_REST: f32 = 0.07;
-/// The panel's hairline (the menus' rules).
-const LINE_INK: f32 = 0.14;
 /// How fast it comes up.
 const RATE: f32 = 14.0;
 
@@ -191,8 +191,6 @@ impl Confirm {
         };
         g.rects
             .push(solid(r, paint.radius * s, fade(paint.fill, 1.0), 0.0));
-        g.rects
-            .push(solid(r, paint.radius * s, fade(ink, LINE_INK), 1.0));
         let x = r.x + PAD * s;
         let top = r.y + PAD * s;
         if let Some(layer) = shield {
@@ -243,9 +241,11 @@ impl Confirm {
             y += TEXT_LINE * s;
         }
         // The buttons: the panel a step toward the ink; the focused one, or
-        // the one under the pointer, tinted toward the accent as a menu's row.
+        // the one under the pointer, tinted as a menu's hovered row — Cancel
+        // toward the accent, the act (its words always the menus' red)
+        // toward the red. No ring.
         let rest = mix(paint.fill, ink, BTN_REST);
-        let lit = paint.hover(paint.accent, 0.20, 0.28, ink);
+        let red = paint.danger();
         let lift = r.y - self.rect.y;
         for (n, (b, words)) in self
             .buttons()
@@ -255,17 +255,12 @@ impl Confirm {
         {
             let b = Rect::new(b.x, b.y + lift, b.w, b.h);
             let on = self.focus == n || self.hover == Some(n);
-            g.rects.push(solid(
-                b,
-                BTN_RADIUS * s,
-                fade(if on { lit } else { rest }, 1.0),
-                0.0,
-            ));
-            // (The focus is also a ring: the keys' place is never a guess.)
-            if self.focus == n {
-                g.rects
-                    .push(solid(b, BTN_RADIUS * s, fade(paint.accent, 0.9), 1.0));
-            }
+            let fill = match (on, n) {
+                (false, _) => rest,
+                (true, 0) => paint.row_tint(),
+                (true, _) => paint.red_tint(),
+            };
+            g.rects.push(solid(b, BTN_RADIUS * s, fade(fill, 1.0), 0.0));
             g.labels.push(Label {
                 pos: (b.x + BTN_PAD * s, b.y + (b.h - TEXT_LINE * s) / 2.0),
                 max_w: b.w,
@@ -276,7 +271,7 @@ impl Confirm {
                     TEXT_PX * s,
                     TEXT_LINE * s,
                     false,
-                    fade(ink, 1.0),
+                    fade(if n == 1 { red } else { ink }, 1.0),
                 )
             });
         }
