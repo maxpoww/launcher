@@ -465,7 +465,20 @@ The big daemon files are cohesive but long — go straight to the function:
   read worse than 4.5 : 1 (or four fifths of what the bare panel gives): a very light accent in the dark stays
   a tint; at the row's radius; the words and symbol keep their ink, a red row its red — never white; none on
   a rule, a note or a row with nothing to do. The selection pill's buttons stay neutral (the panel 7 % toward
-  the ink). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
+  the ink). MENU SIZE (Max, 2026-10-21: "add ctrl +/-/0 to
+  the context menus (make it bigger or smaller)" — for kids and grandmas): while a menu is OPEN, Ctrl + (=, keypad
+  +) / Ctrl − / Ctrl 0 and Ctrl + the wheel over it make it bigger, smaller, as shipped — 80 % to 200 % a tenth a
+  step, rows, words, symbols, air, corners and width together, at once (no motion). ONE size for every menu,
+  kept (`settings.menu_zoom`, `desktop_menu::scale`/`set_scale`, set at start; `App::zoom("menu", …)`): every menu
+  opens at it and one that is up is laid out again (`Menu::rescale`, `filer_menus_rescaled`,
+  `desktop_menu_rescaled`), its row under the pointer what is under it now. Its corner STAYS (`Menu::hang`: an
+  anchor and which edges hang from it — the pointer's corner as it opened, the pill's ⋯ hanging up, the sort
+  menu down from its button), shifted back onto the surface where it would leave it (`place`; back where it
+  was at its old size). While a menu is up those keys are the MENU's (`filer_key`, `desktop_shortcut`), not
+  the window's zoom; the DESKTOP takes the keyboard while its menu is up (`Desktop::keys_for_menu`, given back
+  when nothing is up — `sync_desktop_top_input`), so Escape closes it too. Rig: `files key ctrl plus|minus|zero`,
+  `debug-desktop "zoom menu in|out|reset|<n>"`; real keys through the nested compositor with
+  `hl.dsp.send_shortcut({ mods = "CTRL", key = "equal" })` (no window: the keyboard's surface). NEW ROWS: Open in new tab (`filer_tab_open`), Quick look, Duplicate ("name copy",
   `filer::copy_name`, undoable), Paste into folder, Select all, Copy to <the one stick plugged in>
   (`one_stick`), Send to › (a COPY now), New folder with these ("New folder with items", the selection
   moved in, its name typed; `Undo::Grouped`), Get info (Files: the i card; a place, the desktop: the
