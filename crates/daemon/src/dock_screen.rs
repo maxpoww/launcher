@@ -201,6 +201,8 @@ pub(crate) struct DockScreens {
     /// A setting's box asked for on a screen the dock was not on (the
     /// desktop's menu, `settings_box`): opened once it is there.
     pub(crate) box_after: Option<&'static str>,
+    /// A drag is over one of the edges.
+    pub(crate) drag_on_edge: bool,
 }
 
 /// The stretches of screen `name`'s edge on `side` another screen goes on
@@ -788,6 +790,52 @@ impl App {
         }
     }
 
+    /// Where along its side of screen `name` the pointer is now, from the
+    /// compositor (a drag's enter tells the middle of the surface, not
+    /// where the pointer is: `desktop_dnd_enter`).
+    fn cursor_along(&self, name: &str, side: Side) -> Option<f64> {
+        let (x, y) = crate::hypr::cursor_pos()?;
+        let m = crate::hypr::all_monitors().into_iter().find(|m| m.name == name)?;
+        Some(match side {
+            Side::Bottom => x - m.x,
+            Side::Left | Side::Right => y - m.y,
+        })
+    }
+
+    /// A DRAG came over an edge (a file carried to another screen's edge):
+    /// the dock comes over as it does for the pointer, told apart the same
+    /// way where another screen goes on across. False: not an edge.
+    pub(crate) fn dock_edge_dragged(&mut self, surface: &WlSurface) -> bool {
+        let Some(edge) = self.dock_screens.edges.iter().find(|e| e.layer.wl_surface() == surface) else {
+            return false;
+        };
+        let output = edge.output.clone();
+        let name = self.output_state.info(&output).and_then(|i| i.name);
+        let along = name.and_then(|n| self.cursor_along(&n, edge.side));
+        let shared = along.is_some_and(|a| edge.shared.iter().any(|&(lo, hi)| a >= lo && a < hi));
+        self.dock_screens.drag_on_edge = true;
+        info!("dock: a drag at an edge");
+        if shared {
+            self.dock_touch_shared(Touch::Edge(output));
+        } else {
+            self.dock_edge_called(output);
+        }
+        true
+    }
+
+    /// A drag came onto the hidden dock's strip where another screen goes
+    /// on across: it is told apart before the dock comes up (true).
+    pub(crate) fn dock_drag_on_shared(&self) -> bool {
+        if self.dock_screens.shared.is_empty() {
+            return false;
+        }
+        let Some(name) = self.dock_screen_name() else {
+            return false;
+        };
+        self.cursor_along(&name, self.dock_side())
+            .is_some_and(|a| self.dock_screens.shared.iter().any(|&(lo, hi)| a >= lo && a < hi))
+    }
+
     /// The pointer left an edge: the next touch is told apart afresh (one
     /// waiting goes on — see the module's note).
     pub(crate) fn dock_edge_left(&mut self) {
@@ -1060,6 +1108,7 @@ mod tests {
             pos,
             transform: 0,
             mm: (0, 0),
+            twin: false,
         }
     }
 

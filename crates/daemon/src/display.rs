@@ -41,7 +41,7 @@ use crate::{hypr, App};
 use crate::i18n::tr;
 
 /// How long a tried resolution stays up before it goes back by itself.
-const KEEP_SECS: u64 = 15;
+pub(crate) const KEEP_SECS: u64 = 15;
 /// How long the compositor is given to put a rule on the screen before the
 /// panel reads the screen back (a rule lands with the next rendered frame).
 const SETTLE: Duration = Duration::from_millis(350);
@@ -124,12 +124,16 @@ pub(crate) struct Monitor {
     pub transform: u8,
     /// Its real size in millimetres, as it says (0: it does not), as made.
     pub mm: (u32, u32),
+    /// Another screen connected says it is the same (maker, model and
+    /// serial: two of one TV, a serial like 0x00000001): it is known by its
+    /// connector instead, or the two would share every choice.
+    pub twin: bool,
 }
 
 impl Monitor {
     /// The rule selector this screen's choice is saved under.
     pub(crate) fn selector(&self) -> String {
-        if self.desc.is_empty() {
+        if self.desc.is_empty() || self.twin {
             self.name.clone()
         } else {
             format!("desc:{}", self.desc)
@@ -151,7 +155,8 @@ impl Monitor {
 
 /// Read the compositor's `j/monitors` reply.
 pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
-    json.as_array()
+    let all = json
+        .as_array()
         .into_iter()
         .flatten()
         .filter_map(|m| {
@@ -190,9 +195,68 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
                     m["physicalWidth"].as_u64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
                     m["physicalHeight"].as_u64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
                 ),
+                twin: false,
             })
         })
-        .collect()
+        .collect();
+    with_twins(all)
+}
+
+/// The screens, those that say they are the same as another connected one
+/// marked (`Monitor::twin`).
+fn with_twins(mut all: Vec<Monitor>) -> Vec<Monitor> {
+    let descs: Vec<String> = all.iter().map(|m| m.desc.clone()).collect();
+    for m in &mut all {
+        m.twin = !m.desc.is_empty() && descs.iter().filter(|d| **d == m.desc).count() > 1;
+    }
+    all
+}
+
+/// The choices kept under a description two connected screens share
+/// (`desc:…`, from before the second was plugged in), handed to each by
+/// its connector: kept under the description, one rule would go on both —
+/// and it was the one the compositor kept. Golem's settings; the dock's own
+/// (`dock_sizes`, `launcher_screens_off`) by `rename`.
+pub(crate) fn part_twins(monitors: &[Monitor], mut rename: impl FnMut(&str, &[String])) {
+    let mut shared: Vec<(String, Vec<String>)> = Vec::new();
+    for m in monitors.iter().filter(|m| m.twin) {
+        let key = format!("desc:{}", m.desc);
+        match shared.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, names)) => names.push(m.name.clone()),
+            None => shared.push((key, vec![m.name.clone()])),
+        }
+    }
+    if shared.is_empty() {
+        return;
+    }
+    GolemSettings::change(|g| {
+        let mut changed = false;
+        for (key, names) in &shared {
+            if let Some(choice) = g.displays.remove(key) {
+                for name in names {
+                    g.displays.entry(name.clone()).or_insert_with(|| choice.clone());
+                }
+                changed = true;
+            }
+            if let Some(place) = g.monitors.places.remove(key) {
+                for name in names {
+                    g.monitors.places.entry(name.clone()).or_insert(place);
+                }
+                changed = true;
+            }
+            if g.monitors.picked.as_deref() == Some(key.as_str()) {
+                g.monitors.picked = names.first().cloned();
+                changed = true;
+            }
+        }
+        if changed {
+            info!("display: two screens say they are the same; each kept by its connector");
+            g.store();
+        }
+    });
+    for (key, names) in &shared {
+        rename(key, names);
+    }
 }
 
 /// The connected screens, or none when the compositor does not answer.
@@ -397,7 +461,7 @@ pub(crate) struct GolemSettings {
 }
 
 /// A file in Golem's own config directory (`$XDG_CONFIG_HOME/golem/`).
-fn golem_path(file_name: &str) -> PathBuf {
+pub(crate) fn golem_path(file_name: &str) -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
@@ -621,7 +685,8 @@ fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
     }
     // (Turned: said; as made: left out, as it always was.)
     let transform = match choice.transform {
-        Some(t @ 0..=3) => format!(", transform = {t}"),
+        // (4–7: flipped, then turned.)
+        Some(t @ 0..=7) => format!(", transform = {t}"),
         Some(_) => return None,
         None => String::new(),
     };
@@ -779,9 +844,11 @@ impl App {
 
     /// Seconds a tried resolution still has, if one is being tried.
     pub(crate) fn display_keep_left(&self) -> Option<f32> {
-        self.display_pending
-            .as_ref()
-            .map(|p| p.deadline.saturating_duration_since(Instant::now()).as_secs_f32())
+        self.monitors_turn_left().or_else(|| {
+            self.display_pending
+                .as_ref()
+                .map(|p| p.deadline.saturating_duration_since(Instant::now()).as_secs_f32())
+        })
     }
 
     /// The compositor needs a moment to put a rule on the screen: have the
@@ -972,10 +1039,11 @@ impl App {
         };
         // A try still running on ANOTHER screen goes back first: its timer
         // would have nothing left to take back (and that screen could be
-        // dark).
+        // dark). So does a turn being tried.
         if self.display_pending.as_ref().is_some_and(|p| p.selector != selector) {
             self.revert_display();
         }
+        self.monitors_turn_back();
         // A second try on top of a first goes back to before the first.
         let previous = match self.display_pending.take() {
             Some(p) if p.selector == selector => p.previous,
@@ -1017,8 +1085,11 @@ impl App {
         self.display_changed();
     }
 
-    /// Keep the resolution being tried: save it.
+    /// Keep the resolution being tried: save it. (Or the turn being tried.)
     pub(crate) fn keep_display(&mut self) {
+        if self.monitors_turn_keep() {
+            return;
+        }
         let Some(p) = self.display_pending.take() else {
             return;
         };
@@ -1030,8 +1101,12 @@ impl App {
         self.display_changed();
     }
 
-    /// Give up the resolution being tried: back to what was there.
+    /// Give up the resolution being tried: back to what was there. (Or the
+    /// turn being tried.)
     pub(crate) fn revert_display(&mut self) {
+        if self.monitors_turn_back() {
+            return;
+        }
         let Some(p) = self.display_pending.take() else {
             return;
         };
@@ -1186,6 +1261,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_screens_that_say_they_are_the_same_are_known_by_their_connectors() {
+        let json = serde_json::json!([
+            {"name": "eDP-1", "description": "Lenovo Group Limited 0x8BA2", "width": 3200, "height": 2000, "scale": 1.6},
+            {"name": "HDMI-A-1", "description": "SKYDATA S.P.A. TV MONITOR 0x00000001", "width": 3840, "height": 2160, "scale": 2.0},
+            {"name": "DP-2", "description": "SKYDATA S.P.A. TV MONITOR 0x00000001", "width": 3840, "height": 2160, "scale": 2.0},
+        ]);
+        let all = parse_monitors(&json);
+        let sels: Vec<String> = all.iter().map(Monitor::selector).collect();
+        assert_eq!(sels, ["desc:Lenovo Group Limited 0x8BA2", "HDMI-A-1", "DP-2"]);
+        // One of them alone: by what it says, as ever.
+        let one = parse_monitors(&serde_json::json!([json[0].clone(), json[1].clone()]));
+        assert_eq!(one[1].selector(), "desc:SKYDATA S.P.A. TV MONITOR 0x00000001");
+    }
+
+    #[test]
+    fn a_flipped_screen_is_a_rule_too() {
+        let choice = DisplayChoice { mode: "1920x1080@60".into(), scale: 1.0, position: Some("0x0".into()), transform: Some(5) };
+        assert!(monitor_rule("HDMI-A-1", &choice).is_some_and(|r| r.contains("transform = 5")));
+        let bad = DisplayChoice { transform: Some(8), ..choice };
+        assert!(monitor_rule("HDMI-A-1", &bad).is_none());
+    }
 
     fn percents(stops: &[f64]) -> Vec<u32> {
         stops.iter().map(|s| (s * 100.0).round() as u32).collect()

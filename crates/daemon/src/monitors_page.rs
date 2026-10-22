@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::controls::{Choice, ControlView, Group, ScreenShape};
-use crate::display::{GolemSettings, Monitor};
+use crate::display::{DisplayChoice, GolemSettings, Monitor};
 use crate::i18n::tr;
 use crate::App;
 
@@ -578,6 +578,28 @@ fn picked<'a>(screens: &'a [PageScreen], choice: &MonitorsChoice) -> Option<&'a 
         .or(screens.first())
 }
 
+/// A TURN BEING TRIED (Max, 2026-10-21: which way the compositor's numbers
+/// turn a screen is only seen on the screen itself — and a picture turned
+/// the wrong way turns the pointer with it): on the screens and saved, the
+/// arrangement from before kept beside (`turn-trial.json`, so a session
+/// ended meanwhile comes back to it); kept, or it goes back by itself after
+/// `KEEP_SECS`, as a resolution does.
+pub(crate) struct TurnTrial {
+    before: Before,
+    deadline: std::time::Instant,
+}
+
+/// The screens' choices as they were before a turn.
+#[derive(Clone, Serialize, Deserialize)]
+struct Before {
+    displays: BTreeMap<String, DisplayChoice>,
+    monitors: MonitorsChoice,
+}
+
+fn turn_trial_path() -> std::path::PathBuf {
+    crate::display::golem_path("turn-trial.json")
+}
+
 /// The words of a three-way row, and which value each sends.
 const SCREENS: [(&str, &str); 3] = [("Extend", "extend"), ("Mirror", "mirror"), ("Isolated", "isolated")];
 const WHERE: [(&str, &str); 3] = [("Main screen", "main"), ("Every screen", "every"), ("Follows you", "follows")];
@@ -689,6 +711,22 @@ impl App {
             return;
         }
         let main = crate::launcher_prefs::main_screen(&monitors).unwrap_or(0);
+        // A TURN is tried (`TurnTrial`): what was there before is kept
+        // aside — before a first turn, not a second one on top.
+        let turning = key == "monitors-arrange" && (value.starts_with("cw:") || value.starts_with("ccw:"));
+        let before = turning.then(|| match self.monitors_turn.take() {
+            Some(t) => t.before,
+            None => {
+                let g = GolemSettings::load();
+                Before { displays: g.displays, monitors: g.monitors }
+            }
+        });
+        if turning {
+            // (One thing tried at a time: a resolution being tried goes back.)
+            if self.display_trial_screen().is_some() {
+                self.revert_display();
+            }
+        }
         // (Another screen picked: a resolution tried on one goes back.)
         if let Some(sel) = value.strip_prefix("pick:").filter(|_| key == "monitors-arrange") {
             self.display_trial_leaves(sel);
@@ -729,6 +767,94 @@ impl App {
         if arranged {
             self.monitors_arrange();
         }
+        if let (true, Some(before)) = (arranged && turning, before) {
+            self.monitors_turn_start(before);
+        }
+    }
+
+    /// A turn is on the screens: kept, or back by itself.
+    fn monitors_turn_start(&mut self, before: Before) {
+        use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+        crate::persist::write_json("turn trial", &turn_trial_path(), &before);
+        let span = std::time::Duration::from_secs(crate::display::KEEP_SECS);
+        let deadline = std::time::Instant::now() + span;
+        self.monitors_turn = Some(TurnTrial { before, deadline });
+        info!("monitors: a turn tried, {} s to keep it", crate::display::KEEP_SECS);
+        let armed = self.loop_handle.insert_source(Timer::from_duration(span), move |_, _, app: &mut App| {
+            if app.monitors_turn.as_ref().is_some_and(|t| t.deadline == deadline) {
+                info!("monitors: the turn not kept in time");
+                app.monitors_turn_back();
+            }
+            TimeoutAction::Drop
+        });
+        if let Err(e) = armed {
+            tracing::warn!("monitors: cannot arm the turn's keep timer ({e}), going back now");
+            self.monitors_turn_back();
+            return;
+        }
+        // (The seconds left counted down where it is asked.)
+        let tick = self.loop_handle.insert_source(Timer::from_duration(std::time::Duration::from_secs(1)), move |_, _, app: &mut App| {
+            if app.monitors_turn.as_ref().is_none_or(|t| t.deadline != deadline) {
+                return TimeoutAction::Drop;
+            }
+            app.dirty = true;
+            app.schedule_frame();
+            TimeoutAction::ToDuration(std::time::Duration::from_secs(1))
+        });
+        if let Err(e) = tick {
+            tracing::warn!("monitors: cannot count the turn's seconds down ({e})");
+        }
+    }
+
+    /// Seconds the turn being tried still has.
+    pub(crate) fn monitors_turn_left(&self) -> Option<f32> {
+        self.monitors_turn
+            .as_ref()
+            .map(|t| t.deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f32())
+    }
+
+    /// Keep the turn being tried (false: none).
+    pub(crate) fn monitors_turn_keep(&mut self) -> bool {
+        if self.monitors_turn.take().is_none() {
+            return false;
+        }
+        let _ = std::fs::remove_file(turn_trial_path());
+        info!("monitors: the turn kept");
+        self.monitors_read_soon(std::time::Duration::from_millis(1));
+        self.schedule_frame();
+        true
+    }
+
+    /// The turn being tried goes back: the choices from before, on the
+    /// screens again (false: none).
+    pub(crate) fn monitors_turn_back(&mut self) -> bool {
+        let Some(t) = self.monitors_turn.take() else {
+            return false;
+        };
+        info!("monitors: the turn goes back");
+        self.monitors_put_back(t.before);
+        true
+    }
+
+    fn monitors_put_back(&mut self, before: Before) {
+        GolemSettings::change(|g| {
+            g.displays = before.displays;
+            g.monitors = before.monitors;
+            g.store();
+        });
+        let _ = std::fs::remove_file(turn_trial_path());
+        self.monitors_arrange();
+        self.schedule_frame();
+    }
+
+    /// At start: a turn tried and never kept (the session ended during it)
+    /// goes back.
+    pub(crate) fn monitors_turn_left_over(&mut self) {
+        let Some(before) = crate::persist::read_json::<Before>(&turn_trial_path()) else {
+            return;
+        };
+        info!("monitors: a turn tried and never kept goes back");
+        self.monitors_put_back(before);
     }
 
     /// THE ARRANGEMENT, ON THE SCREENS: every screen put where the page has
@@ -747,11 +873,41 @@ impl App {
         self.monitors_place(true);
     }
 
+    /// Two connected screens that say they are the same: each is kept by
+    /// its connector from now on, its choices so far handed to each.
+    pub(crate) fn monitors_part_twins(&mut self) {
+        let monitors = crate::display::monitors();
+        let mut dock = Vec::new();
+        crate::display::part_twins(&monitors, |key, names| dock.push((key.to_owned(), names.to_vec())));
+        let mut changed = false;
+        for (key, names) in dock {
+            if let Some(size) = self.settings.dock_sizes.remove(&key) {
+                for name in &names {
+                    self.settings.dock_sizes.entry(name.clone()).or_insert(size);
+                }
+                changed = true;
+            }
+            if let Some(i) = self.settings.launcher_screens_off.iter().position(|s| *s == key) {
+                self.settings.launcher_screens_off.remove(i);
+                for name in names {
+                    if !self.settings.launcher_screens_off.contains(&name) {
+                        self.settings.launcher_screens_off.push(name);
+                    }
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.settings.save();
+        }
+    }
+
     /// A screen plugged in or out: once the compositor has put its own
     /// rules on them, the screens as the page has them (one gone from the
     /// middle of a row left the others apart).
     pub(crate) fn monitors_plugged(&mut self) {
         use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+        self.monitors_part_twins();
         let armed = self.loop_handle.insert_source(Timer::from_duration(std::time::Duration::from_millis(700)), |_, _, app: &mut App| {
             app.monitors_keep_arranged();
             TimeoutAction::Drop
@@ -1069,6 +1225,7 @@ mod tests {
             pos: (0.0, 0.0),
             transform: 0,
             mm: (530, 300),
+            twin: false,
         };
         assert_eq!(real_mm(&m, (1920.0, 1080.0)), (530.0, 300.0), "a 24-inch says so");
         let guess = (1920.0 * 25.4 / 96.0, 1080.0 * 25.4 / 96.0);

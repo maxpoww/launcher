@@ -935,6 +935,7 @@ fn main() -> anyhow::Result<()> {
         panel_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
+        monitors_turn: None,
         display_pointer: None,
         veil: transition::Veil::bind(&globals, &qh, layer_shell),
         screen_kit,
@@ -1403,6 +1404,11 @@ fn main() -> anyhow::Result<()> {
     app.reassert_floating_mode();
     // The control panel's choices that live outside the compositor.
     controls::reassert();
+    // (Two screens plugged in that say they are the same: each by its own
+    // connector.)
+    app.monitors_part_twins();
+    // (A screen's turn tried when the last session ended, never kept.)
+    app.monitors_turn_left_over();
     // The palette: the shell wears it, the apps get its files — at the light
     // the sun asks for now, where Ambient is on.
     app.lighting_wake();
@@ -2170,6 +2176,8 @@ pub struct App {
     /// A resolution being tried from the control panel: on the screen, not
     /// saved, going back by itself unless kept (see `display.rs`).
     display_pending: Option<display::Pending>,
+    /// A screen's turn being tried (the Monitors page).
+    monitors_turn: Option<monitors_page::TurnTrial>,
     /// The pointer to put back once a change of scale has landed.
     display_pointer: Option<display::PointerFix>,
     /// What a change of scale is dissolved with, the dissolve in flight, and
@@ -8278,6 +8286,10 @@ impl DataDeviceHandler for App {
             .is_some_and(|l| l.wl_surface() == surface);
         self.card_bar_drag(on_bar);
         let on_files = self.filer.id_of(surface);
+        // (Carried to another screen's edge: the dock comes over to it.)
+        if self.dock_edge_dragged(surface) {
+            return;
+        }
         if !on_desktop && !on_dock && !on_card && on_files.is_none() {
             return;
         }
@@ -8298,6 +8310,11 @@ impl DataDeviceHandler for App {
     }
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {
+        // (Off an edge, or off the dock's strip: as the pointer's leave.)
+        self.dock_touch_left();
+        if std::mem::take(&mut self.dock_screens.drag_on_edge) {
+            return;
+        }
         self.card_bar_drag(false);
         if self.filer.dnd_active() {
             self.filer_dnd_leave();

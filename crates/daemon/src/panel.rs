@@ -950,6 +950,9 @@ pub(crate) struct Panel {
     display_at: Option<Instant>,
     /// Seconds a tried resolution still has before it goes back.
     keep_left: Option<f32>,
+    /// …and it is a screen's TURN, not a resolution (the Monitors page asks
+    /// under its drawing).
+    pub(crate) keep_turn: bool,
     /// What the last click asked for, until `App` takes it.
     action: Option<PanelAction>,
     /// The open setting as last read, when it is one of
@@ -2506,6 +2509,16 @@ impl Panel {
             // THE SCREENS, DRAWN (the Monitors page).
             if !g.screens.is_empty() {
                 y = self.flow_screens(&mut out, y, gi as u8, g);
+                // (A turn being tried: kept, or it goes back by itself.)
+                if let Some(left) = self.keep_left.filter(|_| self.keep_turn) {
+                    let text = crate::i18n::fill(tr("Keep the screen turned? Going back in {0} s"), &[("0", &format!("{:.0}", left.ceil().max(1.0)))]);
+                    y = self.caption(&mut out, y, text);
+                    let chips = vec![
+                        (tr("Keep").to_owned(), true, PanelAction::Keep),
+                        (tr("Go back").to_owned(), false, PanelAction::Revert),
+                    ];
+                    y = self.flow(&mut out, y, 120.0, chips);
+                }
                 continue;
             }
             // ON OR OFF is a switch row: its name left, the switch right —
@@ -2526,7 +2539,7 @@ impl Panel {
                 y = self.word_row(&mut out, y, gi as u8, g);
                 // (A screen's resolution being tried, on the Monitors page:
                 // kept, or it goes back by itself.)
-                if g.key == "monitors-mode" {
+                if g.key == "monitors-mode" && !self.keep_turn {
                     if let Some(left) = self.keep_left {
                         let text = crate::i18n::fill(tr("Keep this resolution? Going back in {0} s"), &[("0", &format!("{:.0}", left.ceil().max(1.0)))]);
                         y = self.caption(&mut out, y, text);
@@ -2726,7 +2739,7 @@ impl Panel {
                     .collect();
                 y = self.flow(&mut out, y, 96.0, chips);
             }
-            if let Some(left) = self.keep_left {
+            if let Some(left) = self.keep_left.filter(|_| !self.keep_turn) {
                 let text = crate::i18n::fill(tr("Keep this resolution? Going back in {0} s"), &[("0", &format!("{:.0}", left.ceil().max(1.0)))]);
                 y = self.caption(&mut out, y, text);
                 let chips = vec![
@@ -4527,6 +4540,7 @@ impl App {
         self.colours_preview_guard();
         self.panel.wall_tile = self.wallpaper_tile_w();
         self.panel.keep_left = self.display_keep_left();
+        self.panel.keep_turn = self.monitors_turn.is_some();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
         let mut draw = self.panel.draw(paint);
@@ -5113,6 +5127,7 @@ impl App {
             self.quick.set_display(view);
         }
         self.quick.keep_left = self.display_keep_left();
+        self.quick.keep_turn = self.monitors_turn.is_some();
         if let Some(label) = self.quick.control_due() {
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Read(label, ui));

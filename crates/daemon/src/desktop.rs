@@ -5511,7 +5511,11 @@ impl App {
     /// dock hidden: it is called up, so there are tiles to hold on.
     fn dock_spring_enter(&mut self, own: bool) {
         let called = !own && self.ui.target() == crate::state::Target::Hidden;
-        if called {
+        // (Where another screen goes on across the dock's edge, a drag
+        // carried over from it is told apart first, as the pointer is.)
+        if called && self.dock_drag_on_shared() {
+            self.dock_touch_shared(crate::dock_screen::Touch::Dock);
+        } else if called {
             self.handle_command(waverunner_proto::Command::Show);
         }
         self.desktop.spring = Some(Spring { called, ..Default::default() });
