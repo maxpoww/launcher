@@ -1351,5 +1351,14 @@
  "Your library": "Tu biblioteca",
  "Your orders": "Tus pedidos",
  "Search {site}": "Buscar en {site}",
- "“{words}”": "«{words}»"
+ "“{words}”": "«{words}»",
+ "Move around": "Moverse",
+ "Select a run": "Seleccionar seguidos",
+ "Up": "Subir",
+ "First": "Primero",
+ "Last": "Último",
+ "Hidden files": "Archivos ocultos",
+ "Grid or list": "Cuadrícula o lista",
+ "New tab": "Pestaña nueva",
+ "Close tab": "Cerrar pestaña"
 }

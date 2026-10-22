@@ -7954,6 +7954,54 @@ impl App {
                 Keysym::c | Keysym::C => return self.filer_act(id, Action::Copy, None, (0.0, 0.0)),
                 Keysym::v | Keysym::V => return self.filer_act(id, Action::Paste, None, (0.0, 0.0)),
                 Keysym::r | Keysym::R if one => return self.filer_act(id, Action::Rename, None, (0.0, 0.0)),
+                // THE EIGHT MORE (Max, 2026-10-22: "constrúilos todos"): U up
+                // (`..`), N a new folder (its name typed), F the search, G the
+                // first thing and Shift+G the last (plain moves, not visual
+                // mode), I the i card, H hidden files (the eye's state), L
+                // grid ↔ list, T a tab on this folder and Shift+T closes it
+                // (nothing on the last).
+                Keysym::u | Keysym::U => return self.filer_up(id),
+                Keysym::n | Keysym::N => return self.filer_act(id, Action::NewFolder, None, (0.0, 0.0)),
+                Keysym::f | Keysym::F => {
+                    if win.find.is_none() {
+                        self.filer_find(id, Some(String::new()));
+                    }
+                    return;
+                }
+                Keysym::g | Keysym::G => {
+                    let last = keysym == Keysym::G;
+                    let to = if last { win.items.len().saturating_sub(1) } else { 0 };
+                    if win.items.is_empty() {
+                        return;
+                    }
+                    let held = self.modifiers.shift;
+                    self.modifiers.shift = false;
+                    self.filer_walk_to(id, to);
+                    self.modifiers.shift = held;
+                    return;
+                }
+                Keysym::i | Keysym::I => {
+                    win.info_on = !win.info_on;
+                    self.filer_info_due(id);
+                    self.filer_hover(id);
+                    return self.filer_request_draw(id);
+                }
+                Keysym::h | Keysym::H => return self.filer_act(id, Action::ToggleHidden, None, (0.0, 0.0)),
+                Keysym::l | Keysym::L => {
+                    let list = !self.settings.files_list;
+                    return self.filer_set_list(list);
+                }
+                Keysym::t => {
+                    let dir = win.dir.clone();
+                    return self.filer_tab_open(id, dir);
+                }
+                Keysym::T => {
+                    if win.tabs.len() > 1 {
+                        let n = win.tab;
+                        self.filer_tab_close(id, n);
+                    }
+                    return;
+                }
                 // (No other letter or number types: nothing searches by itself.)
                 _ if utf8.is_some_and(|t| t.chars().any(char::is_alphanumeric)) => return,
                 _ => (keysym, utf8),
@@ -8279,6 +8327,16 @@ impl App {
                     "f2" => Keysym::F2,
                     "w" => Keysym::w,
                     "r" => Keysym::r,
+                    "u" => Keysym::u,
+                    "n" => Keysym::n,
+                    "f" => Keysym::f,
+                    "g" => Keysym::g,
+                    "G" => Keysym::G,
+                    "i" => Keysym::i,
+                    "h" => Keysym::h,
+                    "l" => Keysym::l,
+                    "t" => Keysym::t,
+                    "T" => Keysym::T,
                     "z" => Keysym::z,
                     "x" => Keysym::x,
                     "c" => Keysym::c,
@@ -8585,7 +8643,7 @@ impl App {
         };
         let layout = win.layout(icon_scale);
         format!(
-            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}, keys on {:?}",
+            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}, keys on {:?}, find {:?}, info {}, hidden {}, list {}, tabs {}",
             win.size.0,
             win.size.1,
             win.dir.display(),
@@ -8604,6 +8662,11 @@ impl App {
             win.props.as_ref().map_or("-", |p| p.title.as_str()),
             win.rename.as_ref().map(|r| r.text.as_str()),
             win.cursor.and_then(|i| win.items.get(i)).map(|it| it.name.as_str()),
+            win.find.as_deref(),
+            win.info_on,
+            win.hidden,
+            win.list,
+            win.tabs.len(),
         )
     }
 }

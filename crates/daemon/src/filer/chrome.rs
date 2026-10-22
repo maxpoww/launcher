@@ -54,6 +54,38 @@ const CHEV: f32 = 8.0;
 const PEN_BOX: f32 = 18.0;
 /// From keyboard mode's button to the first tab.
 const KEYS_GAP: f32 = 8.0;
+/// KEYBOARD MODE's letters and what each does (`filer_key`): the button's
+/// words for when the top line's buttons are named (and the log's now).
+pub(super) const KEYS: [(&str, &str); 20] = [
+    ("W A S D", "Move around"),
+    ("Shift", "Select a run"),
+    ("Q", "Back"),
+    ("E", "Open"),
+    ("Z", "Undo"),
+    ("X", "Cut"),
+    ("C", "Copy"),
+    ("V", "Paste"),
+    ("R", "Rename"),
+    ("Delete", "Move to bin"),
+    ("U", "Up"),
+    ("N", "New folder"),
+    ("F", "Search"),
+    ("G", "First"),
+    ("Shift+G", "Last"),
+    ("I", "Get info"),
+    ("H", "Hidden files"),
+    ("L", "Grid or list"),
+    ("T", "New tab"),
+    ("Shift+T", "Close tab"),
+];
+
+/// Keyboard mode's letters, said in the shell's language ("Q Back · …").
+pub(super) fn keys_words() -> String {
+    KEYS.iter()
+        .map(|(k, what)| format!("{k} {}", tr(what)))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
 /// `..` with nowhere up: a disabled menu row's ink (`desktop_menu`'s 0.38).
 const NOWHERE_INK: f32 = 0.35;
 /// The path line's chip (`zones`): its height, air, words and lock.
@@ -1436,7 +1468,11 @@ impl App {
         if self.settings.files_keys != on {
             self.settings.files_keys = on;
             self.settings.save();
-            info!("files: keyboard mode {}", if on { "on" } else { "off" });
+            info!(
+                "files: keyboard mode {}{}",
+                if on { "on — " } else { "off" },
+                if on { keys_words() } else { String::new() }
+            );
         }
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
