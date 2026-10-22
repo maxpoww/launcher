@@ -230,6 +230,24 @@ impl ColorChoice {
         }
         .unwrap_or(false)
     }
+    /// THE APPS' EXCEPTIONS IN FORCE — the apps kept in their own colours
+    /// and the apps' own looks: none under Auto (Max, 2026-10-21: "auto is
+    /// auto, there is no per apps when auto"). Kept, for Auto turned off.
+    pub(crate) fn skip_in_force(&self) -> &[String] {
+        if self.auto_of(Surface::Apps) {
+            &[]
+        } else {
+            &self.skip
+        }
+    }
+    pub(crate) fn looks_in_force(&self) -> &std::collections::BTreeMap<String, String> {
+        static NONE: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        if self.auto_of(Surface::Apps) {
+            &NONE
+        } else {
+            &self.app_look
+        }
+    }
     /// Whether a surface's light follows the sun (Auto has it on too).
     pub(crate) fn ambient_of(&self, s: Surface) -> bool {
         self.auto_of(s)
@@ -2154,7 +2172,7 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     m.insert("icons_dark".into(), shell.icons_dark.into());
     // A webapp kept in its own colours: out of the webapps, and named so
     // Seam leaves its site alone even with the web on.
-    let skipped = crate::webapps::hosts_of(&picked.skip);
+    let skipped = crate::webapps::hosts_of(picked.skip_in_force());
     m.insert("webapp_hosts".into(), webapp_hosts.iter().filter(|h| !skipped.contains(h)).cloned().collect::<Vec<_>>().into());
     m.insert("web_skip".into(), skipped.into());
     // The accent, for what Seam's chrome lights with it (the drop on its
@@ -3035,8 +3053,8 @@ impl crate::App {
         }
         set_shell(&picked, crate::look::dark());
         let c = choice();
-        set_skipped_programs(&self.entries, &c.skip);
-        set_looked_programs(&self.entries, &c.app_look);
+        set_skipped_programs(&self.entries, c.skip_in_force());
+        set_looked_programs(&self.entries, c.looks_in_force());
         let changed = set(theme);
         // A move of the Lighting alone leaves the theme as it was, yet the
         // shell, the apps and the web all wear it.
@@ -3697,6 +3715,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn auto_is_auto_no_app_keeps_an_exception_under_it() {
+        let mut c = ColorChoice { skip: vec!["org.inkscape.Inkscape".into()], ..Default::default() };
+        c.app_look.insert("code".into(), "dark".into());
+        assert_eq!(c.skip_in_force().len(), 1, "manual: the exceptions hold");
+        assert_eq!(c.looks_in_force().len(), 1);
+        c.auto = Some(true);
+        assert!(c.skip_in_force().is_empty(), "Auto: every app follows the section");
+        assert!(c.looks_in_force().is_empty());
+        assert_eq!(c.skip.len(), 1, "kept, for Auto turned off");
+        c.auto = Some(false);
+        assert_eq!(c.skip_in_force().len(), 1, "back as they were");
     }
 
     #[test]
