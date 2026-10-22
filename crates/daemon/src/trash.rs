@@ -16,8 +16,9 @@
 //!
 //! Scope: the **home trash** only. Files on other mounts may live in a
 //! per-volume top-dir trash (`$topdir/.Trash-$uid`); reading those is a later
-//! addition. Trashing a path from another filesystem falls back to copy+remove
-//! for a plain file, and errors for a directory (rare for a home setup).
+//! addition. A path from another filesystem (a stick, a card, a second disk)
+//! is COPIED in — a folder whole, its links as links — and the original taken
+//! away only once the copy is all there ([`move_across`]).
 
 use std::fs;
 use std::io::{self, Write};
@@ -277,21 +278,60 @@ impl Trash {
 }
 
 /// Move `src` to `dst`, falling back to copy+remove across filesystems
-/// (`rename` returns `EXDEV`). Directories across filesystems aren't handled.
+/// (`rename` returns `EXDEV`).
 fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
     match fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            let meta = fs::symlink_metadata(src)?;
-            if meta.is_dir() {
-                return Err(io::Error::other(
-                    "cross-filesystem directory move not supported",
-                ));
-            }
-            fs::copy(src, dst)?;
-            fs::remove_file(src)
-        }
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => move_across(src, dst),
         Err(e) => Err(e),
+    }
+}
+
+/// `src` moved to `dst` on another disk: copied as it is, then taken away.
+/// A folder used to be refused here ("cross-filesystem directory move not
+/// supported"), so nothing on a stick or a card could go to the bin.
+/// Nothing is overwritten (`dst` must not be there), and a copy that fails
+/// halfway is taken back with the original left as it was.
+fn move_across(src: &Path, dst: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(dst).is_ok() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "something is already there"));
+    }
+    if let Err(e) = copy_as_is(src, dst) {
+        let _ = remove_any(dst);
+        return Err(e);
+    }
+    remove_any(src)
+}
+
+/// `src` copied to `dst` AS IT IS: a folder with all that is in it, a link
+/// as a link — never followed (a link to the home folder would bring the
+/// whole home along). Anything else (a pipe, a device) is refused.
+fn copy_as_is(src: &Path, dst: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(src)?, dst)
+    } else if kind.is_dir() {
+        fs::create_dir(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            copy_as_is(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        // (Last: a folder that may not be written to is filled first.)
+        fs::set_permissions(dst, meta.permissions())
+    } else if kind.is_file() {
+        fs::copy(src, dst).map(|_| ())
+    } else {
+        Err(io::Error::other("not a file, a folder or a link"))
+    }
+}
+
+/// Take `path` away, whatever it is (a link: the link, not what it points at).
+fn remove_any(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
     }
 }
 
@@ -520,6 +560,51 @@ mod tests {
 
         let _ = fs::remove_dir_all(&src_dir);
         let _ = fs::remove_dir_all(&t.root);
+    }
+
+    #[test]
+    fn a_folder_from_another_disk_is_copied_in_whole_then_taken_away() {
+        // (`move_across` is what `rename`'s EXDEV leads to: one disk here.)
+        let d = std::env::temp_dir().join(format!("wr-across-{}", unique_id()));
+        let _ = fs::remove_dir_all(&d);
+        let src = d.join("stick/Holiday");
+        fs::create_dir_all(src.join("day 1")).unwrap();
+        fs::write(src.join("day 1/a.jpg"), b"pixels").unwrap();
+        fs::create_dir_all(d.join("home")).unwrap();
+        fs::write(d.join("home/big.iso"), b"not to be copied").unwrap();
+        std::os::unix::fs::symlink(d.join("home"), src.join("to home")).unwrap();
+        let dst = d.join("bin/Holiday");
+        fs::create_dir_all(d.join("bin")).unwrap();
+        move_across(&src, &dst).unwrap();
+        assert!(!src.exists(), "the original went");
+        assert_eq!(fs::read(dst.join("day 1/a.jpg")).unwrap(), b"pixels");
+        let link = dst.join("to home");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "a link stays a link");
+        assert_eq!(fs::read_link(&link).unwrap(), d.join("home"));
+        assert!(d.join("home/big.iso").exists(), "what the link points at is untouched");
+        // Nothing is ever copied over what is there.
+        fs::create_dir_all(d.join("stick/again")).unwrap();
+        let err = move_across(&d.join("stick/again"), &dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(d.join("stick/again").exists() && dst.join("day 1/a.jpg").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_copy_that_fails_halfway_leaves_the_original_and_no_half_copy() {
+        let d = std::env::temp_dir().join(format!("wr-half-{}", unique_id()));
+        let _ = fs::remove_dir_all(&d);
+        let src = d.join("stick/Mixed");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), b"a").unwrap();
+        // A pipe cannot be copied: the copy stops there.
+        let fifo = std::ffi::CString::new(src.join("z-pipe").into_os_string().into_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let dst = d.join("bin-Mixed");
+        assert!(move_across(&src, &dst).is_err());
+        assert!(src.join("a.txt").exists(), "the original is as it was");
+        assert!(fs::symlink_metadata(&dst).is_err(), "no half copy left");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

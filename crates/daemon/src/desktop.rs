@@ -5597,9 +5597,12 @@ impl App {
                 return;
             };
             if self.dropped_on_trash(&self.current_layout(), at.pos) {
-                for path in self.filer.drag_paths() {
-                    info!("files: {path} → Recycle Bin");
-                    self.trash_file(&path);
+                // The window's own way to the bin: off the loop (a folder
+                // from a stick is COPIED in) and into its history.
+                if let Some(win) = self.filer.drag_win() {
+                    let paths: Vec<PathBuf> = self.filer.drag_paths().into_iter().map(PathBuf::from).collect();
+                    info!("files: {} item(s) → Recycle Bin", paths.len());
+                    self.filer_bin(win, &paths);
                 }
             }
             offer.finish(); // → the source's `dnd_finished` → `filer_drag_end`

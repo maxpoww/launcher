@@ -2041,6 +2041,11 @@ impl Filer {
         self.drag.as_ref().map_or_else(Vec::new, |d| d.paths.clone())
     }
 
+    /// The window a drag of ours came from.
+    pub fn drag_win(&self) -> Option<u32> {
+        self.drag.as_ref().map(|d| d.win)
+    }
+
     pub fn is_drag_source(&self, source: &wayland_client::protocol::wl_data_source::WlDataSource) -> bool {
         self.drag.as_ref().is_some_and(|d| d.source.inner() == source)
     }
@@ -4138,7 +4143,7 @@ impl App {
 
     /// Throw `paths` away, remembering their names in the bin so window
     /// `id`'s history can put them back.
-    fn filer_bin(&mut self, id: u32, paths: &[PathBuf]) {
+    pub(crate) fn filer_bin(&mut self, id: u32, paths: &[PathBuf]) {
         let paths = paths.to_vec();
         // (Off the loop: from another disk a thing is COPIED into the bin.)
         self.desktop_off_loop(
