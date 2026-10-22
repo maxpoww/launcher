@@ -428,8 +428,6 @@ fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8
     }
 }
 
-/// The most controls the apps grid's search shows in its row.
-pub(crate) const MAX_SEARCH_CONTROLS: usize = 6;
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -1290,10 +1288,13 @@ impl Panel {
         }
     }
 
-    /// The settings matching `query` (the apps grid's search), best first:
-    /// name prefix, name, keyword; then nearest layer; at most
-    /// [`MAX_SEARCH_CONTROLS`].
-    pub(crate) fn matching_controls(&self, query: &str) -> Vec<&'static str> {
+    /// Every one of this field's pills matching `query` (the apps grid's
+    /// search), best first — name prefix, name, keyword; then nearest layer —
+    /// each
+    /// with how well it matched (0 = its name begins so, 1 = its name holds
+    /// it, 2 = a keyword does) — no cap: the dock box's System row takes as
+    /// many as its width holds.
+    pub(crate) fn matching_ranked(&self, query: &str) -> Vec<(u8, &'static str)> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
             return Vec::new();
@@ -1310,7 +1311,7 @@ impl Panel {
             .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, groups[i], i)))
             .collect();
         hits.sort();
-        hits.into_iter().take(MAX_SEARCH_CONTROLS).map(|(.., i)| items[i].0).collect()
+        hits.into_iter().map(|(rank, _, i)| (rank, items[i].0)).collect()
     }
 
     /// Open the setting named `label` (from the apps grid's search): now if
@@ -5472,13 +5473,14 @@ mod tests {
     #[test]
     fn the_apps_search_finds_controls_best_first() {
         let p = Panel { items: &SETTINGS, ..Panel::default() };
-        let audio = p.matching_controls("audio");
+        let names = |q: &str| -> Vec<&'static str> { p.matching_ranked(q).into_iter().map(|(_, l)| l).collect() };
+        let audio = names("audio");
         for want in ["Sound output", "Volume", "Microphone"] {
             assert!(audio.contains(&want), "{want} in {audio:?}");
         }
-        assert_eq!(p.matching_controls("res").first(), Some(&"Resolution"), "a name prefix first");
-        assert!(p.matching_controls("  ").is_empty());
-        assert!(p.matching_controls("e").len() <= MAX_SEARCH_CONTROLS);
+        assert_eq!(names("res").first(), Some(&"Resolution"), "a name prefix first");
+        assert_eq!(p.matching_ranked("res").first().map(|&(rank, _)| rank), Some(0), "ranked as a name prefix");
+        assert!(names("  ").is_empty());
     }
 
     #[test]
@@ -5489,8 +5491,8 @@ mod tests {
         assert!(p.is_modules());
         assert_eq!(p.pills.len(), crate::modules::items().len());
         assert_clean(&p, "the modules field");
-        assert_eq!(p.matching_controls("steam").first(), Some(&"Gaming"), "a keyword finds its module");
-        assert!(p.matching_controls("resolution").is_empty(), "no settings in the modules");
+        assert_eq!(p.matching_ranked("steam").first(), Some(&(2, "Gaming")), "a keyword finds its module");
+        assert!(p.matching_ranked("resolution").is_empty(), "no settings in the modules");
     }
 
     #[test]

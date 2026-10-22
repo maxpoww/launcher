@@ -134,10 +134,9 @@ impl App {
         }
     }
 
-    /// The band's rows: Controls, Modules, or both — never mixed.
+    /// The band's rows: the one System row, while anything matches.
     pub(crate) fn control_rows(&self) -> usize {
-        let m = &self.search.control_modules;
-        usize::from(m.iter().any(|&x| !x)) + usize::from(m.iter().any(|&x| x))
+        usize::from(!self.search.controls.is_empty())
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
@@ -197,32 +196,25 @@ impl App {
         for sec in &mut layout.sections {
             sec.centre_rows = centre_rows;
         }
-        // The Controls row: the matching settings as near-layer pills,
-        // split about the title's centre (see `content::controls_rects`).
-        // Settings in their row, modules in theirs: each row centred on
-        // its own title; a pill that doesn't fit gets no rect.
-        if !layout.control_bands.is_empty() {
+        // The System row: the matching settings and modules as near-layer
+        // pills, split about the title's centre (see `content::controls_rects`).
+        // As many as the row's width holds, in their order: one too wide for
+        // what is left is passed over and the next ones still have their
+        // chance; one passed over gets no rect.
+        if let Some(&(_, row)) = layout.control_bands.first() {
             let s = self.options_scale() * crate::panel::LAYER_SCALE[0];
             let gap = CONTROLS_GAP * self.options_scale();
-            let kinds = &self.search.control_modules;
-            let mut rects = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); self.search.controls.len()];
-            let mut band = 0;
-            for module in [false, true] {
-                let idx: Vec<usize> = (0..self.search.controls.len()).filter(|&i| kinds.get(i).copied().unwrap_or(false) == module).collect();
-                if idx.is_empty() {
-                    continue;
-                }
-                let Some(&(_, row)) = layout.control_bands.get(band) else {
-                    break;
-                };
-                band += 1;
-                let widths: Vec<f32> = idx
-                    .iter()
-                    .map(|&i| (self.search.controls[i].1 + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
-                    .collect();
-                for (r, &i) in content::controls_rects(row, &widths, gap).into_iter().zip(&idx) {
-                    rects[i] = r;
-                }
+            let widths: Vec<f32> = self
+                .search
+                .controls
+                .iter()
+                .map(|&(_, w)| (w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
+                .collect();
+            let fits = content::row_fits(row, &widths, gap);
+            let kept: Vec<f32> = fits.iter().map(|&i| widths[i]).collect();
+            let mut rects = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); widths.len()];
+            for (r, &i) in content::controls_rects(row, &kept, gap).into_iter().zip(&fits) {
+                rects[i] = r;
             }
             layout.controls = rects;
         }
@@ -1703,7 +1695,6 @@ impl App {
                 fast: fast_draw,
                 quick: quick_draw,
                 controls: &self.search.controls,
-                control_modules: &self.search.control_modules,
                 control_lift: &self.search.control_lift,
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {

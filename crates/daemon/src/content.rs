@@ -1722,6 +1722,21 @@ pub fn controls_band_h(icon_scale: f32, pill_h: f32) -> f32 {
 /// about its centre — the title's (Max, 2026-09-30): an odd count puts the
 /// middle pill on it, an even count the gap between the middle two. Only
 /// as many as fit inside the row are shown, best first.
+/// Which of `widths` (in their order) `row` holds as [`controls_rects`]
+/// lays them out: each in turn if it still fits beside those already taken
+/// — one that does not is passed over and the next ones keep their chance.
+pub(crate) fn row_fits(row: Rect, widths: &[f32], gap: f32) -> Vec<usize> {
+    let mut kept: Vec<usize> = Vec::new();
+    for i in 0..widths.len() {
+        let mut with: Vec<f32> = kept.iter().map(|&k| widths[k]).collect();
+        with.push(widths[i]);
+        if controls_rects(row, &with, gap).len() == with.len() {
+            kept.push(i);
+        }
+    }
+    kept
+}
+
 pub(crate) fn controls_rects(row: Rect, widths: &[f32], gap: f32) -> Vec<Rect> {
     let cx = row.x + row.w / 2.0;
     for n in (1..=widths.len()).rev() {
@@ -2025,12 +2040,10 @@ pub struct FrameInput<'a> {
     pub query_px: f32,
     /// The search pill's size, type and hover.
     pub search_pill: SearchPill,
-    /// The Controls row's settings (label, shaped width), in
+    /// The System row's settings and modules (label, shaped width), in
     /// `Layout::controls` order, and each pill's eased hover.
     pub controls: &'a [(&'static str, f32)],
     pub control_lift: &'a [f32],
-    /// Which of `controls` are modules: the row's title names what it shows.
-    pub control_modules: &'a [bool],
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
     pub quick: Option<QuickDraw<'a>>,
@@ -2375,7 +2388,6 @@ pub fn scene(
         search_pill,
         controls,
         control_lift,
-        control_modules,
         fast,
         quick,
         stretch,
@@ -3825,12 +3837,11 @@ pub fn scene(
     // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
     if !layout.control_bands.is_empty() && !layout.controls.is_empty() && !panel {
-        // One title per row: Controls over the settings, Modules over the modules.
-        let has = |m: bool| control_modules.contains(&m);
-        let names: Vec<&str> = [(false, "Controls"), (true, "Modules")].into_iter().filter(|&(m, _)| has(m)).map(|(_, n)| crate::i18n::tr(n)).collect();
-        for (&(title, _), name) in layout.control_bands.iter().zip(names) {
+        // One title over the one row: "System" — the settings and the
+        // modules together (Max, 2026-10-22).
+        if let Some(&(title, _)) = layout.control_bands.first() {
             scene.labels.push(Label {
-                text: crate::i18n::tr(name).to_string(),
+                text: crate::i18n::tr("System").to_string(),
                 pos: (title.0, title.1 + TITLE_DROP),
                 max_w: 200.0,
                 font_px: TITLE_FONT_PX,
@@ -4657,6 +4668,16 @@ mod tests {
         assert!((r[1].x + r[1].w / 2.0 - 300.0).abs() < 0.01, "3: the middle pill on the title");
         // Too wide for both halves: the best that fit are kept.
         assert_eq!(controls_rects(row, &[200.0; 4], gap).len(), 2);
+    }
+
+    #[test]
+    fn the_system_row_passes_over_a_pill_too_wide_and_takes_the_next() {
+        let row = Rect::new(0.0, 0.0, 600.0, 30.0);
+        // The second is too wide beside the first; the third still fits.
+        assert_eq!(row_fits(row, &[150.0, 500.0, 120.0], 10.0), vec![0, 2]);
+        // Everything that fits, in order.
+        assert_eq!(row_fits(row, &[100.0, 100.0, 100.0], 10.0), vec![0, 1, 2]);
+        assert!(row_fits(row, &[700.0], 10.0).is_empty(), "wider than the row: none");
     }
 
     #[test]

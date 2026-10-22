@@ -5023,25 +5023,28 @@ impl App {
         // `recompute_dock_order` below. See `minimized.rs`.
         self.minimized_entries();
         self.search.visible = visible;
-        // The settings that match, for the Controls row (not on the panel
-        // itself, which searches its own field).
-        // And the modules that match (Max, 2026-10-03: "as controls do"):
-        // settings first, then up to three modules, six pills at most.
-        let (settings, modules) = if self.control_panel {
-            (Vec::new(), Vec::new())
+        // THE SYSTEM ROW (Max, 2026-10-22: "mostrá los dos en una fila con
+        // la etiqueta System, sin orden de prioridad ni tope — las que entren
+        // en el ancho de la caja"): the settings AND the modules that match,
+        // in ONE row, mixed — by how well each matched (a name that begins
+        // so before a name that holds it before a keyword), the two kinds
+        // taking turns at the same footing; no cap: as many as the row's
+        // width holds (`content::controls_rects` leaves the rest out). The app
+        // found stays the one selected, so the row is never in the way. Not
+        // on the control panel, which searches its own field.
+        let picked: Vec<(&'static str, bool)> = if self.control_panel {
+            Vec::new()
         } else {
-            (
-                self.settings_panel().matching_controls(&self.search.query),
-                self.modules_panel().matching_controls(&self.search.query),
-            )
+            let q = &self.search.query;
+            let side = |hits: Vec<(u8, &'static str)>, module: bool| {
+                hits.into_iter().enumerate().map(move |(k, (rank, label))| (rank, k, label, module))
+            };
+            let mut both: Vec<(u8, usize, &'static str, bool)> = side(self.settings_panel().matching_ranked(q), false)
+                .chain(side(self.modules_panel().matching_ranked(q), true))
+                .collect();
+            both.sort_by_key(|&(rank, k, _, module)| (rank, k, module));
+            both.into_iter().map(|(_, _, label, module)| (label, module)).collect()
         };
-        // Two rows, never mixed (Max, 2026-10-03): the settings in the
-        // Controls row, the modules in the Modules row under it.
-        let picked: Vec<(&'static str, bool)> = settings
-            .into_iter()
-            .map(|l| (l, false))
-            .chain(modules.into_iter().take(panel::MAX_SEARCH_CONTROLS).map(|l| (l, true)))
-            .collect();
         self.search.control_modules = picked.iter().map(|&(_, m)| m).collect();
         let controls: Vec<&'static str> = picked.into_iter().map(|(l, _)| l).collect();
         // The near layer's type (Max: "make the pills big as the nearest layer").
