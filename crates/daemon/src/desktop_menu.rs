@@ -142,6 +142,29 @@ pub(crate) enum Action {
     Print,
 }
 
+impl Action {
+    /// Whether it CHANGES files (makes, names, moves, throws away, turns):
+    /// none of these is offered on what is the system's (`Ctx::readonly`).
+    pub fn changes(&self) -> bool {
+        matches!(
+            self,
+            Action::Cut
+                | Action::Paste
+                | Action::PasteInto
+                | Action::Rename
+                | Action::Duplicate
+                | Action::Compress
+                | Action::Extract
+                | Action::NewFolder
+                | Action::NewFolderWith
+                | Action::MoveToBin
+                | Action::MoveToHome
+                | Action::Rotate
+                | Action::AllowRun
+        )
+    }
+}
+
 /// One row: an action, a line that only says something, or a rule.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Row {
@@ -270,6 +293,9 @@ pub(crate) struct Ctx {
     pub placed: bool,
     /// Something of the system's: not thrown away.
     pub system: bool,
+    /// THE SYSTEM'S (`filer::zones`, Max 2026-10-22): looked at, copied,
+    /// never changed — no row that changes files is offered.
+    pub readonly: bool,
     /// Dot files shown.
     pub hidden: bool,
     /// The folder is arranged by hand (Clean up puts it in order).
@@ -333,7 +359,11 @@ impl Limits {
 pub(crate) fn rows_for(c: &Ctx) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
     let mut grp = |rows: Vec<Option<Row>>| {
-        let rows: Vec<Row> = rows.into_iter().flatten().collect();
+        let rows: Vec<Row> = rows
+            .into_iter()
+            .flatten()
+            .filter(|r| !(c.readonly && matches!(r, Row::Item { action, .. } if action.changes())))
+            .collect();
         if rows.is_empty() {
             return;
         }
@@ -2042,6 +2072,51 @@ mod tests {
     }
 
     #[test]
+    fn the_systems_things_are_looked_at_never_changed() {
+        let file = rows_for(&Ctx {
+            on: On::File,
+            here: true,
+            clip: true,
+            readonly: true,
+            system: true,
+            ..Default::default()
+        });
+        let got = acts(&file);
+        for keep in [
+            Action::Open,
+            Action::Copy,
+            Action::SendPage,
+            Action::Properties,
+        ] {
+            assert!(got.contains(&keep), "{keep:?} is still offered");
+        }
+        for gone in [
+            Action::Cut,
+            Action::Rename,
+            Action::Duplicate,
+            Action::Compress,
+            Action::MoveToBin,
+        ] {
+            assert!(!got.contains(&gone), "{gone:?} is not offered");
+        }
+        let ground = rows_for(&Ctx {
+            on: On::Ground,
+            here: true,
+            clip: true,
+            readonly: true,
+            ..Default::default()
+        });
+        let got = acts(&ground);
+        assert!(!got.contains(&Action::Paste) && !got.contains(&Action::NewFolder));
+        assert!(got.contains(&Action::SelectAll) && got.contains(&Action::ToggleHidden));
+        // (No rule is left at an end or twice.)
+        assert!(
+            !matches!(ground.first(), Some(Row::Sep)) && !matches!(ground.last(), Some(Row::Sep))
+        );
+        assert!(!ground.windows(2).any(|w| matches!(w, [Row::Sep, Row::Sep])));
+    }
+
+    #[test]
     fn the_bin_is_red_only_where_nothing_comes_back() {
         let item = rows_for(&Ctx {
             on: On::BinItem,
@@ -2593,6 +2668,7 @@ mod tests {
                         untrusted: all,
                         placed: all,
                         system: !all,
+                        readonly: !all,
                         hidden: all,
                         by_hand: all,
                         terminal: all,

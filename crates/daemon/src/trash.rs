@@ -364,17 +364,16 @@ fn remove_any(path: &Path) -> io::Result<()> {
 /// Make `path` absolute against the CWD without resolving symlinks (used when
 /// `canonicalize` fails, e.g. the file is already gone by the time we format).
 /// WHAT CAN NEVER BE THROWN AWAY (Max, 2026-10-15: "the user can delete only
-/// what the user created"): what the system made —
+/// what the user created"; split 2026-10-22, when Files was unlocked):
 /// - the root, Home and every folder above it;
-/// - the owner's folders (Desktop, Documents, Downloads…, as `user-dirs.dirs`
-///   names them), `~/Phones`, `~/Golem` (the system's own checkout), and
-///   everything hidden at the top of Home (`.config`, `.local`…: the apps'
-///   and the system's settings);
 /// - the bin itself and the folders it lives in;
-/// - anything that is not the owner's (`/nix`, `/etc`, another user's);
+/// - the system's (`filer::zones`: what the owner cannot write, `/nix`,
+///   `/etc`…, another user's);
 /// - a volume's own folder (a stick is ejected, not binned).
 ///
-/// Inside those folders, what the owner put there is the owner's to throw.
+/// The owner's folders themselves (Desktop, Documents…), `~/Phones`,
+/// `~/Golem` and Home's dot entries are no longer kept here: they are
+/// DELICATE — a change to them asks first (`filer::zones`, `confirm.rs`).
 ///
 /// Remembered a few seconds: it is asked at every frame of a file window
 /// with a selection (its pill) and of the dock while a drag is over it, for
@@ -425,13 +424,10 @@ fn protected_now(path: &Path) -> bool {
     if home.starts_with(&abs) {
         return true;
     }
-    if parent == home {
-        let name = abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if name.starts_with('.') || name == "Phones" || name == "Golem" {
-            return true;
-        }
+    if Trash::home().files_root().starts_with(&abs) {
+        return true;
     }
-    if crate::desktop::is_own_folder(&abs) || Trash::home().files_root().starts_with(&abs) {
+    if crate::filer::zones::is_system(&abs) {
         return true;
     }
     let Ok(meta) = fs::symlink_metadata(&abs) else {
@@ -540,9 +536,11 @@ mod tests {
         assert!(protected(Path::new("/")));
         assert!(protected(&home));
         assert!(protected(home.parent().unwrap()));
-        assert!(protected(&home.join(".config")));
-        assert!(protected(&home.join("Desktop")));
+        // (Delicate, not kept: a change to them asks first — `filer::zones`.)
+        assert!(!protected(&home.join(".config")));
+        assert!(!protected(&home.join("Desktop")));
         assert!(protected(Path::new("/nix")), "not the owner's");
+        assert!(protected(Path::new("/etc/hosts")), "the system's");
         let d = std::env::temp_dir().join(format!("wr-protect-{}", std::process::id()));
         fs::create_dir_all(d.join("mine")).unwrap();
         assert!(!protected(&d.join("mine")), "what the owner made goes");

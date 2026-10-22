@@ -263,6 +263,18 @@ impl App {
     /// FreeDesktop trash, then refilter so it drops out of the Files listing
     /// and, if the trash view is open, appears in the bin.
     pub(crate) fn trash_file(&mut self, path: &str) {
+        // A DELICATE place (`filer::zones`: one of the owner's folders
+        // itself, ~/Golem, a dot entry…) asks first in a file window; the
+        // dock cannot show that question, so here it stays, quietly.
+        if let crate::filer::zones::Zone::Delicate(d) =
+            crate::filer::zones::zone_of(std::path::Path::new(path))
+        {
+            info!(
+                "not trashed {path}: inside {} — a file window asks first",
+                d.place.display()
+            );
+            return;
+        }
         match crate::trash::Trash::home().trash(std::path::Path::new(path)) {
             Ok(item) => info!("trashed {path} → Trash/files/{}", item.name),
             Err(e) => warn!("failed to trash {path}: {e}"),

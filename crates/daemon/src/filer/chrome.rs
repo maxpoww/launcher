@@ -52,6 +52,11 @@ const CHIP_ICON: f32 = 13.0;
 const CRUMB_ICON: f32 = 14.0;
 const CHEV: f32 = 8.0;
 const PEN_BOX: f32 = 18.0;
+/// The path line's chip (`zones`): its height, air, words and lock.
+const TAG_H: f32 = 18.0;
+const TAG_PAD: f32 = 7.0;
+const TAG_PX: f32 = 11.0;
+const TAG_ICON: f32 = 10.0;
 const PEN_ICON: f32 = 14.0;
 const X_BOX: f32 = 16.0;
 const X_ICON: f32 = 8.0;
@@ -119,10 +124,11 @@ pub(super) struct Info {
 // ── the chrome's own symbols ────────────────────────────────────────────
 
 /// The symbols the chrome wears (the shell's own set: `glyphs.rs`).
-const CHROME: [&str; 33] = [
+const CHROME: [&str; 35] = [
     "clock", "pin", "files", "media", "sort", "info", "grid", "list", "eye", "eyeoff", "search",
-    "pen", "x", "plus", "chev", "folder", "undo", "rename", "trash", "newf", "copy", "open", "dup",
-    // (The selection pill's: there at once when it rises.)
+    // (The system's chip on the path line; the confirmation's shield.)
+    "lock", "shield", "pen", "x", "plus", "chev", "folder", "undo", "rename", "trash", "newf",
+    "copy", "open", "dup", // (The selection pill's: there at once when it rises.)
     "move", "openwith", "usb", "more", "paste",
     // (And what a kind of thing is for: the pill's, and by the ↶.)
     "play", "slides", "pic", "print", "extract",
@@ -930,19 +936,26 @@ impl App {
             .filter(|&i| i != win.tab)
             .map(|i| chip_w(chip_words[i].1) + TAB_GAP)
             .sum();
-        let tail = IN_GAP + PEN_BOX + if many { IN_GAP + X_BOX } else { 0.0 };
+        // THE PATH LINE'S CHIP (`zones`, Max 2026-10-22): at the end of the
+        // way here, small and dim — a lock and "System" where nothing is
+        // the owner's to change, "Emptied at restart" in /tmp and /var/tmp.
+        let editing = win.go_to.is_some();
+        let tag: Option<(bool, &str)> = if editing || win.dir == super::recent::root() {
+            None
+        } else if win.zone == super::zones::Zone::System {
+            Some((true, tr("System")))
+        } else if super::zones::emptied_at_restart(&win.dir) {
+            Some((false, tr("Emptied at restart")))
+        } else {
+            None
+        };
+        let tag_w = tag.map_or(0.0, |(lock, words)| {
+            let lock_w = if lock { TAG_ICON + 4.0 } else { 0.0 };
+            IN_GAP + 2.0 * TAG_PAD + lock_w + measure(win, words, TAG_PX, None)
+        });
+        let tail = IN_GAP + PEN_BOX + if many { IN_GAP + X_BOX } else { 0.0 } + tag_w;
         let room = (tools_left - x0 - others - TAB_GAP - ADD_BOX - tail).max(40.0);
-        let mut starts = win.places.clone();
-        if let Some(root) = &win.root {
-            starts.push(Place {
-                name: file_name(root),
-                path: root.clone(),
-                icon: String::new(),
-                gap: false,
-                start: true,
-            });
-        }
-        let steps = crumbs(&win.dir, &starts);
+        let steps = crumbs(&win.dir, &win.places);
         let widths: Vec<f32> = steps
             .iter()
             .map(|(n, _)| measure(win, n, LINE_PX, None))
@@ -952,7 +965,6 @@ impl App {
         while from > 0 && steps_w(&widths, from - 1) <= room {
             from -= 1;
         }
-        let editing = win.go_to.is_some();
         let field_w = (win.edit_w - tail).max(EDIT_MIN);
         let current_w = if editing {
             field_w
@@ -1044,6 +1056,33 @@ impl App {
                         });
                         hits.crumbs.push((hit, dir));
                         x += bw;
+                    }
+                    if let Some((lock, words_now)) = tag {
+                        let chip = Rect::new(x + IN_GAP, cy - TAG_H / 2.0, tag_w - IN_GAP, TAG_H);
+                        g.rects
+                            .push(rect(chip, TAG_H / 2.0, faded(tones.field, 0.8)));
+                        let mut tx = chip.x + TAG_PAD;
+                        if lock {
+                            symbol(
+                                &mut g,
+                                win,
+                                &glyph("lock"),
+                                square((tx + TAG_ICON / 2.0, cy), TAG_ICON),
+                                tones.dim,
+                            );
+                            tx += TAG_ICON + 4.0;
+                        }
+                        g.labels.push(Label {
+                            clip: Some(chip),
+                            ..words(
+                                words_now,
+                                (tx, cy - (TAG_PX + 4.0) / 2.0),
+                                chip.w,
+                                TAG_PX,
+                                tones.dim_text,
+                            )
+                        });
+                        x += tag_w;
                     }
                 }
                 // ✎ and ×: on hover (the pencil also while it is taken).
@@ -1888,9 +1927,15 @@ impl App {
                     parts.push(button(icon, label, PillAct::Act(*action)));
                     parts.push(PillPart::Rule);
                 }
+                // The system's (`zones`): copied and looked at, never changed.
+                let theirs = sel.iter().any(|it| {
+                    super::zones::zone_of(Path::new(&it.path)) == super::zones::Zone::System
+                });
                 words.push(button("copy", tr("Copy"), PillAct::Act(Action::Copy)));
-                words.push(button("move", tr("Move"), PillAct::Act(Action::Cut)));
-                if one {
+                if !theirs {
+                    words.push(button("move", tr("Move"), PillAct::Act(Action::Cut)));
+                }
+                if one && !theirs {
                     words.push(button("rename", tr("Rename"), PillAct::Act(Action::Rename)));
                 }
                 if file && smart.is_none() {
@@ -1909,9 +1954,10 @@ impl App {
                 }
                 words.truncate(PILL_WORDS - usize::from(smart.is_some()));
                 parts.extend(words);
-                if !sel
-                    .iter()
-                    .any(|it| crate::trash::protected(Path::new(&it.path)))
+                if !theirs
+                    && !sel
+                        .iter()
+                        .any(|it| crate::trash::protected(Path::new(&it.path)))
                 {
                     parts.push(round("trash", PillAct::Act(Action::MoveToBin)));
                 }

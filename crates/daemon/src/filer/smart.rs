@@ -445,6 +445,12 @@ impl App {
             .filter(|it| it.kind == Kind::File)
             .map(|it| PathBuf::from(&it.path))
             .collect();
+        // (Turning changes the photos: the zones' gate first.)
+        if action == Action::Rotate
+            && !self.filer_gate(id, super::Act::Rotate, &picked, None, super::Pending::Smart(action))
+        {
+            return;
+        }
         self.smart_act(SendFor::Files(id), action, picked, here, one_folder);
     }
 

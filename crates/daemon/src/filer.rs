@@ -63,7 +63,9 @@ mod chrome;
 mod history;
 mod print;
 mod recent;
+mod confirm;
 mod smart;
+pub(crate) mod zones;
 
 pub(crate) use print::Can;
 pub(crate) use smart::{same_disk, slow_mount, smart_for};
@@ -673,6 +675,94 @@ enum Then {
     Nothing,
     Open,
     Rename,
+}
+
+/// A change that waits for its confirmation (`confirm.rs`): done again as
+/// it was asked, once accepted. (Things by their path: the folder may be
+/// listed again meanwhile.)
+#[derive(Debug, Clone)]
+enum Pending {
+    Rename(PathBuf),
+    Bin(Vec<PathBuf>),
+    Paste(PathBuf),
+    Bring {
+        paths: Vec<PathBuf>,
+        dir: PathBuf,
+        may_move: bool,
+        arrange: Option<(Vec<String>, Vec<String>)>,
+    },
+    NewFolder,
+    Duplicate(Vec<String>),
+    Group(Vec<String>),
+    Archive(Action, Vec<String>),
+    Smart(Action),
+}
+
+/// What a change does, for the confirmation's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Act {
+    Bin,
+    Rename,
+    Move,
+    Copy,
+    Create,
+    Duplicate,
+    Compress,
+    Extract,
+    Rotate,
+}
+
+impl Act {
+    /// The confirmation's second button: "<the act> anyway".
+    fn anyway(self) -> &'static str {
+        match self {
+            Act::Bin => tr("Move to bin anyway"),
+            Act::Rename => tr("Rename anyway"),
+            Act::Move => tr("Move anyway"),
+            Act::Copy => tr("Copy anyway"),
+            Act::Create => tr("Create anyway"),
+            Act::Duplicate => tr("Duplicate anyway"),
+            Act::Compress => tr("Compress anyway"),
+            Act::Extract => tr("Extract anyway"),
+            Act::Rotate => tr("Rotate anyway"),
+        }
+    }
+}
+
+/// The confirmation's title for `act` on `changed` (the things it changes),
+/// the delicate places it touches being `hits` (each with the thing, or
+/// none for the folder things are made or put in).
+fn confirm_title(act: Act, changed: &[PathBuf], hits: &[(Option<PathBuf>, zones::Delicate)]) -> String {
+    let name = |p: &Path| file_name(p);
+    let n = changed.len();
+    let one = changed.first().map(|p| name(p)).unwrap_or_default();
+    // (Every thing of it inside the same place, and none of them that place.)
+    let things: Vec<&(Option<PathBuf>, zones::Delicate)> = hits.iter().filter(|(p, _)| p.is_some()).collect();
+    let inside = things.first().map(|(_, d)| d.place.clone()).filter(|place| {
+        things.len() == n && things.iter().all(|(p, d)| d.place == *place && p.as_ref() != Some(place))
+    });
+    let place = |d: &zones::Delicate| name(&d.place);
+    match act {
+        Act::Bin if n == 1 => fill(tr("Move “{name}” to the bin?"), &[("name", &one)]),
+        Act::Bin => match inside {
+            Some(p) => fill(tr("Move {n} items inside “{place}” to the bin?"), &[("n", &n), ("place", &name(&p))]),
+            None => fill(tr("Move {n} items to the bin?"), &[("n", &n)]),
+        },
+        Act::Rename => fill(tr("Rename “{name}”?"), &[("name", &one)]),
+        Act::Rotate if n == 1 => fill(tr("Rotate “{name}”?"), &[("name", &one)]),
+        Act::Rotate => fill(tr("Rotate {n} items?"), &[("n", &n)]),
+        Act::Move if !things.is_empty() => {
+            if n == 1 {
+                fill(tr("Move “{name}”?"), &[("name", &one)])
+            } else {
+                fill(tr("Move {n} items?"), &[("n", &n)])
+            }
+        }
+        _ => {
+            let at = hits.iter().find(|(p, _)| p.is_none()).or(hits.first()).map(|(_, d)| place(d)).unwrap_or_default();
+            fill(tr("Change files inside “{place}”?"), &[("place", &at)])
+        }
+    }
 }
 
 /// Which part of a thing the pointer is on: its picture, its name, or
@@ -1626,6 +1716,12 @@ struct Win {
     loading: bool,
     failed: bool,
     hidden: bool,
+    /// Where a change in its folder falls (`zones::zone_in`): the system's
+    /// is looked at, never changed.
+    zone: zones::Zone,
+    /// A change that waits to be confirmed (a delicate place, `confirm.rs`):
+    /// the panel, and what is done again once it is accepted.
+    confirm: Option<(confirm::Confirm, Pending)>,
     items: Vec<Item>,
     /// Each item's name as it is written under it (two lines), shaped once
     /// per listing and icon size: `(icon scale, names)`.
@@ -1678,9 +1774,6 @@ struct Win {
     scroll: f32,
     scroll_to: f32,
     places: Vec<Place>,
-    /// Its own root, when it was opened from outside on a folder under none
-    /// of the others (`floor`).
-    root: Option<PathBuf>,
 
     chains: HashMap<String, Vec<u8>>,
     /// How much of each picture's square is empty round what it shows
@@ -1921,7 +2014,7 @@ impl Win {
     /// in the window's, and over the chrome.
     fn point(&self, raw: (f32, f32), icon_scale: f32) -> (f32, f32) {
         let at = raw;
-        if self.menu.is_some() || self.props.is_some() || self.on_chrome(at) {
+        if self.menu.is_some() || self.props.is_some() || self.confirm.is_some() || self.on_chrome(at) {
             return at;
         }
         self.layout(icon_scale).inward(at)
@@ -1930,7 +2023,7 @@ impl Win {
     /// Whether things can be made or put in what this window shows (not in
     /// Recents, the bin, or the media view's library).
     fn put_here(&self) -> bool {
-        self.dir != recent::root() && self.in_bin() == InBin::No && !self.media
+        self.dir != recent::root() && self.in_bin() == InBin::No && !self.media && self.zone != zones::Zone::System
     }
 
     /// Whether a point of the window is on the sidebar as it is drawn now.
@@ -2211,6 +2304,9 @@ pub(crate) struct Filer {
     /// The rig's `files over`: a drag that is no Wayland one (the springs
     /// take it for real).
     rig_drag: bool,
+    /// A confirmed change is being done again: the zones' gate lets it by
+    /// once (`filer_confirmed`).
+    confirmed: bool,
     orders: Orders,
     /// The files on the clipboard the pill was told to forget (its ×):
     /// neither offered here nor drawn faded while they are what is there.
@@ -2245,6 +2341,7 @@ impl Filer {
             drag: None,
             dnd: None,
             rig_drag: false,
+            confirmed: false,
             orders: Orders::default(),
             clip_forgot: None,
             live: Default::default(),
@@ -2424,8 +2521,17 @@ pub(crate) fn places(
             });
         }
     }
-    // LOCATIONS.
+    // LOCATIONS: the computer's own disk first, the whole of it (Max,
+    // 2026-10-22: Files unlocked; what is the system's on it is looked at,
+    // never changed — `zones`).
     let first = out.len();
+    out.push(Place {
+        name: tr("Golem Disk").to_owned(),
+        path: PathBuf::from("/"),
+        icon: "asset:drive-harddisk".to_owned(),
+        gap: false,
+        start: true,
+    });
     for disk in crate::mounts::own_disks() {
         out.push(Place {
             name: file_name(&disk),
@@ -2455,21 +2561,6 @@ pub(crate) fn places(
     out
 }
 
-/// THE FLOOR (Max, 2026-10-15: "Files should go from ~/ onwards… nobody
-/// should go into /; a superuser goes from the terminal"): a file window
-/// lives under a ROOT — Home, the bin, a stick, a phone, a disk of the
-/// owner's — and goes no higher than the one it is under. A folder under
-/// none is reached only when it is ASKED FOR FROM OUTSIDE (another app's
-/// "show in folder", `xdg-open`): the window opened on it has it as its own
-/// root (`Win::root`), and goes down from there only.
-pub(crate) fn floor<'a>(dir: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
-    roots
-        .iter()
-        .filter(|r| dir.starts_with(r))
-        .max_by_key(|r| r.components().count())
-        .map(PathBuf::as_path)
-}
-
 /// `..` — the folder this one is in — as the first of the places (Max,
 /// 2026-10-14): a click goes up, and it is where things are dragged OUT of
 /// a folder to.
@@ -2478,13 +2569,15 @@ pub(crate) const UP: &str = "..";
 /// `places` for a window on `dir`: `..` — the folder this one is in —
 /// first, a place like the others (Max, 2026-10-14: "tiene que ser otra
 /// carpeta arriba de Home"; brought back to the sidebar of 2026-10-21: "add
-/// the '..' place too"). At the root there is nowhere up, and nothing is
-/// above a root (`floor`): no `..` at all there (Max: hidden, not grey).
-pub(crate) fn with_up(places: &[Place], dir: &Path, roots: Option<&[PathBuf]>) -> Vec<Place> {
+/// the '..' place too"). It climbs past Home to `/` (Max, 2026-10-22: Files
+/// UNLOCKED — "golem is for every user, i just needed to go to /tmp"); at
+/// `/` there is nowhere up, and the bin's top and Recents are places of
+/// their own: no `..` at all there (Max: hidden, not grey).
+pub(crate) fn with_up(places: &[Place], dir: &Path) -> Vec<Place> {
     let Some(parent) = dir.parent() else {
         return places.to_vec();
     };
-    if roots.is_some_and(|roots| floor(dir, roots).is_none_or(|f| f == dir)) {
+    if dir == bin_root() || dir == recent::root() {
         return places.to_vec();
     }
     let mut out = vec![Place {
@@ -2860,9 +2953,6 @@ impl App {
         // (The chrome's symbols, written where the icon loader reads them, and
         // read once for every window.)
         crate::glyphs::write_all();
-        // Asked for from outside, under none of the roots (another app's
-        // "show in folder"): this window's own root, down from there only.
-        let root = floor(&dir, &self.filer_roots(None)).is_none().then(|| dir.clone());
         let Some(xdg) = self.filer.xdg.as_ref() else {
             warn!("files: the compositor has no xdg-shell; handing {} to the system", dir.display());
             let exec = format!("xdg-open {}", launch::shell_quote(&dir.to_string_lossy()));
@@ -2966,6 +3056,8 @@ impl App {
             loading: false,
             failed: false,
             hidden: false,
+            zone: zones::Zone::Yours,
+            confirm: None,
             items: Vec::new(),
             names: (0.0, Vec::new()),
             selected: HashSet::new(),
@@ -2990,7 +3082,6 @@ impl App {
             scroll: 0.0,
             scroll_to: 0.0,
             places: Vec::new(),
-            root,
             chains: HashMap::new(),
             ink: HashMap::new(),
             uploaded: Vec::new(),
@@ -3076,15 +3167,12 @@ impl App {
         let marks = parse_marks(&std::fs::read_to_string(marks_path()).unwrap_or_default());
         let list = places(&home, &user_dirs, &bin_root(), &marks, &self.desktop.volumes);
         let marked: Vec<PathBuf> = marks.into_iter().map(|(_, p)| p).collect();
-        let base = self.filer_roots(None);
         let ids: Vec<u32> = self.filer.wins.iter().map(|w| w.id).collect();
         for id in ids {
             if let Some(win) = self.filer.win_mut(id) {
                 win.marks = marked.clone();
                 // (Each window's own: `..` is the folder ITS folder is in.)
-                let mut roots = base.clone();
-                roots.extend(win.root.clone());
-                let list = with_up(&list, &win.dir, Some(&roots));
+                let list = with_up(&list, &win.dir);
                 if win.places != list {
                     win.places = list;
                     // (A drag over them held a place by its number.)
@@ -3095,30 +3183,9 @@ impl App {
         }
     }
 
-    /// The roots a file window lives under (`floor`): Home, the bin, and
-    /// what is plugged in and open.
-    /// (A window's own root too, when `id` names one opened from outside.)
-    pub(crate) fn filer_roots(&self, id: Option<u32>) -> Vec<PathBuf> {
-        let mut roots = vec![home(), bin_root(), recent::root()];
-        roots.extend(self.desktop.volumes.iter().filter(|v| !v.closed).map(|v| v.path.clone()));
-        roots.extend(crate::mounts::own_disks());
-        roots.extend(id.and_then(|id| self.filer.win(id)).and_then(|w| w.root.clone()));
-        roots
-    }
-
-    /// Whether window `id` may show `dir`: under one of its roots.
-    pub(crate) fn filer_may_show(&self, id: u32, dir: &Path) -> bool {
-        floor(dir, &self.filer_roots(Some(id))).is_some()
-    }
-
     /// Go to `dir`, the folder shown now becoming the way back.
     fn filer_go(&mut self, id: u32, dir: PathBuf) {
         let dir = tidy(dir);
-        // (Above the floor: nowhere to go, and nothing for the way back.)
-        if !self.filer_may_show(id, &dir) {
-            info!("files: {} is the system's: staying", dir.display());
-            return;
-        }
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
@@ -3158,15 +3225,14 @@ impl App {
 
     /// To the folder this one is in, which comes up with this one selected.
     fn filer_up(&mut self, id: u32) {
-        let roots = self.filer_roots(Some(id));
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         let Some(parent) = win.dir.parent().map(Path::to_path_buf) else {
             return;
         };
-        // (No higher than its root.)
-        if floor(&win.dir, &roots).is_none_or(|f| f == win.dir) {
+        // (The bin's top and Recents are places: nothing is up from them.)
+        if win.dir == bin_root() || win.dir == recent::root() {
             return;
         }
         win.reveal = Some(win.dir.to_string_lossy().into_owned());
@@ -3176,18 +3242,19 @@ impl App {
     /// Show `dir` in window `id`: empty at once, listed off the loop,
     /// watched from now on. History is the caller's.
     fn filer_show(&mut self, id: u32, dir: PathBuf) {
-        // Above the floor (an old step back to a stick since ejected):
-        // Home instead.
-        let dir = if self.filer_may_show(id, &dir) {
+        // Gone (an old step back to a stick since ejected): Home instead.
+        let dir = if dir == recent::root() || dir.is_dir() {
             dir
         } else {
-            info!("files: {} is the system's: Home instead", dir.display());
+            info!("files: {} is not there: Home instead", dir.display());
             home()
         };
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
         win.dir = dir.clone();
+        win.zone = if dir == recent::root() { zones::Zone::Yours } else { zones::zone_in(&dir) };
+        win.confirm = None;
         win.items.clear();
         win.names.1.clear();
         win.menu = None;
@@ -3501,7 +3568,8 @@ impl App {
         self.filer_request_draw(id);
         if let Some(i) = named {
             self.filer_walk_to(id, i);
-            self.filer_begin_rename(id, i);
+            // (Its making was what was asked about, if anything was.)
+            self.filer_confirmed(|app| app.filer_begin_rename(id, i));
         }
         // It changed again while this reading was on its way.
         if again {
@@ -3598,6 +3666,12 @@ impl App {
             untrusted: thing.is_some_and(|it| crate::desktop::locked_shortcut(it).is_some()),
             placed: path.as_ref().is_some_and(|p| win.marks.iter().any(|m| m.as_os_str() == p.as_str())),
             system: win.selected.iter().any(|p| crate::trash::protected(Path::new(p))),
+            // The system's (`zones`): its things, or its folder's ground.
+            readonly: if path.is_some() {
+                win.selected.iter().any(|p| zones::zone_of(Path::new(p)) == zones::Zone::System)
+            } else {
+                win.zone == zones::Zone::System
+            },
             hidden: win.hidden,
             by_hand,
             terminal: win.dir != recent::root() && win.in_bin() == InBin::No,
@@ -4166,6 +4240,12 @@ impl App {
                     return;
                 }
                 let cut = action == Action::Cut;
+                // (The system's is copied, never moved away.)
+                if let Some(theirs) = selected.iter().find(|p| cut && zones::zone_of(Path::new(p)) == zones::Zone::System) {
+                    let theirs = PathBuf::from(theirs);
+                    self.filer_refuse(id, &theirs);
+                    return;
+                }
                 info!("files: {} {}", if cut { "cut" } else { "copied" }, selected.join(", "));
                 self.serve_files(&selected, cut);
                 // (They wait in the pill to be put somewhere: the selection goes.)
@@ -4192,23 +4272,7 @@ impl App {
                 let paths: Vec<PathBuf> = selected.iter().map(PathBuf::from).collect();
                 self.filer_bin(id, &paths); // the folder's watch takes them off the window
             }
-            // Archives are the system archiver's work (File Roller, which
-            // Golem ships): it shows how far it is and asks what it must.
-            Action::Extract | Action::Compress => {
-                if selected.is_empty() {
-                    return;
-                }
-                let files: Vec<String> = selected.iter().map(|p| launch::shell_quote(p)).collect();
-                let exec = if action == Action::Extract {
-                    format!("file-roller --extract-here {}", files.join(" "))
-                } else {
-                    format!("file-roller --add {}", files.join(" "))
-                };
-                info!("files: {exec}");
-                if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
-                    error!("files: the archiver could not be started: {e:#}");
-                }
-            }
+            Action::Extract | Action::Compress => self.filer_archive(id, action, selected),
             Action::OpenApp(n) => {
                 // A pick on the "Open with" page: that app, this file.
                 let (Some((name, exec, terminal)), Some(path)) = (win.open_with.get(n).cloned(), selected.first())
@@ -4328,11 +4392,43 @@ impl App {
         }
     }
 
+    /// Archives are the system archiver's work (File Roller, which Golem
+    /// ships): it shows how far it is and asks what it must. What it makes
+    /// stands beside them.
+    fn filer_archive(&mut self, id: u32, action: Action, selected: Vec<String>) {
+        if selected.is_empty() {
+            return;
+        }
+        let dir = Path::new(&selected[0]).parent().map(Path::to_path_buf).unwrap_or_default();
+        let act = if action == Action::Extract { Act::Extract } else { Act::Compress };
+        if !self.filer_gate(id, act, &[], Some(&dir), Pending::Archive(action, selected.clone())) {
+            return;
+        }
+        let files: Vec<String> = selected.iter().map(|p| launch::shell_quote(p)).collect();
+        let exec = if action == Action::Extract {
+            format!("file-roller --extract-here {}", files.join(" "))
+        } else {
+            format!("file-roller --add {}", files.join(" "))
+        };
+        info!("files: {exec}");
+        if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
+            error!("files: the archiver could not be started: {e:#}");
+        }
+    }
+
     /// The clipboard's files into the folder shown: copied, or moved if
-    /// they were cut. Off the loop; what arrived comes up selected.
+    /// they were cut. Off the loop; what arrived comes up selected. Into
+    /// the system's: refused, said quietly.
     fn filer_paste(&mut self, id: u32) {
-        if let Some(dir) = self.filer.win(id).filter(|w| w.put_here()).map(|w| w.dir.clone()) {
+        let Some(win) = self.filer.win(id) else {
+            return;
+        };
+        if win.put_here() {
+            let dir = win.dir.clone();
             self.filer_paste_into(id, dir);
+        } else if win.zone == zones::Zone::System && self.clipboard_files().is_some() {
+            let dir = win.dir.clone();
+            self.filer_refuse(id, &dir);
         }
     }
 
@@ -4342,6 +4438,10 @@ impl App {
         let Some((paths, cut)) = self.clipboard_files() else {
             return;
         };
+        let (act, changed) = if cut { (Act::Move, paths.as_slice()) } else { (Act::Copy, &[][..]) };
+        if !self.filer_gate(id, act, changed, Some(&dir), Pending::Paste(dir.clone())) {
+            return;
+        }
         let into = dir.clone();
         let sources = paths.clone();
         let task = self.filer_copy_task(&paths, &dir, cut, cut);
@@ -4442,9 +4542,133 @@ impl App {
         Some(self.task_begin(&words))
     }
 
+    /// THE ZONES' GATE (`zones`, Max 2026-10-22), before a change in window
+    /// `id`: where it falls — `changed`, the things it changes themselves
+    /// (named, moved, thrown away, turned); `into`, the folder it makes or
+    /// puts things in. The system's: refused, said quietly in the pill. A
+    /// delicate place: the confirmation comes up, the change kept as
+    /// `pending` until it is accepted. True: go on now.
+    fn filer_gate(&mut self, id: u32, act: Act, changed: &[PathBuf], into: Option<&Path>, pending: Pending) -> bool {
+        // (Accepted: this is the change done again.)
+        if std::mem::take(&mut self.filer.confirmed) {
+            return true;
+        }
+        let mut hits: Vec<(Option<PathBuf>, zones::Delicate)> = Vec::new();
+        for path in changed {
+            match zones::zone_of(path) {
+                zones::Zone::System => return self.filer_refuse(id, path),
+                zones::Zone::Delicate(d) => hits.push((Some(path.clone()), d)),
+                zones::Zone::Yours => {}
+            }
+        }
+        if let Some(dir) = into {
+            match zones::zone_in(dir) {
+                zones::Zone::System => return self.filer_refuse(id, dir),
+                zones::Zone::Delicate(d) => hits.push((None, d)),
+                zones::Zone::Yours => {}
+            }
+        }
+        // (A thing's own place says the most: its sentence first.)
+        let Some(why) = hits.iter().find(|(p, _)| p.is_some()).or(hits.first()).map(|(_, d)| d.why) else {
+            return true;
+        };
+        let title = confirm_title(act, changed, &hits);
+        let Some(win) = self.filer.win_mut(id) else {
+            return false;
+        };
+        let size = win.virt();
+        let renderer = &mut win.renderer;
+        let mut measure = |t: &str, px: f32, bold: bool| {
+            renderer
+                .as_mut()
+                .map_or(t.chars().count() as f32 * px * 0.55, |r| r.measure_text(t, px, bold.then_some(crate::content::FONT_MEDIUM)))
+        };
+        let panel = confirm::Confirm::new(&title, why.sentence(), act.anyway(), size, &mut measure);
+        info!("files: asked first: {title}");
+        win.menu = None;
+        win.menu_path = None;
+        win.props = None;
+        win.press = None;
+        win.band = None;
+        win.confirm = Some((panel, pending));
+        self.filer_request_draw(id);
+        false
+    }
+
+    /// A change the system's `path` would take: not made, said quietly.
+    fn filer_refuse(&mut self, id: u32, path: &Path) -> bool {
+        info!("files: {} is the system's: nothing changed", path.display());
+        self.filer_flash(id, tr("This is the system's. Golem manages it.").to_owned());
+        false
+    }
+
+    /// The confirmation answered: the change done as it was asked, or not.
+    fn filer_confirm_answer(&mut self, id: u32, answer: confirm::Answer) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        match answer {
+            confirm::Answer::Nothing => {}
+            confirm::Answer::Moved => self.filer_request_draw(id),
+            confirm::Answer::Cancel => {
+                win.confirm = None;
+                info!("files: not done");
+                self.filer_hover(id);
+                self.filer_request_draw(id);
+            }
+            confirm::Answer::Go => {
+                let Some((_, pending)) = win.confirm.take() else {
+                    return;
+                };
+                info!("files: done anyway: {pending:?}");
+                self.filer_request_draw(id);
+                self.filer_confirmed(|app| app.filer_do(id, pending));
+                self.filer_hover(id);
+            }
+        }
+    }
+
+    /// `f` with the gate open once (the change it makes was confirmed);
+    /// shut again after, whether `f` reached it or not.
+    fn filer_confirmed(&mut self, f: impl FnOnce(&mut Self)) {
+        self.filer.confirmed = true;
+        f(self);
+        self.filer.confirmed = false;
+    }
+
+    /// A confirmed change, done.
+    fn filer_do(&mut self, id: u32, pending: Pending) {
+        let index = |app: &Self, path: &Path| {
+            app.filer.win(id).and_then(|w| w.items.iter().position(|it| Path::new(&it.path) == path))
+        };
+        match pending {
+            Pending::Rename(path) => {
+                if let Some(i) = index(self, &path) {
+                    self.filer_begin_rename(id, i);
+                }
+            }
+            Pending::Bin(paths) => self.filer_bin(id, &paths),
+            Pending::Paste(dir) => self.filer_paste_into(id, dir),
+            Pending::Bring {
+                paths,
+                dir,
+                may_move,
+                arrange,
+            } => self.filer_bring(id, paths, dir, may_move, arrange, || {}),
+            Pending::NewFolder => self.filer_new_folder(id),
+            Pending::Duplicate(selected) => self.filer_duplicate(id, selected),
+            Pending::Group(selected) => self.filer_group(id, selected),
+            Pending::Archive(action, selected) => self.filer_archive(id, action, selected),
+            Pending::Smart(action) => self.filer_smart_act(id, action),
+        }
+    }
+
     /// Throw `paths` away, remembering their names in the bin so window
     /// `id`'s history can put them back.
     pub(crate) fn filer_bin(&mut self, id: u32, paths: &[PathBuf]) {
+        if !self.filer_gate(id, Act::Bin, paths, None, Pending::Bin(paths.to_vec())) {
+            return;
+        }
         let paths = paths.to_vec();
         // (Off the loop: from another disk a thing is COPIED into the bin.)
         self.desktop_off_loop(
@@ -4497,7 +4721,7 @@ impl App {
         let Some(text) = self.filer.win(id).and_then(|w| w.go_to.clone()) else {
             return;
         };
-        let Some((dir, file)) = typed_place(&text, &home()).filter(|(dir, _)| self.filer_may_show(id, dir)) else {
+        let Some((dir, file)) = typed_place(&text, &home()) else {
             // (Nothing there: the field says so, and stays.)
             if let Some(win) = self.filer.win_mut(id) {
                 win.go_bad = true;
@@ -4531,6 +4755,11 @@ impl App {
             return;
         }
         let paths: Vec<PathBuf> = selected.iter().map(PathBuf::from).collect();
+        // (The copies stand beside them: in their folder.)
+        let dir = paths[0].parent().map(Path::to_path_buf).unwrap_or_default();
+        if !self.filer_gate(id, Act::Duplicate, &[], Some(&dir), Pending::Duplicate(selected.clone())) {
+            return;
+        }
         self.desktop_off_loop(
             move || {
                 let mut made = Vec::new();
@@ -4574,6 +4803,10 @@ impl App {
             return;
         };
         if selected.is_empty() {
+            return;
+        }
+        let moved: Vec<PathBuf> = selected.iter().map(PathBuf::from).collect();
+        if !self.filer_gate(id, Act::Move, &moved, Some(&dir), Pending::Group(selected.clone())) {
             return;
         }
         let base = tr("New folder with items");
@@ -4624,6 +4857,9 @@ impl App {
         if dir == recent::root() {
             return;
         }
+        if !self.filer_gate(id, Act::Create, &[], Some(&dir), Pending::NewFolder) {
+            return;
+        }
         let path = (1..)
             .map(|n| {
                 if n == 1 {
@@ -4639,7 +4875,9 @@ impl App {
             return;
         }
         info!("files: new folder {}", path.display());
-        win.rename_next = Some(path.to_string_lossy().into_owned());
+        if let Some(win) = self.filer.win_mut(id) {
+            win.rename_next = Some(path.to_string_lossy().into_owned());
+        }
         self.filer_did(id, Undo::Made(path));
         self.filer_list(id);
     }
@@ -4656,6 +4894,16 @@ impl App {
         if item.kind == Kind::Volume {
             return;
         }
+        let it = PathBuf::from(&item.path);
+        if !self.filer_gate(id, Act::Rename, std::slice::from_ref(&it), None, Pending::Rename(it.clone())) {
+            return;
+        }
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
+        let Some(item) = win.items.get(i) else {
+            return;
+        };
         // (A shortcut is renamed by its file, not its `Name=`.)
         let (path, text) = (item.path.clone(), file_name(Path::new(&item.path)));
         let is_file = item.kind == Kind::File;
@@ -5481,7 +5729,12 @@ impl App {
         let label_w = layout.label_w();
         // Names are painted last of all: one under the menu or the box is
         // left out, or it would show through (the desktop's lesson).
-        let cover = win.menu.as_ref().map(|m| m.rect).or(win.props.as_ref().map(|p| p.rect));
+        let cover = win
+            .menu
+            .as_ref()
+            .map(|m| m.rect)
+            .or(win.props.as_ref().map(|p| p.rect))
+            .or(win.confirm.as_ref().map(|(c, _)| c.rect));
         // (What covers the files is in the window's space; the files are
         // laid out in their own, `zoom` times smaller from the body's corner.)
         let into_field = |r: Rect| {
@@ -5808,7 +6061,8 @@ impl App {
             .menu
             .as_ref()
             .map(|m| Rect::new(m.rect.x, m.rect.y - 4.0 * m.scale, m.rect.w, m.rect.h + 4.0 * m.scale))
-            .or(win.props.as_ref().map(|p| p.rect));
+            .or(win.props.as_ref().map(|p| p.rect))
+            .or(win.confirm.as_ref().map(|(c, _)| c.rect));
         if let (Some(panel), Some(r)) = (panel, win.renderer.as_mut()) {
             for g in chrome.iter_mut() {
                 chrome::leave_out(&mut g.labels, panel, &mut |l| r.measure_text(&l.text, l.font_px, l.family));
@@ -5830,6 +6084,18 @@ impl App {
         }
         if let Some(props) = win.props.as_ref() {
             props.push(&mut scene, &self.filer_panel_paint(props.rect, ground));
+        }
+        // The confirmation, over everything (and laid out again as the
+        // window is resized).
+        let size = win.virt();
+        let shield = win.layer_of(&chrome::glyph("shield"));
+        if let Some((panel, _)) = win.confirm.as_mut() {
+            panel.place(size);
+            if panel.ease(dt) {
+                moving = true;
+                win.last_frame = Some(now);
+            }
+            panel.push(&mut scene, &self.filer_panel_paint(panel.rect, ground), shield);
         }
 
         let mut presented = false;
@@ -5917,6 +6183,13 @@ impl App {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
+        // A confirmation up: only its buttons answer the pointer.
+        if let Some((panel, _)) = win.confirm.as_mut() {
+            if panel.pointer(win.ptr) {
+                self.filer_request_draw(id);
+            }
+            return;
+        }
         // A menu or the Properties box up: only its rows answer the pointer
         // — and only by their band: nothing opens on hover (Max,
         // 2026-10-21: "i dont want the open on hover on the menus").
@@ -6171,6 +6444,20 @@ impl App {
             return;
         };
         let at = win.ptr.unwrap_or_default();
+        // A confirmation up takes every press: a left one on a button is
+        // its answer, one anywhere off the panel cancels.
+        if let Some((panel, _)) = win.confirm.as_ref() {
+            if !pressed {
+                return;
+            }
+            let answer = match panel.hit(at) {
+                Some(1) if button == 0x110 => confirm::Answer::Go,
+                Some(0) if button == 0x110 => confirm::Answer::Cancel,
+                None if !panel.rect.contains(at) => confirm::Answer::Cancel,
+                _ => confirm::Answer::Nothing,
+            };
+            return self.filer_confirm_answer(id, answer);
+        }
         // A menu that is up takes the click: a left press on a row acts
         // when it comes back up on the same row; any other press closes it.
         if let Some(menu) = win.menu.as_mut() {
@@ -6625,6 +6912,7 @@ impl App {
         let in_field = place.is_none()
             && layout.body.contains(at)
             && win.in_bin() == InBin::No
+            && win.zone != zones::Zone::System
             && win.dir != recent::root()
             && win.sort.0 == SortKey::Name
             && win.find.as_ref().is_none_or(|f| f.is_empty());
@@ -7055,6 +7343,24 @@ impl App {
             self.filer_list(id);
             return;
         }
+        // (What is the system's is copied from, never moved away.)
+        let may_move = may_move && !paths.iter().any(|p| zones::zone_of(p) == zones::Zone::System);
+        let (act, changed) = if may_move { (Act::Move, paths.as_slice()) } else { (Act::Copy, &[][..]) };
+        let pending = Pending::Bring {
+            paths: paths.clone(),
+            dir: dir.clone(),
+            may_move,
+            arrange: arrange.clone(),
+        };
+        if !self.filer_gate(id, act, changed, Some(&dir), pending) {
+            // (The drag is ended at once, whatever is asked: its source waits.)
+            then();
+            if let Some(win) = self.filer.win_mut(id) {
+                win.gap = None;
+                win.gap_keep = false;
+            }
+            return;
+        }
         let into = dir.clone();
         let mut then = Some(then);
         // What comes stands where it was let go — said BEFORE it arrives, so
@@ -7439,6 +7745,11 @@ impl App {
 
     /// A key while window `id` has the keyboard.
     pub(crate) fn filer_key(&mut self, id: u32, keysym: Keysym, utf8: Option<&str>) {
+        // A confirmation up takes every key (Tab, Enter, Space, Escape).
+        if let Some((panel, _)) = self.filer.win_mut(id).and_then(|w| w.confirm.as_mut()) {
+            let answer = panel.key(keysym);
+            return self.filer_confirm_answer(id, answer);
+        }
         // QUICK LOOK up for this window: its keys first (the arrows walk on
         // here, and it follows them).
         if self.peek_key(id, keysym, utf8) || self.filer_peek_walk(id, keysym) {
@@ -7869,6 +8180,8 @@ impl App {
                     "back" => Keysym::BackSpace,
                     "escape" => Keysym::Escape,
                     "space" => Keysym::space,
+                    "tab" => Keysym::Tab,
+                    "delete" => Keysym::Delete,
                     "pgdown" => Keysym::Page_Down,
                     "pgup" => Keysym::Page_Up,
                     "p" => Keysym::p,
@@ -8339,26 +8652,17 @@ mod tests {
             gap: false,
             start: true,
         };
-        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"), None);
+        let places = with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents/Work"));
         assert_eq!((places[0].name.as_str(), places[0].path.as_path()), (UP, Path::new("/home/max/Documents")));
         assert!(!places[1].gap && places[1].path == home.path);
-        // At the root, at Home (the floor) and at Recents (a root of its
-        // own): no `..`.
-        assert_eq!(with_up(std::slice::from_ref(&home), Path::new("/"), None), std::slice::from_ref(&home));
-        let roots = [PathBuf::from("/home/max"), recent::root()];
-        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max"), Some(&roots)).iter().all(|p| p.name != UP));
-        assert!(with_up(std::slice::from_ref(&home), &recent::root(), Some(&roots)).iter().all(|p| p.name != UP));
-        assert!(with_up(std::slice::from_ref(&home), Path::new("/home/max/Documents"), Some(&roots)).iter().any(|p| p.name == UP));
-    }
-
-    #[test]
-    fn the_floor_is_the_deepest_root_a_folder_is_under() {
-        // The floor: Home, a stick; the system's has none.
-        let roots = [PathBuf::from("/home/max"), PathBuf::from("/run/media/max/STICK")];
-        assert_eq!(floor(Path::new("/run/media/max/STICK/photos"), &roots), Some(Path::new("/run/media/max/STICK")));
-        assert_eq!(floor(Path::new("/home/max/Documents"), &roots), Some(Path::new("/home/max")));
-        assert_eq!(floor(Path::new("/etc"), &roots), None);
-        assert_eq!(floor(Path::new("/home"), &roots), None);
+        // Past Home, up to `/` (Files unlocked, 2026-10-22).
+        let up = |dir: &Path| with_up(std::slice::from_ref(&home), dir).first().filter(|p| p.name == UP).map(|p| p.path.clone());
+        assert_eq!(up(Path::new("/home/max")), Some(PathBuf::from("/home")));
+        assert_eq!(up(Path::new("/tmp")), Some(PathBuf::from("/")));
+        // At `/`, the bin's top and Recents (places of their own): no `..`.
+        assert_eq!(up(Path::new("/")), None);
+        assert_eq!(up(&recent::root()), None);
+        assert_eq!(up(&bin_root()), None);
     }
 
     #[test]
@@ -8488,6 +8792,31 @@ mod tests {
         assert!(band_hits(&l, (beside, a.y), (gap_x, a.y + a.h - 2.0), 3, &mut thing).is_empty());
         let under_name = (name.x + 2.0, name.y + name.h - 2.0);
         assert_eq!(band_hits(&l, under_name, (beside, a.y + a.h - 1.0), 3, &mut thing), vec![1]);
+    }
+
+    #[test]
+    fn a_confirmation_names_the_act_and_the_place() {
+        use zones::{Delicate, Why};
+        let golem = Delicate { why: Why::Golem, place: PathBuf::from("/h/Golem") };
+        let config = Delicate { why: Why::Settings, place: PathBuf::from("/h/.config") };
+        let p = |s: &str| PathBuf::from(s);
+        let one = [p("/h/.config")];
+        assert_eq!(confirm_title(Act::Bin, &one, &[(Some(one[0].clone()), config.clone())]), "Move “.config” to the bin?");
+        let three = [p("/h/Golem/a"), p("/h/Golem/b"), p("/h/Golem/c")];
+        let hits: Vec<_> = three.iter().map(|t| (Some(t.clone()), golem.clone())).collect();
+        assert_eq!(confirm_title(Act::Bin, &three, &hits), "Move 3 items inside “Golem” to the bin?");
+        // The places themselves, or not all of them inside one: no "inside".
+        let local = Delicate { why: Why::Settings, place: PathBuf::from("/h/.local") };
+        let two = [p("/h/.config"), p("/h/.local")];
+        let hits = [(Some(two[0].clone()), config.clone()), (Some(two[1].clone()), local)];
+        assert_eq!(confirm_title(Act::Bin, &two, &hits), "Move 2 items to the bin?");
+        let pics = Delicate { why: Why::Main, place: PathBuf::from("/h/Pictures") };
+        assert_eq!(confirm_title(Act::Rename, &[p("/h/Pictures")], &[(Some(p("/h/Pictures")), pics)]), "Rename “Pictures”?");
+        // Made or put inside: the place named.
+        assert_eq!(confirm_title(Act::Create, &[], &[(None, golem.clone())]), "Change files inside “Golem”?");
+        assert_eq!(confirm_title(Act::Copy, &[], &[(None, golem.clone())]), "Change files inside “Golem”?");
+        assert_eq!(confirm_title(Act::Move, &[p("/h/notes.txt")], &[(None, golem)]), "Change files inside “Golem”?");
+        assert_eq!(confirm_title(Act::Move, &one, &[(Some(one[0].clone()), config)]), "Move “.config”?");
     }
 
     #[test]

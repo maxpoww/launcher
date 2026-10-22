@@ -6004,6 +6004,13 @@ impl App {
         // A move, unless the source only lets its files be copied (the
         // card's items stay on the card).
         let may_move = offer.source_actions.is_empty() || offer.source_actions.contains(DndAction::Move);
+        // (What is not the owner's to change — the system's, or a delicate
+        // place, which only a file window asks about: `filer::zones` — is
+        // COPIED here, never moved away.)
+        let may_move = may_move
+            && paths
+                .iter()
+                .all(|p| crate::filer::zones::zone_of(p) == crate::filer::zones::Zone::Yours);
         // Dropped on a stick's or a phone's icon: onto it, not onto the
         // desktop (a copy: the other app's files stay where they are).
         if let Some(onto) = self.desktop_volume_under(at, &[]) {
