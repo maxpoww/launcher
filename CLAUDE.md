@@ -575,8 +575,10 @@ The big daemon files are cohesive but long — go straight to the function:
   onto a cell `Grid` at the dock's icon scale (side margins equal and HALF of what centring leaves — `Grid::x0`; the rest of the spare width is shared between the columns, `Grid::pitch`): each file's cell is REMEMBERED in cell units
   (`desktop.json`, path → [col,row]; `place` + `stick`), new files take the first free cell
   column-major and move nothing, `forget` re-flows. Draws the Files-section tile
-  (carrier/thumbnail + one-line name, fitted by MEASURED width with "…", white on a dark
-  shadow); no hover magnification (Max). Click = select, DOUBLE click (400 ms) = open (`xdg-open` / the launcher's `Exec=`).
+  (carrier/thumbnail + its name on up to TWO lines as Files' grid — `filer::two_lines`, measured,
+  cut in the middle past two (Max, 2026-10-22) — white on a dark shadow; a selected item's wash
+  reaches over a second line and the wash of the one under it begins past it; `Desktop::hit` looks
+  at the cell above the pointer too, where a second line reaches); no hover magnification (Max). Click = select, DOUBLE click (400 ms) = open (`xdg-open` / the launcher's `Exec=`).
   DRAG = a real Wayland drag of ours (`desktop_lift`: `DragSource` offering `text/uri-list` +
   text, the icon raster on an shm surface as the drag image, `start_drag` with the press serial
   — Hyprland ignores it): over the desktop nothing is shown (no landing-cell wash — Max) and
@@ -1013,10 +1015,25 @@ The big daemon files are cohesive but long — go straight to the function:
   work on with the rest of the app in hand). Routing by id: `fractional::SurfaceKind::Files(id)`,
   `options::PointerSurface::Files(id)`, `Filer::keys` (the window the keyboard is on —
   `handle_key_event` asks it first), `CompositorHandler::frame` → `filer_frame`. ONE folder a
-  window: the desktop's cell with TWO lines of name (`two_lines`), row by row (`Layout`: `cell`,
+  window: the desktop's cell with TWO lines of name (`two_lines`; see MIDDLE CUT below), row by row (`Layout`: `cell`,
   `index_at`, `in_view`, `reveal`), scrolling THE CARD'S WAY (Max, 2026-10-14; `filer_scroll` / `filer_fling`, the card's own numbers: a step ×2.4, fingers followed step for step, a wheel's notch eased at 24, a fast scroll let go of gliding on at 4.5 for its speed × 0.32), only what is
   on screen laid out and holding a texture layer (`filer_sync_icons`; thumbnails ride the Files
-  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). THE CHROME — "A · Unified" (Max, 2026-10-21: "is
+  thumbnailer — `filer_on_thumb` — at most `CHAINS_MAX` kept). A NAME THAT DOES NOT FIT IS CUT IN THE MIDDLE (Max, 2026-10-22: "i want the … in the middle as macOS
+  does it, like: dhadjk…kjhasoj.mp4"): `desktop::fit_name` keeps the start and the end, the end just
+  under half of the room (`END_SHARE`) and never less than the name's ending (`desktop::ending`: not a
+  dotfile's dot) with three characters before it while the room holds that much, one "…", spaces at
+  the cut trimmed, measured by the renderer's shaping (`measure_text` takes `&self`, so a draw holding
+  `&self` — Quick Look's — measures too). Past TWO lines in the grid (and on the desktop) the first
+  line is as much of the start as it holds and the second "…" and the end (`two_lines`,
+  `desktop::fit_end`). Everywhere a file's or a folder's name shows: the grid, list rows (a thing
+  found below: "folder/name"), the pill's “name” (cut inside its quotes), the i card's title, the
+  sidebar's places (fitted to the sidebar open), the tabs' chips, the path line's last step when it
+  stands alone and is still too long, Quick Look's title, the Properties box's title
+  (`Props::fit_title`), the desktop, and the dock's file tiles — its Files row and the lone app's
+  recents (`content::tile_label`, by the estimate `truncate_label` uses; a web page's title is not a
+  name). Words that are not names (menus, rows of the i card, an app's actions —
+  `two_lines_of_words`) keep `fit_label`'s cut at the end; the rename field shows the whole name.
+  THE CHROME — "A · Unified" (Max, 2026-10-21: "is
   perfect! build it to the real golem files"; mockup https://claude.ai/artifact/DudbvDzykY1oVnMnmn7dvW,
   `filer/chrome.rs`; it REPLACED the floating pills of 2026-10-17): a standard file manager's frame.
   THE SIDEBAR on the page's own colour, one hairline at its right, no shadow, no light (`content::UNLIT`
