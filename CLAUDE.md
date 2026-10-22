@@ -1123,7 +1123,14 @@ The big daemon files are cohesive but long — go straight to the function:
   and Shift+T closes it (nothing on the last); AND MORE: `/` Golem Disk (it no longer opens the path
   field while the mode is on — ✎ and Ctrl+L still do, mode or not), `.` Home, 1…9 the steps of the path
   line AS SHOWN (`Hits::crumbs`: inside Home 1 = the owner's name; outside, 1 = Golem Disk; past the last
-  does nothing), ← → the tabs round (↑ ↓ walk as ever), `?` THE SHORTCUTS TABLE (`filer/shortcuts.rs`,
+  does nothing), ← → the tabs round (↑ ↓ walk as ever), ` THE SIDEBAR CYCLE (Max, 2026-10-22: "add ` to
+  jump over the items on the sidebar, so i press ````` when i stop 0.5s it opens the selected";
+  `filer_cycle`, `Win::cycle`): the first press opens the rested sidebar at once and lights the place
+  after the folder shown (or after the one lit), each press the next round the places (never `..`;
+  Shift+` — `~` — the one before), in a menu row's quiet tint; `CYCLE_REST` (0.5 s) after the last press
+  the place lit opens in this tab and the sidebar folds unless pinned (`filer_cycle_end`, only the newest
+  press's wait counts); Escape ends it with nothing opened; a press, or the pointer coming onto the
+  sidebar, takes over as ever (the sidebar is held open meanwhile — `side_follow`), `?` THE SHORTCUTS TABLE (`filer/shortcuts.rs`,
   `filer_shortcuts`; also a click on the pill's glyph; Ctrl+K in its "Always"): the confirmation's
   material centred over the window, ~520 wide, two columns cut where they balance, a key cap and the
   words a row under "Keyboard mode" and "Always"; `?`, Escape or any press puts it away, and nothing else
@@ -1133,7 +1140,7 @@ The big daemon files are cohesive but long — go straight to the function:
   still do). A field that is up (search, path,
   name, a menu's search) and a menu take their keys first, as before; Alt+W/A/S/D/Q/E still work with it
   off. Quiet: the pill's glyph is the only sign. Rig: `files keymode on|off`, `files key ctrl k`, `files pill <n>`,
-  `files key w|a|s|d|e|q|z|x|c|v|r|u|n|f|g|G|i|h|l|t|T|slash|period|question|1|2|3|9|left|right`,
+  `files key w|a|s|d|e|q|z|x|c|v|r|u|n|f|g|G|i|h|l|t|T|slash|period|question|grave|tilde|1|2|3|9|left|right`,
   `files key ctrl l` (the state names the cursor's thing, the search,
   the i card, hidden, list, the tabs). Buttons 22×20, 12 px
   symbols — the mockup's own strokes written as SVGs into `~/.cache/waverunner/files-glyphs/` once
