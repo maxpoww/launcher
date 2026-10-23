@@ -435,6 +435,16 @@ impl Theme {
     pub(crate) fn ink(&self) -> Rgb {
         self.c[0x05]
     }
+    /// QUIET WORDS: the "comment" grey of the programs that follow base16 —
+    /// Neovim's comments and line numbers, the terminal's bright black, btop's
+    /// inactive, the Text Editor's comments and line numbers. They take
+    /// base03 for it, which in Golem's palettes is a GROUND (the fourth step
+    /// the Lighting moves): invisible in nearly every palette (the legibility
+    /// audit, 2026-10-23). The dimmest grey of its hue that reads 4.5:1 on
+    /// base00 and base01 ([`as_text`]).
+    pub(crate) fn quiet(&self) -> Rgb {
+        quiet(&self.c)
+    }
     pub(crate) fn accent(&self) -> Rgb {
         self.c[self.accent_slot]
     }
@@ -2075,8 +2085,25 @@ fn readable(c: &mut [Rgb; 16], dark: bool, acc: usize) {
 /// on base02. A light look's accent and links stood at 3–4.4:1 as text, 2:1
 /// in full colour; only the text moves (2026-10-20).
 pub(crate) fn as_text(c: &[Rgb; 16], x: Rgb) -> Rgb {
+    reading(c, x, &[(0, 4.5), (1, 4.5), (2, 3.0)])
+}
+
+/// [`Theme::quiet`] for a palette's sixteen.
+pub(crate) fn quiet(c: &[Rgb; 16]) -> Rgb {
+    as_text(c, c[0x03])
+}
+
+/// base04 as words on every ground, base02 included (a status line):
+/// 4.5:1 on each.
+pub(crate) fn quiet_raised(c: &[Rgb; 16]) -> Rgb {
+    reading(c, c[0x04], &[(0, 4.5), (1, 4.5), (2, 4.5)])
+}
+
+/// `x` walked in lightness, hue and chroma kept, away from the grounds of `c`
+/// until it reads each `(ground, floor)` given.
+pub(crate) fn reading(c: &[Rgb; 16], x: Rgb, on: &[(usize, f32)]) -> Rgb {
     let r = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
-    let reads = |y: Rgb| r(y, c[0]) >= 4.5 && r(y, c[1]) >= 4.5 && r(y, c[2]) >= 3.0;
+    let reads = |y: Rgb| on.iter().all(|&(g, f)| r(y, c[g]) >= f);
     let up = rel_lum(x) > rel_lum(c[1]);
     let (mut l, ch, h) = tint::lch(x);
     let mut y = x;
@@ -2237,6 +2264,7 @@ fn foot_ini(t: &Theme) -> String {
     let variant = |c: &[Rgb; 16], acc: usize| {
         let accent = as_text(c, c[acc]); // (the links' colour: text)
         let h = |i: usize| hex(c[i]);
+        let x = terminal16(c);
         format!(
             "background={bg}\nforeground={fg}\ncursor={bg} {fg}\nselection-background={sel}\nselection-foreground={fg}\n\
              urls={accent}\n\
@@ -2246,16 +2274,16 @@ fn foot_ini(t: &Theme) -> String {
             fg = h(5),
             sel = h(2),
             accent = hex(accent),
-            r0 = h(2),
-            r1 = h(8),
-            r2 = h(0xB),
-            r3 = h(0xA),
-            r4 = h(0xD),
-            r5 = h(0xE),
-            r6 = h(0xC),
-            r7 = h(5),
-            b0 = h(3),
-            b7 = h(7),
+            r0 = hex(x[0]),
+            r1 = hex(x[1]),
+            r2 = hex(x[2]),
+            r3 = hex(x[3]),
+            r4 = hex(x[4]),
+            r5 = hex(x[5]),
+            r6 = hex(x[6]),
+            r7 = hex(x[7]),
+            b0 = hex(x[8]),
+            b7 = hex(x[15]),
         )
     };
     let (dark, da, light, la) = both(t, pal);
@@ -2724,7 +2752,7 @@ fn btop_theme(t: &Theme) -> String {
     put("hi_fg", &a);
     put("selected_bg", &h(2));
     put("selected_fg", &h(7));
-    put("inactive_fg", &h(3));
+    put("inactive_fg", &format!("#{}", hex(t.quiet())));
     put("graph_text", &h(4));
     put("meter_bg", &h(2));
     put("proc_misc", &a);
@@ -2752,7 +2780,12 @@ fn btop_theme(t: &Theme) -> String {
 
 /// Neovim (mini.base16, Golem's home layer loads this at each start).
 fn nvim_lua(t: &Theme) -> String {
-    let palette: String = t.c.iter().enumerate().map(|(i, c)| format!("    {} = '#{}',\n", slot_name(i), hex(*c))).collect();
+    // (mini.base16 reads base03 as comments and line numbers, base04 as the
+    // status line's words: Golem's are grounds — given as words here.)
+    let mut c = t.c;
+    c[0x03] = quiet(&t.c);
+    c[0x04] = quiet_raised(&t.c);
+    let palette: String = c.iter().enumerate().map(|(i, c)| format!("    {} = '#{}',\n", slot_name(i), hex(*c))).collect();
     format!(
         "-- Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change.\n\
          vim.o.background = '{}'\n\
@@ -2831,12 +2864,12 @@ fn sourceview_scheme(t: &Theme, id: &str) -> String {
         ("text", format!(r#"foreground="{}" background="{}""#, h(c[5]), h(c[0]))),
         ("selection", format!(r#"foreground="{}" background="{}""#, h(c[6]), h(c[2]))),
         ("current-line", format!(r#"background="{}""#, h(c[1]))),
-        ("line-numbers", format!(r#"foreground="{}" background="{}""#, h(c[3]), h(c[0]))),
+        ("line-numbers", format!(r#"foreground="{}" background="{}""#, h(t.quiet()), h(c[0]))),
         ("current-line-number", format!(r#"foreground="{}" background="{}""#, h(c[5]), h(c[1]))),
         ("cursor", format!(r#"foreground="{}""#, h(t.accent()))),
         ("bracket-match", format!(r#"foreground="{}" background="{}" bold="true""#, h(t.accent_text()), h(c[2]))),
         ("search-match", format!(r#"background="{}""#, h(c[3]))),
-        ("def:comment", format!(r#"foreground="{}" italic="true""#, h(c[4]))),
+        ("def:comment", format!(r#"foreground="{}" italic="true""#, h(t.quiet()))),
         ("def:keyword", format!(r#"foreground="{}" bold="true""#, h(c[0xE]))),
         ("def:statement", format!(r#"foreground="{}""#, h(c[0xE]))),
         ("def:type", format!(r#"foreground="{}""#, h(c[0xA]))),
@@ -2896,9 +2929,17 @@ fn signal_all(comm: &str, sig: libc::c_int) {
 /// them as output and changes on the spot, and so does whatever draws with
 /// its colours (yazi, bat, ls, git, the prompt). The order is foot.ini's
 /// (`foot_ini`), so a new window and an old one agree.
+/// THE TERMINAL'S SIXTEEN, by meaning in both looks: black the raised
+/// ground, white the ink, bright black the quiet words ([`Theme::quiet`];
+/// base03, a ground, was invisible as the dim text programs print with it).
+/// One list for foot's file and for the live OSC, so the two never part.
+fn terminal16(c: &[Rgb; 16]) -> [Rgb; 16] {
+    [c[2], c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[5], quiet(c), c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[7]]
+}
+
 fn foot_osc(t: &Theme) -> String {
     let c = &t.c;
-    let sixteen = [c[2], c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[5], c[3], c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[7]];
+    let sixteen = terminal16(c);
     let mut out = String::new();
     for (i, col) in sixteen.iter().enumerate() {
         out.push_str(&format!("\x1b]4;{i};#{}\x1b\\", hex(*col)));

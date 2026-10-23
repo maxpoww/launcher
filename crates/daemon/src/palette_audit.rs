@@ -273,7 +273,9 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
         a.app("Apps · terminal", &format!("bright{i} on background"), f(&format!("bright{i}")), bg, TEXT);
     }
     a.app("Apps · terminal", "bright0 (dim grey) on background", f("bright0"), bg, LARGE);
-    a.app("Apps · terminal", "regular0 (black) on background", f("regular0"), bg, LARGE);
+    // (regular0, "black", is the raised ground BY MEANING — as white is the
+    // ink — so that programs made for a dark terminal read in both looks:
+    // never words on the background; it is judged under the hues, in yazi.)
     // yazi, by foot's names (Golem's home.nix).
     let (black, red, green, yellow, blue, magenta) = (f("regular0"), f("regular1"), f("regular2"), f("regular3"), f("regular4"), f("regular5"));
     for (rule, fg, b) in [
@@ -287,7 +289,12 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
         a.app("Apps · yazi", rule, fg, b, TEXT);
     }
     a.app("Apps · yazi", "border: darkgray on background", f("bright0"), bg, LARGE);
-    // ---- Neovim (mini.base16: the palette's slots as it maps them).
+    // ---- Neovim (mini.base16: the palette nvim.lua gives it, as it maps it).
+    let nv: BTreeMap<String, S> = colours(&nvim_lua(apps), |l| {
+        let (k, v) = l.trim().split_once(" = ")?;
+        Some((k.to_owned(), v.trim_end_matches(',').trim_matches('\'').to_owned()))
+    });
+    let nvc = |i: usize| nv.get(&slot_name(i)).copied().unwrap_or_else(|| panic!("nvim: no {}", slot_name(i)));
     for (rule, fg, b, floor) in [
         ("Normal c5 on c0", 5, 0, TEXT),
         ("NormalFloat, Pmenu c5 on c1", 5, 1, TEXT),
@@ -305,11 +312,11 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
         ("DiffChange cE on c1", 0xE, 1, TEXT),
         ("DiffText cD on c1", 0xD, 1, TEXT),
     ] {
-        a.app("Apps · Neovim", rule, c(fg), c(b), floor);
+        a.app("Apps · Neovim", rule, nvc(fg), nvc(b), floor);
     }
     for h in 8..16 {
-        a.app("Apps · Neovim", &format!("syntax c{h:X} on c0"), c(h), c(0), TEXT);
-        a.app("Apps · Neovim", &format!("syntax c{h:X} on Visual c2"), c(h), c(2), LARGE);
+        a.app("Apps · Neovim", &format!("syntax c{h:X} on c0"), nvc(h), nvc(0), TEXT);
+        a.app("Apps · Neovim", &format!("syntax c{h:X} on Visual c2"), nvc(h), nvc(2), LARGE);
     }
     // ---- Text Editor (GtkSourceView), from the scheme as written.
     let xml = sourceview_scheme(apps, "golem");
