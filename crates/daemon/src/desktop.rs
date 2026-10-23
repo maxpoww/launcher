@@ -6304,6 +6304,18 @@ impl App {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
         }
+        // `twilight <0..1000|off>`: the point between the looks by hand
+        // (`lighting_twilight`): 0 the lightest dark, 1000 the dimmest light.
+        if let Some(rest) = what.strip_prefix("twilight ") {
+            let t = match rest.trim() {
+                "off" => None,
+                n => match n.parse::<u16>() {
+                    Ok(v) => Some(v),
+                    Err(_) => return format!("twilight what? {n}"),
+                },
+            };
+            return self.lighting_twilight(t);
+        }
         // `walk <light|dark|sun|line> <seconds>`: the light walked by hand
         // (`lighting_walk`): light = Light 60, dark = Dark 20, sun = back to
         // the sun's own line (it takes over there).

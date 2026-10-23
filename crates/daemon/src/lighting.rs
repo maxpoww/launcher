@@ -405,6 +405,11 @@ pub(crate) fn tell_overview() {
 }
 
 pub(crate) fn veil_now() -> f32 {
+    // A twilight: the veil between its two edges' (`lighting_twilight`).
+    if let Some(t) = palette::tint::twilight() {
+        let k = f32::from(t) / 1000.0;
+        return veil_alpha(45, true) * (1.0 - k) + veil_alpha(55, true) * k;
+    }
     veil_alpha(wall_line_now(), true)
 }
 
@@ -734,6 +739,32 @@ impl App {
         }
         info!("lighting: walking {from} -> {target} by hand, a point every {:.1} s", step.as_secs_f64());
         format!("walking {from} -> {target}, a point every {:.1} s", step.as_secs_f64())
+    }
+
+    /// TWILIGHT BY HAND (`palette::tint::set_twilight`; Max, 2026-10-22: "can't
+    /// you do it manually first? and then do the ambient"): a point between
+    /// the looks — 0 the lightest dark … 1000 the dimmest light — the apps,
+    /// the dock and the veil there at once; the look turns at the middle.
+    /// None: back to the line. The sun waits meanwhile.
+    pub(crate) fn lighting_twilight(&mut self, t: Option<u16>) -> String {
+        let Some(t) = t.map(|t| t.min(1000)) else {
+            palette::tint::set_twilight(None);
+            self.colors_apply(false);
+            self.veil_sync();
+            return "twilight off".to_owned();
+        };
+        let dark = t < palette::tint::TWILIGHT_FLIP;
+        palette::tint::set_twilight(Some(t));
+        SUN.store(if dark { 45 } else { 55 }, Ordering::Relaxed);
+        self.lighting.walked = true;
+        if crate::look::dark() == dark {
+            self.colors_apply(false);
+        } else {
+            let _ = std::thread::Builder::new().name("ambient-look".into()).spawn(move || crate::controls::assert_dark(dark));
+            self.look_set(dark);
+        }
+        self.veil_sync();
+        format!("twilight {t} ({})", if dark { "dark" } else { "light" })
     }
 
     /// The point of the line shown now: the fade's step, else the shell's.
