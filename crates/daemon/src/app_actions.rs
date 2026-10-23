@@ -463,6 +463,7 @@ fn files_recents(app: &AppEntry, shared: bool, picks: &web_actions::Picks, max: 
             dir: path.is_dir(),
             url: path.to_string_lossy().into_owned(),
             picture: None,
+            aspect: None,
         })
         .collect()
 }
@@ -532,6 +533,11 @@ pub(crate) struct Actions {
     /// The recents' page shown, and how many there are.
     pub recent_page: usize,
     pub recent_pages: usize,
+    /// Each recent preview's shape (entry, width / height), drawn whole.
+    pub shapes: Vec<(usize, f32)>,
+    /// The page that went, sliding out, and which way the pages went.
+    pub leaving: Vec<content::Leaving>,
+    pub turn_dir: f32,
 }
 
 /// Where a lone app's recent pages come from and how they open
@@ -554,6 +560,10 @@ enum Source {
 
 /// How many measured names are kept before they are measured afresh.
 const NAME_FIT_KEPT: usize = 4000;
+
+/// A recents' page's width in the pager's own units (the slide is drawn in
+/// the row's real width).
+const RECENT_STRIP: f32 = 1000.0;
 
 /// How many recents are read: a line a page, at most `RECENT_PAGES`.
 const RECENT_MAX: usize = 24;
@@ -723,6 +733,13 @@ impl App {
         let same = self.search.actions.app.as_deref() == Some(entry.id.as_str());
         let armed = self.search.actions.armed.filter(|_| same);
         let page = if same { self.search.actions.recent_page } else { 0 };
+        // (The page that went goes on sliding out through a refilter.)
+        let (leaving, turn_dir) = if same {
+            (std::mem::take(&mut self.search.actions.leaving), self.search.actions.turn_dir)
+        } else {
+            self.search.recent_pager.reset();
+            (Vec::new(), 0.0)
+        };
         let n_left = left.len();
         left.extend(right);
         self.search.actions = Actions {
@@ -732,6 +749,8 @@ impl App {
             cols,
             armed,
             web: matches!(source, Some(Source::Webapp { .. } | Source::Browser(..))),
+            leaving,
+            turn_dir,
             ..Default::default()
         };
         let (placeholder, layer) = (
@@ -774,10 +793,14 @@ impl App {
                     Source::Browser(..) | Source::Files { .. } => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
                 };
                 self.search.actions.recent_keys.push(item.url.clone());
+                let aspect = item.aspect;
                 let at = match &source {
                     Source::Files { .. } => self.push_transient_file(&item.url, &item.title, exec, item.dir),
                     _ => self.push_web_recent(item, exec, (placeholder, layer)),
                 };
+                if let Some(a) = aspect.filter(|a| a.is_finite() && *a > 0.1 && *a < 10.0) {
+                    self.search.actions.shapes.push((at, a));
+                }
                 self.search.actions.recents.push(at);
                 apps.push(at);
             }
@@ -1236,6 +1259,33 @@ impl App {
         if to == a.recent_page || to >= a.recent_pages {
             return;
         }
+        // THE SLIDE, as the box's pages slide (the same pager): the page that
+        // goes is kept as it was and slides out one way, the new one comes in
+        // from the other; the way is the one the pages went (round the end:
+        // on, as the wheel goes round).
+        let (from, n) = (a.recent_page, a.recent_pages);
+        let dir: f32 = if to == (from + 1) % n { 1.0 } else { -1.0 };
+        let cols = a.cols;
+        self.search.actions.leaving = a
+            .recents
+            .iter()
+            .enumerate()
+            .filter_map(|(j, &e)| {
+                Some(content::Leaving {
+                    slot: cols + j,
+                    layer: *self.icon_layers.get(e)?,
+                    name: self.entries.get(e)?.name.clone(),
+                    aspect: a.shapes.iter().find(|(s, _)| *s == e).map(|&(_, x)| x),
+                })
+            })
+            .collect();
+        self.search.actions.turn_dir = dir;
+        // The new page starts a row away on the side it comes from (where the
+        // old one stood, if it was still sliding in).
+        let p = &mut self.search.recent_pager;
+        let still = p.pos - p.target;
+        p.target = to as f32 * RECENT_STRIP;
+        p.pos = p.target - dir * RECENT_STRIP + still;
         self.search.actions.recent_page = to;
         let row = self.search.actions.row();
         self.refilter();
@@ -1268,6 +1318,33 @@ impl App {
             self.recents_turn((page + dir).rem_euclid(pages) as usize, None);
         }
         true
+    }
+
+    /// The recents as the frame draws them: the page shown, their pictures'
+    /// shapes, the slide between pages.
+    pub(crate) fn recents_draw(&self) -> Option<content::RecentsDraw> {
+        let a = &self.search.actions;
+        if a.app.is_none() || a.recents.is_empty() {
+            return None;
+        }
+        let p = &self.search.recent_pager;
+        Some(content::RecentsDraw {
+            cells: a.recents.clone(),
+            shapes: a.shapes.clone(),
+            slide: (p.target - p.pos) / RECENT_STRIP,
+            dir: a.turn_dir,
+            leaving: a.leaving.clone(),
+        })
+    }
+
+    /// The recents' slide, a frame on (`dt` seconds): whether it still
+    /// moves; once it has stopped, the page that went is let go.
+    pub(crate) fn recents_slide(&mut self, dt: f32) -> bool {
+        let moving = self.search.recent_pager.ease(dt);
+        if !moving && !self.search.actions.leaving.is_empty() {
+            self.search.actions.leaving.clear();
+        }
+        moving
     }
 
     /// The recents' page shown and how many there are, when more than one.

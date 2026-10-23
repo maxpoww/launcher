@@ -1159,36 +1159,61 @@ fn video_pictures(cache2: &Path) -> Pictures {
 }
 
 /// A video's picture from a cache entry (`body` bytes long), as a file of
-/// ours: its middle, SQUARE, as big as a tile — the tile is square, and a
-/// wide picture in it is a thin strip (the black bands of a 4:3 one are
-/// inside what is cut away).
+/// ours, in its own shape (`fitted`).
 fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBuf> {
-    let path = dir.join(format!("{id}-s1.png"));
+    let path = dir.join(format!("{id}-f1.png"));
     if path.exists() {
         return Some(path);
     }
     let bytes = std::fs::read(entry).ok()?;
-    squared(bytes.get(..body as usize)?, &path)
+    fitted(bytes.get(..body as usize)?, &path)
 }
 
-/// A picture's middle, SQUARE, as big as a tile, written to `path` (a
-/// PNG): the tile is square, and a wide picture in it is a thin strip (the
-/// black bands of a 4:3 video picture are inside what is cut away).
-fn squared(bytes: &[u8], path: &Path) -> Option<PathBuf> {
+/// The longest side a recent's picture is kept at.
+const PICTURE_SIDE: u32 = 512;
+
+/// A picture WHOLE, in its own shape (Max, 2026-10-23: "más rectangulares,
+/// la miniatura entera, forma libre — las de YouTube Music son cuadradas,
+/// las de YouTube rectángulos"), at most `PICTURE_SIDE`, written to `path`
+/// (a PNG) — only a video picture's black bands cut away (YouTube's 4:3
+/// ones hold a 16:9 picture between two).
+fn fitted(bytes: &[u8], path: &Path) -> Option<PathBuf> {
     let img = decode(bytes)?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return None;
     }
-    // (A 4:3 one is a 16:9 picture between bands: its square within that.)
-    let side = if w * 3 == h * 4 { w * 9 / 16 } else { w.min(h) };
-    let img = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
-    let tile = crate::apps::ICON_SIZE;
-    let img = if side > tile { img.resize(tile, tile, image::imageops::FilterType::Triangle) } else { img };
+    let img = if w * 3 == h * 4 && banded(&img) {
+        let band = (h - w * 9 / 16) / 2;
+        img.crop_imm(0, band, w, h - 2 * band)
+    } else {
+        img
+    };
+    let img = if img.width().max(img.height()) > PICTURE_SIDE {
+        img.resize(PICTURE_SIDE, PICTURE_SIDE, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
     let tmp = path.with_extension("part");
     img.to_rgba8().save_with_format(&tmp, image::ImageFormat::Png).ok()?;
     std::fs::rename(&tmp, path).ok()?;
     Some(path.to_owned())
+}
+
+/// Whether a 4:3 picture is a 16:9 one between two black bands (its top
+/// and bottom rows dark all across).
+fn banded(img: &image::DynamicImage) -> bool {
+    let (w, h) = (img.width(), img.height());
+    let band = (h - w * 9 / 16) / 2;
+    let rgb = img.to_rgb8();
+    let dark = |y: u32| (0..w).step_by(4).all(|x| rgb.get_pixel(x, y).0.iter().all(|&c| c < 24));
+    band > 2 && dark(1) && dark(band.saturating_sub(2)) && dark(h - 2)
+}
+
+/// A picture file's shape (width / height), read from its header.
+fn shape_of(path: &Path) -> Option<f32> {
+    let (w, h) = image::image_dimensions(path).ok()?;
+    (w > 0 && h > 0).then(|| w as f32 / h as f32)
 }
 
 // ---- Seam's kitchen ---------------------------------------------------------------
@@ -1353,6 +1378,9 @@ pub(crate) struct Recent {
     pub picture: Option<PathBuf>,
     /// A folder (an app's recent file that is one).
     pub dir: bool,
+    /// The picture's own shape (width / height) when it is a preview to be
+    /// shown whole — a video's, a cover, a page's; none for a favicon's tile.
+    pub aspect: Option<f32>,
 }
 
 /// `pages` made recents: each one's picture found.
@@ -1371,12 +1399,12 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
             // (by its id: it cannot be another's), then the preview Seam kept,
             // then the favicon.
             let cooked = |src: PathBuf| {
-                let out = shots.as_deref()?.join(format!("k-{}-s1.png", src.file_stem()?.to_string_lossy()));
+                let out = shots.as_deref()?.join(format!("k-{}-f1.png", src.file_stem()?.to_string_lossy()));
                 if out.exists() {
                     return Some(out);
                 }
                 let bytes = std::fs::read(&src).ok()?;
-                squared(&bytes, &out)
+                fitted(&bytes, &out)
             };
             let video = || {
                 video_id(&v.url)
@@ -1384,11 +1412,13 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
                     .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body))
             };
             let played = v.pic.as_deref().map(PathBuf::from).and_then(cooked);
-            let picture = played.or_else(video).or_else(|| kitchen.page_picture(&v.url).and_then(cooked)).or_else(|| {
+            let preview = played.or_else(video).or_else(|| kitchen.page_picture(&v.url).and_then(cooked));
+            let aspect = preview.as_deref().and_then(shape_of);
+            let picture = preview.or_else(|| {
                 let data = favicon(browser, icons.as_deref()?, &v.url)?;
                 tile_in(tiles.as_deref()?, &data)
             });
-            Recent { url: v.url, title, picture, dir: false }
+            Recent { url: v.url, title, picture, dir: false, aspect }
         })
         .collect();
     // (Now and then: the picture caches kept under their bound.)

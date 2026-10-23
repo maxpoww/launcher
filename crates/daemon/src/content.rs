@@ -2068,11 +2068,56 @@ pub struct NameFit {
 /// than a line, so it stays clear of the next row's icons.
 const SECOND_LINE: f32 = 14.0;
 
+/// A lone app's RECENTS as drawn (`app_actions.rs`): the page shown, the
+/// shapes of their pictures, and the slide between pages.
+#[derive(Debug, Clone, Default)]
+pub struct RecentsDraw {
+    /// The entries of the page shown.
+    pub cells: Vec<usize>,
+    /// Each preview's own shape (entry, width / height): drawn WHOLE, a
+    /// little bigger than an icon (Max, 2026-10-23: "forma libre… no muy
+    /// chicas, como las miniaturas de los archivos, un poco más grandes").
+    pub shapes: Vec<(usize, f32)>,
+    /// Where the page shown stands, in widths of the row (0 in place, 1 a
+    /// whole row to the right), and which way the pages went (+1 the next).
+    pub slide: f32,
+    pub dir: f32,
+    /// The page that went, as it was, sliding out (`Leaving`).
+    pub leaving: Vec<Leaving>,
+}
+
+/// A recent of the page that went, drawn as it slides out.
+#[derive(Debug, Clone)]
+pub struct Leaving {
+    /// Its display slot in the grid, its picture's layer, its name.
+    pub slot: usize,
+    pub layer: u32,
+    pub name: String,
+    pub aspect: Option<f32>,
+}
+
+/// How high a recent's preview stands, of an icon; how wide it may be, of a
+/// cell (less a margin).
+const PREVIEW_H: f32 = 1.15;
+const PREVIEW_MARGIN: f32 = 8.0;
+
+/// A preview of shape `aspect` drawn whole, its bottom on the icons' line
+/// at `bottom`, centred on `cx`: the square texture's rect (the picture
+/// stands centred in it, `thumbs`).
+fn preview_rect(cx: f32, bottom: f32, aspect: f32, cell_w: f32, icon: f32) -> Rect {
+    let (bw, bh) = ((cell_w - PREVIEW_MARGIN).max(icon), icon * PREVIEW_H);
+    let (pw, ph) = if aspect >= bw / bh { (bw, bw / aspect) } else { (bh * aspect, bh) };
+    let side = pw.max(ph);
+    Rect::new(cx - side / 2.0, bottom - ph / 2.0 - side / 2.0, side, side)
+}
+
 /// Per-frame dynamic inputs to scene assembly.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameInput<'a> {
     /// The grid cells whose names need two lines, by entry (`NameFit`).
     pub names: Option<&'a std::collections::HashMap<usize, NameFit>>,
+    /// A lone app's recents: their pictures' shapes and their pages' slide.
+    pub recents: Option<&'a RecentsDraw>,
     /// A lone app's recents' page shown and how many, when more than one:
     /// their dots under their line (`app_actions.rs`).
     pub recent_pages: Option<(usize, usize)>,
@@ -2436,6 +2481,7 @@ pub fn scene(
 ) -> Scene {
     let FrameInput {
         names,
+        recents,
         recent_pages,
         hover,
         query_px,
@@ -3607,6 +3653,9 @@ pub fn scene(
                 i as f32
             };
             let (cell_x, cell_y) = cell_pos(di);
+            // (A lone app's recents slide between their pages.)
+            let recent = s == SECTION_APPS && recents.is_some_and(|r| r.cells.contains(&entry_idx));
+            let cell_x = cell_x + recents.filter(|_| recent).map_or(0.0, |r| r.slide * sec.viewport.w);
             let off_page = if sec.vertical {
                 cell_y - sec.viewport.y <= -grid_cell_h || cell_y - sec.viewport.y >= page_w
             } else {
@@ -3820,13 +3869,13 @@ pub fn scene(
                 }
                 continue;
             }
+            // A recent's preview: whole, in its own shape, its bottom on the icons' line.
+            let shape = recents.filter(|_| recent).and_then(|r| r.shapes.iter().find(|(e, _)| *e == entry_idx).map(|&(_, a)| a));
             g.icons.push(IconInst {
-                rect: Rect::new(
-                    cx - size / 2.0,
-                    icon_cy - size / 2.0 - lift(entry_idx),
-                    size,
-                    size,
-                ),
+                rect: match shape {
+                    Some(a) => preview_rect(cx, icon_cy + size / 2.0 - lift(entry_idx), a, cell.w, size),
+                    None => Rect::new(cx - size / 2.0, icon_cy - size / 2.0 - lift(entry_idx), size, size),
+                },
                 layer: layer_of(entry_idx),
                 tint: [0.0; 4],
                 ring: -1.0,
@@ -3950,7 +3999,39 @@ pub fn scene(
                     cache: true,
                     family: None,
                     color: None,
-                    clip: None,
+                    // (A recent's name slides with it, inside the box.)
+                    clip: recent.then(|| reveal_clip(sec.viewport)),
+                });
+            }
+        }
+        // The recents' page that went, sliding out the other way.
+        if let Some(r) = recents.filter(|r| s == SECTION_APPS && !r.leaving.is_empty()) {
+            let dx = (r.slide - r.dir) * sec.viewport.w;
+            for l in &r.leaving {
+                let (x, y) = cell_pos(l.slot as f32);
+                let (cx, icon_cy) = (x + dx + sec_cell_w / 2.0, y + grid_icon_top + grid_icon / 2.0);
+                grid.icons.push(IconInst {
+                    rect: match l.aspect {
+                        Some(a) => preview_rect(cx, icon_cy + grid_icon / 2.0, a, sec_cell_w, grid_icon),
+                        None => Rect::new(cx - grid_icon / 2.0, icon_cy - grid_icon / 2.0, grid_icon, grid_icon),
+                    },
+                    layer: l.layer,
+                    tint: [0.0; 4],
+                    ring: -1.0,
+                    plate: NO_PLATE,
+                });
+                grid.labels.push(Label {
+                    text: truncate_label(&l.name, sec_cell_w - 12.0, LABEL_FONT_PX),
+                    pos: (cx, y + grid_icon_top + grid_icon + GRID_LABEL_GAP),
+                    max_w: sec_cell_w - 12.0,
+                    font_px: LABEL_FONT_PX,
+                    line_px: LABEL_LINE_PX,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: None,
+                    color: None,
+                    clip: Some(reveal_clip(sec.viewport)),
                 });
             }
         }

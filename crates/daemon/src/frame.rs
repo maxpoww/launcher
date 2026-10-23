@@ -648,6 +648,8 @@ impl App {
             scroll_animating |= sec.ease(dt);
         }
         scroll_animating |= self.box_pager.ease(dt);
+        // (A lone app's recents slide between their pages the same way.)
+        scroll_animating |= self.recents_slide(dt);
 
         // Jelly edge: agua_breath is the same spring impulse as agua_card but
         // softer (lower k, c) so it rings longer after the box opens.
@@ -1704,6 +1706,7 @@ impl App {
         // The lone app's action cells (`app_actions.rs`).
         let (act_cells, act_asking, act_wide) = self.action_draw();
         let names = self.fitted_names(&layout);
+        let recents = self.recents_draw();
         let scene = content::scene(
             &self.config,
             self.icon_scale(),
@@ -1714,6 +1717,7 @@ impl App {
             &content::FrameInput {
                 names: Some(&names),
                 recent_pages: self.recent_pages(),
+                recents: recents.as_ref(),
                 // Suppress hover highlight and magnification while dragging.
                 hover: if drag_frame.is_none() {
                     self.hover
@@ -1842,7 +1846,9 @@ impl App {
                 && self.scroll.per.iter().any(pager::Pager::is_settling))
                 // A box page-slide keeps animating whatever the card state
                 // (a dock stack lives in the Dock state, not Open).
-                || (self.stack_open() && self.box_pager.is_settling()))
+                || (self.stack_open() && self.box_pager.is_settling())
+                // …and a lone app's recents' slide between their pages.
+                || (self.ui.target() == Target::Open && self.search.recent_pager.is_settling()))
         {
             self.dirty = true;
         }

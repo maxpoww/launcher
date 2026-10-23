@@ -1499,7 +1499,11 @@ The big daemon files are cohesive but long — go straight to the function:
   artist", opened where they played when that is a page of the site's own, else as a search of the
   site for them — Spotify plays from a search page; with their covers); `with_plays` makes a song and
   its page one. Pictures: what played > the page's preview > YouTube's from Seam's cache > the
-  favicon, each cropped square (`squared`; every picture a page had a hand in decoded within bounds —
+  favicon, each kept WHOLE in its own shape (`fitted`; Max: "forma libre" — a video's a rectangle, a
+  cover square; only a YouTube 4:3 picture's black bands cut) and drawn so (`content::RecentsDraw`,
+  `preview_rect`: its bottom on the icons' line, `PREVIEW_H` an icon high at most, a cell wide), the
+  recents' pages SLIDING as the box's do (a `Pager`, `recents_turn` / `recents_slide`: the page that
+  went is kept as `Leaving` and slides out the other way; every picture a page had a hand in decoded within bounds —
   `decode`: 4096 a side, 64 MB —; the picture caches trimmed to `PICTURES_KEPT`). Read as data a page had a hand in (`Kitchen`: 4 MB,
   http(s) only, pictures only `<16 hex>.<jpg|png|webp>` plain files in its `pics/`). On a
   short screen the card GROWS for the recents (a negative trim,
