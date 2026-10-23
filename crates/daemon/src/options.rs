@@ -7348,7 +7348,26 @@ impl crate::App {
     pub(crate) fn dock_surface(&self) -> ([f32; 4], [f32; 4]) {
         let bg = self.config.theme.background_rgba();
         let ink = self.config.theme.text_rgba();
-        self.dock_regime().surface(bg, ink, false)
+        let (fill, ink) = self.dock_regime().surface(bg, ink, false);
+        // Over a near-white backdrop: the toned glass (`toned_fill`).
+        let k = self.dock_tone();
+        if k > 0.0 {
+            if let Some(back) = self.dock_regime().get() {
+                let toned = toned_fill(back);
+                return (std::array::from_fn(|i| fill[i] + (toned[i] - fill[i]) * k), ink);
+            }
+        }
+        (fill, ink)
+    }
+
+    /// How far the dock wears THE TONED GLASS (0..1): only while it reads
+    /// the screen (no palette pair on the shell) and what is behind it is
+    /// near-white (`tone_of`).
+    pub(crate) fn dock_tone(&self) -> f32 {
+        if crate::palette::shell().is_some() || self.config.accessibility.reduce_transparency {
+            return 0.0;
+        }
+        self.dock_regime().get().map_or(0.0, tone_of)
     }
 
     /// THE QUICK BOX's colours this frame, given the dock's (`dock_fill`,
@@ -7527,12 +7546,16 @@ impl crate::App {
             DOCK_INK_RATE,
             hidden,
         );
+        // (Eased with the fill, so the card's density and shadow move with it.)
+        let k = self.dock_tone();
+        let (tone, tone_moving) = ease_rgba(&mut self.dock_tone_anim, [k; 4], dt, DOCK_FILL_RATE, hidden);
         DockPaint {
             fill,
             ink,
             wash,
             plate,
-            moving: fill_moving || ink_moving || wash_moving || plate_moving,
+            tone: tone[0],
+            moving: fill_moving || ink_moving || wash_moving || plate_moving || tone_moving,
         }
     }
 }
@@ -7548,8 +7571,45 @@ pub(crate) struct DockPaint {
     pub wash: [f32; 4],
     /// Icon squircle-plate colour (shader-drawn, see `IconInst::plate`).
     pub plate: [f32; 4],
-    /// True while any of the four is still easing — keep frames coming.
+    /// How far the card wears the toned glass (`App::dock_tone`), eased.
+    pub tone: f32,
+    /// True while any of them is still easing — keep frames coming.
     pub moving: bool,
+}
+
+/// THE TONED GLASS (Max, 2026-10-23, the mockup's C: "toned glass, but only
+/// on really light backgrounds"): over a near-white wallpaper the dock's
+/// see-through glass is lifted to white by the compositor's blend (its
+/// premultiplied colour is encoded as sRGB: 255,255,248 over a cream card).
+/// There the card is one soft step darker than what is behind it, in its
+/// hue, and dense. Anything less light keeps the glass as it is; between
+/// `TONE_FROM` and `TONE_FULL` (relative luminance; #dadada…#e7e7e7) it
+/// fades in, so no wallpaper flips it.
+const TONE_FROM: f32 = 0.70;
+const TONE_FULL: f32 = 0.80;
+/// On screen, the toned card is the backdrop times this (sRGB): one step.
+const TONE_STEP: f32 = 0.94;
+/// …at this density.
+const TONE_ALPHA: f32 = 0.94;
+
+/// How near-white a backdrop is, for the toned glass: 0 below `TONE_FROM`,
+/// 1 from `TONE_FULL`, eased between.
+pub(crate) fn tone_of(back: [f32; 4]) -> f32 {
+    let t = ((luminance(back) - TONE_FROM) / (TONE_FULL - TONE_FROM)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The card's fill (linear, its alpha `TONE_ALPHA`) that shows on screen as
+/// `back` one `TONE_STEP` darker, after the compositor's blend: what shows
+/// is the sRGB of the premultiplied fill plus the backdrop's share.
+pub(crate) fn toned_fill(back: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0, 0.0, 0.0, TONE_ALPHA];
+    for i in 0..3 {
+        let b = linear_to_srgb(back[i]).clamp(0.0, 1.0);
+        let own = (b * TONE_STEP - b * (1.0 - TONE_ALPHA)).max(0.0);
+        out[i] = srgb_to_linear(own) / TONE_ALPHA;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -7571,6 +7631,26 @@ mod tests {
     /// own parts stay, and the pills clear of it are untouched — including
     /// their POSITIONS, since a re-flow under the pointer is exactly what
     /// `OptionUXRules.md` §2 forbids.
+    #[test]
+    fn the_toned_glass_only_on_a_near_white_backdrop() {
+        let lin = |c: [u8; 3]| [0, 1, 2].map(|i| srgb_to_linear(f32::from(c[i]) / 255.0)).into_iter().chain([1.0]).collect::<Vec<_>>();
+        let at = |c: [u8; 3]| -> [f32; 4] { lin(c).try_into().unwrap() };
+        // The cream day card: all the way; a bright photo, a dark one: none.
+        assert_eq!(tone_of(at([0xf4, 0xef, 0xe8])), 1.0);
+        assert_eq!(tone_of(at([0x8d, 0xa4, 0xbd])), 0.0);
+        assert_eq!(tone_of(at([0x26, 0x27, 0x2b])), 0.0);
+        let mid = tone_of(at([0xe0, 0xe0, 0xe0]));
+        assert!(mid > 0.0 && mid < 1.0, "fades in near #e0e0e0: {mid}");
+        // On screen (the compositor's blend): the cream one step darker.
+        let back = at([0xf4, 0xef, 0xe8]);
+        let f = toned_fill(back);
+        for i in 0..3 {
+            let b = linear_to_srgb(back[i]);
+            let shown = linear_to_srgb(f[i] * f[3]) + b * (1.0 - f[3]);
+            assert!((shown - b * TONE_STEP).abs() < 0.005, "channel {i}: {shown} for {}", b * TONE_STEP);
+        }
+    }
+
     #[test]
     fn an_open_box_clears_the_pills_it_covers() {
         let mut pills = vec![

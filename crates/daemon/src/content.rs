@@ -417,6 +417,9 @@ pub(crate) const DOCK_SHADOW_BLUR: f32 = 16.0;
 pub(crate) const DOCK_SHADOW_ALPHA_TOP: f32 = 0.10;
 pub(crate) const DOCK_SHADOW_ALPHA_BOTTOM: f32 = 0.40;
 pub(crate) const DOCK_SHADOW_ALPHA_SIDE: f32 = 0.10;
+/// On a near-white wallpaper (the toned glass) the shadow round the top and
+/// the sides is this much lighter; the bottom one stays (Max, 2026-10-23).
+pub(crate) const DOCK_SHADOW_TONED_CUT: f32 = 0.35;
 /// Dock icons: fastest and bounciest (ζ≈0.3), first to peak, a few
 /// visible sloshes.
 pub(crate) const AGUA_ICONS_K: f32 = 200.0;
@@ -2344,6 +2347,9 @@ pub struct FrameInput<'a> {
     pub dock_ink: [f32; 4],
     /// Adaptive hover wash, replacing `config.theme.highlight_rgba()`.
     pub dock_highlight: [f32; 4],
+    /// How far the card wears the toned glass (0..1, `App::dock_tone`): as
+    /// dense resting as open, its shadow round the top and sides lighter.
+    pub dock_tone: f32,
 }
 
 /// The open box's slot under `pos` — the member's place on its page, the
@@ -2555,6 +2561,7 @@ pub fn scene(
         dock_bg,
         dock_ink,
         dock_highlight,
+        dock_tone,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // Plate for an app entry's icon: the live adaptive colour. Only an
@@ -2769,10 +2776,10 @@ pub fn scene(
             blur: DOCK_SHADOW_BLUR,
             color: [0.0, 0.0, 0.0, card_shadow.clamp(0.0, 1.0)],
             edges: [
-                DOCK_SHADOW_ALPHA_TOP,
+                DOCK_SHADOW_ALPHA_TOP * (1.0 - DOCK_SHADOW_TONED_CUT * dock_tone),
                 DOCK_SHADOW_ALPHA_BOTTOM,
-                DOCK_SHADOW_ALPHA_SIDE,
-                DOCK_SHADOW_ALPHA_SIDE,
+                DOCK_SHADOW_ALPHA_SIDE * (1.0 - DOCK_SHADOW_TONED_CUT * dock_tone),
+                DOCK_SHADOW_ALPHA_SIDE * (1.0 - DOCK_SHADOW_TONED_CUT * dock_tone),
             ],
         });
     }
@@ -2786,7 +2793,9 @@ pub fn scene(
         // Open, the card reaches `theme.open_opacity` when one is set (the
         // light tier's denser box), else the background's own alpha.
         let open_a = config.theme.open_alpha(card_fill[3]);
-        card_fill[3] = lerp(card_fill[3] * DOCK_REST_FILL, open_a, card_open);
+        // (The toned glass rests as dense as it opens.)
+        let rest = lerp(DOCK_REST_FILL, 1.0, dock_tone);
+        card_fill[3] = lerp(card_fill[3] * rest, open_a.max(card_fill[3] * dock_tone), card_open);
     }
     scene.rects.push(RectInst {
         rect: card_rect,

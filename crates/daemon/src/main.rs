@@ -863,6 +863,7 @@ fn main() -> anyhow::Result<()> {
         pointer_inside_box: false,
         dock_mag: Vec::new(),
         dock_fill_anim: None,
+        dock_tone_anim: None,
         wall_until: None,
         wall_guess: None,
         wall_hold_until: None,
@@ -1975,6 +1976,8 @@ pub struct App {
     /// colour changes fade instead of blinking — the ink's black↔white
     /// flip included. `None` until the first frame seeds them.
     dock_fill_anim: Option<[f32; 4]>,
+    /// The toned glass's strength, eased with the fill (`DockPaint::tone`).
+    dock_tone_anim: Option<[f32; 4]>,
     /// A WALLPAPER IS CHANGING (picked in its setting): until when the
     /// screen is sampled at every chance, so the shell's colours follow the
     /// picture's fade instead of landing in one step later; and the colour
