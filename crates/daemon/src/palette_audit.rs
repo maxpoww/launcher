@@ -30,8 +30,9 @@ use std::fmt::Write as _;
 
 const TEXT: f32 = 4.5;
 const LARGE: f32 = 3.0;
-/// `decoration.dim_strength` in hyprland.lua.
-const DIM_INACTIVE: f32 = 0.3;
+/// Out of focus, words need only this much of their floor (TEXT 4.5 → 3.0,
+/// LARGE 3.0 → 2.0): a window not being read, dimmed by the compositor.
+const OUT_OF_FOCUS: f32 = 3.0 / 4.5;
 /// The dock's glass as the theme gives it (`core/config.rs`: #05070980).
 const DOCK_ALPHA: f32 = 0.502;
 
@@ -52,9 +53,9 @@ fn ratio(a: S, b: S) -> f32 {
 fn over(fg: S, a: f32, bg: S) -> S {
     [0, 1, 2].map(|i| fg[i] * a + bg[i] * (1.0 - a))
 }
-/// A window out of focus: black at `DIM_INACTIVE` over it.
-fn dimmed(c: S) -> S {
-    c.map(|v| v * (1.0 - DIM_INACTIVE))
+/// A window out of focus: black at `dim` over it (`palette::dim_inactive_for`).
+fn dimmed(c: S, dim: f32) -> S {
+    c.map(|v| v * (1.0 - dim))
 }
 fn hexs(c: S) -> String {
     c.iter().map(|v| format!("{:02x}", (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect()
@@ -109,6 +110,8 @@ struct Audit {
     pal: String,
     tag: String,
     design: bool,
+    /// How dark a window out of focus goes in this case.
+    dim: f32,
 }
 
 impl Audit {
@@ -130,7 +133,8 @@ impl Audit {
     /// An app's pair, and the same with its window out of focus.
     fn app(&mut self, group: &str, rule: &str, fg: S, bg: S, floor: f32) {
         self.check(group, rule, fg, bg, floor);
-        self.check(&format!("{group} · out of focus"), rule, dimmed(fg), dimmed(bg), floor);
+        let dim = self.dim;
+        self.check(&format!("{group} · out of focus"), rule, dimmed(fg, dim), dimmed(bg, dim), floor * OUT_OF_FOCUS);
     }
 }
 
@@ -514,17 +518,32 @@ fn audit_screen_glass(a: &mut Audit) {
     }
 }
 
+/// THE WHOLE AUDIT: Lighting 0/25/50/75/100 × Saturation 0/50/100 × the
+/// Palette slider off/as made/full, every palette, both looks — about a
+/// minute, so not with every `cargo test`: run before a push. Fails on a
+/// single pair under its floor, with the report.
 #[test]
 #[ignore]
 fn legibility_audit() {
+    audit(&[0, 25, 50, 75, 100], &[0, 50, 100], &[Some(0), None, Some(100)]);
+}
+
+/// THE FLOOR WITH EVERY `cargo test`: every palette, both looks, the
+/// Lighting at its ends and as designed (a few seconds).
+#[test]
+fn legibility_floor() {
+    audit(&[0, 50, 100], &[50], &[None]);
+}
+
+fn audit(lights: &[u8], sats: &[u8], tints: &[Option<u8>]) {
     let mut a = Audit::default();
     let mut n = 0usize;
     let pals = all();
     for p in &pals {
         for dark in [true, false] {
-            for light in [0u8, 25, 50, 75, 100] {
-                for sat in [0u8, 50, 100] {
-                    for tint in [Some(0u8), None, Some(100)] {
+            for &light in lights {
+                for &sat in sats {
+                    for &tint in tints {
                         let choice = ColorChoice {
                             palette: Some(p.id.clone()),
                             shell_dark: Some(dark),
@@ -546,6 +565,7 @@ fn legibility_audit() {
                         a.pal = p.id.clone();
                         a.design = light == 50 && sat == 50 && tint.is_none();
                         a.tag = format!("{} {} light={light} sat={sat} palette={}", p.id, if dark { "dark" } else { "light" }, tint.map_or("as made".to_owned(), |t| t.to_string()));
+                        a.dim = dim_inactive_for(apps.dark);
                         audit_apps(&mut a, &apps);
                         audit_web(&mut a, &apps, &shell, &choice);
                         audit_shell(&mut a, &choice, &shell, &apps, dark);
@@ -609,4 +629,5 @@ fn legibility_audit() {
     if let Some(path) = std::env::var_os("AUDIT_OUT") {
         let _ = std::fs::write(path, &out);
     }
+    assert_eq!(fails, 0, "words under their floor (4.5:1 words, 3:1 glyphs; 2/3 of that out of focus):\n{out}");
 }

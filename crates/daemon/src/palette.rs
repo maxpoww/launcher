@@ -1319,6 +1319,14 @@ pub(crate) fn danger_srgb() -> [f32; 4] {
     srgb(shell_words(t.as_text(t.c[0x08])))
 }
 
+/// HOW DARK A WINDOW OUT OF FOCUS GOES (Hyprland's `dim_strength`; Max,
+/// 2026-10-23, after the legibility audit showed 0.3 taking almost every
+/// pair under 4.5:1): 15% while the apps are Light — black over a light
+/// window cuts its contrast the most — 25% while they are Dark.
+pub(crate) fn dim_inactive_for(apps_dark: bool) -> f32 {
+    if apps_dark { 0.25 } else { 0.15 }
+}
+
 /// `x` readable on the shell's surface as it is drawn: lit by the Shell's
 /// Lighting, and dimmed by the night light (`options::NIGHT_DIM`) — the
 /// accent on a box at Lighting 100 read 4.4:1 (the legibility audit).
@@ -2112,8 +2120,13 @@ fn readable(c: &mut [Rgb; 16], dark: bool, acc: usize) {
 /// cards, popovers and dialogs carry their words (the legibility audit,
 /// 2026-10-23: the accent at 3:1 there failed in 41% of palettes).
 pub(crate) fn as_text(c: &[Rgb; 16], x: Rgb) -> Rgb {
-    reading(c, x, &[(0, 4.5), (1, 4.5), (2, 4.5)])
+    reading(c, x, &[(0, WORDS), (1, WORDS), (2, WORDS)])
 }
+
+/// What a program's words read at on its grounds: 4.5:1 with the window in
+/// focus, and still 3:1 out of it, under the Dark look's 25% dim
+/// (`dim_inactive_for`) — on a near-black ground that takes 4.8.
+pub(crate) const WORDS: f32 = 4.8;
 
 /// The words that read ON a fill (a destructive button, a selection): the
 /// palette's darkest or brightest, whichever stands further from it — and
@@ -2136,7 +2149,7 @@ pub(crate) fn quiet(c: &[Rgb; 16]) -> Rgb {
 /// base04 as words on every ground, base02 included (a status line):
 /// 4.5:1 on each.
 pub(crate) fn quiet_raised(c: &[Rgb; 16]) -> Rgb {
-    reading(c, c[0x04], &[(0, 4.5), (1, 4.5), (2, 4.5)])
+    reading(c, c[0x04], &[(0, WORDS), (1, WORDS), (2, WORDS)])
 }
 
 /// `x` walked in lightness, hue and chroma kept, away from the grounds of `c`

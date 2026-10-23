@@ -7323,8 +7323,11 @@ impl crate::App {
         // dynamic or not. Hyprland forgets it on a config reload like the
         // border, so it rides the same push.
         let ground = crate::palette::hex(crate::palette::current().bg());
+        // (…and how dark a window out of focus goes, by the apps' look —
+        // `palette::dim_inactive_for`; forgotten on a reload like the rest.)
+        let dim = crate::palette::dim_inactive_for(crate::palette::current().apps_dark);
         crate::hypr::eval(&format!(
-            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }}, inactive_border = '{}' }} }}, misc = {{ background_color = 0xff{ground} }} }})",
+            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ '{}', '{}', '{}' }}, angle = 90 }}, inactive_border = '{}' }} }}, misc = {{ background_color = 0xff{ground} }}, decoration = {{ dim_strength = {dim} }} }})",
             hex(stops[0]),
             hex(stops[1]),
             hex(stops[2]),

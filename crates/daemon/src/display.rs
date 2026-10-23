@@ -631,13 +631,14 @@ impl GolemSettings {
     fn colours_lua(&self) -> String {
         let theme = crate::palette::resolve(&self.colors.clone().unwrap_or_default(), self.dark.unwrap_or(true));
         let ground = crate::palette::hex(theme.bg());
+        let dim = crate::palette::dim_inactive_for(theme.apps_dark);
         if theme.dynamic {
-            return format!("hl.config({{ misc = {{ background_color = 0xff{ground} }} }})");
+            return format!("hl.config({{ misc = {{ background_color = 0xff{ground} }}, decoration = {{ dim_strength = {dim} }} }})");
         }
         let accent = crate::palette::hex(theme.accent());
         let inactive = crate::palette::hex(theme.raised());
         format!(
-            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ 'rgba({accent}ff)' }}, angle = 90 }}, inactive_border = 'rgba({inactive}ff)' }} }}, misc = {{ background_color = 0xff{ground} }} }})"
+            "hl.config({{ general = {{ col = {{ active_border = {{ colors = {{ 'rgba({accent}ff)' }}, angle = 90 }}, inactive_border = 'rgba({inactive}ff)' }} }}, misc = {{ background_color = 0xff{ground} }}, decoration = {{ dim_strength = {dim} }} }})"
         )
     }
 }
@@ -1495,7 +1496,7 @@ mod tests {
         ));
         // The palette's ground for the compositor's start; the borders only
         // when the shell wears the palette (dynamic colour off).
-        assert!(lua.contains("hl.config({ misc = { background_color = 0xff16171a } })"), "{lua}");
+        assert!(lua.contains("hl.config({ misc = { background_color = 0xff16171a }, decoration = { dim_strength = 0.25 } })"), "{lua}");
         assert!(!lua.contains("active_border"), "{lua}");
         store.colors = Some(crate::palette::ColorChoice { palette: Some(crate::palette::GOLEM.to_owned()), ..Default::default() });
         let lua = store.lua();

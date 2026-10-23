@@ -102,13 +102,13 @@ pub(crate) fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
     // light accent wore ink_dim, the links and the accent itself at 1–2:1
     // (India Ink, 2026-10-20).
     let on = t.accent_ink();
-    // (The alternate selection a step toward the ground, no further than
-    // its words still read 4.5:1 on it.)
-    let mut k = 0.3;
-    while k > 0.0 && crate::palette::contrast(crate::palette::rel_lum(on), crate::palette::rel_lum(mix(t.accent(), c[0], k))) < 4.5 {
-        k -= 0.02;
-    }
-    let alt = mix(t.accent(), c[0], k.max(0.0));
+    // (The alternate selection a step from the accent AWAY from its words —
+    // toward the palette's lighter end under dark words, its darker under
+    // light ones: a step toward the ground took them under 3:1 out of focus.)
+    let lum = crate::palette::rel_lum;
+    let (light_end, dark_end) = if lum(c[0]) > lum(c[7]) { (c[0], c[7]) } else { (c[7], c[0]) };
+    let away = if lum(on) < lum(t.accent()) { light_end } else { dark_end };
+    let alt = mix(t.accent(), away, 0.3);
     // (The faint one a step toward the accent, no further than 3:1 on both.)
     let reads = |x: Rgb| [t.accent(), alt].iter().all(|g| crate::palette::contrast(crate::palette::rel_lum(x), crate::palette::rel_lum(*g)) >= 3.0);
     let mut f = 0.2;
