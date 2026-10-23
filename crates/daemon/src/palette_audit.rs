@@ -424,36 +424,48 @@ fn audit_shell(a: &mut Audit, choice: &ColorChoice, shell: &Theme, apps: &Theme,
     let bright = 0.2126 * surface[0] + 0.7152 * surface[1] + 0.0722 * surface[2] > 0.179;
     // `Backdrop::surface_wash`: the night light's dim on a dark ground.
     let fill = if bright { surface.map(|v| v * 0.9) } else { surface.map(|v| v * (1.0 - crate::options::NIGHT_DIM)) };
-    let ink_bytes: S = ink_lin; // (handed over linear)
     let ink_srgb: S = ink_lin.map(linear_to_srgb);
     let list_dim = if ink_lin.iter().sum::<f32>() < 1.5 { crate::options::LIST_DIM_LIGHT } else { crate::options::LIST_DIM };
+    let f4 = [fill[0], fill[1], fill[2], 1.0];
+    let ink_on = if 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
     for (bn, behind) in BEHIND {
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, ink_bytes, 1.0, behind);
-        a.check("Shell · boxes, card (Dark, a palette)", &format!("titles (as rendered), over {bn}"), w, g, TEXT);
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, ink_bytes, list_dim, behind);
-        a.check("Shell · boxes, card (Dark, a palette)", &format!("list rows (as rendered), over {bn}"), w, g, TEXT);
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, ink_srgb, list_dim, behind);
-        a.check("Shell · boxes, card (Dark, a palette)", &format!("list rows (ink as sRGB), over {bn}"), w, g, TEXT);
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, s(shell.accent()), 1.0, behind);
+        let back = [srgb_to_linear(behind[0]), srgb_to_linear(behind[1]), srgb_to_linear(behind[2]), 1.0];
+        // Boxes: the palette's ink as words, the panel dense enough over what is behind.
+        let iw = [ink_srgb[0], ink_srgb[1], ink_srgb[2], 1.0];
+        // (As `accent_srgb`/`danger_srgb`: text-safe on the lit surface and its night dim.)
+        let to = |c: [f32; 3]| -> Rgb { [0, 1, 2].map(|i| (linear_to_srgb(c[i]).clamp(0.0, 1.0) * 255.0).round() as u8) };
+        let grounds = [to(surface), to(surface.map(|v| v * (1.0 - crate::options::NIGHT_DIM)))];
+        let (acc, red) = (s(readable_on(shell.accent_text(), &grounds)), s(readable_on(shell.as_text(shell.c[8]), &grounds)));
+        let al = [iw, [acc[0], acc[1], acc[2], 1.0], [red[0], red[1], red[2], 1.0]]
+            .iter()
+            .fold(crate::options::BOX_ALPHA, |al, w| crate::options::dense_enough(f4, *w, back, al));
+        let (w, g) = layer(fill, al, ink_srgb, 1.0, behind);
+        a.check("Shell · boxes, card (Dark, a palette)", &format!("titles, over {bn}"), w, g, TEXT);
+        let dim = crate::options::readable_dim(f4, al, iw, list_dim, back);
+        let (w, g) = layer(fill, al, ink_srgb, dim, behind);
+        a.check("Shell · boxes, card (Dark, a palette)", &format!("list rows, over {bn}"), w, g, TEXT);
+        let (w, g) = layer(fill, al, acc, 1.0, behind);
         a.check("Shell · boxes, card (Dark, a palette)", &format!("accent words, over {bn}"), w, g, TEXT);
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, s(shell.c[8]), 1.0, behind);
+        let (w, g) = layer(fill, al, red, 1.0, behind);
         a.check("Shell · boxes, card (Dark, a palette)", &format!("red glyphs (×), over {bn}"), w, g, LARGE);
-        // The dock: its ink measured on the fill as if solid; the glass a third, half open.
-        let ink = if 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
-        // (Open: the resting dock carries no words; its names are tooltips, dense.)
-        let al = DOCK_ALPHA;
-        let (w, g) = layer(fill, al, ink, 1.0, behind);
+        // The dock's open box: dense enough for its ink; its faint words solid.
+        let al = crate::options::dense_enough([fill[0], fill[1], fill[2], DOCK_ALPHA], [ink_on[0], ink_on[1], ink_on[2], 1.0], back, DOCK_ALPHA);
+        let seen = crate::options::seen_through(f4, al, back);
+        let ink4 = [ink_on[0], ink_on[1], ink_on[2], 1.0];
+        let (w, g) = layer(fill, al, ink_on, 1.0, behind);
         a.check("Shell · dock (Dark, a palette)", &format!("open box: names, over {bn}"), w, g, TEXT);
-        let (w, g) = layer(fill, al, ink, crate::content::TITLE_ALPHA, behind);
-        a.check("Shell · dock (Dark, a palette)", &format!("open box: section titles at .3, over {bn}"), w, g, LARGE);
-        let (w, g) = layer(fill, al, ink, 0.45, behind);
-        a.check("Shell · dock (Dark, a palette)", &format!("open box: placeholder, empty states at .45, over {bn}"), w, g, TEXT);
+        let t = crate::content::faded_on(ink4, seen, crate::content::TITLE_ALPHA, LARGE);
+        let (w, g) = layer(fill, al, [t[0], t[1], t[2]], 1.0, behind);
+        a.check("Shell · dock (Dark, a palette)", &format!("open box: section titles, over {bn}"), w, g, LARGE);
+        let t = crate::content::faded_on(ink4, seen, 0.45, TEXT);
+        let (w, g) = layer(fill, al, [t[0], t[1], t[2]], 1.0, behind);
+        a.check("Shell · dock (Dark, a palette)", &format!("open box: placeholder, empty states, over {bn}"), w, g, TEXT);
     }
-    // Menus, Properties: solid.
-    let (w, g) = layer(surface, 1.0, ink_bytes, 1.0, [0.0; 3]);
-    a.check("Shell · menus (Dark, a palette)", "rows (as rendered)", w, g, TEXT);
-    let (w, g) = layer(surface, 1.0, ink_bytes, 0.75, [0.0; 3]);
-    a.check("Shell · menus (Dark, a palette)", "symbols at .75 (as rendered)", w, g, LARGE);
+    // Menus, Properties: solid; their renderer takes linear words.
+    let (w, g) = layer(surface, 1.0, ink_srgb, 1.0, [0.0; 3]);
+    a.check("Shell · menus (Dark, a palette)", "rows", w, g, TEXT);
+    let (w, g) = layer(surface, 1.0, ink_srgb, 0.75, [0.0; 3]);
+    a.check("Shell · menus (Dark, a palette)", "symbols at .75", w, g, LARGE);
 }
 
 /// The Light look reads the screen: the same for every palette, so once,
@@ -472,22 +484,33 @@ fn audit_screen_glass(a: &mut Audit) {
         let fill = bl.map(|v| v * 0.89 + srgb_to_linear(0.11));
         let ink = if 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
         let dim = if ink[0] < 0.5 { crate::options::LIST_DIM_LIGHT } else { crate::options::LIST_DIM };
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, ink, 1.0, *b);
+        let back = [bl[0], bl[1], bl[2], 1.0];
+        let f4 = [fill[0], fill[1], fill[2], 1.0];
+        let ink4 = [ink[0], ink[1], ink[2], 1.0];
+        let al = crate::options::dense_enough(f4, ink4, back, crate::options::BOX_ALPHA);
+        let (w, g) = layer(fill, al, ink, 1.0, *b);
         a.check("Shell · Light look (reads the screen)", "box titles", w, g, TEXT);
-        let (w, g) = layer(fill, crate::options::BOX_ALPHA, ink, dim, *b);
+        let dim = crate::options::readable_dim(f4, al, ink4, dim, back);
+        let (w, g) = layer(fill, al, ink, dim, *b);
         a.check("Shell · Light look (reads the screen)", "box list rows", w, g, TEXT);
-        // The open dock: the toned glass over a near-white backdrop (`dock_surface`).
-        let k = crate::options::tone_of([bl[0], bl[1], bl[2], 1.0]);
-        let toned = crate::options::toned_fill([bl[0], bl[1], bl[2], 1.0]);
+        // The open dock: the toned glass over a near-white backdrop, dense enough, faint words solid.
+        let k = crate::options::tone_of(back);
+        let toned = crate::options::toned_fill(back);
         let dfill: [f32; 3] = std::array::from_fn(|i| fill[i] + (toned[i] - fill[i]) * k);
-        let al = DOCK_ALPHA + (toned[3] - DOCK_ALPHA) * k;
         let dink = if 0.2126 * dfill[0] + 0.7152 * dfill[1] + 0.0722 * dfill[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
+        let d4 = [dfill[0], dfill[1], dfill[2], 1.0];
+        let a0 = DOCK_ALPHA + (toned[3] - DOCK_ALPHA) * k;
+        let al = crate::options::dense_enough(d4, [dink[0], dink[1], dink[2], 1.0], back, a0);
+        let seen = crate::options::seen_through(d4, al, back);
+        let dink4 = [dink[0], dink[1], dink[2], 1.0];
         let (w, g) = layer(dfill, al, dink, 1.0, *b);
         a.check("Shell · Light look (reads the screen)", "open dock: names", w, g, TEXT);
-        let (w, g) = layer(dfill, al, dink, crate::content::TITLE_ALPHA, *b);
-        a.check("Shell · Light look (reads the screen)", "open dock: section titles at .3", w, g, LARGE);
-        let (w, g) = layer(dfill, al, dink, 0.45, *b);
-        a.check("Shell · Light look (reads the screen)", "open dock: placeholder, empty states at .45", w, g, TEXT);
+        let t = crate::content::faded_on(dink4, seen, crate::content::TITLE_ALPHA, LARGE);
+        let (w, g) = layer(dfill, al, [t[0], t[1], t[2]], 1.0, *b);
+        a.check("Shell · Light look (reads the screen)", "open dock: section titles", w, g, LARGE);
+        let t = crate::content::faded_on(dink4, seen, 0.45, TEXT);
+        let (w, g) = layer(dfill, al, [t[0], t[1], t[2]], 1.0, *b);
+        a.check("Shell · Light look (reads the screen)", "open dock: placeholder, empty states", w, g, TEXT);
     }
 }
 

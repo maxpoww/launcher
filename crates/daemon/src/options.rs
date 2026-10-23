@@ -1223,10 +1223,18 @@ impl crate::App {
     /// fully opaque under the reduce-transparency intent.
     pub(crate) fn box_panel_alpha(&self) -> f32 {
         if self.config.accessibility.reduce_transparency {
-            1.0
-        } else {
-            self.config.theme.open_alpha(BOX_ALPHA)
+            return 1.0;
         }
+        let a = self.config.theme.open_alpha(BOX_ALPHA);
+        // DENSE ENOUGH TO READ ON over what is behind the boxes (either side's
+        // frost, the lighter and the darker: `dense_enough`).
+        // Its words: the ink, and the accent and the red the boxes write in.
+        let (fill, ink) = self.options_box_surface();
+        let words = [ink, crate::palette::accent_srgb(), crate::palette::danger_srgb()];
+        [self.options_pill_color, self.clip_pill_color]
+            .into_iter()
+            .flatten()
+            .fold(a, |a, back| words.iter().fold(a, |a, w| dense_enough(fill, *w, back, a)))
     }
 }
 /// An open box's fill: the backdrop it floats on with the pill's wash
@@ -1362,7 +1370,10 @@ impl Backdrop {
     fn palette() -> Option<Backdrop> {
         // (The Shell slider and its look: `palette::shell`.)
         let (surface, ink) = crate::palette::shell()?;
-        Some(Backdrop { matched: Some(surface), frost: None, ink: Some(ink) })
+        // (The ink is WORDS: the text renderer takes sRGB, the palette's pair
+        // is linear — handed over as it was, a light ink drew a shade dimmer
+        // than designed: the legibility audit, 2026-10-23.)
+        Some(Backdrop { matched: Some(surface), frost: None, ink: Some(words(ink)) })
     }
 
     /// What this surface actually sits on right now: the match if there is
@@ -3142,7 +3153,11 @@ impl App {
         } else {
             LIST_DIM
         };
-        [ink[0], ink[1], ink[2], ink[3] * list_dim]
+        // No fainter than reads, where the box is seen (`readable_dim`): on
+        // a mid-grey box no dimmed word reached 4.5:1 (the legibility audit).
+        let (fill, a) = (self.options_box_surface().0, self.box_panel_alpha());
+        let dim = [self.options_pill_color, self.clip_pill_color].into_iter().flatten().fold(list_dim, |t, back| readable_dim(fill, a, ink, t, back));
+        [ink[0], ink[1], ink[2], ink[3] * dim]
     }
 
     /// Add the OPTIONS pills to the bar's scene (called after the base fill).
@@ -7348,14 +7363,21 @@ impl crate::App {
     pub(crate) fn dock_surface(&self) -> ([f32; 4], [f32; 4]) {
         let bg = self.config.theme.background_rgba();
         let ink = self.config.theme.text_rgba();
-        let (fill, ink) = self.dock_regime().surface(bg, ink, false);
+        let (mut fill, ink) = self.dock_regime().surface(bg, ink, false);
         // Over a near-white backdrop: the toned glass (`toned_fill`).
         let k = self.dock_tone();
         if k > 0.0 {
             if let Some(back) = self.dock_regime().get() {
                 let toned = toned_fill(back);
-                return (std::array::from_fn(|i| fill[i] + (toned[i] - fill[i]) * k), ink);
+                fill = std::array::from_fn(|i| fill[i] + (toned[i] - fill[i]) * k);
             }
+        }
+        // DENSE ENOUGH TO READ ON: the dock's words (`ink_on` its fill) over
+        // the glass as the screen shows it, with what is behind
+        // (`dense_enough`; the Dark look's palette dock over a white page
+        // read 2.8:1 — the legibility audit, 2026-10-23).
+        if let (Some(back), false) = (self.dock_pill_color, self.config.accessibility.reduce_transparency) {
+            fill[3] = dense_enough(fill, ink_on(fill), back, fill[3]);
         }
         (fill, ink)
     }
@@ -7557,6 +7579,9 @@ impl crate::App {
             DOCK_INK_RATE,
             hidden,
         );
+        // What the open card shows under its words, as the screen shows it.
+        let a = if self.config.accessibility.reduce_transparency { 1.0 } else { self.config.theme.open_alpha(fill[3]) };
+        let seen = self.dock_pill_color.map_or([0.0; 4], |back| seen_through(fill, a, back));
         // (Eased with the fill, so the card's density and shadow move with it.)
         let (tone, tone_moving) = ease_rgba(&mut self.dock_tone_anim, [k; 4], dt, DOCK_FILL_RATE, hidden);
         DockPaint {
@@ -7565,6 +7590,7 @@ impl crate::App {
             wash,
             plate,
             tone: tone[0],
+            seen,
             moving: fill_moving || ink_moving || wash_moving || plate_moving || tone_moving,
         }
     }
@@ -7583,6 +7609,9 @@ pub(crate) struct DockPaint {
     pub plate: [f32; 4],
     /// How far the card wears the toned glass (`App::dock_tone`), eased.
     pub tone: f32,
+    /// The open card's ground as the screen shows it (sRGB; alpha 0:
+    /// nothing sampled behind yet): `seen_through`.
+    pub seen: [f32; 4],
     /// True while any of them is still easing — keep frames coming.
     pub moving: bool,
 }
@@ -7601,6 +7630,63 @@ const TONE_FULL: f32 = 0.80;
 const TONE_STEP: f32 = 0.94;
 /// …at this density.
 const TONE_ALPHA: f32 = 0.94;
+
+/// A colour the renderer takes as WORDS: linear → sRGB, the alpha kept.
+pub(crate) fn words(c: [f32; 4]) -> [f32; 4] {
+    [linear_to_srgb(c[0]), linear_to_srgb(c[1]), linear_to_srgb(c[2]), c[3]]
+}
+
+/// What a fill of ours (linear) at `a` shows over `back` (linear), as the
+/// compositor blends it: our premultiplied colour stored as sRGB, then
+/// `+ behind × (1 − a)` (the dock read 255,255,248 over a 245,238,231
+/// picture). sRGB, opaque.
+pub(crate) fn seen_through(fill: [f32; 4], a: f32, back: [f32; 4]) -> [f32; 4] {
+    let c = |i: usize| (linear_to_srgb(fill[i] * a) + linear_to_srgb(back[i]) * (1.0 - a)).min(1.0);
+    [c(0), c(1), c(2), 1.0]
+}
+
+/// Relative luminance of an sRGB colour.
+pub(crate) fn srgb_luminance(c: [f32; 4]) -> f32 {
+    0.2126 * srgb_to_linear(c[0]) + 0.7152 * srgb_to_linear(c[1]) + 0.0722 * srgb_to_linear(c[2])
+}
+
+/// Contrast of two sRGB colours.
+pub(crate) fn srgb_contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let (x, y) = (srgb_luminance(a), srgb_luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// What words of ours (`ink`, sRGB, at `ta`) on a fill of ours (linear, at
+/// `a`) show over `back` (linear): blended with the fill in our buffer
+/// (linear), then by the compositor as `seen_through`. sRGB, opaque.
+pub(crate) fn words_through(fill: [f32; 4], a: f32, ink: [f32; 4], ta: f32, back: [f32; 4]) -> [f32; 4] {
+    let pa = ta + a * (1.0 - ta);
+    let c = |i: usize| (linear_to_srgb(srgb_to_linear(ink[i]) * ta + fill[i] * a * (1.0 - ta)) + linear_to_srgb(back[i]) * (1.0 - pa)).min(1.0);
+    [c(0), c(1), c(2), 1.0]
+}
+
+/// The faintest a word may rest at — `dim`, the design — and still read
+/// 4.5:1 where it is seen (`words_through` on `seen_through`).
+pub(crate) fn readable_dim(fill: [f32; 4], a: f32, ink: [f32; 4], dim: f32, back: [f32; 4]) -> f32 {
+    let mut t = dim.clamp(0.0, 1.0);
+    while t < 1.0 && srgb_contrast(words_through(fill, a, ink, t, back), seen_through(fill, a, back)) < 4.5 {
+        t = (t + 0.02).min(1.0);
+    }
+    t
+}
+
+/// THE GLASS DENSE ENOUGH TO READ ON (the legibility audit, 2026-10-23): the
+/// see-through fill's alpha from `a`, raised until its `ink` (sRGB words)
+/// reads 4.5:1 on what the screen shows — the fill over `back`. Over what
+/// it was made for nothing moves; over a page that fights its words (a Dark
+/// palette's dock over white) it grows solid, as far as it must.
+pub(crate) fn dense_enough(fill: [f32; 4], ink: [f32; 4], back: [f32; 4], a: f32) -> f32 {
+    let mut a = a.clamp(0.0, 1.0);
+    while a < 1.0 && srgb_contrast(ink, seen_through(fill, a, back)) < 4.5 {
+        a = (a + 0.02).min(1.0);
+    }
+    a
+}
 
 /// How near-white a backdrop is, for the toned glass: 0 below `TONE_FROM`,
 /// 1 from `TONE_FULL`, eased between.

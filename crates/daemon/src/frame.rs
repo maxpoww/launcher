@@ -1529,7 +1529,7 @@ impl App {
         // icon plates' polarity crossfade too. Keep frames coming while
         // anything settles.
         let paint = self.dock_surface_eased(dt);
-        let (dock_bg, dock_ink, dock_highlight, dock_tone) = (paint.fill, paint.ink, paint.wash, paint.tone);
+        let (dock_bg, dock_ink, dock_highlight, dock_tone, dock_seen) = (paint.fill, paint.ink, paint.wash, paint.tone, paint.seen);
         // The control panel's field moves (orbits, layer moves, the open
         // setting), so frames keep coming while the card is up as the panel;
         // sinking with the card, it is drawn still.
@@ -1808,6 +1808,7 @@ impl App {
                 dock_ink,
                 dock_highlight,
                 dock_tone,
+                dock_seen,
             },
         );
         let thumb_base = self.thumb_layer_base();

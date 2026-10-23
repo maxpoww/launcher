@@ -1308,11 +1308,42 @@ pub(crate) fn srgb(c: Rgb) -> [f32; 4] {
 /// chips, warnings and "this cannot be undone" wear (Max, 2026-10-15: the
 /// palette "as deep as possible"). Golem's own palette gives back exactly
 /// the colours these were before (#ffbe98, #e05252).
+/// (As words — the shell writes in them — text-safe: `as_text` on the
+/// palette's grounds, then on the shell's own surface as lit and as the
+/// night light dims it (`shell_words`); a colour that reads stays as it is.)
 pub(crate) fn accent_srgb() -> [f32; 4] {
-    srgb(signals().accent())
+    srgb(shell_words(signals().accent_text()))
 }
 pub(crate) fn danger_srgb() -> [f32; 4] {
-    srgb(signals().c[0x08])
+    let t = signals();
+    srgb(shell_words(t.as_text(t.c[0x08])))
+}
+
+/// `x` readable on the shell's surface as it is drawn: lit by the Shell's
+/// Lighting, and dimmed by the night light (`options::NIGHT_DIM`) — the
+/// accent on a box at Lighting 100 read 4.4:1 (the legibility audit).
+pub(crate) fn shell_words(x: Rgb) -> Rgb {
+    let Some((surface, _)) = shell() else { return x };
+    let to = |c: [f32; 4]| -> Rgb { [0, 1, 2].map(|i| (crate::options::linear_to_srgb(c[i]).clamp(0.0, 1.0) * 255.0).round() as u8) };
+    let dim = 1.0 - crate::options::NIGHT_DIM;
+    readable_on(x, &[to(surface), to([surface[0] * dim, surface[1] * dim, surface[2] * dim, 1.0])])
+}
+
+/// `x` walked in lightness, hue and chroma kept, until it reads 4.5:1 on
+/// each of `grounds` (away from the first).
+pub(crate) fn readable_on(x: Rgb, grounds: &[Rgb]) -> Rgb {
+    let r = |a: Rgb, b: Rgb| contrast(rel_lum(a), rel_lum(b));
+    let Some(first) = grounds.first() else { return x };
+    let up = rel_lum(x) > rel_lum(*first);
+    let (mut l, ch, h) = tint::lch(x);
+    let mut y = x;
+    let mut n = 0;
+    while grounds.iter().any(|g| r(y, *g) < 4.5) && n < 100 {
+        l = (l + if up { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
+        y = tint::from_lch(l, ch, h);
+        n += 1;
+    }
+    y
 }
 pub(crate) fn warn_srgb() -> [f32; 4] {
     srgb(signals().c[0x0A])

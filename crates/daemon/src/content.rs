@@ -2350,6 +2350,30 @@ pub struct FrameInput<'a> {
     /// How far the card wears the toned glass (0..1, `App::dock_tone`): as
     /// dense resting as open, its shadow round the top and sides lighter.
     pub dock_tone: f32,
+    /// The open card's ground as the screen shows it (sRGB; alpha 0:
+    /// unknown): what its faint words are laid on (`faded_on`).
+    pub dock_seen: [f32; 4],
+}
+
+/// FAINT WORDS, SOLID (the legibility audit, 2026-10-23): `ink` faded `a` of
+/// the way from what the screen shows under it (`seen`, sRGB) — laid as a
+/// solid colour, since a faded ink on our see-through card is lifted toward
+/// the card by the compositor's blend (a section title at .3 read 1.4:1 on
+/// the light dock) — and no fainter than `floor` on it. `seen` unknown
+/// (alpha 0): the fade stays an alpha.
+pub(crate) fn faded_on(ink: [f32; 4], seen: [f32; 4], a: f32, floor: f32) -> [f32; 4] {
+    if seen[3] <= 0.0 {
+        return [ink[0], ink[1], ink[2], ink[3] * a];
+    }
+    let mut k = a.clamp(0.0, 1.0);
+    loop {
+        let c = [0, 1, 2].map(|i| seen[i] + (ink[i] - seen[i]) * k);
+        let c = [c[0], c[1], c[2], 1.0];
+        if k >= 1.0 || crate::options::srgb_contrast(c, seen) >= floor {
+            return [c[0], c[1], c[2], ink[3]];
+        }
+        k = (k + 0.02).min(1.0);
+    }
 }
 
 /// The open box's slot under `pos` — the member's place on its page, the
@@ -2562,6 +2586,7 @@ pub fn scene(
         dock_ink,
         dock_highlight,
         dock_tone,
+        dock_seen,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // Plate for an app entry's icon: the live adaptive colour. Only an
@@ -3472,7 +3497,7 @@ pub fn scene(
             glass: 0.0,
             border: 0.0,
         });
-        let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[1]];
+        let ink = faded_on(dock_ink, dock_seen, LAYER_INK[1], 4.5);
         let (text, dim) = if search_expand >= 0.5 && !query.is_empty() {
             (query.to_string(), false)
         } else {
@@ -3486,11 +3511,12 @@ pub fn scene(
             font_px: font * k,
             line_px: line * k,
             centered: true,
-            dim,
+            dim: false,
             // Glyphs cache only at rest (an easing size would fill it).
             cache: (query.is_empty() || search_expand < 0.5) && (k - 1.0).abs() < 0.001,
             family: crate::options::TEXT_FONT,
-            color: if dim { None } else { Some(ink) },
+            // (The placeholder: the renderer's .45 dim, laid solid.)
+            color: Some(if dim { faded_on(dock_ink, dock_seen, 0.45, 4.5) } else { ink }),
             clip: Some(reveal_clip(draw_rect)),
         });
         // A real caret sitting exactly after the shaped text, only once
@@ -3511,7 +3537,7 @@ pub fn scene(
     }
 
     // The section titles' ink.
-    let title_ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * TITLE_ALPHA];
+    let title_ink = faded_on(dock_ink, dock_seen, TITLE_ALPHA, 3.0);
     // The three sections: title, grid cells with per-section horizontal
     // paging, page dots, and per-section empty states.
     for (s, sec) in layout.sections.iter().enumerate() {
@@ -3591,10 +3617,11 @@ pub fn scene(
                 font_px: LABEL_FONT_PX + 2.0,
                 line_px: LABEL_LINE_PX + 2.0,
                 centered: true,
-                dim: true,
+                dim: false,
                 cache: true,
                 family: None,
-                color: None,
+                // (The empty state: the .45 dim, laid solid.)
+                color: Some(faded_on(dock_ink, dock_seen, 0.45, 4.5)),
                 clip: Some(reveal_rect),
             });
             scene.grids.push(grid);

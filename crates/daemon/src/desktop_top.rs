@@ -100,7 +100,12 @@ impl App {
                 Renderer::new(&self.conn, layer.wl_surface(), pw, ph, scale)
             };
             match built {
-                Ok(renderer) => self.desktop_top.renderer = Some(renderer),
+                Ok(mut renderer) => {
+                    // (Menus, Properties and the phone's box hand their words
+                    // over linear, as their grounds: `Renderer::labels_linear`.)
+                    renderer.labels_linear = true;
+                    self.desktop_top.renderer = Some(renderer);
+                }
                 Err(e) => {
                     // Never fatal: the menus fall back to the desktop itself.
                     error!("desktop menu surface: renderer init failed: {e:#}");

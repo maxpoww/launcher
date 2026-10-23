@@ -40,13 +40,16 @@ const DIM: f32 = 0.58;
 const QUIET_HINT: f32 = 0.55;
 /// The switch that is on, the box that is ticked, Apply.
 fn accent() -> [f32; 3] {
+    // (Linear, as everything this box hands its renderer: its fills were
+    // the sRGB swatch read as linear — lighter — and its words now are
+    // converted with the rest: `Renderer::labels_linear`.)
     let a = crate::palette::accent_srgb();
-    [a[0], a[1], a[2]]
+    [0, 1, 2].map(|i| crate::options::srgb_to_linear(a[i]))
 }
 /// What takes files off the phone.
 fn danger() -> [f32; 3] {
     let d = crate::palette::danger_srgb();
-    [d[0], d[1], d[2]]
+    [0, 1, 2].map(|i| crate::options::srgb_to_linear(d[i]))
 }
 /// How many letters of the small text fit a line of the box (it has no
 /// renderer to measure with: a wrap by count, on the safe side).
