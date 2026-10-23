@@ -252,6 +252,12 @@ pub enum Frame {
 }
 
 pub struct Renderer {
+    /// THE WORDS' COLOURS ARE LINEAR here, as the rects' are: converted to
+    /// the sRGB bytes the text renderer takes (glyphon, `ColorMode::Accurate`,
+    /// reads sRGB). Golem Files' palette is linear throughout; handed over
+    /// as it was, its words came out darker than designed (a light ink
+    /// #e1d6d5 drawn #bfabaa — the legibility audit, 2026-10-23).
+    pub labels_linear: bool,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1450,6 +1456,7 @@ impl Renderer {
         );
 
         Ok(Self {
+            labels_linear: false,
             surface,
             device,
             queue,
@@ -2037,6 +2044,14 @@ impl Renderer {
 
         // Shape the visible labels and hand them to glyphon.
         let alpha = scene.alpha.clamp(0.0, 1.0);
+        let words = |c: [f32; 4]| -> [f32; 4] {
+            if self.labels_linear {
+                [crate::options::linear_to_srgb(c[0]), crate::options::linear_to_srgb(c[1]), crate::options::linear_to_srgb(c[2]), c[3]]
+            } else {
+                c
+            }
+        };
+        let text_color = words(text_color);
         let text_rgba = glyphon::Color::rgba(
             (text_color[0] * 255.0) as u8,
             (text_color[1] * 255.0) as u8,
@@ -2211,7 +2226,7 @@ impl Renderer {
                 right: ((clip.x + clip.w) * scale) as i32,
                 bottom: ((clip.y + clip.h) * scale).min(h as f32) as i32,
             };
-            let col = match label.color {
+            let col = match label.color.map(words) {
                 Some(c) => glyphon::Color::rgba(
                     (c[0] * 255.0) as u8,
                     (c[1] * 255.0) as u8,

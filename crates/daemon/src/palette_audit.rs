@@ -404,16 +404,16 @@ fn audit_shell(a: &mut Audit, choice: &ColorChoice, shell: &Theme, apps: &Theme,
     a.check("Lock screen", "clock: ink on bg", ink, bg, TEXT);
     a.check("Lock screen", "typed: ink on the field", ink, raised, TEXT);
     a.check("Lock screen", "ring: accent on bg", s(shell.accent()), bg, LARGE);
-    // Golem Files: a solid window; its words handed to the renderer as the
-    // linear colour.
-    let (ground, words) = (lin_of(apps.c[1]), lin_of(apps.c[5]));
+    // Golem Files: a solid window; its words linear like its grounds, the
+    // window's renderer converting them (`Renderer::labels_linear`).
+    let (ground, words) = (lin_of(apps.c[1]), s(apps.c[5]));
     let (w, g) = layer(ground, 1.0, words, 1.0, [0.0; 3]);
-    a.check("Files", "names (as rendered) on the window", w, g, TEXT);
-    let (w, g) = layer(ground, 1.0, s(apps.c[5]), 1.0, [0.0; 3]);
-    a.check("Files", "names (if given as sRGB) on the window", w, g, TEXT);
-    let (w, g) = layer(ground, 1.0, words, 0.5, [0.0; 3]);
-    a.check("Files", "dim words at .5 (as rendered)", w, g, LARGE);
-    a.check("Files", "rename: white on the accent", [1.0; 3], s(apps.accent()), TEXT);
+    a.check("Files", "names on the window", w, g, TEXT);
+    let (w, g) = layer(ground, 1.0, s(apps.quiet()), 1.0, [0.0; 3]);
+    a.check("Files", "dim words (the quiet ones)", w, g, TEXT);
+    let acc = lin_of(apps.accent());
+    let on = if 0.2126 * acc[0] + 0.7152 * acc[1] + 0.0722 * acc[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
+    a.check("Files", "rename: the picked words on the accent", on, s(apps.accent()), TEXT);
     // The shell wearing the palette: the Dark look (the Light one reads the
     // screen: `audit_screen_glass`).
     if !dark {
@@ -540,9 +540,14 @@ fn legibility_audit() {
             a.design = true;
             a.tag = format!("{} shell {} apps {}", p.id, if shell_dark { "dark" } else { "light" }, if apps_dark { "dark" } else { "light" });
             if !shell_dark {
-                // Golem Files' menus in a Light shell: a fixed #e8e5de, the Apps' ink.
-                let (w, g) = layer([0.807, 0.784, 0.73], 1.0, lin_of(apps.c[5]), 1.0, [0.0; 3]);
-                a.check("Files", "menus in a Light shell, Apps Dark (as rendered)", w, g, TEXT);
+                // Golem Files' menus in a Light shell: a fixed #e8e5de, the
+                // Apps' ink where it reads, else black (`filer_panel_paint`).
+                let fill = [0.807f32, 0.784, 0.73];
+                let ink = lin_of(apps.c[5]);
+                let l = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                let ink = if (l(fill) + 0.05) / (l(ink) + 0.05) >= 4.5 { ink } else { [0.0; 3] };
+                let (w, g) = layer(fill, 1.0, ink.map(linear_to_srgb), 1.0, [0.0; 3]);
+                a.check("Files", "menus in a Light shell, Apps Dark", w, g, TEXT);
             }
         }
     }

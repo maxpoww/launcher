@@ -2791,6 +2791,8 @@ pub(crate) struct Palette {
     pub ground: [f32; 4],
     pub side: [f32; 4],
     pub ink: [f32; 4],
+    /// The quiet words (`Theme::quiet`): the dim ones, that still read.
+    pub quiet: [f32; 4],
     pub band_fill: [f32; 4],
     pub band_line: [f32; 4],
 }
@@ -2805,6 +2807,7 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
             ground: lift(dock, 0.0),
             side: lift(dock, 0.012),
             ink: dock_ink,
+            quiet: lin(theme.quiet()),
             band_fill: [1.0, 1.0, 1.0, 0.07],
             band_line: [1.0, 1.0, 1.0, 0.38],
         };
@@ -2819,6 +2822,7 @@ fn palette(dark: bool, dock: [f32; 4], dock_ink: [f32; 4], theme: &crate::palett
         ground: lin(theme.surface()),
         side: lin(theme.raised()),
         ink: lin(theme.ink()),
+        quiet: lin(theme.quiet()),
         band_fill: [0.0, 0.0, 0.0, 0.05],
         band_line: [0.0, 0.0, 0.0, 0.32],
     }
@@ -2943,7 +2947,9 @@ impl Typed {
             g.rects.push(rect(Rect::new(x + self.caret_x, top + 2.0, 1.0, line - 4.0), 0.0, ink));
         }
         let (head, rest) = self.text.split_at(self.picked);
-        for (words, at, color) in [(head, x, [1.0, 1.0, 1.0, 1.0]), (rest, x + self.mark_w, ink)] {
+        // (The picked part's words on the accent: black or white, whichever
+        // reads — white sat on a light accent at 1.2:1.)
+        for (words, at, color) in [(head, x, crate::options::ink_on(accent)), (rest, x + self.mark_w, ink)] {
             if !words.is_empty() {
                 g.labels.push(Label {
                     font_px: px,
@@ -5167,7 +5173,11 @@ impl App {
         }
         if !crate::palette::shell_dark() {
             paint.fill = [0.807, 0.784, 0.73, 1.0]; // #e8e5de
-            paint.ink = self.filer_palette().ink;
+            // (The Apps' ink where it reads on the pale panel; an Apps Dark
+            // gave its light ink there, 1:1.)
+            let ink = self.filer_palette().ink;
+            let lum = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            paint.ink = if (lum(paint.fill) + 0.05) / (lum(ink) + 0.05) >= 4.5 { ink } else { crate::options::ink_on(paint.fill) };
             paint.wash = [0.0, 0.0, 0.0, 0.06];
             return paint;
         }
@@ -5238,6 +5248,7 @@ impl App {
         } else {
             match crate::renderer::Renderer::new(&self.conn, win.window.wl_surface(), pw, ph, drawn) {
                 Ok(mut renderer) => {
+                    renderer.labels_linear = true;
                     if win.capacity > 0 {
                         renderer.alloc_icon_array(win.capacity);
                         win.uploaded.iter_mut().for_each(|u| *u = None);

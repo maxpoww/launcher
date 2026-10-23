@@ -298,7 +298,7 @@ pub(super) fn tones(pal: &Palette) -> Tones {
             carved_lit: mix(g, ink, 0.83),
             sunk: mix(g, ink, 0.08),
             dim: mix(g, ink, 0.52),
-            dim_text: [ink[0], ink[1], ink[2], 0.5],
+            dim_text: pal.quiet,
             line: mix(g, white, 0.08),
             field: mix(g, white, 0.08),
             hover: mix(g, white, 0.06),
@@ -315,7 +315,7 @@ pub(super) fn tones(pal: &Palette) -> Tones {
             carved_lit: carve(g, 0.55),
             sunk: carve(g, 0.16),
             dim: mix(g, ink, 0.52),
-            dim_text: [ink[0], ink[1], ink[2], 0.5],
+            dim_text: pal.quiet,
             line: mix(g, black, 0.09),
             field: mix(g, black, 0.05),
             hover: mix(g, black, 0.05),
@@ -1784,7 +1784,8 @@ impl App {
         let paint = self.filer_panel_paint(panel, pal.ground);
         let fill = paint.fill;
         let ink = [paint.ink[0], paint.ink[1], paint.ink[2], 0.86];
-        let dim = [paint.ink[0], paint.ink[1], paint.ink[2], 0.5];
+        // (Dim, still 3:1: black at half on the pale panel was 2:1.)
+        let dim = [paint.ink[0], paint.ink[1], paint.ink[2], 0.75];
         // (The menu's own fields: a step from what is under them, toward
         // black in the light, toward white in the dark.)
         let dark = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] < 0.18;
