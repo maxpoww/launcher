@@ -962,7 +962,7 @@
  "Dynamic": "Dinámico",
  "Colours on apps": "Colores en apps",
  "Colours on the web": "Colores en la web",
- "How everything looks. Some apps need a restart to show changes.": "Cómo se ve todo. Algunas apps necesitan reiniciarse para mostrar los cambios.",
+ "How everything looks. Some apps need a restart, and some web pages a reload, to show changes.": "Cómo se ve todo. Algunas apps necesitan reiniciarse, y algunas páginas web recargarse, para mostrar los cambios.",
  "Original": "Original",
  "Install": "Instalar",
  "Open with {app}": "Abrir con {app}",
