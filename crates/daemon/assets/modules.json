@@ -339,7 +339,12 @@
       },
       {
        "name": "Element",
-       "what": "Matrix messaging",
+       "what": "Matrix messaging, in your colours",
+       "web": "https://app.element.io"
+      },
+      {
+       "name": "Element desktop",
+       "what": "the desktop app, in its own colours",
        "pkg": "element-desktop"
       },
       {
