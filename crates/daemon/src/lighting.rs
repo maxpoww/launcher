@@ -33,7 +33,7 @@
 //! second run only for its 20 s, and a frame that lands on the same step
 //! redraws nothing.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use calloop::timer::{TimeoutAction, Timer};
@@ -89,6 +89,14 @@ const RETURN_CUE: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_secs(30);
 const FRAME: Duration = Duration::from_millis(66);
 const FADE: Duration = Duration::from_secs(20);
+/// The fade's length now: `FADE`, or a walk's step while one goes
+/// (`lighting_walk`).
+static FADE_MS: AtomicU64 = AtomicU64::new(20_000);
+fn fade_time() -> Duration {
+    Duration::from_millis(FADE_MS.load(Ordering::Relaxed))
+}
+/// Where the veil begins on the line: Light 44.
+const VEIL_FROM: u8 = 75;
 /// A change smaller than this is not worth a fade: one point of the line
 /// (~0.005 of lightness on the grounds, under what an eye sees change).
 const MIN_STEP: u8 = 1;
@@ -143,7 +151,7 @@ fn eased(from: u8, to: u8, elapsed: Duration, span: Duration) -> u8 {
 
 /// Where the fade is after `elapsed`: eased from `from` to `to`.
 pub(crate) fn fade_value(from: u8, to: u8, elapsed: Duration) -> u8 {
-    eased(from, to, elapsed, FADE)
+    eased(from, to, elapsed, fade_time())
 }
 
 /// Where a fade ON THE LINE is after `elapsed`. Within a look, [`fade_value`].
@@ -160,8 +168,8 @@ pub(crate) fn fade_line(from: u8, to: u8, elapsed: Duration) -> u8 {
     let a = f64::from(from.abs_diff(edge_from));
     let b = f64::from(to.abs_diff(edge_to));
     let total = (a + b).max(1.0);
-    let ta = FADE.mul_f64(a / total);
-    let tb = FADE.mul_f64(b / total);
+    let ta = fade_time().mul_f64(a / total);
+    let tb = fade_time().mul_f64(b / total);
     if elapsed < ta {
         return eased(from, edge_from, elapsed, ta);
     }
@@ -175,7 +183,7 @@ pub(crate) fn fade_line(from: u8, to: u8, elapsed: Duration) -> u8 {
 
 /// How long a fade from `from` to `to` takes: the leap added when it crosses.
 pub(crate) fn fade_len(from: u8, to: u8) -> Duration {
-    if palette::line_to(from).0 == palette::line_to(to).0 { FADE } else { FADE + GAP }
+    if palette::line_to(from).0 == palette::line_to(to).0 { fade_time() } else { fade_time() + GAP }
 }
 
 /// Whether a line value is in the gap (the leap between the looks).
@@ -188,18 +196,18 @@ pub(crate) fn decide(current: u8, target: u8) -> Option<u8> {
     (current.abs_diff(target) >= MIN_STEP).then_some(target)
 }
 
-/// The black wash over the wallpaper at a point of the LINE: none in the
-/// Light look and from Dark 50 up, 0.45 at Dark 0. (`on`: the wallpaper's
-/// Lighting is on this line at all.)
+/// The black wash over the wallpaper at a point of the LINE: one eased
+/// slope from nothing at Light 44 (`VEIL_FROM`) down through the gap to
+/// 0.45 at Dark 0 — the wallpaper darkens all through dusk with no step at
+/// the switch (Max, 2026-10-22: the background stayed white past the switch;
+/// it began only under Dark 50). (`on`: the wallpaper's Lighting is on this
+/// line at all.)
 pub(crate) fn veil_alpha(line: u8, on: bool) -> f32 {
     if !on {
         return 0.0;
     }
-    let (dark, light) = palette::line_to(line);
-    if !dark {
-        return 0.0;
-    }
-    f32::from(50u8.saturating_sub(light)) / 50.0 * VEIL_MAX
+    let t = (f32::from(VEIL_FROM.saturating_sub(line)) / f32::from(VEIL_FROM)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t) * VEIL_MAX
 }
 
 /// The slot of a moment: the sun is looked at once a slot.
@@ -505,6 +513,20 @@ pub(crate) struct Lighting {
     owed: Option<(bool, Instant)>,
     /// The owner came back while a look was owed: it goes with their settling.
     returned: bool,
+    /// A walk of the line by hand in progress (`lighting_walk`).
+    walk: Option<Walk>,
+    /// A walk by hand ended away from the sun: the sun waits until a walk
+    /// back to it, or Auto turned on again.
+    walked: bool,
+}
+
+/// A walk of the line by hand: where to (or the sun's own line), a point
+/// every `step`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Walk {
+    to: u8,
+    step: Duration,
+    sun: bool,
 }
 
 impl Lighting {
@@ -523,6 +545,8 @@ impl Lighting {
             last_tick: None,
             owed: None,
             returned: false,
+            walk: None,
+            walked: false,
         }
     }
 
@@ -565,6 +589,7 @@ impl App {
     pub(crate) fn lighting_mirror(&mut self, on: bool) {
         if self.lighting.on != on {
             self.lighting.on = on;
+            self.lighting.walked = false;
             self.lighting.plan.absent();
             if !on {
                 hold(None);
@@ -607,6 +632,10 @@ impl App {
         if !self.lighting.on {
             return;
         }
+        // A walk by hand: the sun waits.
+        if self.lighting.walk.is_some() || self.lighting.walked {
+            return;
+        }
         let unix = unix_now();
         let facts = Facts {
             at: self.lighting.since_start(),
@@ -640,6 +669,11 @@ impl App {
         } else {
             self.look_set(dark);
         }
+        // A wallpaper that follows the colours takes the new look's card with
+        // the apps (its own picture's fade, under the same dissolve) — it
+        // stayed light behind dark apps (Max, 2026-10-22: "my BG is white
+        // still").
+        crate::wall_follow::refresh();
     }
 
     /// …under a still of every screen dissolving slowly to the result
@@ -658,7 +692,94 @@ impl App {
     }
 
     /// Auto was just turned on, by the owner: the light goes to the sun's now.
+    /// WALK THE LINE BY HAND (Max, 2026-10-22: "we change from dark to
+    /// light, that includes all, even the wallpaper, it have to be 5 mins
+    /// smooth and even"): from what is shown to `to` (None: the sun's own
+    /// line) over about `secs`, a point at a time through the same fades —
+    /// the shell, the veil and the apps step by step, the switch between the
+    /// looks under the slow dissolve. Ended away from the sun, the sun waits
+    /// until a walk back to it (or Auto turned on).
+    pub(crate) fn lighting_walk(&mut self, to: Option<u8>, secs: u32) -> String {
+        let from = self.lighting_shown();
+        let target = match to {
+            Some(v) => v.min(100),
+            None => match options_engine::sun_elevation_deg(unix_now() as f64) {
+                Some(e) => line(e),
+                None => return "no sun to walk to (no place from the time zone)".to_owned(),
+            },
+        };
+        if from == target {
+            self.lighting.walked = to.is_some();
+            return format!("already at {target}");
+        }
+        let crossing = palette::line_to(from).0 != palette::line_to(target).0;
+        let points = u32::from(from.abs_diff(target)).saturating_sub(if crossing { 10 } else { 0 }).max(1);
+        let along = Duration::from_secs(u64::from(secs)).saturating_sub(if crossing { GAP } else { Duration::ZERO });
+        let step = (along / points).max(Duration::from_millis(400));
+        FADE_MS.store(step.as_millis() as u64, Ordering::Relaxed);
+        let fresh = self.lighting.walk.is_none();
+        self.lighting.walk = Some(Walk { to: target, step, sun: to.is_none() });
+        self.lighting.walked = false;
+        if fresh {
+            let timer = Timer::from_duration(step);
+            let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| match app.lighting_walk_step() {
+                Some(next) => TimeoutAction::ToDuration(next),
+                None => TimeoutAction::Drop,
+            });
+            if let Err(e) = armed {
+                self.lighting.walk = None;
+                FADE_MS.store(FADE.as_millis() as u64, Ordering::Relaxed);
+                return format!("no timer for the walk ({e})");
+            }
+        }
+        info!("lighting: walking {from} -> {target} by hand, a point every {:.1} s", step.as_secs_f64());
+        format!("walking {from} -> {target}, a point every {:.1} s", step.as_secs_f64())
+    }
+
+    /// The point of the line shown now: the fade's step, else the shell's.
+    fn lighting_shown(&self) -> u8 {
+        self.lighting.fade.as_ref().map_or_else(
+            || {
+                let lv = palette::choice().levels_now(palette::Surface::Shell);
+                palette::line_of(lv.dark, lv.light)
+            },
+            |f| f.shown,
+        )
+    }
+
+    /// One step of a walk; when to come again, or None: it is over.
+    fn lighting_walk_step(&mut self) -> Option<Duration> {
+        let w = self.lighting.walk?;
+        // A fade, or the switch's dissolve, still going: wait for it.
+        if self.lighting.fade.is_some() || self.dissolve.is_some() {
+            return Some(Duration::from_millis(200));
+        }
+        let to = if w.sun { options_engine::sun_elevation_deg(unix_now() as f64).map_or(w.to, line) } else { w.to };
+        let from = self.lighting_shown();
+        if from == to {
+            self.lighting.walk = None;
+            self.lighting.walked = !w.sun;
+            FADE_MS.store(FADE.as_millis() as u64, Ordering::Relaxed);
+            info!("lighting: the walk by hand is done at {to}{}", if w.sun { " (the sun's: it takes over)" } else { " (the sun waits)" });
+            return None;
+        }
+        let up = to > from;
+        let next = if up { from + 1 } else { from - 1 };
+        let next = if in_gap(next) { if up { 55 } else { 45 } } else { next };
+        SUN.store(next, Ordering::Relaxed);
+        self.lighting_fade(from, next);
+        if self.lighting.fade.is_none() {
+            // (Neither the colours' nor the wallpaper's light follows the line.)
+            self.lighting.walk = None;
+            FADE_MS.store(FADE.as_millis() as u64, Ordering::Relaxed);
+            info!("lighting: the walk stops — no Ambient to walk");
+            return None;
+        }
+        Some(w.step)
+    }
+
     pub(crate) fn lighting_auto_on(&mut self) {
+        self.lighting.walked = false;
         self.lighting.plan.looked(slot_key(unix_now()));
         self.lighting_look();
     }
@@ -1068,13 +1189,19 @@ mod tests {
     }
 
     #[test]
-    fn the_veil_is_a_wash_below_fifty_and_only_when_asked() {
+    fn the_veil_is_one_slope_through_dusk_and_only_when_asked() {
         use crate::palette::line_of;
-        assert_eq!(veil_alpha(line_of(true, 80), true), 0.0);
-        assert_eq!(veil_alpha(line_of(true, 50), true), 0.0);
-        assert!((veil_alpha(line_of(true, 0), true) - 0.45).abs() < 1e-6);
-        assert!((veil_alpha(line_of(true, 25), true) - 0.225).abs() < 0.012, "(within the line's step)");
-        assert_eq!(veil_alpha(line_of(false, 0), true), 0.0, "the Light look has no wash");
+        assert_eq!(veil_alpha(line_of(false, 60), true), 0.0, "a bright day: none");
+        assert_eq!(veil_alpha(line_of(false, 44), true), 0.0, "it begins at Light 44");
+        assert!((veil_alpha(line_of(true, 0), true) - 0.45).abs() < 1e-6, "the darkest night: 0.45");
+        let (before, after) = (veil_alpha(line_of(false, 0), true), veil_alpha(line_of(true, 100), true));
+        assert!(before > 0.0 && after > before && after - before < 0.09, "no step at the switch: {before} → {after}");
+        let mut prev = 0.0;
+        for v in (0..=100u8).rev() {
+            let a = veil_alpha(v, true);
+            assert!(a >= prev, "it only deepens as the line goes down");
+            prev = a;
+        }
         assert_eq!(veil_alpha(line_of(true, 0), false), 0.0, "the switch off draws nothing");
     }
 

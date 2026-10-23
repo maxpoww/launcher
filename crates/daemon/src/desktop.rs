@@ -6304,6 +6304,24 @@ impl App {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
         }
+        // `walk <light|dark|sun|line> <seconds>`: the light walked by hand
+        // (`lighting_walk`): light = Light 60, dark = Dark 20, sun = back to
+        // the sun's own line (it takes over there).
+        if let Some(rest) = what.strip_prefix("walk ") {
+            let mut words = rest.split_whitespace();
+            let to = match words.next() {
+                Some("light") => Some(crate::palette::line_of(false, 60)),
+                Some("dark") => Some(crate::palette::line_of(true, 20)),
+                Some("sun") => None,
+                Some(n) => match n.parse::<u8>() {
+                    Ok(v) => Some(v),
+                    Err(_) => return format!("walk to what? {n}"),
+                },
+                None => return "walk <light|dark|sun|line> <seconds>".to_owned(),
+            };
+            let secs = words.next().and_then(|s| s.parse().ok()).unwrap_or(300);
+            return self.lighting_walk(to, secs);
+        }
         // `dissolve`: the light's slow dissolve over every screen with
         // nothing changed under it (it must look like nothing but a beat).
         if what.trim() == "dissolve" {

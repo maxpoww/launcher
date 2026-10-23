@@ -104,7 +104,9 @@ const HARD_CAP: Duration = Duration::from_millis(2000);
 /// in one frame (Max, 2026-10-21: the terminal went white to black in half a
 /// second, "aggressive").
 const SLOW_HOLD: Duration = Duration::from_millis(300);
-const SLOW_FADE: Duration = Duration::from_millis(2500);
+/// (8 s: in 2.5 a white screen going black read as a jump — Max,
+/// 2026-10-22, at the first dusk.)
+const SLOW_FADE: Duration = Duration::from_millis(8000);
 
 /// What is done under the still.
 pub(crate) type Then = Box<dyn FnOnce(&mut App)>;
