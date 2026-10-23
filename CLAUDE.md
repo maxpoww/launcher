@@ -342,12 +342,14 @@ The big daemon files are cohesive but long — go straight to the function:
   OWNER (Golem §7). Presence = ext-idle-notify-v1 (120 s "away", 3 s "quiet"; `hyprlock` running or a sleep =
   gone); `Plan` (pure, tested) says when to look: present AND settled (2 min after a dock start; 2 s after the
   first touch back from away — `RETURN_CUE`) AND not under a fullscreen window, every minute (`SLOT_SECS`, one
-  point of the line a fade, `MIN_STEP`); missed slots are never replayed. A step of more than 2 points, and every
-  switch between the looks, reaches the apps under the slow dissolve of every screen (`dissolve_slow`). The look starts a
+  point of the line a fade, `MIN_STEP`); missed slots are never replayed. THE SWITCH between the looks never happens
+  in front of the owner (Max, 2026-10-23, after a cut, 3/8/30 s dissolves and a twilight all showed): present, the
+  light stops at the look's edge (`within_look`: Light 0 at dusk, Dark 100 at dawn); away, locked or just back from a
+  sleep, the tick sets the sun's line AT ONCE, switch and wallpaper card included (`lighting_follow`/`lighting_set`). The look starts a
   20 s eased FADE: ~15 frames a second move only the SHELL's pair (`palette::ShellPlan`, made once; a frame on the
   same step redraws nothing) and the desktop's VEIL; the end saves the step (what the owner last saw) and the apps/
   web/files are made for it once, at the next quiet moment (`colors_apply`). Auto turned ON is the owner's act: the
-  fade starts at once; the slider turns Auto off. THE VEIL: a black wash under the desktop's icons (`Lighting` <
+  sun's line is set at once; the slider turns Auto off. THE VEIL: a black wash under the desktop's icons (`Lighting` <
   50, `veil_alpha`), a `RectInst` with `glass = VEIL_GLASS` (`rounded_rect.wgsl` skips the scene's fade for it).
   A change of the Lighting alone is a change for `colors_apply` (`lighting::applied`).
 - `wall_follow.rs` + `palette_card::wall_svg` — THE WALLPAPER THAT FOLLOWS YOUR COLOURS (Max, 2026-10-18): the

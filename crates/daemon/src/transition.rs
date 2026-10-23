@@ -21,10 +21,6 @@
 //!
 //! What is seen is one dissolve from the old screen to the new.
 //!
-//! The same, slower, carries the LIGHT across its two looks
-//! (`dissolve_slow`, `lighting.rs`): a still on EVERY screen, held while the
-//! apps take their new colours, faded out over 2.5 s.
-//!
 //! **Under the still, nothing glides.** The compositor slides every layer
 //! surface to its new place when a monitor is re-arranged (`layers`
 //! animation, ~0.4 s) and tiled windows fly to their new sizes; our own card
@@ -96,32 +92,9 @@ const HOLD: Duration = Duration::from_millis(180);
 /// The fade from the still to the new screen.
 const FADE: Duration = Duration::from_millis(260);
 const FADE_TICK: Duration = Duration::from_millis(16);
-/// A slow dissolve hurried away (`dissolve_hurry`) is gone this fast.
-const HURRY: Duration = Duration::from_millis(250);
 /// The still is taken down by now whatever happened: a frozen picture left
 /// over the desktop would look like a hang.
 const HARD_CAP: Duration = Duration::from_millis(2000);
-/// THE SLOW DISSOLVE (`dissolve_slow`), for the light crossing between the
-/// looks: the apps' new look shows through the still as a light dims, never
-/// in one frame (Max, 2026-10-21: the terminal went white to black in half a
-/// second, "aggressive").
-/// (50 ms: held 300, the screen read as frozen at the start of a long one —
-/// Max, 2026-10-22: "the system gets frozen for 1 or 2 s".)
-const SLOW_HOLD: Duration = Duration::from_millis(50);
-/// (8 s: in 2.5 a white screen going black read as a jump — Max,
-/// 2026-10-22, at the first dusk.)
-const SLOW_FADE_MS: u64 = 8000;
-/// The slow dissolve's fade now: `SLOW_FADE_MS`, or a length set by hand
-/// (`set_slow_fade`; Max, 2026-10-22: the look's switch tried at 30 s).
-static SLOW_FADE_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SLOW_FADE_MS);
-fn slow_fade() -> Duration {
-    Duration::from_millis(SLOW_FADE_NOW.load(std::sync::atomic::Ordering::Relaxed))
-}
-pub(crate) fn set_slow_fade(d: Option<Duration>) {
-    let ms = d.map_or(SLOW_FADE_MS, |d| d.as_millis() as u64);
-    SLOW_FADE_NOW.store(ms, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// What is done under the still.
 pub(crate) type Then = Box<dyn FnOnce(&mut App)>;
 
@@ -230,20 +203,13 @@ impl Still {
 }
 
 /// A dissolve in flight: a still on each screen it covers (the screen whose
-/// scale changes; every screen for the light's look).
+/// scale changes).
 pub(crate) struct Dissolve {
     /// Tells this run's timers from a later run's.
     id: u64,
     then: Option<Then>,
-    /// The light's slow pace (`SLOW_HOLD`, `slow_fade`), not a scale's.
-    slow: bool,
     phase: Phase,
     stills: Vec<Still>,
-    /// How much of the old screen shows now (the stills' opacity).
-    shown: f32,
-    /// Something moved on its own under a slow one: since when it goes,
-    /// and from how much (`dissolve_hurry`).
-    hurry: Option<(Instant, f32)>,
 }
 
 impl Dissolve {
@@ -276,14 +242,6 @@ fn logical(px: (u32, u32), scale: f64) -> (i32, i32) {
     (side(px.0), side(px.1))
 }
 
-/// A SLOW dissolve's curve: it thins from the first frame (the live screen
-/// shows through at once — an eased start held the old screen still for a
-/// couple of seconds), more slowly as it goes.
-fn opacity_slow(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    (1.0 - t) * (1.0 - t)
-}
-
 /// The fade's curve: the still's opacity `t` (0..1) of the way through.
 fn opacity(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -304,19 +262,10 @@ impl App {
     /// means to (or with motion reduced) `then` just runs.
     pub(crate) fn dissolve(&mut self, output_name: &str, new_scale: f64, then: Then) {
         let over = self.output_by_name(output_name).map(|o| vec![(o, Some(new_scale))]).unwrap_or_default();
-        self.dissolve_over(over, then, false);
+        self.dissolve_over(over, then);
     }
 
-    /// The light's dissolve: `then` — a change of the look, of no screen's
-    /// size — under a still of EVERY screen, held a moment longer for the
-    /// apps to take their new look, then faded out slowly (a screen left
-    /// bare was a cut in one frame — Max, 2026-10-21: "no jumps at all").
-    pub(crate) fn dissolve_slow(&mut self, then: Then) {
-        let over = self.output_state.outputs().map(|o| (o, None)).collect();
-        self.dissolve_over(over, then, true);
-    }
-
-    fn dissolve_over(&mut self, over: Vec<(WlOutput, Option<f64>)>, then: Then, slow: bool) {
+    fn dissolve_over(&mut self, over: Vec<(WlOutput, Option<f64>)>, then: Then) {
         // A second change while one dissolves: the first is finished at once.
         self.dissolve_end();
         let ready = !crate::animation::reduce_motion()
@@ -339,7 +288,7 @@ impl App {
                 Still::new(output, new_scale, frame)
             })
             .collect();
-        self.dissolve = Some(Dissolve { id, then: Some(then), slow, phase: Phase::Preparing, stills, shown: 1.0, hurry: None });
+        self.dissolve = Some(Dissolve { id, then: Some(then), phase: Phase::Preparing, stills });
         // Not covered in time: what is up covers its screen, and the change
         // is made rather than late.
         self.dissolve_timer(id, COVER_DEADLINE, |app| {
@@ -347,9 +296,8 @@ impl App {
                 app.dissolve_cover_late();
             }
         });
-        let cap = if slow { HARD_CAP + SLOW_HOLD + slow_fade() } else { HARD_CAP };
-        self.dissolve_timer(id, cap, move |app| {
-            warn!("dissolve: still up after {cap:?}; taking it down");
+        self.dissolve_timer(id, HARD_CAP, |app| {
+            warn!("dissolve: still up after {HARD_CAP:?}; taking it down");
             app.dissolve_end();
         });
     }
@@ -604,7 +552,7 @@ impl App {
 
     /// The stills are up: make the change under them.
     fn dissolve_cover(&mut self) {
-        let (id, then, slow) = {
+        let (id, then) = {
             let Some(d) = self.dissolve.as_mut() else {
                 return;
             };
@@ -622,7 +570,7 @@ impl App {
                     layer.wl_surface().commit();
                 }
             }
-            (d.id, d.then.take(), d.slow)
+            (d.id, d.then.take())
         };
         if let Err(e) = self.conn.flush() {
             debug!("dissolve: flush failed: {e}");
@@ -634,26 +582,7 @@ impl App {
         if let Some(then) = then {
             then(self);
         }
-        self.dissolve_timer(id, if slow { SLOW_HOLD } else { HOLD }, move |app| app.dissolve_fade(id));
-    }
-
-    /// SOMETHING MOVED ON ITS OWN under a slow dissolve — a workspace swipe
-    /// beginning, a window opening, closing or moving, the overview: the still
-    /// of the old screen gets out of the way in `HURRY`, or it stands over the
-    /// windows going by, pinned and see-through (Max, 2026-10-22: "i swipe to
-    /// the next WS and the windows on my current follow me like they are
-    /// pinned… all the windows get transparent and mixed").
-    pub(crate) fn dissolve_hurry(&mut self, why: &str) {
-        let Some(d) = self.dissolve.as_mut() else { return };
-        if !d.slow || d.hurry.is_some() || d.phase == Phase::Preparing {
-            return;
-        }
-        d.hurry = Some((Instant::now(), d.shown));
-        if d.phase == Phase::Covered {
-            // (The hold's timer starts the fade, hurried.)
-            d.phase = Phase::Fading(Instant::now());
-        }
-        info!("dissolve: {why}: the still goes now");
+        self.dissolve_timer(id, HOLD, move |app| app.dissolve_fade(id));
     }
 
     /// Fade the stills out, a tick at a time, then take them down.
@@ -670,19 +599,8 @@ impl App {
                     now
                 }
             };
-            let fade = if d.slow { slow_fade() } else { FADE };
-            let (t, a) = match d.hurry {
-                // Hurried: from what showed then to nothing in `HURRY`.
-                Some((at, a0)) => {
-                    let k = at.elapsed().as_secs_f32() / HURRY.as_secs_f32();
-                    (k, a0 * (1.0 - k).max(0.0))
-                }
-                None => {
-                    let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
-                    (t, if d.slow { opacity_slow(t) } else { opacity(t) })
-                }
-            };
-            d.shown = a;
+            let t = from.elapsed().as_secs_f32() / FADE.as_secs_f32();
+            let a = opacity(t);
             if t < 1.0 {
                 let multiplier = (f64::from(a) * f64::from(u32::MAX)) as u32;
                 for s in &d.stills {
@@ -747,19 +665,6 @@ mod tests {
         assert_eq!(logical((1440, 900), 100.0 / 120.0), (1728, 1080));
         assert_eq!(logical((1440, 900), 1.5), (960, 600));
         assert_eq!(logical((3200, 2000), 1.6), (2000, 1250));
-    }
-
-    #[test]
-    fn a_slow_fade_thins_from_the_first_frame() {
-        assert_eq!(opacity_slow(0.0), 1.0);
-        assert_eq!(opacity_slow(1.0), 0.0);
-        assert!(opacity_slow(0.07) < 0.9, "two seconds into thirty, the live screen shows through");
-        let mut last = 1.0;
-        for i in 1..=20 {
-            let a = opacity_slow(i as f32 / 20.0);
-            assert!(a < last);
-            last = a;
-        }
     }
 
     #[test]

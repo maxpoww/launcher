@@ -1297,13 +1297,6 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // `workspacev2>>ID,NAME` — the space changed. Hand back
                         // the window that was left there, if the way in didn't
                         // (see [`crate::focus_cycle`]).
-                        // Windows moving on their own: a slow dissolve's still
-                        // gets out of the way (`dissolve_hurry`).
-                        if ["openwindow", "closewindow", "movewindow", "changefloatingmode", "fullscreen"].iter().any(|e| name.starts_with(e))
-                            || (name.starts_with("workspace") && !name.starts_with("workspacerule"))
-                        {
-                            app.dissolve_hurry(name);
-                        }
                         if name.starts_with("workspace") && !name.starts_with("workspacerule") {
                             if let Some(id) = line
                                 .split(">>")

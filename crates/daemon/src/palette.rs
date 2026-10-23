@@ -293,7 +293,7 @@ impl ColorChoice {
     /// [`levels`] with what is true now: the sun's line while a fade shows it,
     /// and the shell's look.
     pub(crate) fn levels_now(&self, s: Surface) -> Levels {
-        self.levels(s, crate::lighting::ambient_line_for(s), crate::look::dark())
+        self.levels(s, crate::lighting::ambient_line(), crate::look::dark())
     }
 }
 
@@ -754,9 +754,9 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
     .unwrap_or_else(golem);
     // Each surface through its levels: Auto's defaults and Ambient's sun apply
     // here (the programs and the web through the held look, if one).
-    let apps = choice.levels(Surface::Apps, crate::lighting::ambient_line_for(Surface::Apps), dark);
-    let web = choice.levels(Surface::Web, crate::lighting::ambient_line_for(Surface::Web), dark);
-    let icons = choice.levels(Surface::Icons, crate::lighting::ambient_line_for(Surface::Icons), dark);
+    let apps = choice.levels(Surface::Apps, crate::lighting::ambient_line(), dark);
+    let web = choice.levels(Surface::Web, crate::lighting::ambient_line(), dark);
+    let icons = choice.levels(Surface::Icons, crate::lighting::ambient_line(), dark);
     let apps_tint = apps.tint;
     let web_tint = web.tint;
     // (The shell's own hues kept readable too: Fluor's and Golem's light
@@ -1123,70 +1123,11 @@ pub(crate) mod tint {
     const DARK_TOP: [f32; 4] = [0.30, 0.34, 0.39, 0.47];
     const LIGHT_FLOOR: [f32; 4] = [0.72, 0.68, 0.62, 0.55];
 
-    /// TWILIGHT (Max, 2026-10-22: "in 10 mins from the less dark to the less
-    /// light"): a point BETWEEN the looks — 0 the lightest dark (Dark 100) …
-    /// 1000 the dimmest light (Light 0) — the grounds through soft greys,
-    /// the text turning at the middle (`TWILIGHT_FLIP`), where both read.
-    /// While it is set every walk is lit by it, not by its Lighting; Seam's
-    /// Dark Reader pairs are made `without_twilight` (a new pair restarts
-    /// Dark Reader: every page would flash at every step).
-    static TWILIGHT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(u16::MAX);
-    thread_local! {
-        static PLAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-    pub(crate) const TWILIGHT_FLIP: u16 = 500;
-    /// The page's ground where the looks meet: light text reads on the dark
-    /// side's, dark text on the light side's, each about 4.5 : 1.
-    const MEET_DARK: f32 = 0.565;
-    const MEET_LIGHT: f32 = 0.585;
-    pub(crate) fn set_twilight(t: Option<u16>) {
-        TWILIGHT.store(t.map_or(u16::MAX, |t| t.min(1000)), std::sync::atomic::Ordering::Relaxed);
-    }
-    pub(crate) fn twilight() -> Option<u16> {
-        let t = TWILIGHT.load(std::sync::atomic::Ordering::Relaxed);
-        (t != u16::MAX).then_some(t)
-    }
-    pub(crate) fn without_twilight<R>(f: impl FnOnce() -> R) -> R {
-        PLAIN.with(|p| {
-            let was = p.replace(true);
-            let r = f();
-            p.set(was);
-            r
-        })
-    }
-
-    /// The grounds at twilight `t`: the dark variant's from Dark 100's up to
-    /// where the looks meet, the light variant's from there to Light 0's —
-    /// each ground keeping its distance from the page's.
-    pub(crate) fn twilit(c: &[Rgb; 16], dark: bool, t: u16) -> [Rgb; 16] {
-        let mut out = *c;
-        let l = |k: usize| lch(c[k]).0;
-        for k in 0..4 {
-            let target = if dark {
-                let s = (f32::from(t) / f32::from(TWILIGHT_FLIP)).min(1.0);
-                let start = |k: usize| (l(k) + 0.14).clamp(0.0, DARK_TOP[k]);
-                let meet = MEET_DARK + (start(k) - start(0));
-                start(k) + (meet - start(k)) * s
-            } else {
-                let s = (f32::from(t.saturating_sub(TWILIGHT_FLIP)) / f32::from(1000 - TWILIGHT_FLIP)).min(1.0);
-                let end = |k: usize| (l(k) - 0.12).clamp(LIGHT_FLOOR[k], 1.0);
-                let meet = MEET_LIGHT + (end(k) - end(0));
-                meet + (end(k) - meet) * s
-            };
-            let (_, cc, h) = lch(c[k]);
-            out[k] = from_lch(target.clamp(0.0, 1.0), cc, h);
-        }
-        inks_read(c, out)
-    }
-
     /// The grounds (base00..03) moved by the Lighting `v`, within the look's
     /// band — the dark from black up to a dim grey, the light from soft paper
     /// up to white — hue and colour kept; the inks left (they read on every
-    /// ground of the band). 50 changes nothing. (A twilight set: by it.)
+    /// ground of the band). 50 changes nothing.
     pub(crate) fn lit(c: &[Rgb; 16], dark: bool, v: u8) -> [Rgb; 16] {
-        if let Some(t) = twilight().filter(|_| !PLAIN.with(std::cell::Cell::get)) {
-            return twilit(c, dark, t);
-        }
         if v == 50 {
             return *c;
         }
@@ -2233,17 +2174,14 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     // Seam hands Dark Reader a new pair by restarting it, and every open page
     // loses its colours for that moment — a flash at every step of the day
     // (Max, 2026-10-21: "no jumps at all"). So the pair is the look's as
-    // designed; it changes with the look, under the slow dissolve.
+    // designed; it changes with the look.
     let web_light = if picked.ambient_of(Surface::Web) { 50 } else { shell.web_light };
     // (Off with its Dark clicked: the start of the path — the grounds with no colour.)
-    // (Never a twilight's: a new pair restarts Dark Reader, every page flashes.)
-    let mut wv = tint::without_twilight(|| {
-        if web_dark_off {
-            tint::saturate(&tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, web_light), shell.web_sat)
-        } else {
-            tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint, web_light, shell.web_sat)
-        }
-    });
+    let mut wv = if web_dark_off {
+        tint::saturate(&tint::lit(&tint::at(&wv, pal.dark[pal.accent], 0.0, true), true, web_light), shell.web_sat)
+    } else {
+        tint::walk(&wv, pal.dark[pal.accent], shell.web_dark, shell.web_tint, web_light, shell.web_sat)
+    };
     if web_dark_off {
         // …and the ink with no colour either (Hacker's is green: ASUS,
         // 2026-10-16, "the text on wikipedia is green").
@@ -2256,7 +2194,7 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     // The webapps' pair for Dark Reader (the apps' row) — the same: under
     // Ambient the apps' look as designed, not base01/base05, which follow
     // the light for Seam's own bar.
-    let steady = if picked.ambient_of(Surface::Apps) { tint::without_twilight(|| for_apps(&Theme { apps_light: 50, ..shell.clone() })) } else { t.clone() };
+    let steady = if picked.ambient_of(Surface::Apps) { for_apps(&Theme { apps_light: 50, ..shell.clone() }) } else { t.clone() };
     m.insert("apps_bg".into(), format!("#{}", hex(steady.c[1])).into());
     m.insert("apps_ink".into(), format!("#{}", hex(steady.c[5])).into());
     // (What a Seam from before 2026-10-15 reads: it only darkened.)
@@ -3821,32 +3759,6 @@ mod tests {
         };
         assert_eq!(pair(true, 30), pair(true, 60), "Ambient: one pair a look");
         assert_ne!(pair(false, 30), pair(false, 60), "by hand: the Lighting reaches the pages");
-    }
-
-    #[test]
-    fn twilight_goes_from_the_lightest_dark_to_the_dimmest_light_in_steps_nobody_sees() {
-        let mut worst_text = f32::MAX;
-        for p in all() {
-            let (d, l) = (p.dark, p.light);
-            assert_eq!(tint::twilit(&d, true, 0), tint::lit(&d, true, 100), "{}: it starts at Dark 100", p.id);
-            assert_eq!(tint::twilit(&l, false, 1000), tint::lit(&l, false, 0), "{}: it ends at Light 0", p.id);
-            let mut page = |t: u16| {
-                let (c, dark) = if t < tint::TWILIGHT_FLIP { (d, true) } else { (l, false) };
-                let lit = tint::twilit(&c, dark, t);
-                worst_text = worst_text.min(contrast(rel_lum(lit[5]), rel_lum(lit[0])));
-                tint::lch(lit[0]).0
-            };
-            let mut prev = page(0);
-            for t in (8..=1000).step_by(8) {
-                let g = page(t);
-                let flip = t >= tint::TWILIGHT_FLIP && t - 8 < tint::TWILIGHT_FLIP;
-                // (One level of an 8-bit colour near black is ~0.01 of lightness.)
-                let most = if flip { 0.035 } else { 0.012 };
-                assert!((g - prev).abs() < most, "{}: the page's ground moved {:.4} at {t}", p.id, (g - prev).abs());
-                prev = g;
-            }
-        }
-        assert!(worst_text >= 3.0, "the text reads all through twilight: {worst_text:.2}");
     }
 
     #[test]

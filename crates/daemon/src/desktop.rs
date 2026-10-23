@@ -6304,54 +6304,6 @@ impl App {
         if self.desktop_layer.is_none() {
             return "no desktop surface (disabled, or closed)".to_owned();
         }
-        // `twilight <0..1000|off>`: the point between the looks by hand
-        // (`lighting_twilight`): 0 the lightest dark, 1000 the dimmest light.
-        // `twilight <t> fade <seconds>`: there under the slow dissolve, its
-        // fade that long (the look's switch, crossfaded by hand).
-        if let Some((t, secs)) = what.strip_prefix("twilight ").and_then(|r| r.split_once(" fade ")) {
-            let (Ok(t), Ok(secs)) = (t.trim().parse::<u16>(), secs.trim().parse::<u64>()) else {
-                return "twilight <t> fade <seconds>".to_owned();
-            };
-            crate::transition::set_slow_fade(Some(std::time::Duration::from_secs(secs.max(1))));
-            self.dissolve_slow(Box::new(move |app: &mut crate::App| {
-                app.lighting_twilight(Some(t));
-            }));
-            return format!("twilight {t} under a {secs} s dissolve");
-        }
-        if let Some(rest) = what.strip_prefix("twilight ") {
-            let t = match rest.trim() {
-                "off" => None,
-                n => match n.parse::<u16>() {
-                    Ok(v) => Some(v),
-                    Err(_) => return format!("twilight what? {n}"),
-                },
-            };
-            return self.lighting_twilight(t);
-        }
-        // `walk <light|dark|sun|line> <seconds>`: the light walked by hand
-        // (`lighting_walk`): light = Light 60, dark = Dark 20, sun = back to
-        // the sun's own line (it takes over there).
-        if let Some(rest) = what.strip_prefix("walk ") {
-            let mut words = rest.split_whitespace();
-            let to = match words.next() {
-                Some("light") => Some(crate::palette::line_of(false, 60)),
-                Some("dark") => Some(crate::palette::line_of(true, 20)),
-                Some("sun") => None,
-                Some(n) => match n.parse::<u8>() {
-                    Ok(v) => Some(v),
-                    Err(_) => return format!("walk to what? {n}"),
-                },
-                None => return "walk <light|dark|sun|line> <seconds>".to_owned(),
-            };
-            let secs = words.next().and_then(|s| s.parse().ok()).unwrap_or(300);
-            return self.lighting_walk(to, secs);
-        }
-        // `dissolve`: the light's slow dissolve over every screen with
-        // nothing changed under it (it must look like nothing but a beat).
-        if what.trim() == "dissolve" {
-            self.dissolve_slow(Box::new(|_: &mut crate::App| info!("dissolve: covered (nothing changed under it)")));
-            return "slow dissolve over every screen".to_owned();
-        }
         // `peek …`: Quick Look's pencil without a pointer (`edit_debug`).
         if let Some(rest) = what.strip_prefix("peek ") {
             return self.edit_debug(rest);
