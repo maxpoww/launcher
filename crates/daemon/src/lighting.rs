@@ -643,11 +643,16 @@ impl App {
         }
     }
 
-    /// The point of the line shown now: the fade's step, else the shell's.
+    /// The point of the line shown now: the fade's step, else the line of
+    /// what follows the sun — the shell's, else the wallpaper's. (With only
+    /// the wallpaper's Ambient on, the shell's own line is not the sun's:
+    /// read, it set the light again every tick — Max's dock, 2026-10-23.)
     fn lighting_shown(&self) -> u8 {
         self.lighting.fade.as_ref().map_or_else(
             || {
-                let lv = palette::choice().levels_now(palette::Surface::Shell);
+                let picked = palette::choice();
+                let s = if picked.ambient_of(palette::Surface::Shell) { palette::Surface::Shell } else { palette::Surface::Wall };
+                let lv = picked.levels_now(s);
                 palette::line_of(lv.dark, lv.light)
             },
             |f| f.shown,
