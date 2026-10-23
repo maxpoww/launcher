@@ -7539,6 +7539,17 @@ impl crate::App {
                 alpha,
             ]
         };
+        // The toned glass's plates are LIGHT (Max, 2026-10-23, the mockup's
+        // C2): the wallpaper's own colour, solid — one step lighter than the
+        // toned card.
+        let k = self.dock_tone();
+        let plate_target = match self.dock_regime().get() {
+            Some(back) if k > 0.0 => std::array::from_fn(|i| {
+                let to = if i == 3 { 1.0 } else { back[i] };
+                plate_target[i] + (to - plate_target[i]) * k
+            }),
+            _ => plate_target,
+        };
         let (plate, plate_moving) = ease_rgba(
             &mut self.dock_plate_anim,
             plate_target,
@@ -7547,7 +7558,6 @@ impl crate::App {
             hidden,
         );
         // (Eased with the fill, so the card's density and shadow move with it.)
-        let k = self.dock_tone();
         let (tone, tone_moving) = ease_rgba(&mut self.dock_tone_anim, [k; 4], dt, DOCK_FILL_RATE, hidden);
         DockPaint {
             fill,
