@@ -102,18 +102,34 @@ pub(crate) fn kde_scheme(t: &Theme) -> Vec<(String, Vec<(String, String)>)> {
     // light accent wore ink_dim, the links and the accent itself at 1–2:1
     // (India Ink, 2026-10-20).
     let on = t.accent_ink();
-    let mut selection = set(t.accent(), mix(t.accent(), c[0], 0.3), on);
+    // (The alternate selection a step toward the ground, no further than
+    // its words still read 4.5:1 on it.)
+    let mut k = 0.3;
+    while k > 0.0 && crate::palette::contrast(crate::palette::rel_lum(on), crate::palette::rel_lum(mix(t.accent(), c[0], k))) < 4.5 {
+        k -= 0.02;
+    }
+    let alt = mix(t.accent(), c[0], k.max(0.0));
+    // (The faint one a step toward the accent, no further than 3:1 on both.)
+    let reads = |x: Rgb| [t.accent(), alt].iter().all(|g| crate::palette::contrast(crate::palette::rel_lum(x), crate::palette::rel_lum(*g)) >= 3.0);
+    let mut f = 0.2;
+    while f > 0.0 && !reads(mix(on, t.accent(), f)) {
+        f -= 0.02;
+    }
+    let faint = mix(on, t.accent(), f.max(0.0));
+    let mut selection = set(t.accent(), alt, on);
     for (k, v) in &mut selection {
         if k.starts_with("Foreground") {
-            *v = rgb(if k == "ForegroundInactive" { mix(on, t.accent(), 0.2) } else { on });
+            *v = rgb(if k == "ForegroundInactive" { faint } else { on });
         }
     }
     vec![
         ("Colors:Window".into(), set(c[1], c[2], ink)),
         ("Colors:View".into(), set(c[0], c[1], ink)),
-        ("Colors:Button".into(), set(c[2], c[3], ink)),
+        // (Alternates on base01, not base03 — a ground no words were made
+        // to read on: the legibility audit, 2026-10-23.)
+        ("Colors:Button".into(), set(c[2], c[1], ink)),
         ("Colors:Header".into(), set(c[1], c[2], ink)),
-        ("Colors:Tooltip".into(), set(c[2], c[3], ink)),
+        ("Colors:Tooltip".into(), set(c[2], c[1], ink)),
         ("Colors:Complementary".into(), set(c[0], c[1], ink)),
         ("Colors:Selection".into(), selection),
     ]

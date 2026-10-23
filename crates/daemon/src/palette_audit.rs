@@ -305,7 +305,6 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
         ("StatusLine c4 on c2", 4, 2, TEXT),
         ("Search, Substitute c1 on cA", 1, 0xA, TEXT),
         ("IncSearch, CurSearch c1 on c9", 1, 9, TEXT),
-        ("WildMenu c8 on cA", 8, 0xA, TEXT),
         ("Todo cA on c1", 0xA, 1, TEXT),
         ("TabLineSel, DiffAdd cB on c1", 0xB, 1, TEXT),
         ("DiffDelete c8 on c1", 8, 1, TEXT),
@@ -313,6 +312,14 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
         ("DiffText cD on c1", 0xD, 1, TEXT),
     ] {
         a.app("Apps · Neovim", rule, nvc(fg), nvc(b), floor);
+    }
+    // WildMenu: as nvim.lua sets it over mini.base16's.
+    let lua = nvim_lua(apps);
+    let wild = lua.lines().find(|l| l.contains("'WildMenu'")).map(|l| l.split('\'').filter_map(parse_hex).collect::<Vec<S>>());
+    if let Some([fg, bg]) = wild.as_deref() {
+        a.app("Apps · Neovim", "WildMenu (as set)", *fg, *bg, TEXT);
+    } else {
+        a.app("Apps · Neovim", "WildMenu c8 on cA (mini's own)", nvc(8), nvc(0xA), TEXT);
     }
     for h in 8..16 {
         a.app("Apps · Neovim", &format!("syntax c{h:X} on c0"), nvc(h), nvc(0), TEXT);

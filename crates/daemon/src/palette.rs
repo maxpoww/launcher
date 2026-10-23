@@ -474,15 +474,9 @@ impl Theme {
     /// The ink that reads ON the accent: the palette's darkest or its
     /// brightest, whichever stands further from it.
     pub(crate) fn accent_ink(&self) -> Rgb {
-        let a = rel_lum(self.accent());
-        let (first, last) = (self.c[0x00], self.c[0x07]);
-        let best = if contrast(a, rel_lum(first)) >= contrast(a, rel_lum(last)) { first } else { last };
-        if contrast(a, rel_lum(best)) >= 4.5 {
-            return best;
-        }
-        // A mid-tone accent neither end reads on (the sweep: Braun's
-        // #d14118 took 4.2:1): pure black or white, whichever reads better.
-        if contrast(a, 0.0) >= contrast(a, 1.0) { [0, 0, 0] } else { [255, 255, 255] }
+        // (A mid-tone accent neither end reads on — the sweep: Braun's
+        // #d14118 took 4.2:1 — gets pure black or white.)
+        ink_on_fill(&self.c, self.accent())
     }
 }
 
@@ -2081,11 +2075,26 @@ fn readable(c: &mut [Rgb; 16], dark: bool, acc: usize) {
 }
 
 /// `x` as TEXT on the grounds of `c`: walked in lightness, hue and chroma
-/// kept, away from them, until it reads 4.5:1 on base00 and base01 and 3:1
-/// on base02. A light look's accent and links stood at 3–4.4:1 as text, 2:1
-/// in full colour; only the text moves (2026-10-20).
+/// kept, away from them, until it reads 4.5:1 on base00, base01 and base02.
+/// A light look's accent and links stood at 3–4.4:1 as text, 2:1 in full
+/// colour; only the text moves (2026-10-20). base02 at 4.5 too: it is where
+/// cards, popovers and dialogs carry their words (the legibility audit,
+/// 2026-10-23: the accent at 3:1 there failed in 41% of palettes).
 pub(crate) fn as_text(c: &[Rgb; 16], x: Rgb) -> Rgb {
-    reading(c, x, &[(0, 4.5), (1, 4.5), (2, 3.0)])
+    reading(c, x, &[(0, 4.5), (1, 4.5), (2, 4.5)])
+}
+
+/// The words that read ON a fill (a destructive button, a selection): the
+/// palette's darkest or brightest, whichever stands further from it — and
+/// where neither reads 4.5:1, pure black or white (one of them always does).
+pub(crate) fn ink_on_fill(c: &[Rgb; 16], fill: Rgb) -> Rgb {
+    let a = rel_lum(fill);
+    let (first, last) = (c[0x00], c[0x07]);
+    let best = if contrast(a, rel_lum(first)) >= contrast(a, rel_lum(last)) { first } else { last };
+    if contrast(a, rel_lum(best)) >= 4.5 {
+        return best;
+    }
+    if contrast(a, 0.0) >= contrast(a, 1.0) { [0, 0, 0] } else { [255, 255, 255] }
 }
 
 /// [`Theme::quiet`] for a palette's sixteen.
@@ -2346,14 +2355,21 @@ fn gtk4_css(t: &Theme) -> String {
             ("popover-fg-color", h(c[5])),
             ("thumbnail-bg-color", h(c[2])),
             ("thumbnail-fg-color", h(c[5])),
+            // (The -colors are words: text-safe. The -fg-colors on the
+            // fills are ours too — left out, libadwaita's white sat on a
+            // light green, 1.3:1 — the legibility audit, 2026-10-23.)
             ("destructive-bg-color", h(c[8])),
-            ("destructive-color", h(c[8])),
+            ("destructive-fg-color", h(ink_on_fill(c, c[8]))),
+            ("destructive-color", h(as_text(c, c[8]))),
             ("success-bg-color", h(c[0xB])),
-            ("success-color", h(c[0xB])),
+            ("success-fg-color", h(ink_on_fill(c, c[0xB]))),
+            ("success-color", h(as_text(c, c[0xB]))),
             ("warning-bg-color", h(c[0xA])),
-            ("warning-color", h(c[0xA])),
+            ("warning-fg-color", h(ink_on_fill(c, c[0xA]))),
+            ("warning-color", h(as_text(c, c[0xA]))),
             ("error-bg-color", h(c[8])),
-            ("error-color", h(c[8])),
+            ("error-fg-color", h(ink_on_fill(c, c[8]))),
+            ("error-color", h(as_text(c, c[8]))),
         ];
         vars.iter().map(|(k, v)| format!("  --{k}: {v};\n")).collect::<String>()
     };
@@ -2412,16 +2428,18 @@ fn gtk3_theme_css(t: &Theme, base: &Path) -> String {
         // Max, 2026-10-20, India Ink). Said outright here.
         ("theme_selected_bg_color", h(t.accent())),
         ("theme_selected_fg_color", h(t.accent_ink())),
-        ("destructive_color", h(c[8])),
+        // (The `_color`s are WORDS — an error's label, a destructive
+        // flat button — so the text-safe colour; the `_bg_color`s fills.)
+        ("destructive_color", h(t.as_text(c[8]))),
         ("destructive_bg_color", h(c[8])),
         ("destructive_fg_color", ink(c[8])),
-        ("error_color", h(c[8])),
+        ("error_color", h(t.as_text(c[8]))),
         ("error_bg_color", h(c[8])),
         ("error_fg_color", ink(c[8])),
-        ("success_color", h(c[0xB])),
+        ("success_color", h(t.as_text(c[0xB]))),
         ("success_bg_color", h(c[0xB])),
         ("success_fg_color", ink(c[0xB])),
-        ("warning_color", h(c[0xA])),
+        ("warning_color", h(t.as_text(c[0xA]))),
         ("warning_bg_color", h(c[0xA])),
         ("warning_fg_color", ink(c[0xA])),
     ] {
@@ -2430,15 +2448,10 @@ fn gtk3_theme_css(t: &Theme, base: &Path) -> String {
     out
 }
 
-/// The palette's darkest or brightest, whichever reads on `bg`.
+/// The palette's darkest or brightest, whichever reads on `bg` (else pure
+/// black or white: [`ink_on_fill`]).
 fn ink_for(t: &Theme, bg: Rgb) -> Rgb {
-    let a = rel_lum(bg);
-    let (first, last) = (t.c[0x00], t.c[0x07]);
-    if contrast(a, rel_lum(first)) >= contrast(a, rel_lum(last)) {
-        first
-    } else {
-        last
-    }
+    ink_on_fill(&t.c, bg)
 }
 
 /// adw-gtk3's stylesheet for a look, where the system keeps it.
@@ -2503,8 +2516,11 @@ fn qt_scheme(t: &Theme) -> String {
     let c = &t.c;
     let a = |x: Rgb| format!("#ff{}", hex(x));
     let dim = |x: Rgb| format!("#80{}", hex(x));
+    // (Disabled words: the palette's dim ink, which reads 3:1 on every
+    // ground — the ink at half its alpha did not, on 47% of palettes.)
+    let _ = dim;
     let roles = |text: Rgb, faint: bool| {
-        let ink = if faint { dim(text) } else { a(text) };
+        let ink = if faint { a(t.ink_dim()) } else { a(text) };
         [
             ink.clone(),          // WindowText
             a(c[2]),              // Button
@@ -2771,9 +2787,11 @@ fn btop_theme(t: &Theme) -> String {
         ("upload", (0xE, 0x9, 0x8)),
         ("process", (0xB, 0xA, 0x8)),
     ] {
-        put(&format!("{k}_start"), &h(s));
-        put(&format!("{k}_mid"), &h(m));
-        put(&format!("{k}_end"), &h(e));
+        // (Graphs are shapes: 3:1 on the ground and on the meters' base02.)
+        let g = |i: usize| format!("#{}", hex(reading(c, c[i], &[(0, 3.0), (2, 3.0)])));
+        put(&format!("{k}_start"), &g(s));
+        put(&format!("{k}_mid"), &g(m));
+        put(&format!("{k}_end"), &g(e));
     }
     out
 }
@@ -2785,15 +2803,23 @@ fn nvim_lua(t: &Theme) -> String {
     let mut c = t.c;
     c[0x03] = quiet(&t.c);
     c[0x04] = quiet_raised(&t.c);
+    // (…and the hues, its syntax and its messages, as words.)
+    for (slot, hue) in c.iter_mut().zip(t.c).skip(8) {
+        *slot = as_text(&t.c, hue);
+    }
     let palette: String = c.iter().enumerate().map(|(i, c)| format!("    {} = '#{}',\n", slot_name(i), hex(*c))).collect();
     format!(
         "-- Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change.\n\
          vim.o.background = '{}'\n\
          require('mini.base16').setup({{\n  palette = {{\n{}  }},\n  use_cterm = true,\n}})\n\
-         vim.g.colors_name = 'golem'\n",
+         vim.g.colors_name = 'golem'\n\
+         -- (mini.base16's WildMenu is red on yellow: the search's pair instead.)\n\
+         vim.api.nvim_set_hl(0, 'WildMenu', {{ fg = '#{}', bg = '#{}' }})\n",
         t.name,
         if t.dark { "dark" } else { "light" },
         palette,
+        hex(c[1]),
+        hex(c[0xA]),
     )
 }
 
@@ -2868,22 +2894,22 @@ fn sourceview_scheme(t: &Theme, id: &str) -> String {
         ("current-line-number", format!(r#"foreground="{}" background="{}""#, h(c[5]), h(c[1]))),
         ("cursor", format!(r#"foreground="{}""#, h(t.accent()))),
         ("bracket-match", format!(r#"foreground="{}" background="{}" bold="true""#, h(t.accent_text()), h(c[2]))),
-        ("search-match", format!(r#"background="{}""#, h(c[3]))),
+        ("search-match", format!(r#"foreground="{}" background="{}""#, h(ink_on_fill(c, c[3])), h(c[3]))),
         ("def:comment", format!(r#"foreground="{}" italic="true""#, h(t.quiet()))),
-        ("def:keyword", format!(r#"foreground="{}" bold="true""#, h(c[0xE]))),
-        ("def:statement", format!(r#"foreground="{}""#, h(c[0xE]))),
-        ("def:type", format!(r#"foreground="{}""#, h(c[0xA]))),
-        ("def:string", format!(r#"foreground="{}""#, h(c[0xB]))),
-        ("def:special-char", format!(r#"foreground="{}""#, h(c[0xC]))),
-        ("def:constant", format!(r#"foreground="{}""#, h(c[0x9]))),
-        ("def:number", format!(r#"foreground="{}""#, h(c[0x9]))),
-        ("def:identifier", format!(r#"foreground="{}""#, h(c[0xD]))),
-        ("def:function", format!(r#"foreground="{}""#, h(c[0xD]))),
-        ("def:preprocessor", format!(r#"foreground="{}""#, h(c[0xC]))),
-        ("def:error", format!(r#"foreground="{}" underline="error""#, h(c[8]))),
+        ("def:keyword", format!(r#"foreground="{}" bold="true""#, h(t.as_text(c[0xE])))),
+        ("def:statement", format!(r#"foreground="{}""#, h(t.as_text(c[0xE])))),
+        ("def:type", format!(r#"foreground="{}""#, h(t.as_text(c[0xA])))),
+        ("def:string", format!(r#"foreground="{}""#, h(t.as_text(c[0xB])))),
+        ("def:special-char", format!(r#"foreground="{}""#, h(t.as_text(c[0xC])))),
+        ("def:constant", format!(r#"foreground="{}""#, h(t.as_text(c[0x9])))),
+        ("def:number", format!(r#"foreground="{}""#, h(t.as_text(c[0x9])))),
+        ("def:identifier", format!(r#"foreground="{}""#, h(t.as_text(c[0xD])))),
+        ("def:function", format!(r#"foreground="{}""#, h(t.as_text(c[0xD])))),
+        ("def:preprocessor", format!(r#"foreground="{}""#, h(t.as_text(c[0xC])))),
+        ("def:error", format!(r#"foreground="{}" underline="error""#, h(t.as_text(c[8])))),
         ("def:note", format!(r#"foreground="{}" bold="true""#, h(t.accent_text()))),
         ("def:heading", format!(r#"foreground="{}" bold="true""#, h(t.accent_text()))),
-        ("def:link-text", format!(r#"foreground="{}" underline="single""#, h(c[0xD]))),
+        ("def:link-text", format!(r#"foreground="{}" underline="single""#, h(t.as_text(c[0xD])))),
     ];
     let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change. -->\n<style-scheme id=\"{id}\" name=\"Golem\" version=\"1.0\">\n  <author>Golem</author>\n  <description>The palette in use</description>\n",
@@ -2934,7 +2960,9 @@ fn signal_all(comm: &str, sig: libc::c_int) {
 /// base03, a ground, was invisible as the dim text programs print with it).
 /// One list for foot's file and for the live OSC, so the two never part.
 fn terminal16(c: &[Rgb; 16]) -> [Rgb; 16] {
-    [c[2], c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[5], quiet(c), c[8], c[0xB], c[0xA], c[0xD], c[0xE], c[0xC], c[7]]
+    // (The hues are words in a terminal: text-safe, 4.5:1 on its grounds.)
+    let w = |i: usize| as_text(c, c[i]);
+    [c[2], w(8), w(0xB), w(0xA), w(0xD), w(0xE), w(0xC), c[5], quiet(c), w(8), w(0xB), w(0xA), w(0xD), w(0xE), w(0xC), c[7]]
 }
 
 fn foot_osc(t: &Theme) -> String {
@@ -4070,7 +4098,10 @@ mod tests {
         assert_eq!(btop.matches("theme[").count(), 10 + 5 + 27);
         let osc = foot_osc(&t);
         assert!(osc.contains("\x1b]11;#16171a\x1b\\"), "ground");
-        assert!(osc.contains("\x1b]4;1;#e05252\x1b\\"), "red, as foot.ini");
+        // (Red as words — text-safe — the same in the live OSC as in foot.ini.)
+        let red = hex(as_text(&t.c, t.c[8]));
+        assert!(osc.contains(&format!("\x1b]4;1;#{red}\x1b\\")), "red, as words");
+        assert!(foot_ini(&t).contains(&format!("regular1={red}")), "red, as the live OSC");
         assert_eq!(osc.matches("\x1b]4;").count(), 16);
         assert_eq!(adwaita_accent([0x8a, 0xb4, 0xf0]), "blue");
         // Text on the peach accent is the dark end.
