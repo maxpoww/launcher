@@ -105,7 +105,9 @@ const HARD_CAP: Duration = Duration::from_millis(2000);
 /// looks: the apps' new look shows through the still as a light dims, never
 /// in one frame (Max, 2026-10-21: the terminal went white to black in half a
 /// second, "aggressive").
-const SLOW_HOLD: Duration = Duration::from_millis(300);
+/// (50 ms: held 300, the screen read as frozen at the start of a long one —
+/// Max, 2026-10-22: "the system gets frozen for 1 or 2 s".)
+const SLOW_HOLD: Duration = Duration::from_millis(50);
 /// (8 s: in 2.5 a white screen going black read as a jump — Max,
 /// 2026-10-22, at the first dusk.)
 const SLOW_FADE_MS: u64 = 8000;
@@ -272,6 +274,14 @@ impl Dissolve {
 fn logical(px: (u32, u32), scale: f64) -> (i32, i32) {
     let side = |p: u32| ((f64::from(p) / scale).round() as i32).max(1);
     (side(px.0), side(px.1))
+}
+
+/// A SLOW dissolve's curve: it thins from the first frame (the live screen
+/// shows through at once — an eased start held the old screen still for a
+/// couple of seconds), more slowly as it goes.
+fn opacity_slow(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    (1.0 - t) * (1.0 - t)
 }
 
 /// The fade's curve: the still's opacity `t` (0..1) of the way through.
@@ -669,7 +679,7 @@ impl App {
                 }
                 None => {
                     let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
-                    (t, opacity(t))
+                    (t, if d.slow { opacity_slow(t) } else { opacity(t) })
                 }
             };
             d.shown = a;
@@ -737,6 +747,19 @@ mod tests {
         assert_eq!(logical((1440, 900), 100.0 / 120.0), (1728, 1080));
         assert_eq!(logical((1440, 900), 1.5), (960, 600));
         assert_eq!(logical((3200, 2000), 1.6), (2000, 1250));
+    }
+
+    #[test]
+    fn a_slow_fade_thins_from_the_first_frame() {
+        assert_eq!(opacity_slow(0.0), 1.0);
+        assert_eq!(opacity_slow(1.0), 0.0);
+        assert!(opacity_slow(0.07) < 0.9, "two seconds into thirty, the live screen shows through");
+        let mut last = 1.0;
+        for i in 1..=20 {
+            let a = opacity_slow(i as f32 / 20.0);
+            assert!(a < last);
+            last = a;
+        }
     }
 
     #[test]
