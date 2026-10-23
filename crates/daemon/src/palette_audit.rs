@@ -370,12 +370,12 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
         }
     }
     // ---- Seam's own chrome (golem-chrome.js: base01 bar, base05 words).
-    let (c0, c1, c4, c5) = (c(0), c(1), c(4), c(5));
+    let (c0, c1, c5) = (c(0), c(1), c(5));
     let mix = |x: S, y: S, k: f32| over(y, k, x);
     for (rule, fg, bg, floor) in [
         ("overview words c5 on the bar c1", c5, c1, TEXT),
-        ("overview muted c4 on c1", c4, c1, TEXT),
-        ("overview toolbar icons: fixed white on c1", [1.0; 3], c1, LARGE),
+        ("overview muted (the quiet ink) on c1", s(apps.quiet()), c1, TEXT),
+        ("overview toolbar icons (gsInkOn) on c1", if ratio(c5, c1) >= TEXT { c5 } else if lum(c1) > 0.179 { [0.0; 3] } else { [1.0; 3] }, c1, LARGE),
         ("tab card words on mix(c1, c5, .07)", c5, mix(c1, c5, 0.07), TEXT),
         ("tab card words, hovered, on mix(c1, c5, .13)", c5, mix(c1, c5, 0.13), TEXT),
         ("footer words on mix(c1, c0, .5)", c5, mix(c1, c0, 0.5), TEXT),

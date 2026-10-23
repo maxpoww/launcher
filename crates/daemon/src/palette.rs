@@ -2254,6 +2254,8 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
         ("raised", t.raised()),
         ("border", t.border()),
         ("ink_dim", t.ink_dim()),
+        // (Seam's muted words: the quiet ink, which reads 4.5:1.)
+        ("quiet", t.quiet()),
         ("ink", t.ink()),
         ("accent", t.accent()),
         ("accent_ink", t.accent_ink()),
