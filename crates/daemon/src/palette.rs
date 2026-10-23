@@ -3333,6 +3333,11 @@ impl crate::App {
     }
 }
 
+/// The legibility audit: every pair of words over a ground, as seen.
+#[cfg(test)]
+#[path = "palette_audit.rs"]
+mod audit;
+
 #[cfg(test)]
 mod tests {
     use super::*;

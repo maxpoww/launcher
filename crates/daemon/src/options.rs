@@ -1160,7 +1160,7 @@ const STAGE_ONLY: Presence = Presence {
 
 /// How far a surface falls toward black in the dark look (the night light,
 /// [`Backdrop::surface_wash`]).
-const NIGHT_DIM: f32 = 0.42;
+pub(crate) const NIGHT_DIM: f32 = 0.42;
 
 /// The inactive window border hyprland.lua sets, given back when the shell
 /// stops wearing the palette.
@@ -1214,8 +1214,8 @@ const STRIPE_DIM_L: f32 = 0.18;
 /// necessarily smaller. Muting the light-box text as far as the dark-box
 /// text is what made the content unreadable earlier in the day. See
 /// [`App::dim_ink`].
-const LIST_DIM: f32 = 0.67;
-const LIST_DIM_LIGHT: f32 = 0.88;
+pub(crate) const LIST_DIM: f32 = 0.67;
+pub(crate) const LIST_DIM_LIGHT: f32 = 0.88;
 
 impl crate::App {
     /// The open boxes' panel/zebra alpha: [`BOX_ALPHA`] glass normally, the

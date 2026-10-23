@@ -324,7 +324,7 @@ pub const LABEL_LINE_PX: f32 = 16.0;
 /// (2026-09-30): small and bold, faint, raised a little in their band.
 const TITLE_FONT_PX: f32 = 13.0;
 const TITLE_LINE_PX: f32 = 16.0;
-const TITLE_ALPHA: f32 = 0.3;
+pub(crate) const TITLE_ALPHA: f32 = 0.3;
 const TITLE_DROP: f32 = -1.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
