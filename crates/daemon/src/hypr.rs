@@ -1302,7 +1302,7 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         if ["openwindow", "closewindow", "movewindow", "changefloatingmode", "fullscreen"].iter().any(|e| name.starts_with(e))
                             || (name.starts_with("workspace") && !name.starts_with("workspacerule"))
                         {
-                            app.dissolve_hurry();
+                            app.dissolve_hurry(name);
                         }
                         if name.starts_with("workspace") && !name.starts_with("workspacerule") {
                             if let Some(id) = line

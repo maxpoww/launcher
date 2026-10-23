@@ -633,7 +633,7 @@ impl App {
     /// windows going by, pinned and see-through (Max, 2026-10-22: "i swipe to
     /// the next WS and the windows on my current follow me like they are
     /// pinned… all the windows get transparent and mixed").
-    pub(crate) fn dissolve_hurry(&mut self) {
+    pub(crate) fn dissolve_hurry(&mut self, why: &str) {
         let Some(d) = self.dissolve.as_mut() else { return };
         if !d.slow || d.hurry.is_some() || d.phase == Phase::Preparing {
             return;
@@ -643,7 +643,7 @@ impl App {
             // (The hold's timer starts the fade, hurried.)
             d.phase = Phase::Fading(Instant::now());
         }
-        debug!("dissolve: something moved; the still goes now");
+        info!("dissolve: {why}: the still goes now");
     }
 
     /// Fade the stills out, a tick at a time, then take them down.
