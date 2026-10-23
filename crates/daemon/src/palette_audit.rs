@@ -373,6 +373,9 @@ fn audit_apps(a: &mut Audit, apps: &Theme) {
             a.app("Apps · btop", "graph colours on meter_bg", *v, b("meter_bg"), LARGE);
         }
     }
+    // ---- GIMP (its System theme on our GTK; gimp.css: the spin scales'
+    // fill the palette's selection, under the window's words).
+    a.app("Apps · GIMP", "spin scale words on their fill", get3("window_fg_color"), s(apps.selection()), TEXT);
     // ---- Seam's own chrome (golem-chrome.js: base01 bar, base05 words).
     let (c0, c1, c5) = (c(0), c(1), c(5));
     let mix = |x: S, y: S, k: f32| over(y, k, x);

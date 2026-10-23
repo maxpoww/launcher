@@ -42,6 +42,7 @@ pub(crate) fn write(t: &Theme) {
     kde(t);
     vscode(t);
     inkscape(t);
+    gimp(t);
     jetbrains(t);
     easyeffects(t);
 }
@@ -397,6 +398,77 @@ fn inkscape(t: &Theme) {
     });
 }
 
+// ------------------------------------------------------------------ GIMP
+
+/// GIMP 3 draws with themes of its own and ignores the system's, but one of
+/// them — "System" — wears the GTK theme in use (Golem's palette) with
+/// GIMP's own sizes, its light or dark rules by `prefer-dark-theme`. Set
+/// where the owner never picked a theme of their own, by the apps' look;
+/// once GIMP has run (its first start sets its folder up, migrating an older
+/// one) and once it has quit (it writes its gimprc back as it quits). The
+/// legibility audit, 2026-10-23: theme-reach said MISSING.
+fn gimp(t: &Theme) {
+    let path = config().join("GIMP/3.0/gimprc");
+    if !path.is_file() {
+        return;
+    }
+    let dark = t.dark;
+    // The System theme fills its spin scales with the selection colour and
+    // leaves their words the window's: on a dark accent, dark words on it
+    // (the rig, 2026-10-23: "Opacity" unreadable in a light look). GIMP's own
+    // gimp.css, read after the theme, gives them the palette's selection —
+    // the accent over the ground, as far as its words read 4.5:1.
+    let css = format!("{GIMP_CSS_MARK}\nGimpSpinScale entry progress {{ background-color: #{}; }}\n", crate::palette::hex(t.selection()));
+    when_closed("=(gimp|gimp-3.0|\\.gimp-3.0-wrapp)", move || {
+        let Ok(old) = std::fs::read_to_string(&path) else { return };
+        if gimprc_value(&old, "theme").is_some_and(|v| v != "\"System\"") {
+            return; // (A theme the owner picked is theirs.)
+        }
+        let text = gimprc_set(&gimprc_set(&old, "theme", "\"System\""), "prefer-dark-theme", if dark { "yes" } else { "no" });
+        if text != old {
+            put(&path, &text);
+            info!("apps: GIMP on the system's theme ({})", if dark { "dark" } else { "light" });
+        }
+        // (Only a gimp.css of ours, or none: the owner's own styles stay.)
+        let css_path = path.with_file_name("gimp.css");
+        let now = std::fs::read_to_string(&css_path).ok();
+        if now.as_deref().is_none_or(|n| n.starts_with(GIMP_CSS_MARK)) && now.as_deref() != Some(css.as_str()) {
+            put(&css_path, &css);
+        }
+    });
+}
+
+/// The first line of a gimp.css Golem wrote (and may write again).
+const GIMP_CSS_MARK: &str = "/* Golem's palette, written by the dock. Your own GIMP styles: delete this line, and Golem leaves this file alone. */";
+
+/// A gimprc setting's value as written (`(key value)` on a line of its own).
+fn gimprc_value(text: &str, key: &str) -> Option<String> {
+    let open = format!("({key} ");
+    text.lines().find_map(|l| l.trim().strip_prefix(open.as_str())).map(|v| v.trim_end_matches(')').trim().to_owned())
+}
+
+/// `text` with `(key value)`: its line replaced, else added at the end.
+fn gimprc_set(text: &str, key: &str, value: &str) -> String {
+    let open = format!("({key} ");
+    let line = format!("({key} {value})");
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.trim().starts_with(open.as_str()) {
+                found = true;
+                line.clone()
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(line);
+    }
+    out.join("\n") + "\n"
+}
+
 /// Run `then` now if no process `name` names runs (`=name`: by its exact
 /// process name; else a pattern of the command line), else once the last one
 /// has quit (a thread waits; a newer wait for the same app replaces it).
@@ -742,6 +814,24 @@ fn zip_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
     out.extend_from_slice(&start.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out
+}
+
+#[cfg(test)]
+mod gimp_tests {
+    use super::*;
+
+    #[test]
+    fn gimp_wears_the_system_theme_unless_the_owner_picked_one() {
+        let fresh = "# GIMP gimprc\n(show-tips no)\n";
+        let set = gimprc_set(&gimprc_set(fresh, "theme", "\"System\""), "prefer-dark-theme", "no");
+        assert!(set.contains("(theme \"System\")") && set.contains("(prefer-dark-theme no)") && set.contains("(show-tips no)"));
+        // Again: replaced, not added twice.
+        let again = gimprc_set(&set, "prefer-dark-theme", "yes");
+        assert_eq!(again.matches("prefer-dark-theme").count(), 1);
+        assert_eq!(gimprc_value(&again, "theme").as_deref(), Some("\"System\""));
+        assert_eq!(gimprc_value("(theme \"Default\")\n", "theme").as_deref(), Some("\"Default\""));
+        assert_eq!(gimprc_value(fresh, "theme"), None);
+    }
 }
 
 #[cfg(test)]
