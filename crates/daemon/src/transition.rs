@@ -96,6 +96,8 @@ const HOLD: Duration = Duration::from_millis(180);
 /// The fade from the still to the new screen.
 const FADE: Duration = Duration::from_millis(260);
 const FADE_TICK: Duration = Duration::from_millis(16);
+/// A slow dissolve hurried away (`dissolve_hurry`) is gone this fast.
+const HURRY: Duration = Duration::from_millis(250);
 /// The still is taken down by now whatever happened: a frozen picture left
 /// over the desktop would look like a hang.
 const HARD_CAP: Duration = Duration::from_millis(2000);
@@ -235,6 +237,11 @@ pub(crate) struct Dissolve {
     slow: bool,
     phase: Phase,
     stills: Vec<Still>,
+    /// How much of the old screen shows now (the stills' opacity).
+    shown: f32,
+    /// Something moved on its own under a slow one: since when it goes,
+    /// and from how much (`dissolve_hurry`).
+    hurry: Option<(Instant, f32)>,
 }
 
 impl Dissolve {
@@ -322,7 +329,7 @@ impl App {
                 Still::new(output, new_scale, frame)
             })
             .collect();
-        self.dissolve = Some(Dissolve { id, then: Some(then), slow, phase: Phase::Preparing, stills });
+        self.dissolve = Some(Dissolve { id, then: Some(then), slow, phase: Phase::Preparing, stills, shown: 1.0, hurry: None });
         // Not covered in time: what is up covers its screen, and the change
         // is made rather than late.
         self.dissolve_timer(id, COVER_DEADLINE, |app| {
@@ -620,6 +627,25 @@ impl App {
         self.dissolve_timer(id, if slow { SLOW_HOLD } else { HOLD }, move |app| app.dissolve_fade(id));
     }
 
+    /// SOMETHING MOVED ON ITS OWN under a slow dissolve — a workspace swipe
+    /// beginning, a window opening, closing or moving, the overview: the still
+    /// of the old screen gets out of the way in `HURRY`, or it stands over the
+    /// windows going by, pinned and see-through (Max, 2026-10-22: "i swipe to
+    /// the next WS and the windows on my current follow me like they are
+    /// pinned… all the windows get transparent and mixed").
+    pub(crate) fn dissolve_hurry(&mut self) {
+        let Some(d) = self.dissolve.as_mut() else { return };
+        if !d.slow || d.hurry.is_some() || d.phase == Phase::Preparing {
+            return;
+        }
+        d.hurry = Some((Instant::now(), d.shown));
+        if d.phase == Phase::Covered {
+            // (The hold's timer starts the fade, hurried.)
+            d.phase = Phase::Fading(Instant::now());
+        }
+        debug!("dissolve: something moved; the still goes now");
+    }
+
     /// Fade the stills out, a tick at a time, then take them down.
     fn dissolve_fade(&mut self, id: u64) {
         let t = {
@@ -635,9 +661,20 @@ impl App {
                 }
             };
             let fade = if d.slow { slow_fade() } else { FADE };
-            let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
+            let (t, a) = match d.hurry {
+                // Hurried: from what showed then to nothing in `HURRY`.
+                Some((at, a0)) => {
+                    let k = at.elapsed().as_secs_f32() / HURRY.as_secs_f32();
+                    (k, a0 * (1.0 - k).max(0.0))
+                }
+                None => {
+                    let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
+                    (t, opacity(t))
+                }
+            };
+            d.shown = a;
             if t < 1.0 {
-                let multiplier = (f64::from(opacity(t)) * f64::from(u32::MAX)) as u32;
+                let multiplier = (f64::from(a) * f64::from(u32::MAX)) as u32;
                 for s in &d.stills {
                     if let (Some(alpha), Some(layer)) = (&s.alpha, &s.layer) {
                         alpha.set_multiplier(multiplier);

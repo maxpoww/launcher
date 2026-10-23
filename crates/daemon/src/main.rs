@@ -3258,6 +3258,7 @@ impl App {
                 return;
             }
             Command::OverviewOn => {
+                self.dissolve_hurry();
                 self.set_overview(true);
                 return;
             }

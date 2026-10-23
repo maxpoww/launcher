@@ -5943,6 +5943,8 @@ impl App {
     /// card is gone at once — it is a layer, and would stand still over
     /// windows sliding away under it.
     pub(crate) fn card_swipe_away(&mut self) {
+        // (A slow dissolve's still must not stand over the swipe either.)
+        self.dissolve_hurry();
         // (A return still waiting on the last swipe is called off.)
         self.card.waits[Wait::SwipeBack as usize] = None;
         self.card_away(Away::Swipe);
