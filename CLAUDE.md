@@ -1457,7 +1457,10 @@ The big daemon files are cohesive but long — go straight to the function:
   but its start, a sign-in or one titled only with its name (`webapp_pages`; Keep's are all
   "Google Keep": none); Seam's own without the installed webapps' sites — read OFF THE LOOP from
   the browser's own history (Seam/Firefox/LibreWolf `places.sqlite`, Chrome/Chromium/Brave/Edge/
-  Vivaldi `History`; each a copy, the browser holds the file; kept `FRESH` 60 s by app), pictured
+  Vivaldi `History`; each reading its OWN copy, removed when it is done — `Copied`: two readings at
+  once shared one and each copied over the other's; kept `FRESH` 60 s by app; an app's FILES are read
+  off the loop the same way, `Source::Files` — the record read whole and each file looked for must not
+  hold the box), pictured
   with no network: a YouTube video by its own picture from SEAM'S DISK CACHE (`cache2`, an index of
   `i.ytimg.com/vi/<id>/` entries, cropped square), else the page's favicon on a light tile
   (`tile_in`). A page opens in its app's window, which is brought forward (`web_opened`: Seam cannot
@@ -1496,7 +1499,8 @@ The big daemon files are cohesive but long — go straight to the function:
   artist", opened where they played when that is a page of the site's own, else as a search of the
   site for them — Spotify plays from a search page; with their covers); `with_plays` makes a song and
   its page one. Pictures: what played > the page's preview > YouTube's from Seam's cache > the
-  favicon, each cropped square (`squared`). Read as data a page had a hand in (`Kitchen`: 4 MB,
+  favicon, each cropped square (`squared`; every picture a page had a hand in decoded within bounds —
+  `decode`: 4096 a side, 64 MB —; the picture caches trimmed to `PICTURES_KEPT`). Read as data a page had a hand in (`Kitchen`: 4 MB,
   http(s) only, pictures only `<16 hex>.<jpg|png|webp>` plain files in its `pics/`). On a
   short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).

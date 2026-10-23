@@ -446,6 +446,27 @@ fn recent_for(app: &AppEntry, shared: bool) -> Vec<(PathBuf, f64, f64)> {
     all.into_iter().filter(|(p, _, _)| p.exists() && seen.insert(p.clone())).collect()
 }
 
+/// What `app` opened lately, as recents in THE ORDER (`web_actions::rank`,
+/// the owner's `picks` counted in), at most `max` — read off the loop.
+fn files_recents(app: &AppEntry, shared: bool, picks: &web_actions::Picks, max: usize) -> Vec<web_actions::Recent> {
+    let files = recent_for(app, shared)
+        .into_iter()
+        .map(|(path, last, score)| {
+            let (pick, picked) = picks.get(&*path.to_string_lossy()).copied().unwrap_or((0.0, 0.0));
+            (path, last.max(picked), score + 3.0 * pick)
+        })
+        .collect();
+    web_actions::rank(files, max)
+        .into_iter()
+        .map(|path| web_actions::Recent {
+            title: path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
+            dir: path.is_dir(),
+            url: path.to_string_lossy().into_owned(),
+            picture: None,
+        })
+        .collect()
+}
+
 /// A webapp's site, when Golem knows it (by its slug, else its address).
 fn site_of(slug: &str, start: &str) -> Option<&'static web_actions::Site> {
     let host = web_actions::origin(start).map(|(_, h)| h);
@@ -524,7 +545,15 @@ enum Source {
     /// A browser: its own history, opened by it — none of the sites in its
     /// second (Seam's: the installed webapps', whose pages are theirs).
     Browser(web_actions::Browser, Vec<String>),
+    /// Any other app: the files it opened (the system's record, VLC's own
+    /// list), opened by it — read off the loop too (the record is read
+    /// whole and each file looked for: a stick or a share that does not
+    /// answer must not hold the box). Its program names it unless `shared`.
+    Files { app: AppEntry, shared: bool },
 }
+
+/// How many measured names are kept before they are measured afresh.
+const NAME_FIT_KEPT: usize = 4000;
 
 /// How many recents are read: a line a page, at most `RECENT_PAGES`.
 const RECENT_MAX: usize = 24;
@@ -702,7 +731,7 @@ impl App {
             left: n_left,
             cols,
             armed,
-            web: source.is_some(),
+            web: matches!(source, Some(Source::Webapp { .. } | Source::Browser(..))),
             ..Default::default()
         };
         let (placeholder, layer) = (
@@ -734,47 +763,23 @@ impl App {
         // a webapp's or a browser's pages, else files —, in THE ORDER (the
         // three newest, then by use: `web_actions::rank`), a line a PAGE.
         let pages = |n: usize| n.div_ceil(cols.max(1)).min(RECENT_PAGES);
-        match source {
-            Some(source) => {
-                let all = self.web_recents(&entry.id, &source);
-                let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
-                self.search.actions.recent_pages = n;
-                self.search.actions.recent_page = page;
-                for item in all.into_iter().skip(page * cols).take(cols) {
-                    let exec = match &source {
-                        Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &item.url),
-                        Source::Browser(..) => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
-                    };
-                    self.search.actions.recent_keys.push(item.url.clone());
-                    let at = self.push_web_recent(item, exec, (placeholder, layer));
-                    self.search.actions.recents.push(at);
-                    apps.push(at);
-                }
-            }
-            None => {
-                let prog = program(&entry.exec);
-                let base = &self.entries[..self.base_len.min(self.entries.len())];
-                let shared = base.iter().filter(|e| program(&e.exec) == prog).count() > 1;
-                let picks = self.search.picks.snapshot();
-                let files = recent_for(&entry, shared)
-                    .into_iter()
-                    .map(|(path, last, score)| {
-                        let (pick, picked) = picks.get(&*path.to_string_lossy()).copied().unwrap_or((0.0, 0.0));
-                        (path, last.max(picked), score + 3.0 * pick)
-                    })
-                    .collect();
-                let all = web_actions::rank(files, RECENT_MAX);
-                let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
-                self.search.actions.recent_pages = n;
-                self.search.actions.recent_page = page;
-                for path in all.into_iter().skip(page * cols).take(cols) {
-                    let name = path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
-                    let exec = format!("{} {}", entry.exec, launch::shell_quote(&path.to_string_lossy()));
-                    self.search.actions.recent_keys.push(path.to_string_lossy().into_owned());
-                    let at = self.push_transient_file(&path.to_string_lossy(), &name, exec, path.is_dir());
-                    self.search.actions.recents.push(at);
-                    apps.push(at);
-                }
+        if let Some(source) = source {
+            let all = self.web_recents(&entry.id, &source);
+            let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
+            self.search.actions.recent_pages = n;
+            self.search.actions.recent_page = page;
+            for item in all.into_iter().skip(page * cols).take(cols) {
+                let exec = match &source {
+                    Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &item.url),
+                    Source::Browser(..) | Source::Files { .. } => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
+                };
+                self.search.actions.recent_keys.push(item.url.clone());
+                let at = match &source {
+                    Source::Files { .. } => self.push_transient_file(&item.url, &item.title, exec, item.dir),
+                    _ => self.push_web_recent(item, exec, (placeholder, layer)),
+                };
+                self.search.actions.recents.push(at);
+                apps.push(at);
             }
         }
         if !self.search.actions.recents.is_empty() {
@@ -845,7 +850,12 @@ impl App {
             let site = site_of(slug, &start);
             return Some(Source::Webapp { site, slug: slug.to_owned(), start, name: app.name.clone() });
         }
-        let browser = web_actions::browser_for(&program(&app.exec))?;
+        let base = &self.entries[..self.base_len.min(self.entries.len())];
+        let Some(browser) = web_actions::browser_for(&program(&app.exec)) else {
+            let prog = program(&app.exec);
+            let shared = base.iter().filter(|e| program(&e.exec) == prog).count() > 1;
+            return Some(Source::Files { app: app.clone(), shared });
+        };
         let skip = if browser == web_actions::seam() {
             let base = &self.entries[..self.base_len.min(self.entries.len())];
             (0..base.len())
@@ -876,6 +886,7 @@ impl App {
                 move || match &source {
                     Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, &picks, RECENT_MAX),
                     Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, &picks, RECENT_MAX),
+                    Source::Files { app, shared } => files_recents(app, *shared, &picks, RECENT_MAX),
                 },
                 move |app, pages| {
                     app.search.web.asking.remove(&key);
@@ -990,6 +1001,10 @@ impl App {
     /// cut (`content::tile_label`); the actions have theirs already.
     pub(crate) fn fitted_names(&mut self, layout: &content::Layout) -> HashMap<usize, content::NameFit> {
         let mut out = HashMap::new();
+        // (Bounded: page titles come and go; measured again when wanted.)
+        if self.name_fit.values().map(HashMap::len).sum::<usize>() > NAME_FIT_KEPT {
+            self.name_fit.clear();
+        }
         for s in 0..content::N_SECTIONS {
             let sec = &layout.sections[s];
             let room = sec.viewport.w / sec.cols.max(1) as f32 - 12.0;

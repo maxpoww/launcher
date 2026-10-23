@@ -791,16 +791,95 @@ fn hash_of(bytes: &[u8]) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// A copy of a browser's database, open, for ONE reading: gone (with its
+/// log and shared memory) when it is dropped. Each reading has its own —
+/// two at once (YouTube's and YouTube Music's recents asked a key apart)
+/// shared one name, and each copied over and deleted the log of the file
+/// the other was reading.
+struct Copied {
+    conn: Option<rusqlite::Connection>,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for Copied {
+    type Target = rusqlite::Connection;
+    fn deref(&self) -> &rusqlite::Connection {
+        self.conn.as_ref().expect("open until dropped")
+    }
+}
+
+impl Drop for Copied {
+    fn drop(&mut self) {
+        drop(self.conn.take());
+        for end in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{end}", self.path.display()));
+        }
+    }
+}
+
 /// A copy of a browser's database (and its write-ahead log) in the cache,
 /// opened: the browser holds the file and keeps writing it.
-fn copy_open(path: &Path) -> Option<rusqlite::Connection> {
+fn copy_open(path: &Path) -> Option<Copied> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    static SWEPT: std::sync::Once = std::sync::Once::new();
     let dir = cache("history")?;
-    let to = dir.join(hash_of(path.as_os_str().as_encoded_bytes()));
+    // Copies a dock that died left behind (and the old shared ones).
+    SWEPT.call_once(|| sweep(&dir, Duration::from_secs(600)));
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let to = dir.join(format!("{}-{}-{n}", hash_of(path.as_os_str().as_encoded_bytes()), std::process::id()));
     let wal = |p: &Path| PathBuf::from(format!("{}-wal", p.display()));
-    let _ = std::fs::remove_file(wal(&to));
+    // (Made first: a failed copy or open leaves nothing behind either.)
+    let mut copied = Copied { conn: None, path: to.clone() };
     std::fs::copy(path, &to).ok()?;
     let _ = std::fs::copy(wal(path), wal(&to));
-    rusqlite::Connection::open(&to).ok()
+    copied.conn = Some(rusqlite::Connection::open(&to).ok()?);
+    Some(copied)
+}
+
+/// Files of `dir` older than `age`, removed.
+fn sweep(dir: &Path, age: Duration) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > age);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// A cache folder of pictures kept under `keep` files: past it, the oldest
+/// go down to three quarters of it (each is made again if it is wanted).
+fn trim_dir(dir: &Path, keep: usize) {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort();
+    let extra = files.len() - keep * 3 / 4;
+    for (_, path) in files.into_iter().take(extra) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// How many pictures each cache folder keeps.
+const PICTURES_KEPT: usize = 1500;
+
+/// A picture from bytes a page had a hand in, decoded within bounds: no
+/// side over 4096, no more than 64 MB held (a small file can claim a huge
+/// picture).
+fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().ok()
 }
 
 /// A browser's newest pages, newest first (`max` read).
@@ -892,7 +971,7 @@ fn ranked_pages(pages: Vec<(Visit, String)>, picks: &Picks, max: usize) -> Vec<(
 }
 
 /// The browser's favicons database, copied to read.
-fn favicons_db(browser: &Browser) -> Option<rusqlite::Connection> {
+fn favicons_db(browser: &Browser) -> Option<Copied> {
     copy_open(&match browser {
         Browser::Firefox(p) => p.join("favicons.sqlite"),
         Browser::Chromium(p) => p.join("Favicons"),
@@ -949,7 +1028,7 @@ fn tile_in(dir: &Path, data: &[u8]) -> Option<PathBuf> {
     let side = crate::apps::ICON_SIZE;
     let room = (side as f32 * FAVICON_ON_TILE) as u32;
     let svg = data[..data.len().min(512)].windows(4).any(|w| w == b"<svg");
-    let fav = if svg { svg_rgba(data, room)? } else { image::load_from_memory(data).ok()?.to_rgba8() };
+    let fav = if svg { svg_rgba(data, room)? } else { decode(data)?.to_rgba8() };
     let fav = if fav.width() == room || fav.height() == room {
         fav
     } else {
@@ -1096,7 +1175,7 @@ fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBu
 /// PNG): the tile is square, and a wide picture in it is a thin strip (the
 /// black bands of a 4:3 video picture are inside what is cut away).
 fn squared(bytes: &[u8], path: &Path) -> Option<PathBuf> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let img = decode(bytes)?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return None;
@@ -1251,11 +1330,14 @@ fn played(k: &Kitchen, site: Option<&Site>, start: &str, now: f64) -> Vec<(Visit
 /// A recent page as a row of a lone app shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Recent {
+    /// Its address — or, an app's file, its path.
     pub url: String,
     pub title: String,
     /// Its picture as a file: the video's own (YouTube, from Seam's cache),
     /// else its favicon on a tile; none without either.
     pub picture: Option<PathBuf>,
+    /// A folder (an app's recent file that is one).
+    pub dir: bool,
 }
 
 /// `pages` made recents: each one's picture found.
@@ -1267,7 +1349,7 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
         _ => HashMap::new(),
     };
     let shots = cache("web-pictures");
-    pages
+    let out: Vec<Recent> = pages
         .into_iter()
         .map(|(v, title)| {
             // What Seam heard it play, then the preview Seam kept, then the
@@ -1291,12 +1373,21 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
                     .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body))
             };
             let picture = cooked.or_else(video).or_else(|| {
-                let data = favicon(browser, icons.as_ref()?, &v.url)?;
+                let data = favicon(browser, icons.as_deref()?, &v.url)?;
                 tile_in(tiles.as_deref()?, &data)
             });
-            Recent { url: v.url, title, picture }
+            Recent { url: v.url, title, picture, dir: false }
         })
-        .collect()
+        .collect();
+    // (Now and then: the picture caches kept under their bound.)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    if CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(16) {
+        for dir in [&tiles, &shots].into_iter().flatten() {
+            trim_dir(dir, PICTURES_KEPT);
+        }
+    }
+    out
 }
 
 /// A path that is not a place one went to (signing in or out, paying).
@@ -1387,16 +1478,23 @@ const CANDIDATES: usize = 400;
 /// in THE ORDER (`rank`, the owner's `picks` counted in), at most `max`.
 pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, picks: &Picks, max: usize) -> Vec<Recent> {
     let (browser, k) = (seam(), kitchen());
-    let pages = webapp_pages(retitled(history(&browser, 4000), &k), site, start, name, CANDIDATES);
+    // (Seam's title only when it says more than the app's name: an app that
+    // keeps "YouTube Music" over a song must not hide the history's name of it.)
+    let names: Vec<String> = [Some(name), site.map(|s| s.name)].into_iter().flatten().map(str::to_lowercase).collect();
+    let says = |t: &str| {
+        let t = without_name(&clean_title(site, t), name).to_lowercase();
+        !t.is_empty() && !names.contains(&t)
+    };
+    let pages = webapp_pages(retitled(history(&browser, 4000), &k, says), site, start, name, CANDIDATES);
     let pages = with_plays(pages, played(&k, site, start, crate::usage::now_secs()));
     pictured(&browser, &k, ranked_pages(pages, picks, max))
 }
 
 /// A history with each page's title as Seam saw it last, where it kept one
 /// (an app that names the song after the history wrote "YouTube Music").
-fn retitled(mut visits: Vec<Visit>, k: &Kitchen) -> Vec<Visit> {
+fn retitled(mut visits: Vec<Visit>, k: &Kitchen, says: impl Fn(&str) -> bool) -> Vec<Visit> {
     for v in &mut visits {
-        if let Some(t) = k.title_of(&v.url) {
+        if let Some(t) = k.title_of(&v.url).filter(|t| says(t)) {
             v.title = t;
         }
     }
@@ -1438,7 +1536,7 @@ fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit,
 pub(crate) fn browser_recents(browser: &Browser, skip: &[String], picks: &Picks, max: usize) -> Vec<Recent> {
     // (Seam's: as Seam saw its pages; another browser's as it wrote them.)
     let k = if *browser == seam() { kitchen() } else { Kitchen::default() };
-    let pages = browser_pages(retitled(history(browser, 3000), &k), skip, CANDIDATES);
+    let pages = browser_pages(retitled(history(browser, 3000), &k, |t| !t.trim().is_empty()), skip, CANDIDATES);
     pictured(browser, &k, ranked_pages(pages, picks, max))
 }
 
@@ -1661,6 +1759,83 @@ mod tests {
         assert_eq!(both[0].1, "Robot Rock • Daft Punk");
         // Not a file of its own, or not ours at all: nothing.
         assert_eq!(kitchen_in(&dir.join("nowhere")).plays.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readings_at_once_each_read_a_copy_of_their_own_and_leave_none() {
+        let dir = scratch("together");
+        let places = rusqlite::Connection::open(dir.join("places.sqlite")).unwrap();
+        places.execute_batch("CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_date INTEGER);").unwrap();
+        for i in 0..300 {
+            places
+                .execute("INSERT INTO moz_places VALUES (?1, ?2, 't', ?3)", rusqlite::params![i, format!("https://x.test/{i}"), i])
+                .unwrap();
+        }
+        drop(places);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let d = dir.clone();
+                std::thread::spawn(move || (0..10).map(|_| history(&Browser::Firefox(d.clone()), 1000).len()).collect::<Vec<_>>())
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap().iter().all(|&n| n == 300), "a reading saw another's copy");
+        }
+        let tag = hash_of(dir.join("places.sqlite").as_os_str().as_encoded_bytes());
+        let left = std::fs::read_dir(cache("history").unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&tag)).count();
+        assert_eq!(left, 0, "copies left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_claiming_a_huge_size_is_not_decoded() {
+        // A PNG's header saying 60000 × 60000 (its data never comes).
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let ihdr = [&60000u32.to_be_bytes()[..], &60000u32.to_be_bytes()[..], &[8, 6, 0, 0, 0]].concat();
+        png.extend_from_slice(&(ihdr.len() as u32).to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&ihdr);
+        png.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(decode(&png).is_none());
+        let mut ok = Vec::new();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut ok), image::ImageFormat::Png).unwrap();
+        assert!(decode(&ok).is_some());
+    }
+
+    #[test]
+    fn a_picture_cache_is_kept_under_its_bound() {
+        let dir = scratch("trim");
+        for i in 0..20 {
+            std::fs::write(dir.join(format!("{i}.png")), b"x").unwrap();
+        }
+        trim_dir(&dir, 30);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 20);
+        trim_dir(&dir, 16);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 12);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seams_title_wins_only_when_it_says_more_than_the_apps_name() {
+        let dir = scratch("retitle");
+        std::fs::write(
+            dir.join("recents.json"),
+            r#"{"v":1,"pages":{"https://music.youtube.com/watch?v=a":{"title":"YouTube Music"},"https://music.youtube.com/watch?v=b":{"title":"Robot Rock - YouTube Music"}},"plays":[]}"#,
+        )
+        .unwrap();
+        let k = kitchen_in(&dir);
+        let visits = vec![
+            visit("https://music.youtube.com/watch?v=a", "Song A | YouTube Music"),
+            visit("https://music.youtube.com/watch?v=b", "YouTube Music"),
+        ];
+        let says = |t: &str| {
+            let t = without_name(&clean_title(site("youtube-music"), t), "YouTube Music").to_lowercase();
+            !t.is_empty() && t != "youtube music"
+        };
+        let got = retitled(visits, &k, says);
+        assert_eq!(got[0].title, "Song A | YouTube Music", "a generic title of Seam's hid the history's");
+        assert_eq!(got[1].title, "Robot Rock - YouTube Music");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

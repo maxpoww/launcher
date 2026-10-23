@@ -7682,8 +7682,10 @@ impl KeyboardHandler for App {
         if self.fast.open {
             self.fast_key_release(event.keysym);
         }
-        // Shift tapped in the box: the app it is on to its row (`app_actions.rs`).
-        if matches!(event.keysym, Keysym::Shift_L | Keysym::Shift_R) && std::mem::take(&mut self.search.shift_tap) {
+        // Shift tapped in the box: the app it is on to its row (`app_actions.rs`)
+        // — only while the box has the keyboard (a file window's Shift is its own).
+        let tapped = matches!(event.keysym, Keysym::Shift_L | Keysym::Shift_R) && std::mem::take(&mut self.search.shift_tap);
+        if tapped && self.interactive && self.filer.keys.is_none() && !self.card_typing() {
             self.box_shift();
         }
         // (The card: Space held is a voice note for as long as it is held.)
@@ -7875,6 +7877,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         if app.pointer_surface == options::PointerSurface::Options {
             app.options_pointer(event);
             return;
+        }
+        // (Shift held through a click or a scroll on the box is not a tap.)
+        if matches!(event, wl_pointer::Event::Button { .. } | wl_pointer::Event::Axis { .. }) {
+            app.search.shift_tap = false;
         }
         match event {
             wl_pointer::Event::Enter {
