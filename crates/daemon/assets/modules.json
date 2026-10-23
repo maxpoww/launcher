@@ -296,15 +296,25 @@
      "programs": [
       {
        "name": "WhatsApp",
-       "what": "WhatsApp on your desktop",
-       "pkg": "zapzap",
+       "what": "WhatsApp on your desktop, in your colours",
+       "web": "https://web.whatsapp.com",
        "recommended": true
       },
       {
+       "name": "ZapZap",
+       "what": "the desktop app, in its own colours",
+       "pkg": "zapzap"
+      },
+      {
        "name": "Telegram",
-       "what": "fast messaging",
-       "pkg": "telegram-desktop",
+       "what": "fast messaging, in your colours",
+       "web": "https://web.telegram.org",
        "recommended": true
+      },
+      {
+       "name": "Telegram Desktop",
+       "what": "the desktop app, in its own colours",
+       "pkg": "telegram-desktop"
       },
       {
        "name": "Signal",
@@ -314,7 +324,12 @@
       },
       {
        "name": "Discord",
-       "what": "voice and chat communities",
+       "what": "voice and chat communities, in your colours",
+       "web": "https://discord.com/app"
+      },
+      {
+       "name": "Discord desktop",
+       "what": "the desktop app, in its own colours",
        "pkg": "discord"
       },
       {
@@ -437,9 +452,14 @@
      "programs": [
       {
        "name": "Spotify",
-       "what": "music streaming",
-       "pkg": "spotify",
+       "what": "music streaming, in your colours",
+       "web": "https://open.spotify.com",
        "recommended": true
+      },
+      {
+       "name": "Spotify desktop",
+       "what": "the desktop app, in its own colours",
+       "pkg": "spotify"
       },
       {
        "name": "YouTube Music",
@@ -1523,9 +1543,14 @@
      "programs": [
       {
        "name": "Slack",
-       "what": "team chat",
-       "pkg": "slack",
+       "what": "team chat, in your colours",
+       "web": "https://app.slack.com/client",
        "recommended": true
+      },
+      {
+       "name": "Slack desktop",
+       "what": "the desktop app, in its own colours",
+       "pkg": "slack"
       },
       {
        "name": "Mattermost",
