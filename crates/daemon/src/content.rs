@@ -3869,11 +3869,13 @@ pub fn scene(
                 }
                 continue;
             }
-            // A recent's preview: whole, in its own shape, its bottom on the icons' line.
+            // A recent's preview: whole, in its own shape, its bottom on the icons'
+            // line — and still under the pointer (Max: "the thumbnails move down on
+            // hover, we don't need that"): no magnifying, it is a picture.
             let shape = recents.filter(|_| recent).and_then(|r| r.shapes.iter().find(|(e, _)| *e == entry_idx).map(|&(_, a)| a));
             g.icons.push(IconInst {
                 rect: match shape {
-                    Some(a) => preview_rect(cx, icon_cy + size / 2.0 - lift(entry_idx), a, cell.w, size),
+                    Some(a) => preview_rect(cx, icon_cy + grid_icon / 2.0 - lift(entry_idx), a, cell.w, grid_icon),
                     None => Rect::new(cx - size / 2.0, icon_cy - size / 2.0 - lift(entry_idx), size, size),
                 },
                 layer: layer_of(entry_idx),
