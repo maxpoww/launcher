@@ -2739,6 +2739,14 @@ struct SearchState {
     picks: usage::UsageDb,
     /// The recents' pager (the wheel over them turns their pages).
     recent_pager: pager::Pager,
+    /// The app Shift took to its row (its id), and what was typed then
+    /// (`app_actions::box_shift`).
+    focus: Option<(String, String)>,
+    /// Shift is down with no other key since: let go, it is a tap.
+    shift_tap: bool,
+    /// The keys moved the selection since the pointer last did: Shift takes
+    /// the app they are on, not the one under the pointer.
+    keyed: bool,
 }
 
 impl Default for SearchState {
@@ -2758,6 +2766,9 @@ impl Default for SearchState {
             web: Default::default(),
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
+            focus: None,
+            shift_tap: false,
+            keyed: false,
         }
     }
 }
@@ -4836,7 +4847,8 @@ impl App {
     /// screen so the dragged install can be dropped on an exact slot even
     /// though the query is still live for the Install list itself.
     fn grid_resting(&self) -> bool {
-        self.search.query.is_empty() || self.install_drag_reset
+        // (An app Shift took to its row lays the box out as a search does.)
+        (self.search.query.is_empty() && self.search.focus.is_none()) || self.install_drag_reset
     }
 
     /// Whether entry `idx` is an app whose uninstall is in flight — hidden
@@ -4935,7 +4947,8 @@ impl App {
         // dock is hidden from the grid, like a pinned app.
         let group_cells = self.group_cells();
         if !resting_grid {
-            visible[content::SECTION_FILES] = self.file_results();
+            // (Nothing typed — an app Shift took to its row —: the home's.)
+            visible[content::SECTION_FILES] = if searching { self.file_results() } else { self.home_listing() };
         } else {
             // Hide pinned apps from the grid when the search box is
             // empty — they're already visible on the dock. Grouped
@@ -6196,6 +6209,10 @@ impl App {
             self.scroll.reset_sections();
             self.hover = None;
             self.search.open = false;
+            // (An app Shift took to its row goes back to the box's own.)
+            if self.search.focus.take().is_some() {
+                self.refilter();
+            }
         }
         if self.ui.target() == Target::Open {
             self.scroll.reset_sections();
@@ -6890,6 +6907,7 @@ impl App {
                 }
             }
             Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
+                self.search.keyed = true;
                 if self.flat_len() > 0 {
                     let layout = self.current_layout();
                     let cols = layout.sections[content::SECTION_APPS].cols.max(1);
@@ -7647,6 +7665,8 @@ impl KeyboardHandler for App {
         event: KeyEvent,
     ) {
         self.last_input = Instant::now();
+        // (Shift alone, let go with no other key between: a tap — `release_key`.)
+        self.search.shift_tap = matches!(event.keysym, Keysym::Shift_L | Keysym::Shift_R);
         self.handle_key_event(event.keysym, event.utf8.as_deref());
     }
 
@@ -7660,6 +7680,10 @@ impl KeyboardHandler for App {
     ) {
         if self.fast.open {
             self.fast_key_release(event.keysym);
+        }
+        // Shift tapped in the box: the app it is on to its row (`app_actions.rs`).
+        if matches!(event.keysym, Keysym::Shift_L | Keysym::Shift_R) && std::mem::take(&mut self.search.shift_tap) {
+            self.box_shift();
         }
         // (The card: Space held is a voice note for as long as it is held.)
         self.card_key_release(event.keysym);
@@ -7891,6 +7915,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 let prev_pos = app.pointer_pos; // save before update for velocity
                 let pos = (surface_x as f32, surface_y as f32);
                 app.pointer_pos = Some(pos);
+                // (Shift takes the app under the pointer again.)
+                app.search.keyed = false;
                 if app.fast.open {
                     app.fast_touch();
                 }

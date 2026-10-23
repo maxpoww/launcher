@@ -608,8 +608,22 @@ impl App {
     /// windows' on the left, its recents under it. The same app keeps its
     /// asking; another starts afresh.
     pub(crate) fn add_action_cells(&mut self, apps: &mut Vec<usize>, resting: bool) {
+        // An app Shift took to its row: that app alone, whatever was typed
+        // — until what is typed changes (`box_shift`).
+        let focused = match &self.search.focus {
+            Some((id, typed)) if *typed == self.search.query => {
+                self.entries[..self.base_len.min(self.entries.len())].iter().position(|e| e.id == *id)
+            }
+            _ => None,
+        };
+        if focused.is_none() {
+            self.search.focus = None;
+        }
+        if let Some(i) = focused {
+            *apps = vec![i];
+        }
         // The exact name: that app alone; a space after it, the ones past it.
-        if !resting && !self.control_panel {
+        if !resting && !self.control_panel && focused.is_none() {
             let names: Vec<&str> = apps.iter().map(|&i| self.entries[i].name.as_str()).collect();
             let used: Vec<u32> = apps.iter().map(|&i| self.usage.count(&self.entries[i].id)).collect();
             if let Some(kept) = narrow(&self.search.query, &names, &used) {
@@ -619,7 +633,7 @@ impl App {
         // A site's search asked by its name: its cell first, no app alone —
         // unless what is typed begins an app's name ("google maps", "youtube
         // music" are apps to find, not searches).
-        if !resting && !self.control_panel {
+        if !resting && !self.control_panel && focused.is_none() {
             if let Some((site, words)) = web_actions::asked(&self.search.query) {
                 if !self.begins_a_name(&self.search.query) {
                     self.add_search_cell(apps, site, &words);
@@ -628,7 +642,7 @@ impl App {
             }
         }
         let lone = match apps.as_slice() {
-            &[only] if !resting && !self.control_panel && !self.search.query.is_empty() => Some(only),
+            &[only] if !resting && !self.control_panel && (!self.search.query.is_empty() || focused.is_some()) => Some(only),
             _ => None,
         };
         let Some((index, entry)) = lone.and_then(|i| Some((i, self.entries.get(i)?.clone()))) else {
@@ -1113,6 +1127,12 @@ impl App {
                 self.actions_disarm();
                 return true;
             }
+            // (An app Shift took to its row: back to what the box showed.)
+            if self.search.focus.take().is_some() {
+                self.refilter();
+                self.schedule_frame();
+                return true;
+            }
             return false;
         }
         let (row, recents) = (a.row(), a.recents.len());
@@ -1146,10 +1166,52 @@ impl App {
         let Some(to) = to else {
             return false;
         };
+        self.search.keyed = true;
         self.search.selected = Some(to);
         self.actions_settle();
         self.schedule_frame();
         true
+    }
+
+    /// SHIFT ON AN APP (Max, 2026-10-22: "press shift at any time on an
+    /// icon in the box to take it to this — more options, recent content"):
+    /// Shift TAPPED alone while the box is open takes the app under the
+    /// pointer — or the one the keys are on, when they moved last — to ITS
+    /// ROW (the lone app's: its actions, its windows', its recents), whatever
+    /// was typed, or with nothing typed. Shift again, Escape, or typing go
+    /// back; so does the box going away. Only an app of the grid: not a
+    /// file, a package, a box, an action or a recent.
+    pub(crate) fn box_shift(&mut self) {
+        if self.ui.target() != crate::state::Target::Open || self.control_panel || self.fast.open {
+            return;
+        }
+        if self.search.focus.take().is_some() {
+            self.refilter();
+            self.schedule_frame();
+            return;
+        }
+        let s = content::SECTION_APPS;
+        let hovered = match self.hover {
+            Some(content::Hit::GridCell(hs, i)) if hs == s && !self.search.keyed => Some(i),
+            _ => None,
+        };
+        let keyed = self.search.selected.and_then(|f| self.flat_to_pos(f)).filter(|&(fs, _)| fs == s).map(|(_, i)| i);
+        let Some(&e) = hovered.or(keyed).and_then(|cell| self.search.visible[s].get(cell)) else {
+            return;
+        };
+        let base = self.base_len.min(self.entries.len());
+        if e >= base || self.kinds.get(e) != Some(&apps::EntryKind::App) || self.is_catalog_webapp(e) {
+            return;
+        }
+        let id = self.entries[e].id.clone();
+        let special = [apps::CONTROL_PANEL_ID, apps::APPS_GRID_ID, apps::MODULES_ID].contains(&id.as_str());
+        if special || self.search.actions.app.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        info!("shift: {id} to its row (hovered {hovered:?}, keys on {keyed:?}, keys moved last: {})", self.search.keyed);
+        self.search.focus = Some((id, self.search.query.clone()));
+        self.refilter();
+        self.schedule_frame();
     }
 
     /// Show the recents' page `to`; the keys, when they turned it, land on
