@@ -2098,8 +2098,8 @@ pub struct Leaving {
 
 /// How high a recent's preview stands, of an icon; how wide it may be, of a
 /// cell (less a margin).
-const PREVIEW_H: f32 = 1.15;
-const PREVIEW_MARGIN: f32 = 8.0;
+const PREVIEW_H: f32 = 1.3;
+const PREVIEW_MARGIN: f32 = 3.0;
 
 /// A preview of shape `aspect` drawn whole, its bottom on the icons' line
 /// at `bottom`, centred on `cx`: the square texture's rect (the picture

@@ -64,7 +64,7 @@ pub(crate) const SYMBOL: f32 = 0.675;
 pub(crate) const DIM: f32 = 0.5;
 /// The room opened under the app's row for the actions' second lines and
 /// the recents' title (px at icon scale 1).
-pub(crate) const RECENT_ROOM: f32 = 44.0;
+pub(crate) const RECENT_ROOM: f32 = 48.0;
 /// How many cells a site's search cell's name may spread over (it stands
 /// alone in its row).
 pub(crate) const WIDE_LABEL: f32 = 3.0;
