@@ -2350,9 +2350,12 @@ pub struct FrameInput<'a> {
     /// How far the card wears the toned glass (0..1, `App::dock_tone`): as
     /// dense resting as open, its shadow round the top and sides lighter.
     pub dock_tone: f32,
-    /// The open card's ground as the screen shows it (sRGB; alpha 0:
-    /// unknown): what its faint words are laid on (`faded_on`).
+    /// The open card's ground at its worst as the screen shows it (sRGB;
+    /// alpha 0: unknown): what its faint words are laid on (`faded_on`).
     pub dock_seen: [f32; 4],
+    /// How dense the open card must be for its words to read over anything
+    /// (`options::dense_enough` on `worst_behind`).
+    pub dock_open_alpha: f32,
 }
 
 /// FAINT WORDS, SOLID (the legibility audit, 2026-10-23): `ink` faded `a` of
@@ -2587,6 +2590,7 @@ pub fn scene(
         dock_highlight,
         dock_tone,
         dock_seen,
+        dock_open_alpha,
     } = *frame;
     let layer_of = |i: usize| layers.get(i).copied().unwrap_or(i as u32);
     // Plate for an app entry's icon: the live adaptive colour. Only an
@@ -2817,7 +2821,8 @@ pub fn scene(
     if !config.accessibility.reduce_transparency {
         // Open, the card reaches `theme.open_opacity` when one is set (the
         // light tier's denser box), else the background's own alpha.
-        let open_a = config.theme.open_alpha(card_fill[3]);
+        // (Open, dense enough for its words over anything behind.)
+        let open_a = config.theme.open_alpha(card_fill[3]).max(dock_open_alpha);
         // (The toned glass rests as dense as it opens.)
         let rest = lerp(DOCK_REST_FILL, 1.0, dock_tone);
         card_fill[3] = lerp(card_fill[3] * rest, open_a.max(card_fill[3] * dock_tone), card_open);
@@ -4389,7 +4394,7 @@ pub fn scene(
         // not a darker, more opaque panel.
         let mut panel = dock_bg;
         if !config.accessibility.reduce_transparency {
-            panel[3] = config.theme.open_alpha(panel[3]);
+            panel[3] = config.theme.open_alpha(panel[3]).max(dock_open_alpha);
         }
         panel[3] *= t;
         let (bjl, bjr, bjt, bjb) = box_push;

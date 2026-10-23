@@ -433,7 +433,6 @@ fn audit_shell(a: &mut Audit, choice: &ColorChoice, shell: &Theme, apps: &Theme,
     let f4 = [fill[0], fill[1], fill[2], 1.0];
     let ink_on = if 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
     for (bn, behind) in BEHIND {
-        let back = [srgb_to_linear(behind[0]), srgb_to_linear(behind[1]), srgb_to_linear(behind[2]), 1.0];
         // Boxes: the palette's ink as words, the panel dense enough over what is behind.
         let iw = [ink_srgb[0], ink_srgb[1], ink_srgb[2], 1.0];
         // (As `accent_srgb`/`danger_srgb`: text-safe on the lit surface and its night dim.)
@@ -442,10 +441,10 @@ fn audit_shell(a: &mut Audit, choice: &ColorChoice, shell: &Theme, apps: &Theme,
         let (acc, red) = (s(readable_on(shell.accent_text(), &grounds)), s(readable_on(shell.as_text(shell.c[8]), &grounds)));
         let al = [iw, [acc[0], acc[1], acc[2], 1.0], [red[0], red[1], red[2], 1.0]]
             .iter()
-            .fold(crate::options::BOX_ALPHA, |al, w| crate::options::dense_enough(f4, *w, back, al));
+            .fold(crate::options::BOX_ALPHA, |al, w| crate::options::dense_enough(f4, *w, crate::options::worst_behind(*w), al));
         let (w, g) = layer(fill, al, ink_srgb, 1.0, behind);
         a.check("Shell · boxes, card (Dark, a palette)", &format!("titles, over {bn}"), w, g, TEXT);
-        let dim = crate::options::readable_dim(f4, al, iw, list_dim, back);
+        let dim = crate::options::readable_dim(f4, al, iw, list_dim, crate::options::worst_behind(iw));
         let (w, g) = layer(fill, al, ink_srgb, dim, behind);
         a.check("Shell · boxes, card (Dark, a palette)", &format!("list rows, over {bn}"), w, g, TEXT);
         let (w, g) = layer(fill, al, acc, 1.0, behind);
@@ -453,9 +452,10 @@ fn audit_shell(a: &mut Audit, choice: &ColorChoice, shell: &Theme, apps: &Theme,
         let (w, g) = layer(fill, al, red, 1.0, behind);
         a.check("Shell · boxes, card (Dark, a palette)", &format!("red glyphs (×), over {bn}"), w, g, LARGE);
         // The dock's open box: dense enough for its ink; its faint words solid.
-        let al = crate::options::dense_enough([fill[0], fill[1], fill[2], DOCK_ALPHA], [ink_on[0], ink_on[1], ink_on[2], 1.0], back, DOCK_ALPHA);
-        let seen = crate::options::seen_through(f4, al, back);
         let ink4 = [ink_on[0], ink_on[1], ink_on[2], 1.0];
+        let worst = crate::options::worst_behind(ink4);
+        let al = crate::options::dense_enough(f4, ink4, worst, DOCK_ALPHA);
+        let seen = crate::options::seen_through(f4, al, worst);
         let (w, g) = layer(fill, al, ink_on, 1.0, behind);
         a.check("Shell · dock (Dark, a palette)", &format!("open box: names, over {bn}"), w, g, TEXT);
         let t = crate::content::faded_on(ink4, seen, crate::content::TITLE_ALPHA, LARGE);
@@ -491,10 +491,10 @@ fn audit_screen_glass(a: &mut Audit) {
         let back = [bl[0], bl[1], bl[2], 1.0];
         let f4 = [fill[0], fill[1], fill[2], 1.0];
         let ink4 = [ink[0], ink[1], ink[2], 1.0];
-        let al = crate::options::dense_enough(f4, ink4, back, crate::options::BOX_ALPHA);
+        let al = crate::options::dense_enough(f4, ink4, crate::options::worst_behind(ink4), crate::options::BOX_ALPHA);
         let (w, g) = layer(fill, al, ink, 1.0, *b);
         a.check("Shell · Light look (reads the screen)", "box titles", w, g, TEXT);
-        let dim = crate::options::readable_dim(f4, al, ink4, dim, back);
+        let dim = crate::options::readable_dim(f4, al, ink4, dim, crate::options::worst_behind(ink4));
         let (w, g) = layer(fill, al, ink, dim, *b);
         a.check("Shell · Light look (reads the screen)", "box list rows", w, g, TEXT);
         // The open dock: the toned glass over a near-white backdrop, dense enough, faint words solid.
@@ -504,9 +504,10 @@ fn audit_screen_glass(a: &mut Audit) {
         let dink = if 0.2126 * dfill[0] + 0.7152 * dfill[1] + 0.0722 * dfill[2] > 0.179 { [0.0; 3] } else { [1.0; 3] };
         let d4 = [dfill[0], dfill[1], dfill[2], 1.0];
         let a0 = DOCK_ALPHA + (toned[3] - DOCK_ALPHA) * k;
-        let al = crate::options::dense_enough(d4, [dink[0], dink[1], dink[2], 1.0], back, a0);
-        let seen = crate::options::seen_through(d4, al, back);
         let dink4 = [dink[0], dink[1], dink[2], 1.0];
+        let worst = crate::options::worst_behind(dink4);
+        let al = crate::options::dense_enough(d4, dink4, worst, a0);
+        let seen = crate::options::seen_through(d4, al, worst);
         let (w, g) = layer(dfill, al, dink, 1.0, *b);
         a.check("Shell · Light look (reads the screen)", "open dock: names", w, g, TEXT);
         let t = crate::content::faded_on(dink4, seen, crate::content::TITLE_ALPHA, LARGE);

@@ -1468,6 +1468,10 @@ fn publish_icons(mine: u64) {
     let icons = std::path::Path::new(&data).join("icons");
     let names = ["Golem-Tinted-a", "Golem-Tinted-b"];
     let dconf = |name: &str| {
+        // (A nested test dock names no icon theme to the owner's session.)
+        if rig() {
+            return;
+        }
         let _ = std::process::Command::new("dconf")
             .args(["write", "/org/gnome/desktop/interface/icon-theme", &format!("'{name}'")])
             .status();

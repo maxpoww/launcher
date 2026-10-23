@@ -1226,15 +1226,11 @@ impl crate::App {
             return 1.0;
         }
         let a = self.config.theme.open_alpha(BOX_ALPHA);
-        // DENSE ENOUGH TO READ ON over what is behind the boxes (either side's
-        // frost, the lighter and the darker: `dense_enough`).
-        // Its words: the ink, and the accent and the red the boxes write in.
+        // DENSE ENOUGH TO READ ON over whatever is behind (`worst_behind`) —
+        // its words: the ink, and the accent and the red the boxes write in.
         let (fill, ink) = self.options_box_surface();
         let words = [ink, crate::palette::accent_srgb(), crate::palette::danger_srgb()];
-        [self.options_pill_color, self.clip_pill_color]
-            .into_iter()
-            .flatten()
-            .fold(a, |a, back| words.iter().fold(a, |a, w| dense_enough(fill, *w, back, a)))
+        words.iter().fold(a, |a, w| dense_enough(fill, *w, worst_behind(*w), a))
     }
 }
 /// An open box's fill: the backdrop it floats on with the pill's wash
@@ -3156,7 +3152,7 @@ impl App {
         // No fainter than reads, where the box is seen (`readable_dim`): on
         // a mid-grey box no dimmed word reached 4.5:1 (the legibility audit).
         let (fill, a) = (self.options_box_surface().0, self.box_panel_alpha());
-        let dim = [self.options_pill_color, self.clip_pill_color].into_iter().flatten().fold(list_dim, |t, back| readable_dim(fill, a, ink, t, back));
+        let dim = readable_dim(fill, a, ink, list_dim, worst_behind(ink));
         [ink[0], ink[1], ink[2], ink[3] * dim]
     }
 
@@ -7375,13 +7371,6 @@ impl crate::App {
                 fill = std::array::from_fn(|i| fill[i] + (toned[i] - fill[i]) * k);
             }
         }
-        // DENSE ENOUGH TO READ ON: the dock's words (`ink_on` its fill) over
-        // the glass as the screen shows it, with what is behind
-        // (`dense_enough`; the Dark look's palette dock over a white page
-        // read 2.8:1 — the legibility audit, 2026-10-23).
-        if let (Some(back), false) = (self.dock_pill_color, self.config.accessibility.reduce_transparency) {
-            fill[3] = dense_enough(fill, ink_on(fill), back, fill[3]);
-        }
         (fill, ink)
     }
 
@@ -7582,9 +7571,15 @@ impl crate::App {
             DOCK_INK_RATE,
             hidden,
         );
-        // What the open card shows under its words, as the screen shows it.
-        let a = if self.config.accessibility.reduce_transparency { 1.0 } else { self.config.theme.open_alpha(fill[3]) };
-        let seen = self.dock_pill_color.map_or([0.0; 4], |back| seen_through(fill, a, back));
+        // THE OPEN CARD DENSE ENOUGH TO READ ON over whatever is behind it
+        // (`worst_behind` its words): the Dark look's palette card open over a
+        // white page read 2.8:1, its titles nearly gone (the rig, 2026-10-23
+        // — the frost is sampled beside the card, not under it). And what it
+        // shows under its words then, for the faint ones (`faded_on`).
+        let base = if self.config.accessibility.reduce_transparency { 1.0 } else { self.config.theme.open_alpha(fill[3]) };
+        let worst = worst_behind(ink);
+        let open_alpha = dense_enough(fill, ink, worst, base);
+        let seen = seen_through(fill, open_alpha, worst);
         // (Eased with the fill, so the card's density and shadow move with it.)
         let (tone, tone_moving) = ease_rgba(&mut self.dock_tone_anim, [k; 4], dt, DOCK_FILL_RATE, hidden);
         DockPaint {
@@ -7594,6 +7589,7 @@ impl crate::App {
             plate,
             tone: tone[0],
             seen,
+            open_alpha,
             moving: fill_moving || ink_moving || wash_moving || plate_moving || tone_moving,
         }
     }
@@ -7612,9 +7608,11 @@ pub(crate) struct DockPaint {
     pub plate: [f32; 4],
     /// How far the card wears the toned glass (`App::dock_tone`), eased.
     pub tone: f32,
-    /// The open card's ground as the screen shows it (sRGB; alpha 0:
-    /// nothing sampled behind yet): `seen_through`.
+    /// The open card's ground at its worst — over what fights its words most
+    /// (`worst_behind`) — as the screen shows it (sRGB).
     pub seen: [f32; 4],
+    /// How dense the open card must be for its words to read over anything.
+    pub open_alpha: f32,
     /// True while any of them is still easing — keep frames coming.
     pub moving: bool,
 }
@@ -7676,6 +7674,14 @@ pub(crate) fn readable_dim(fill: [f32; 4], a: f32, ink: [f32; 4], dim: f32, back
         t = (t + 0.02).min(1.0);
     }
     t
+}
+
+/// What behind a see-through surface of ours fights its `ink` (sRGB words)
+/// the most: white behind light words, black behind dark ones. A surface
+/// dense enough over it reads over anything — the screen behind a card is
+/// not what any sample beside it shows.
+pub(crate) fn worst_behind(ink: [f32; 4]) -> [f32; 4] {
+    if srgb_luminance(ink) > 0.179 { [1.0, 1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0, 1.0] }
 }
 
 /// THE GLASS DENSE ENOUGH TO READ ON (the legibility audit, 2026-10-23): the
