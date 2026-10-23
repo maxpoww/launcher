@@ -1210,6 +1210,10 @@ pub(crate) struct Kitchen {
     plays: Vec<KitchenPlay>,
     #[serde(skip)]
     dir: PathBuf,
+    /// Pictures more than one page wears: a site's logo, or the first
+    /// page's of an app that changes page without loading — no page's own.
+    #[serde(skip)]
+    shared: HashSet<String>,
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -1261,6 +1265,12 @@ fn kitchen_in(dir: &Path) -> Kitchen {
     match read.and_then(|b| serde_json::from_slice::<Kitchen>(&b).ok()).filter(|k| k.v == 1) {
         Some(mut k) => {
             k.dir = dir.to_owned();
+            let mut seen = HashSet::new();
+            for pic in k.pages.values().filter_map(|p| p.pic.clone()) {
+                if !seen.insert(pic.clone()) {
+                    k.shared.insert(pic);
+                }
+            }
             k
         }
         None => Kitchen::default(),
@@ -1289,9 +1299,11 @@ impl Kitchen {
         (ours && plain && !self.dir.as_os_str().is_empty()).then_some(path)
     }
 
-    /// The preview picture Seam kept of the page at `url`.
+    /// The preview picture Seam kept of the page at `url` — when it is the
+    /// page's own, not one several pages wear.
     fn page_picture(&self, url: &str) -> Option<PathBuf> {
-        self.picture(self.pages.get(url)?.pic.as_deref()?)
+        let pic = self.pages.get(url)?.pic.as_deref()?;
+        (!self.shared.contains(pic)).then(|| self.picture(pic)).flatten()
     }
 }
 
@@ -1310,6 +1322,9 @@ fn played(k: &Kitchen, site: Option<&Site>, start: &str, now: f64) -> Vec<(Visit
     k.plays
         .iter()
         .filter(|p| host_is(&p.host, &hosts) && is_web(&p.url) && !p.title.trim().is_empty())
+        // (A YouTube play away from its video's page was heard in a mini player on
+        // another page: it would open that page, not the video.)
+        .filter(|p| !p.host.ends_with("youtube.com") || video_id(&p.url).is_some())
         .map(|p| {
             let (song, artist): (String, String) = (p.title.trim().chars().take(200).collect(), p.artist.trim().chars().take(120).collect());
             let title = if music && !artist.is_empty() { format!("{song} • {artist}") } else { song.clone() };
@@ -1352,27 +1367,24 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
     let out: Vec<Recent> = pages
         .into_iter()
         .map(|(v, title)| {
-            // What Seam heard it play, then the preview Seam kept, then the
-            // video's own from its cache, then the favicon.
-            let cooked = v
-                .pic
-                .as_deref()
-                .map(PathBuf::from)
-                .or_else(|| kitchen.page_picture(&v.url))
-                .and_then(|src| {
-                    let out = shots.as_deref()?.join(format!("k-{}-s1.png", src.file_stem()?.to_string_lossy()));
-                    if out.exists() {
-                        return Some(out);
-                    }
-                    let bytes = std::fs::read(&src).ok()?;
-                    squared(&bytes, &out)
-                });
+            // What Seam heard it play, then the video's own from Seam's cache
+            // (by its id: it cannot be another's), then the preview Seam kept,
+            // then the favicon.
+            let cooked = |src: PathBuf| {
+                let out = shots.as_deref()?.join(format!("k-{}-s1.png", src.file_stem()?.to_string_lossy()));
+                if out.exists() {
+                    return Some(out);
+                }
+                let bytes = std::fs::read(&src).ok()?;
+                squared(&bytes, &out)
+            };
             let video = || {
                 video_id(&v.url)
                     .and_then(|id| Some((id, videos.get(id)?)))
                     .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body))
             };
-            let picture = cooked.or_else(video).or_else(|| {
+            let played = v.pic.as_deref().map(PathBuf::from).and_then(cooked);
+            let picture = played.or_else(video).or_else(|| kitchen.page_picture(&v.url).and_then(cooked)).or_else(|| {
                 let data = favicon(browser, icons.as_deref()?, &v.url)?;
                 tile_in(tiles.as_deref()?, &data)
             });
@@ -1741,6 +1753,8 @@ mod tests {
         let k = kitchen_in(&dir);
         assert_eq!(k.title_of("https://music.youtube.com/watch?v=9d9PQ1hrhBk").as_deref(), Some("Robot Rock - YouTube Music"));
         assert!(k.picture("0123456789abcdef.png").is_some());
+        // One page wears it alone: its own.
+        assert!(k.page_picture("https://music.youtube.com/watch?v=9d9PQ1hrhBk").is_some());
         assert!(k.picture("fedcba9876543210.jpg").is_none(), "too big");
         assert!(k.picture("aaaaaaaaaaaaaaaa.png").is_none(), "a link");
         assert!(k.picture("../../etc/passwd").is_none() && k.picture("0123456789abcdef.svg").is_none());
@@ -1750,6 +1764,10 @@ mod tests {
         assert_eq!(sp[0].1, "In the End • Linkin Park");
         assert_eq!(sp[0].0.url, "https://open.spotify.com/search/In%20the%20End%20Linkin%20Park");
         assert!(sp[0].0.pic.is_some());
+        // A YouTube play heard away from its video (a mini player on the home page): none.
+        let mut away = k.clone();
+        away.plays = vec![KitchenPlay { host: "www.youtube.com".into(), url: "https://www.youtube.com/".into(), title: "x".into(), ..Default::default() }];
+        assert!(played(&away, site("youtube"), "https://www.youtube.com", 20.0).is_empty());
         // YouTube Music played on its own page: that page; one with it in the history.
         let ym = played(&k, site("youtube-music"), "https://music.youtube.com", 20.0);
         assert_eq!(ym[0].0.url, "https://music.youtube.com/watch?v=9d9PQ1hrhBk");
@@ -1759,6 +1777,25 @@ mod tests {
         assert_eq!(both[0].1, "Robot Rock • Daft Punk");
         // Not a file of its own, or not ours at all: nothing.
         assert_eq!(kitchen_in(&dir.join("nowhere")).plays.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_several_pages_wear_is_none_of_theirs() {
+        let dir = scratch("shared-pic");
+        std::fs::create_dir_all(dir.join("pics")).unwrap();
+        std::fs::write(dir.join("pics/0123456789abcdef.png"), b"png").unwrap();
+        std::fs::write(dir.join("pics/fedcba9876543210.png"), b"png").unwrap();
+        std::fs::write(
+            dir.join("recents.json"),
+            r#"{"v":1,"pages":{"https://www.youtube.com/":{"title":"YouTube","pic":"0123456789abcdef.png"},
+                              "https://www.youtube.com/watch?v=a":{"title":"A","pic":"0123456789abcdef.png"},
+                              "https://www.youtube.com/watch?v=b":{"title":"B","pic":"fedcba9876543210.png"}},"plays":[]}"#,
+        )
+        .unwrap();
+        let k = kitchen_in(&dir);
+        assert!(k.page_picture("https://www.youtube.com/watch?v=a").is_none(), "the first page's picture on a later page");
+        assert!(k.page_picture("https://www.youtube.com/watch?v=b").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
