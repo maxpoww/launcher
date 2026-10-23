@@ -106,7 +106,17 @@ const HARD_CAP: Duration = Duration::from_millis(2000);
 const SLOW_HOLD: Duration = Duration::from_millis(300);
 /// (8 s: in 2.5 a white screen going black read as a jump — Max,
 /// 2026-10-22, at the first dusk.)
-const SLOW_FADE: Duration = Duration::from_millis(8000);
+const SLOW_FADE_MS: u64 = 8000;
+/// The slow dissolve's fade now: `SLOW_FADE_MS`, or a length set by hand
+/// (`set_slow_fade`; Max, 2026-10-22: the look's switch tried at 30 s).
+static SLOW_FADE_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SLOW_FADE_MS);
+fn slow_fade() -> Duration {
+    Duration::from_millis(SLOW_FADE_NOW.load(std::sync::atomic::Ordering::Relaxed))
+}
+pub(crate) fn set_slow_fade(d: Option<Duration>) {
+    let ms = d.map_or(SLOW_FADE_MS, |d| d.as_millis() as u64);
+    SLOW_FADE_NOW.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// What is done under the still.
 pub(crate) type Then = Box<dyn FnOnce(&mut App)>;
@@ -221,7 +231,7 @@ pub(crate) struct Dissolve {
     /// Tells this run's timers from a later run's.
     id: u64,
     then: Option<Then>,
-    /// The light's slow pace (`SLOW_HOLD`, `SLOW_FADE`), not a scale's.
+    /// The light's slow pace (`SLOW_HOLD`, `slow_fade`), not a scale's.
     slow: bool,
     phase: Phase,
     stills: Vec<Still>,
@@ -320,7 +330,7 @@ impl App {
                 app.dissolve_cover_late();
             }
         });
-        let cap = if slow { HARD_CAP + SLOW_HOLD + SLOW_FADE } else { HARD_CAP };
+        let cap = if slow { HARD_CAP + SLOW_HOLD + slow_fade() } else { HARD_CAP };
         self.dissolve_timer(id, cap, move |app| {
             warn!("dissolve: still up after {cap:?}; taking it down");
             app.dissolve_end();
@@ -624,7 +634,7 @@ impl App {
                     now
                 }
             };
-            let fade = if d.slow { SLOW_FADE } else { FADE };
+            let fade = if d.slow { slow_fade() } else { FADE };
             let t = from.elapsed().as_secs_f32() / fade.as_secs_f32();
             if t < 1.0 {
                 let multiplier = (f64::from(opacity(t)) * f64::from(u32::MAX)) as u32;

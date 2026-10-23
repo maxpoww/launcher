@@ -6306,6 +6306,18 @@ impl App {
         }
         // `twilight <0..1000|off>`: the point between the looks by hand
         // (`lighting_twilight`): 0 the lightest dark, 1000 the dimmest light.
+        // `twilight <t> fade <seconds>`: there under the slow dissolve, its
+        // fade that long (the look's switch, crossfaded by hand).
+        if let Some((t, secs)) = what.strip_prefix("twilight ").and_then(|r| r.split_once(" fade ")) {
+            let (Ok(t), Ok(secs)) = (t.trim().parse::<u16>(), secs.trim().parse::<u64>()) else {
+                return "twilight <t> fade <seconds>".to_owned();
+            };
+            crate::transition::set_slow_fade(Some(std::time::Duration::from_secs(secs.max(1))));
+            self.dissolve_slow(Box::new(move |app: &mut crate::App| {
+                app.lighting_twilight(Some(t));
+            }));
+            return format!("twilight {t} under a {secs} s dissolve");
+        }
         if let Some(rest) = what.strip_prefix("twilight ") {
             let t = match rest.trim() {
                 "off" => None,
