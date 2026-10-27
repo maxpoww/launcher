@@ -409,7 +409,7 @@ impl App {
             let widths: Vec<f32> = labels
                 .iter()
                 .map(|l| match self.renderer.as_ref() {
-                    Some(r) => r.measure_text(l, TAB_FONT_PX, Some(content::FONT_BOLD)),
+                    Some(r) => r.measure_text(l, TAB_FONT_PX, crate::options::TEXT_FONT),
                     None => crate::options::est_text_w(l, TAB_FONT_PX),
                 })
                 .collect();

@@ -330,6 +330,7 @@ impl App {
             let widest = (0..pages).map(width_of).fold(0.0f32, f32::max);
             let scale = ((row.w - 2.0 * gap) / widest.max(1.0)).min(1.0);
             let mut at = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); d.tags.len()];
+            let words: Vec<f32> = (0..d.tags.len()).map(|i| d.tab_w.get(i).copied().unwrap_or(40.0) * scale).collect();
             let scales = vec![scale; pages];
             for p in 0..pages {
                 let mut x = row.x + (row.w - width_of(p) * scale) / 2.0;
@@ -342,6 +343,7 @@ impl App {
             let shown = page * deep_search::TABS_PAGE..((page + 1) * deep_search::TABS_PAGE).min(d.tags.len());
             layout.controls = (0..d.tags.len()).map(|i| if shown.contains(&i) { at[i] } else { content::Rect::new(0.0, 0.0, 0.0, 0.0) }).collect();
             layout.tabs_at = at;
+            layout.tabs_words = words;
             layout.tabs_scales = scales;
             layout.tabs_page = (page, pages);
             layout.tabs_slide = d.slide;

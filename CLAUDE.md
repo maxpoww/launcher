@@ -1630,7 +1630,7 @@ The big daemon files are cohesive but long — go straight to the function:
   Under each name when it was used and, from a MB, how big ("2 h · 8.4 MB", `ago`/`big`; the
   page dots a line lower). THE TABS (Max, 2026-10-27: "no pills… letters as we use on the boxes… under
   the searchbox… 9, then two, three pages more… the ones the user uses start being closer… if i search
-  '.html' the tag should be there"): WORDS under the search field (the field moves up into the band
+  '.html' the tag should be there"): WORDS under the search field (in the boxes' word style — the text font, the lit one(s) underlined — the field moves up into the band
   the System row has — `deep_band`, `controls_layer` —, the tabs take its place: `Layout::tabs_row`,
   their rects `Layout::controls`; `TAB_FONT_PX` 16.5, one size on every page — smaller only when a box is
   too narrow for its widest page —; the pages SLIDE as the box's do, `Deep::slide` eased toward

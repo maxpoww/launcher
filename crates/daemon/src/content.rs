@@ -985,6 +985,8 @@ pub struct Layout {
     /// Every tab where it stands when its page is shown, each page's size,
     /// and where the pages stand now (in pages: `Deep::slide`).
     pub tabs_at: Vec<Rect>,
+    /// Each tab's word's width as drawn (its underline's).
+    pub tabs_words: Vec<f32>,
     pub tabs_scales: Vec<f32>,
     pub tabs_slide: f32,
     /// The screen's edge the dock stands on (the Launcher page's Position):
@@ -1458,6 +1460,7 @@ pub fn layout(
         tabs_row: None,
         tabs_page: (0, 1),
         tabs_at: Vec::new(),
+        tabs_words: Vec::new(),
         tabs_scales: Vec::new(),
         tabs_slide: 0.0,
         side: Side::Bottom,
@@ -1867,6 +1870,7 @@ fn layout_side(
         tabs_row: None,
         tabs_page: (0, 1),
         tabs_at: Vec::new(),
+        tabs_words: Vec::new(),
         tabs_scales: Vec::new(),
         tabs_slide: 0.0,
         side: if left { Side::Left } else { Side::Right },
@@ -4464,8 +4468,11 @@ pub fn scene(
     // The Controls row: the settings the search matches, as the control
     // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
-    // THE DEEP SEARCH'S TABS: words under the field, the ones lit in the full
-    // ink, the others as the titles' quieter, the page's dots under them.
+    // THE DEEP SEARCH'S TABS: words under the field as the boxes' tabs are
+    // (the panel's word choices — Max: "use the underline for the selected
+    // one, as on the boxes, and the same font"): the text font, the ones lit
+    // in the full ink and UNDERLINED, the others at 55 %; the page's dots
+    // under them.
     if let (Some(d), Some(row), false) = (deep, layout.tabs_row, panel) {
         // The pages slide: each tab where its page stands now, round the end
         // the nearer way, inside the row.
@@ -4489,32 +4496,46 @@ pub fn scene(
             let r = Rect::new(rest.x + off * row.w, rest.y, rest.w, rest.h);
             let s = layout.tabs_scales.get(p).copied().unwrap_or(1.0);
             let (font, line) = (crate::deep_search::TAB_FONT_PX * s, crate::deep_search::TAB_LINE_PX * s);
-            let a = if d.lit.contains(&i) {
+            let lit = d.lit.contains(&i);
+            let a = if lit {
                 1.0
             } else if hover == Some(Hit::Control(i)) {
                 0.78
             } else {
-                0.5
+                0.55
             };
+            let ink = if a >= 1.0 { [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3]] } else { faded_on(dock_ink, dock_seen, a, 2.5) };
+            // (A little up from the row's middle: the dots under them.)
+            let top = r.y + (r.h - line) / 2.0 - 9.0;
             tgrid.labels.push(Label {
                 text: word.clone(),
-                // (A little up from the row's middle: the dots under them.)
-                pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0 - 9.0),
+                pos: (r.x + r.w / 2.0, top),
                 max_w: r.w,
                 font_px: font,
                 line_px: line,
                 centered: true,
                 dim: false,
                 cache: (s - 1.0).abs() < 0.001,
-                family: Some(FONT_BOLD),
-                color: Some(if a >= 1.0 { [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3]] } else { faded_on(dock_ink, dock_seen, a, 2.5) }),
+                family: crate::options::TEXT_FONT,
+                color: Some(ink),
                 clip: Some(in_row),
             });
+            // The underline: the word's width, a hair under it (the panel's
+            // 1.5 px at its big words).
+            if lit {
+                let uw = layout.tabs_words.get(i).copied().unwrap_or(r.w);
+                let ux = r.x + (r.w - uw) / 2.0;
+                let line_rect = Rect::new(ux, top + line + 1.0, uw, 1.5 * s.max(0.7));
+                let u = line_rect.intersect(&in_row);
+                if u.w > 0.0 && u.h > 0.0 {
+                    tgrid.rects.push(RectInst { rect: u, radius: 0.0, color: ink, glass: 0.0, border: 0.0 });
+                }
+            }
         }
         if pages > 1 {
             let (dot_r, spacing) = (2.5, 9.0);
             let total = pages as f32 * spacing - (spacing - dot_r * 2.0);
-            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 6.0);
+            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 4.5);
             let hl = dock_highlight;
             for p in 0..pages {
                 let x = cx - total / 2.0 + p as f32 * spacing + dot_r;
