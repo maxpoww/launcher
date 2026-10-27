@@ -84,6 +84,11 @@ impl Tag {
 
 /// Tabs a page.
 pub(crate) const TABS_PAGE: usize = 9;
+/// The tabs' type size (bigger than a title's: Max, "make them bigger").
+pub(crate) const TAB_FONT_PX: f32 = 15.0;
+pub(crate) const TAB_LINE_PX: f32 = 19.0;
+/// How fast the tabs' pages slide (the box's own pages').
+const TAB_SLIDE_RATE: f32 = 12.0;
 
 /// The tabs as they first stand (`places`: the owner's folders by key): the
 /// kinds and the downloads, then file types and the other places — what is
@@ -183,6 +188,11 @@ pub(crate) struct Deep {
     pub tab_w: Vec<f32>,
     pub page: usize,
     pub pager: crate::pager::Pager,
+    /// Where the tabs' pages stand, in pages (the page shown is `slide`
+    /// eased toward `slide_to`, both run on past the last page so going
+    /// round slides on the same way: `content` wraps them).
+    pub slide: f32,
+    pub slide_to: f32,
     /// The tab what is typed lit last (its page shown once, as it comes).
     pub typed_was: Option<usize>,
     /// The files picked to act on together (their paths), and their cells.
@@ -195,6 +205,25 @@ pub(crate) struct Deep {
     /// The text inside: the words (and the folder) the found are for, what
     /// they found.
     pub inside: Inside,
+}
+
+impl Deep {
+    /// Page `page` of the tabs shown, sliding there: `dir` the way the wheel
+    /// or a walk went (on past the end, round, the same way), else the
+    /// nearer way round.
+    pub(crate) fn show_page(&mut self, page: usize, dir: Option<i64>) {
+        let pages = self.tags.len().div_ceil(TABS_PAGE).max(1) as f32;
+        let from = self.page as f32;
+        self.page = page;
+        let delta = match dir {
+            Some(d) => d as f32,
+            None => {
+                let ahead = (page as f32 - from).rem_euclid(pages);
+                if ahead > pages / 2.0 { ahead - pages } else { ahead }
+            }
+        };
+        self.slide_to += delta;
+    }
 }
 
 /// The reading of the text inside (`file_inside::find`).
@@ -380,8 +409,8 @@ impl App {
             let widths: Vec<f32> = labels
                 .iter()
                 .map(|l| match self.renderer.as_ref() {
-                    Some(r) => r.measure_text(l, content::TITLE_FONT_PX, Some(content::FONT_BOLD)),
-                    None => crate::options::est_text_w(l, content::TITLE_FONT_PX),
+                    Some(r) => r.measure_text(l, TAB_FONT_PX, Some(content::FONT_BOLD)),
+                    None => crate::options::est_text_w(l, TAB_FONT_PX),
                 })
                 .collect();
             if let Some(d) = self.search.deep.as_mut() {
@@ -392,10 +421,10 @@ impl App {
         let typed = self.deep_typed_tab();
         if let Some(d) = self.search.deep.as_mut() {
             if typed != d.typed_was {
-                if let Some(i) = typed {
-                    d.page = i / TABS_PAGE;
-                }
                 d.typed_was = typed;
+                if let Some(i) = typed {
+                    d.show_page(i / TABS_PAGE, None);
+                }
             }
         }
     }
@@ -490,7 +519,7 @@ impl App {
                 }
             }
         }
-        d.page = next / TABS_PAGE;
+        d.show_page(next / TABS_PAGE, None);
         self.search.selected = None;
         self.search.chosen = false;
         self.refilter();
@@ -503,8 +532,20 @@ impl App {
             return;
         };
         let pages = d.tags.len().div_ceil(TABS_PAGE).max(1);
-        d.page = (d.page as i64 + dir).rem_euclid(pages as i64) as usize;
+        let to = (d.page as i64 + dir).rem_euclid(pages as i64) as usize;
+        d.show_page(to, Some(dir));
         self.schedule_frame();
+    }
+
+    /// The tabs' pages slid on toward the page shown (each frame).
+    /// Whether they still move.
+    pub(crate) fn deep_tabs_ease(&mut self, dt: f32) -> bool {
+        let Some(d) = self.search.deep.as_mut() else {
+            return false;
+        };
+        let (at, moving) = crate::animation::ease_toward(d.slide, d.slide_to, dt, TAB_SLIDE_RATE, 0.002);
+        d.slide = at;
+        moving
     }
 
     /// The wheel over the tabs: their pages. Whether it was over them.

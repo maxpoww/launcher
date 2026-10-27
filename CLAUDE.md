@@ -1632,8 +1632,10 @@ The big daemon files are cohesive but long — go straight to the function:
   the searchbox… 9, then two, three pages more… the ones the user uses start being closer… if i search
   '.html' the tag should be there"): WORDS under the search field (the field moves up into the band
   the System row has — `deep_band`, `controls_layer` —, the tabs take its place: `Layout::tabs_row`,
-  their rects `Layout::controls`, `tabs_scale` when a box is too narrow for nine, `tabs_page`, dots
-  under them), the lit one(s) in the full ink, the others quieter (`DeepDraw::tabs`/`lit`). A `Tag`:
+  their rects `Layout::controls`; `TAB_FONT_PX` 15, one size on every page — smaller only when a box is
+  too narrow for its widest page —; the pages SLIDE as the box's do, `Deep::slide` eased toward
+  `slide_to` at the pager's rate, round the end the nearer way, `Layout::tabs_at`/`tabs_slide`; dots
+  under them lit as the slide passes), the lit one(s) in the full ink, the others quieter (`DeepDraw::tabs`/`lit`). A `Tag`:
   All, a kind, a TYPE by its ending (".html"), a PLACE ("Downloads/" — keeps the search to it);
   NINE a page (`TABS_PAGE`), the first as `first_tabs` (the kinds, Downloads/, .html; then Desktop/,
   Archives, .txt .md .docx … , the other places), then ORDERED BY USE (`by_use`,

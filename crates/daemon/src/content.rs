@@ -981,8 +981,12 @@ pub struct Layout {
     /// much smaller their words are drawn, and the page shown of how many
     /// (`App::layout_stretched`; their rects are `controls`).
     pub tabs_row: Option<Rect>,
-    pub tabs_scale: f32,
     pub tabs_page: (usize, usize),
+    /// Every tab where it stands when its page is shown, each page's size,
+    /// and where the pages stand now (in pages: `Deep::slide`).
+    pub tabs_at: Vec<Rect>,
+    pub tabs_scales: Vec<f32>,
+    pub tabs_slide: f32,
     /// The screen's edge the dock stands on (the Launcher page's Position):
     /// at the bottom a row the box rises from; on a side a column, the box
     /// growing out of that edge with the dock riding its far side
@@ -1452,8 +1456,10 @@ pub fn layout(
         apps_none: false,
         shelf_room: 0.0,
         tabs_row: None,
-        tabs_scale: 1.0,
         tabs_page: (0, 1),
+        tabs_at: Vec::new(),
+        tabs_scales: Vec::new(),
+        tabs_slide: 0.0,
         side: Side::Bottom,
         dock_band: Rect::new(0.0, card_top, w, (dock_hit_bottom - card_top).max(0.0)),
     }
@@ -1859,8 +1865,10 @@ fn layout_side(
         apps_none: false,
         shelf_room: 0.0,
         tabs_row: None,
-        tabs_scale: 1.0,
         tabs_page: (0, 1),
+        tabs_at: Vec::new(),
+        tabs_scales: Vec::new(),
+        tabs_slide: 0.0,
         side: if left { Side::Left } else { Side::Right },
         dock_band,
     }
@@ -4459,13 +4467,28 @@ pub fn scene(
     // THE DEEP SEARCH'S TABS: words under the field, the ones lit in the full
     // ink, the others as the titles' quieter, the page's dots under them.
     if let (Some(d), Some(row), false) = (deep, layout.tabs_row, panel) {
-        let s = layout.tabs_scale;
-        let (font, line) = (TITLE_FONT_PX * s, TITLE_LINE_PX * s);
+        // The pages slide: each tab where its page stands now, round the end
+        // the nearer way, inside the row.
+        let (_, pages) = layout.tabs_page;
+        let n = pages.max(1) as f32;
+        let wrapped = |x: f32| {
+            let r = x.rem_euclid(n);
+            if r > n / 2.0 { r - n } else { r }
+        };
+        let in_row = reveal_clip(row);
         let mut tgrid = GridContent { clip: reveal_rect, ..Default::default() };
-        for (i, r) in layout.controls.iter().enumerate() {
-            let Some(word) = d.tabs.get(i).filter(|_| r.w > 0.0) else {
+        for (i, rest) in layout.tabs_at.iter().enumerate() {
+            let p = i / crate::deep_search::TABS_PAGE;
+            let off = if pages > 1 { wrapped(p as f32 - layout.tabs_slide) } else { 0.0 };
+            if off.abs() >= 1.0 || rest.w <= 0.0 {
+                continue;
+            }
+            let Some(word) = d.tabs.get(i) else {
                 continue;
             };
+            let r = Rect::new(rest.x + off * row.w, rest.y, rest.w, rest.h);
+            let s = layout.tabs_scales.get(p).copied().unwrap_or(1.0);
+            let (font, line) = (crate::deep_search::TAB_FONT_PX * s, crate::deep_search::TAB_LINE_PX * s);
             let a = if d.lit.contains(&i) {
                 1.0
             } else if hover == Some(Hit::Control(i)) {
@@ -4475,7 +4498,8 @@ pub fn scene(
             };
             tgrid.labels.push(Label {
                 text: word.clone(),
-                pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0 - 2.0),
+                // (A little up from the row's middle: the dots under them.)
+                pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0 - 6.0),
                 max_w: r.w,
                 font_px: font,
                 line_px: line,
@@ -4484,18 +4508,19 @@ pub fn scene(
                 cache: (s - 1.0).abs() < 0.001,
                 family: Some(FONT_BOLD),
                 color: Some(if a >= 1.0 { [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3]] } else { faded_on(dock_ink, dock_seen, a, 2.5) }),
-                clip: Some(reveal_rect),
+                clip: Some(in_row),
             });
         }
-        let (page, pages) = layout.tabs_page;
         if pages > 1 {
             let (dot_r, spacing) = (2.5, 9.0);
             let total = pages as f32 * spacing - (spacing - dot_r * 2.0);
-            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 3.0);
+            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 4.0);
             let hl = dock_highlight;
             for p in 0..pages {
                 let x = cx - total / 2.0 + p as f32 * spacing + dot_r;
-                let on = if p == page { 1.0 } else { 0.28 };
+                // (Lit as the slide passes it, as the sections' dots are.)
+                let dist = wrapped(p as f32 - layout.tabs_slide).abs().min(1.0);
+                let on = 1.0 - dist * 0.72;
                 tgrid.rects.push(RectInst {
                     rect: Rect::new(x - dot_r, cy - dot_r, dot_r * 2.0, dot_r * 2.0),
                     radius: dot_r,

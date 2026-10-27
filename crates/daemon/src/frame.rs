@@ -315,20 +315,36 @@ impl App {
             layout.tabs_row = Some(row);
             let pages = d.tags.len().div_ceil(deep_search::TABS_PAGE).max(1);
             let page = d.page.min(pages - 1);
-            let shown = page * deep_search::TABS_PAGE..((page + 1) * deep_search::TABS_PAGE).min(d.tags.len());
             let gap = TAB_GAP * self.options_scale();
-            let widths: Vec<f32> = shown.clone().map(|i| d.tab_w.get(i).copied().unwrap_or(40.0)).collect();
-            let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
-            let scale = ((row.w - 2.0 * gap) / total.max(1.0)).min(1.0);
-            let mut rects = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); d.tags.len()];
-            let mut x = row.x + (row.w - total * scale) / 2.0;
-            for (i, w) in shown.zip(widths) {
-                rects[i] = content::Rect::new(x - gap * scale / 2.0, row.y, (w + gap) * scale, row.h);
-                x += (w + gap) * scale;
+            // Every page laid out at rest, each centred, each its own size;
+            // the page shown takes the pointer (`controls`), the slide draws
+            // them where they are (`content`, `tabs_slide`).
+            // (One size on every page — the one the widest page needs —, so
+            // the words do not change size as the pages slide.)
+            let page_of = |p: usize| p * deep_search::TABS_PAGE..((p + 1) * deep_search::TABS_PAGE).min(d.tags.len());
+            let width_of = |p: usize| {
+                let on = page_of(p);
+                let n = on.len();
+                on.map(|i| d.tab_w.get(i).copied().unwrap_or(40.0)).sum::<f32>() + gap * n.saturating_sub(1) as f32
+            };
+            let widest = (0..pages).map(width_of).fold(0.0f32, f32::max);
+            let scale = ((row.w - 2.0 * gap) / widest.max(1.0)).min(1.0);
+            let mut at = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); d.tags.len()];
+            let scales = vec![scale; pages];
+            for p in 0..pages {
+                let mut x = row.x + (row.w - width_of(p) * scale) / 2.0;
+                for i in page_of(p) {
+                    let w = d.tab_w.get(i).copied().unwrap_or(40.0);
+                    at[i] = content::Rect::new(x - gap * scale / 2.0, row.y, (w + gap) * scale, row.h);
+                    x += (w + gap) * scale;
+                }
             }
-            layout.controls = rects;
-            layout.tabs_scale = scale;
+            let shown = page * deep_search::TABS_PAGE..((page + 1) * deep_search::TABS_PAGE).min(d.tags.len());
+            layout.controls = (0..d.tags.len()).map(|i| if shown.contains(&i) { at[i] } else { content::Rect::new(0.0, 0.0, 0.0, 0.0) }).collect();
+            layout.tabs_at = at;
+            layout.tabs_scales = scales;
             layout.tabs_page = (page, pages);
+            layout.tabs_slide = d.slide;
         }
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
@@ -601,6 +617,10 @@ impl App {
                     fit_animating = true;
                 }
             }
+        }
+        // (The deep search's tabs slide between their pages.)
+        if self.deep_tabs_ease(dt) {
+            fit_animating = true;
         }
         let (trim_want, second_want) = self.apps_trim_target();
         let trim = self.ui.open_trim();
