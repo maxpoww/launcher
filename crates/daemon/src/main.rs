@@ -5149,9 +5149,14 @@ impl App {
             // (everything but dotfiles).
             visible[content::SECTION_FILES] = self.home_listing();
         }
-        // THE DEEP SEARCH ("/"): its shelves are the sections.
-        let deep = self.search.deep.is_some() && !resting_grid;
+        // THE DEEP SEARCH ("/"): its shelves are the sections (a file's row
+        // Shift made is gone once what is typed changed; the pill stays out).
+        let deep = self.search.deep.is_some() && !resting_grid && !self.control_panel;
         if deep {
+            if self.search.focus_file.as_ref().is_some_and(|f| f.typed != self.search.query) {
+                self.search.focus_file = None;
+            }
+            self.search.open = true;
             visible = self.deep_results();
         }
         // One app left in a search: its actions follow it as cells of their
@@ -6380,6 +6385,11 @@ impl App {
             self.box_peek_close();
             self.refilter();
         }
+        // …and so does the deep search, with what it picked.
+        if self.ui.target() != Target::Open && self.search.deep.take().is_some() {
+            self.search.query.clear();
+            self.refilter();
+        }
         if self.ui.target() == Target::Open {
             self.scroll.reset_sections();
             // open_at is set only when expand was triggered by a scroll gesture
@@ -7076,7 +7086,7 @@ impl App {
                     self.install_drag_reset = false;
                     self.search.keyed = true;
                     self.search.chosen = false;
-                    if self.search.query.is_empty() {
+                    if self.search.query.is_empty() && self.search.deep.is_none() {
                         self.search.open = false;
                     }
                     self.refilter();
@@ -8441,7 +8451,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 match app.hover {
                     // Right-click on a Files cell opens a terminal in that
                     // directory (a file's containing folder).
-                    Some(Hit::GridCell(s, cell)) if s == content::SECTION_FILES => {
+                    Some(Hit::GridCell(s, cell))
+                        if app.search.visible[s].get(cell).is_some_and(|&e| {
+                            (s == content::SECTION_FILES && app.kinds.get(e) == Some(&apps::EntryKind::File)) || app.found_file(s, e)
+                        }) =>
+                    {
                         if let Some(entry_idx) = app.search.visible[s].get(cell).copied() {
                             app.open_terminal_at(entry_idx);
                         }

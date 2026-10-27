@@ -1668,9 +1668,11 @@ impl App {
         // Ctrl+Delete on a found file (or its row): into the bin — its row's
         // button too, where the row is wide enough to hold it.
         if matches!(keysym, Keysym::Delete | Keysym::KP_Delete) && self.modifiers.ctrl {
-            let paths = match &self.search.focus_file {
-                Some(f) => f.paths(),
-                None => self.chosen_file().and_then(|e| self.entries.get(e)).map(|e| vec![e.id.clone()]).unwrap_or_default(),
+            // (Only a file the keys or the pointer CHOSE, or a row's own.)
+            let paths = match self.row_paths() {
+                Some(p) => p,
+                None if self.search.chosen => self.chosen_file().and_then(|e| self.entries.get(e)).map(|e| vec![e.id.clone()]).unwrap_or_default(),
+                None => Vec::new(),
             };
             if !paths.is_empty() {
                 self.box_bin(&paths);
@@ -1908,8 +1910,8 @@ impl App {
     /// Ctrl+Enter on a found file (or its row's): shown in Files, selected
     /// there. Whether there was one.
     pub(crate) fn box_show_in_files(&mut self) -> bool {
-        let path = match &self.search.focus_file {
-            Some(f) => Some(f.path.clone()),
+        let path = match self.row_paths() {
+            Some(p) => p.first().cloned(),
             None => self.chosen_file().or_else(|| {
                 let (s, cell) = self.search.selected.and_then(|f| self.flat_to_pos(f))?;
                 let e = *self.search.visible[s].get(cell)?;
@@ -2259,16 +2261,38 @@ impl App {
 
     /// The box goes, the keyboard back to where it was (Show all and Close
     /// all leave no app starting to give it to).
+    /// What a file's row acts on, by where the selection is: on the row
+    /// (the file, its actions) every file it stands for; on one of its
+    /// folder's things under it, that one. `None` with no row up.
+    fn row_paths(&self) -> Option<Vec<String>> {
+        let f = self.search.focus_file.as_ref()?;
+        let a = &self.search.actions;
+        let row = a.row();
+        match self.search.selected {
+            Some(s) if s >= row && s < row + a.recents.len() => {
+                let e = a.recents.get(s - row).and_then(|&e| self.entries.get(e))?;
+                Some(vec![e.id.clone()]).filter(|_| e.id.starts_with('/'))
+            }
+            _ => Some(f.paths()),
+        }
+    }
+
     /// Files put in the bin from the box (a file's row): gone from what the
-    /// box finds at once, the row with them; the box stays, on the search.
+    /// box finds at once — a folder with all in it —, the row with them; the
+    /// box stays, on the search. What stays (a delicate place: a file window
+    /// asks first) keeps its row.
     fn box_bin(&mut self, paths: &[String]) {
         info!("putting {} file(s) in the bin from the box", paths.len());
-        self.search.focus_file = None;
         for p in paths {
             self.trash_file(p);
         }
         let gone: Vec<&String> = paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect();
-        self.file_index.retain(|f| !gone.contains(&&f.path));
+        if gone.is_empty() {
+            info!("nothing went to the bin (kept where it is)");
+            return;
+        }
+        self.search.focus_file = None;
+        self.file_index.retain(|f| !gone.iter().any(|g| Path::new(&f.path).starts_with(g.as_str())));
         if let Some(d) = self.search.deep.as_mut() {
             d.marked.retain(|p| !gone.contains(&p));
         }

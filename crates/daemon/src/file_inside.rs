@@ -116,7 +116,10 @@ pub(crate) fn refresh(papers: Vec<(String, f64, u64)>) -> usize {
         if list.get(key).is_some_and(|(m, _)| (m - mtime).abs() < 0.5) {
             continue;
         }
-        let text = extract(path).unwrap_or_default();
+        // (Not read — its program missing, or too slow —: tried again next time.)
+        let Some(text) = extract(path) else {
+            continue;
+        };
         let tmp = dir.join(format!("{key}.tmp"));
         if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, dir.join(format!("{key}.txt"))).is_ok() {
             list.insert(key.clone(), (*mtime, path.clone()));

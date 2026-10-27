@@ -1604,5 +1604,48 @@ The big daemon files are cohesive but long — go straight to the function:
   with at least a row to let it go on (the held trim, never under a row). Real home: `cargo test -- --ignored
   real_home_search --nocapture` (QUERIES=a,b,…). Rig: `HOME=<fake home>` for the rig dock, an
   `xdg-open` stub on its PATH, and the host's `xdg-mime`/`gio` (the toolbox has neither).
+- More of THE BOX'S FILE SEARCH (Max, 2026-10-27, after a study of Windows' new search, Spotlight,
+  KRunner, Raycast, Alfred and Everything: "build all the features for a simple fast search on
+  regular search"): WORDS THAT SAY WHEN AND HOW BIG (`file_search::parse` → `Query::when`/`size`;
+  "hoy/today", "ayer/yesterday", "esta semana/this week", "semana pasada/last week", "este mes",
+  "este año"; ">10mb", "<500kb", "grandes/big" = 100 MB up — a file changed OR opened then; alone
+  they list it, newest first); A TYPO FORGIVEN when nothing has every word (`rank_forgiving`: a
+  word of 4+ letters one letter off a name's word — two from 8 letters, Damerau `near` —, or off
+  the start of a longer one, or its letters in order; names folded once at the walk,
+  `FileEntry::folded`, 5–6 ms a keystroke on 17.6k files); "Show all in Files" as the Files'
+  last cell (`deep_search::show_all_cell`, `SHOW_ALL_ID`: Golem Files on home searching the same
+  words — `filer_find`, which goes on below); Ctrl+Enter on a found file shows it in Files
+  (`box_show_in_files`); Move to Bin in a file's row, furthest left (cut on a narrow box: then
+  Ctrl+Delete — `box_bin`: out of the index at once, the box stays).
+- `deep_search.rs` + `file_inside.rs` — THE DEEP FILE SEARCH ("/" typed into an empty search; Max:
+  "the FILE: will be /… a deep file search"): the box is files and nothing else. A "Files" CHIP
+  in the search pill (`DeepDraw::chip`; "Files › Facturas" kept to a folder); the THREE SECTIONS
+  ARE SHELVES, retitled (`Deep::shelves`, `DeepDraw::titles`): before a word Recent (the record
+  + what the box opened) / New (the watched tops, newest) / Places (the home's folders); with
+  words a shelf A KIND, the best kind first, "PDF · 4" (KRunner's categories), and "Inside
+  files" — what SAYS the words; a shelf with nothing FOLDS away, its room the first's, which
+  shows more rows (`content::fold_shelves`, `Layout::shelf_room`; the layout stacks the sections
+  from the Apps' trimmed room even past nothing, so what is under them stays where the card's
+  bottom holds it; `apps_trim_target`'s deep branch aims at the rows the first's page needs).
+  Under each name when it was used and, from a MB, how big ("2 h · 8.4 MB", `ago`/`big`; the
+  page dots a line lower). THE KIND CHIPS (`CHIPS`: All · Documents · PDF · Pictures · Videos ·
+  Music · Folders) stand over the field in the System row's place, at the search pill's size
+  (`controls_layer`, tighter), the one in use lit (`deep_lit`: chosen, else a kind word typed);
+  a click, Tab / Shift+Tab. Tab on a CHOSEN FOLDER keeps the search to it (`Narrow::scope`);
+  Backspace in the empty field takes the folder off, then the kind, then the deep search; Escape
+  lets go of what is picked, then leaves. Ctrl+↑/↓ jump shelves (`deep_jump`). Ctrl+Space or
+  Ctrl+click PICK files (`deep_mark`, a check at the picture's corner); Shift then opens the row
+  for all of them (`FocusFile::more`: Copy all · Show in Files · N files · Open all · Copy paths
+  · Move to Bin). Space shows the chosen one big, Ctrl+Enter in Files, "Show all in Files" ends
+  the first shelf. The file helpers take any shelf (`found_file`, `chosen_file`). INSIDE FILES
+  (`file_inside.rs`): text files read where they are by `rg` in the watched folders (or the
+  scope), PDFs and office files read ONCE into plain text in `~/.cache/waverunner/inside`
+  (`refresh`: `pdftotext` 40 pages, `bsdtar` the document's XML, `index.tsv` key/mtime/path; off
+  the loop, the thread at nice 19, again after 30 min) and `rg` reads them there; accents and
+  case ignored (`pattern`), every word in the file (the longest first); asked 280 ms after the
+  last letter, one reading at a time (`deep_inside_soon`), shown when the words are still those
+  and the owner is not walking the results. Golem's home layer brings `rg`, `pdftotext`,
+  `bsdtar` (ripgrep, poppler-utils, libarchive). Rig: link them into the rig's PATH (the toolbox
+  has none); a fake home with real documents.
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

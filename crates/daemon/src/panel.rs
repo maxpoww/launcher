@@ -4552,6 +4552,7 @@ impl App {
                 self.handle_command(Command::Collapse);
             } else {
                 info!("{what}: panel in place of the apps");
+                self.search.deep = None;
                 self.control_panel = true;
                 self.control_panel_from_apps = true;
                 self.search.open = false;
@@ -4678,6 +4679,7 @@ impl App {
             self.panel.reset();
             self.panel_reset_due = false;
         }
+        self.search.deep = None;
         self.control_panel = true;
         self.control_panel_from_apps = true;
         self.search.open = false;

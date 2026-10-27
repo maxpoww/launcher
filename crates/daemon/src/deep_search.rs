@@ -60,8 +60,9 @@ pub(crate) const SHOW_ALL_ID: &str = "golem:show-all-files";
 
 /// How many files a deep search ranks.
 const DEEP_MAX: usize = 400;
-/// How many go on one shelf.
-const SHELF_MAX: usize = 72;
+/// How many go on one shelf (three pages at six across; the pictures of
+/// every cell shown fit the thumbnailer's ring, `thumbs::THUMB_CAP`).
+const SHELF_MAX: usize = 36;
 /// How many recent and new files the shelves hold before a word.
 const BEFORE_MAX: usize = 24;
 /// How many files the text inside can bring.
@@ -92,19 +93,34 @@ pub(crate) struct Deep {
     pub shelves: [Shelf; content::N_SECTIONS],
     /// When each file shown was used, under its name (by entry).
     pub subs: HashMap<usize, String>,
-    /// The text inside: the words the found are for, what they found.
+    /// The text inside: the words (and the folder) the found are for, what
+    /// they found.
     pub inside: Inside,
 }
 
 /// The reading of the text inside (`file_inside::find`).
 #[derive(Debug, Default)]
 pub(crate) struct Inside {
+    /// What was read for: the words, after the folder kept to (`inside_key`).
     pub words: String,
     pub found: Vec<String>,
-    /// A reading on its way, and the words to read when it is done.
+    /// A reading on its way, and what to read when it is done.
     pub asking: bool,
     pub next: Option<String>,
+    /// The wait before reading: armed, and until when (each letter moves it).
     pub timer: bool,
+    pub due: Option<Instant>,
+}
+
+/// What a reading of the text inside is for: the folder kept to and the
+/// words (the same words in another folder are read again).
+fn inside_key(scope: Option<&Path>, words: &str) -> String {
+    format!("{}\u{1}{words}", scope.map(|s| s.to_string_lossy()).unwrap_or_default())
+}
+
+/// The words of a reading's key.
+fn key_words(key: &str) -> &str {
+    key.split_once('\u{1}').map_or(key, |(_, w)| w)
 }
 
 /// A file a shelf shows.
@@ -216,6 +232,10 @@ impl App {
         self.search.selected = None;
         self.search.open = false;
         self.refilter();
+        // (The card at the box's own height at once: the folded shelves'
+        // room it gave back would show the sections over each other easing.)
+        let (trim, _) = self.apps_trim_target();
+        self.ui.set_open_trim(trim);
         self.schedule_frame();
     }
 
@@ -289,6 +309,7 @@ impl App {
             if let Some(d) = self.search.deep.as_mut() {
                 d.shelves = shelves;
                 d.subs.clear();
+                d.marked_cells.clear();
             }
             return out;
         }
@@ -300,8 +321,12 @@ impl App {
             // BEFORE A WORD: used lately, come lately, the places.
             let recent = self.deep_recent();
             let fresh = self.deep_fresh(&recent);
-            lists.push((tr("Recent").to_string(), recent));
-            lists.push((tr("New files").to_string(), fresh));
+            // (None used or come lately: the next shelf moves up.)
+            for (title, list) in [(tr("Recent"), recent), (tr("New files"), fresh)] {
+                if !list.is_empty() {
+                    lists.push((title.to_string(), list));
+                }
+            }
             places = true;
         } else {
             let narrow = Narrow { kind: chip, scope: scope.clone() };
@@ -354,6 +379,7 @@ impl App {
         // Onto the shelves: each file once, at most a shelf's worth.
         let mut subs = HashMap::new();
         let mut seen = std::collections::HashSet::new();
+        let filled = lists.len().min(content::N_SECTIONS);
         for (s, (title, list)) in lists.into_iter().take(content::N_SECTIONS).enumerate() {
             shelves[s].title = title;
             for f in list.into_iter().filter(|f| seen.insert(f.path.clone())).take(SHELF_MAX) {
@@ -372,8 +398,9 @@ impl App {
             }
         }
         if places {
-            shelves[2].title = tr("Places").to_string();
-            out[2] = self.home_listing();
+            let at = filled.min(content::N_SECTIONS - 1);
+            shelves[at].title = tr("Places").to_string();
+            out[at] = self.home_listing();
         } else if q.asks() && !out[0].is_empty() {
             // (Then every file found, in Golem Files.)
             out[0].push(self.show_all_cell());
@@ -438,12 +465,13 @@ impl App {
         if words.chars().filter(|c| c.is_alphanumeric()).count() < 3 {
             return Vec::new();
         }
+        let key = inside_key(narrow.scope.as_deref(), &words);
         let have = self.search.deep.as_ref().map(|d| (d.inside.words.clone(), d.inside.found.clone()));
         let Some((read_for, found)) = have else {
             return Vec::new();
         };
-        if read_for != words {
-            self.deep_inside_soon(words);
+        if read_for != key {
+            self.deep_inside_soon(key);
             return Vec::new();
         }
         found
@@ -462,21 +490,28 @@ impl App {
             .collect()
     }
 
-    /// Read the text inside for `words`, a moment on (one reading at a time:
-    /// words typed meanwhile are read after it).
-    fn deep_inside_soon(&mut self, words: String) {
+    /// Read the text inside for `key` (`inside_key`), once the letters stop
+    /// for `INSIDE_WAIT` (one reading at a time: what is asked meanwhile is
+    /// read after it).
+    fn deep_inside_soon(&mut self, key: String) {
         let Some(d) = self.search.deep.as_mut() else {
             return;
         };
-        d.inside.next = Some(words);
+        d.inside.next = Some(key);
+        d.inside.due = Some(Instant::now() + INSIDE_WAIT);
         if d.inside.timer || d.inside.asking {
             return;
         }
         d.inside.timer = true;
         let armed = self.loop_handle.insert_source(Timer::from_duration(INSIDE_WAIT), |_, _, app: &mut App| {
-            if let Some(d) = app.search.deep.as_mut() {
-                d.inside.timer = false;
+            let Some(d) = app.search.deep.as_mut() else {
+                return TimeoutAction::Drop;
+            };
+            // (A letter since: wait on from it.)
+            if let Some(due) = d.inside.due.filter(|&due| due > Instant::now()) {
+                return TimeoutAction::ToInstant(due);
             }
+            d.inside.timer = false;
             app.deep_inside_read();
             TimeoutAction::Drop
         });
@@ -493,7 +528,7 @@ impl App {
         let Some(d) = self.search.deep.as_mut() else {
             return;
         };
-        let Some(words) = d.inside.next.take() else {
+        let Some(key) = d.inside.next.take() else {
             return;
         };
         d.inside.asking = true;
@@ -501,7 +536,8 @@ impl App {
             Some(s) => vec![s.clone()],
             None => self.file_watched.clone(),
         };
-        let list: Vec<String> = words.split_whitespace().map(str::to_owned).collect();
+        let list: Vec<String> = key_words(&key).split_whitespace().map(str::to_owned).collect();
+        let words = key;
         let started = Instant::now();
         self.desktop_off_loop(
             move || crate::file_inside::find(&list, &roots, &crate::file_inside::cache_dir(), INSIDE_MAX),
@@ -520,8 +556,9 @@ impl App {
                 }
                 d.inside.next = None;
                 // (Not while the owner walks what is shown, or looks at one.)
-                let now_words = file_search::parse(&app.search.query).words.join(" ");
-                if now_words == words && !app.search.chosen && !app.box_peeking() {
+                let scope = app.search.deep.as_ref().and_then(|d| d.scope.clone());
+                let now_key = inside_key(scope.as_deref(), &file_search::parse(&app.search.query).words.join(" "));
+                if now_key == words && !app.search.chosen && !app.box_peeking() {
                     app.refilter();
                     app.schedule_frame();
                 }
