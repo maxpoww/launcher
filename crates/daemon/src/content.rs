@@ -386,29 +386,6 @@ pub struct DeepDraw<'a> {
 /// How far the chip in the search pill stands from the words typed after it.
 const PILL_CHIP_GAP: f32 = 8.0;
 
-/// THE DEEP SEARCH'S BAND (Max, 2026-10-27: "move them higher, and the
-/// search pill also higher — there is too much air above the search pill"):
-/// under the last shelf's dots a little air (`DEEP_PILL_AIR`), the search
-/// field, a hair, the tabs' row — ending `DEEP_TABS_UP` higher than the
-/// field stood. Not the System row's band (its air is for its title).
-const DEEP_PILL_AIR: f32 = 18.0;
-const DEEP_TABS_AIR: f32 = 2.0;
-const DEEP_TABS_H: f32 = 28.0;
-const DEEP_TABS_UP: f32 = 8.0;
-
-/// The room the deep search's band takes from the shelves (the field's own
-/// place, at the card's foot, counted already).
-pub fn deep_band_h() -> f32 {
-    DEEP_PILL_AIR + SEARCH_H + DEEP_TABS_AIR + DEEP_TABS_H - (SEARCH_GAP + SEARCH_H - DEEP_TABS_UP)
-}
-
-/// Where the deep search's field (its top) and tabs' row stand, under the
-/// last shelf ending at `shelf_bottom` (its viewport's bottom).
-pub fn deep_band_at(shelf_bottom: f32, x: f32, w: f32) -> (f32, Rect) {
-    let pill_y = shelf_bottom + DOT_ROOM + DEEP_PILL_AIR;
-    (pill_y, Rect::new(x, pill_y + SEARCH_H + DEEP_TABS_AIR, w, DEEP_TABS_H))
-}
-
 /// How much the content ride trails the opening card (1.0 = glued to
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
 const RIDE_PARALLAX: f32 = 1.18;

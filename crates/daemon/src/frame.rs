@@ -169,17 +169,20 @@ impl App {
 
     /// The Controls row's pill height: the control panel's near layer.
     pub(crate) fn controls_pill_h(&self) -> f32 {
-        self.options_pill_h() * crate::panel::LAYER_SCALE[0]
+        self.options_pill_h() * self.controls_layer()
+    }
+
+    /// The size the System row's pills are drawn at: the control panel's near
+    /// layer — in the deep search the band holds the search field itself
+    /// (moved up, its tabs under it), at its own size.
+    pub(crate) fn controls_layer(&self) -> f32 {
+        crate::panel::LAYER_SCALE[if self.search.deep.is_some() { 1 } else { 0 }]
     }
 
     /// The room the Controls band is heading for: a row's worth while a
     /// search matches settings, none otherwise.
     pub(crate) fn controls_band_target(&self) -> f32 {
-        // (The deep search's own band: its field and tabs.)
-        if self.deep_band() {
-            return content::deep_band_h();
-        }
-        if self.search.controls.is_empty() {
+        if self.search.controls.is_empty() && !self.deep_band() {
             0.0
         } else {
             content::controls_band_h(self.icon_scale(), self.controls_pill_h()) * self.control_rows() as f32
@@ -188,7 +191,7 @@ impl App {
 
     /// The band's rows: the one System row, while anything matches.
     pub(crate) fn control_rows(&self) -> usize {
-        usize::from(!self.search.controls.is_empty())
+        usize::from(!self.search.controls.is_empty() || self.deep_band())
     }
 
     /// The deep search's band: the room the search field moves up into, its
@@ -243,7 +246,7 @@ impl App {
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
             stretch,
-            (!self.search.controls.is_empty()).then(|| self.controls_pill_h()),
+            (!self.search.controls.is_empty() || self.deep_band()).then(|| self.controls_pill_h()),
             self.controls_band,
             self.ui.open_trim(),
             self.control_rows(),
@@ -284,7 +287,7 @@ impl App {
         // what is left is passed over and the next ones still have their
         // chance; one passed over gets no rect.
         if let Some(&(_, row)) = layout.control_bands.first() {
-            let s = self.options_scale() * crate::panel::LAYER_SCALE[0];
+            let s = self.options_scale() * self.controls_layer();
             let gap = CONTROLS_GAP * self.options_scale();
             let widths: Vec<f32> = self
                 .search
@@ -300,17 +303,15 @@ impl App {
             }
             layout.controls = rects;
         }
-        // THE DEEP SEARCH'S TABS (`deep_search.rs`): the field just under the
-        // last shelf, the tabs under the field (`content::deep_band_at`) —
-        // the page shown, words a little smaller on a box too narrow for its
-        // nine.
-        if let (Some(d), true) = (self.search.deep.as_ref(), self.deep_band()) {
-            let first = layout.sections[content::SECTION_APPS].viewport;
-            let shelf_bottom =
-                layout.sections.iter().filter(|s| s.viewport.h > 0.0).map(|s| s.viewport.y + s.viewport.h).fold(first.y + first.h, f32::max);
-            let (pill_y, row) = content::deep_band_at(shelf_bottom, first.x, first.w);
-            layout.search_box.y = pill_y;
-            layout.search_btn.y = pill_y;
+        // THE DEEP SEARCH'S TABS (`deep_search.rs`): the field moves up into
+        // the band, the tabs take its place under it — the page shown, words
+        // a little smaller on a box too narrow for its nine.
+        if let (Some(d), Some(&(_, band)), true) = (self.search.deep.as_ref(), layout.control_bands.first(), self.deep_band()) {
+            let was = layout.search_box;
+            let up = band.y + band.h / 2.0 - (was.y + was.h / 2.0);
+            layout.search_box.y += up;
+            layout.search_btn.y += up;
+            let row = content::Rect::new(band.x, was.y, band.w, was.h);
             layout.tabs_row = Some(row);
             let pages = d.tags.len().div_ceil(deep_search::TABS_PAGE).max(1);
             let page = d.page.min(pages - 1);
