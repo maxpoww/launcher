@@ -1545,7 +1545,10 @@ The big daemon files are cohesive but long — go straight to the function:
   the middle of its button (`peek_page::icon`, measured on the rig with `measure-head.py`-style ink
   boxes), a check on the link a moment after a copy; rested on `TIP_DELAY` (0.5 s) a button says
   what it does in Quick Look's dark pill under it (`page_tip_follow`/`page_tip_push`, a grid drawn
-  last: over the picture). The bin or Delete puts the recent away and closes it (`box_peek_bin`);
+  last: over the picture), and once one has, the others AT ONCE while the pointer stays on the head
+  (`Up::tips_warm`, the dock's names' way). A PRESS Quick Look took keeps its RELEASE
+  (`SearchState::peek_press`): the × closed Quick Look and the release, now the box's, read as a
+  click off its card and closed the box too. The bin or Delete puts the recent away and closes it (`box_peek_bin`);
   Ctrl+C copies. ⚠ rig: Nerd icons are tofu unless the rig dock gets a fonts.conf that includes the
   HOST's conf.d (its store path; the host fonts.conf includes `/etc/fonts/conf.d` = the toolbox's). ⚠ the box holds the
   keyboard EXCLUSIVELY, so Hyprland pins the POINTER to the dock's layer: while Quick Look is up from

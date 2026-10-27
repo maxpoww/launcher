@@ -271,6 +271,9 @@ pub(crate) struct Up {
     /// A page's button the pointer rests on, and since when: its tooltip
     /// (`peek_page.rs`).
     pub(crate) tip: Option<(crate::peek_page::Button, Instant)>,
+    /// One tooltip has shown: the next show at once, while the pointer is
+    /// on the head (the dock's names' way).
+    pub(crate) tips_warm: bool,
 }
 
 impl Up {
@@ -1400,6 +1403,7 @@ impl App {
             anim_frame: None,
             said: thing.said,
             tip: None,
+            tips_warm: false,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1860,6 +1864,7 @@ impl App {
                 if let Some(up) = self.peek.up.as_mut() {
                     up.ptr = None;
                     up.tip = None;
+                    up.tips_warm = false;
                 }
                 self.request_desktop_top_draw();
             }

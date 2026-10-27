@@ -2741,6 +2741,8 @@ struct SearchState {
     web: web_actions::Recents,
     /// The recent Quick Look shows (its address or path), opened by Enter.
     peeked: Option<String>,
+    /// A press on the box went to Quick Look: its release goes there too.
+    peek_press: bool,
     /// What the owner picked from a lone app's recents (`web_actions::rank`).
     picks: usage::UsageDb,
     /// The recents' pager (the wheel over them turns their pages).
@@ -2777,6 +2779,7 @@ impl Default for SearchState {
             actions: Default::default(),
             web: web_actions::Recents { forgot: web_actions::Forgot::load(), ..Default::default() },
             peeked: None,
+            peek_press: false,
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
             focus: None,
@@ -7929,7 +7932,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         // keyboard exclusively, and Hyprland then pins the POINTER to its
         // layer too — so what is meant for Quick Look over it comes here (a
         // click on its Open, its ×, Copy link landed on the box under it).
-        if app.pointer_surface == options::PointerSurface::Dock && app.box_peeking() {
+        // (A press Quick Look took keeps its release, though Quick Look is
+        // going: let go on the box, it was a click off its card — the × closed
+        // Quick Look and the release closed the box too.)
+        if app.pointer_surface == options::PointerSurface::Dock && (app.box_peeking() || app.search.peek_press) {
+            if let wl_pointer::Event::Button { state, .. } = &event {
+                app.search.peek_press = *state == WEnum::Value(wl_pointer::ButtonState::Pressed);
+            }
             let event = app.box_point_on_screen(event);
             app.peek_pointer(&event);
             return;

@@ -13,7 +13,9 @@
 //! Open · Copy link · bin · ×, evenly, each icon's drawing in the middle of
 //! its button (Max: "change the order … and align those 4 buttons"); one
 //! rested on `TIP_DELAY` says what it does in a pill under it (Max: "add
-//! tooltip to the buttons" — `page_tip_follow`, `page_tip_push`). A page
+//! tooltip to the buttons" — `page_tip_follow`, `page_tip_push`), and once
+//! one has, the others at once while the pointer stays on the head (Max:
+//! "as the ones on the dock, delay for first show then instant"). A page
 //! with no picture of its own (its favicon on a tile) has the tile small
 //! beside the words.
 //!
@@ -209,17 +211,32 @@ impl App {
     }
 
     /// The pointer moved on Quick Look: the head button it is on now starts
-    /// its tooltip's wait (a frame is asked for when the wait is over).
+    /// its tooltip's wait (a frame is asked for when the wait is over) — no
+    /// wait once a tooltip has shown and the pointer has stayed on the head
+    /// (`Up::tips_warm`, as the dock's names go warm).
     pub(crate) fn page_tip_follow(&mut self) {
-        let on = self.peek.up.as_ref().and_then(|u| u.ptr).and_then(|p| self.page_button_at(p));
+        let ptr = self.peek.up.as_ref().and_then(|u| u.ptr);
+        let on = ptr.and_then(|p| self.page_button_at(p));
         let Some(up) = self.peek.up.as_mut() else {
             return;
         };
+        let on_head = ptr.is_some_and(|p| {
+            let r = up.rect;
+            p.0 >= r.x && p.0 <= r.x + r.w && p.1 >= r.y && p.1 <= r.y + HEAD
+        });
+        if up.tip.is_some_and(|(_, at)| at.elapsed() >= TIP_DELAY) {
+            up.tips_warm = true;
+        }
+        if !on_head {
+            up.tips_warm = false;
+        }
         if up.tip.map(|(b, _)| b) == on {
             return;
         }
-        up.tip = on.map(|b| (b, std::time::Instant::now()));
-        if on.is_some() {
+        let now = std::time::Instant::now();
+        let since = if up.tips_warm { now.checked_sub(TIP_DELAY).unwrap_or(now) } else { now };
+        up.tip = on.map(|b| (b, since));
+        if on.is_some() && !up.tips_warm {
             let timer = calloop::timer::Timer::from_duration(TIP_DELAY + std::time::Duration::from_millis(20));
             if let Err(e) = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
                 app.request_desktop_top_draw();
