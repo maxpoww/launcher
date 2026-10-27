@@ -4698,6 +4698,11 @@ impl App {
                 e
             })
             .collect();
+        // The apps' own colours and looks are kept by program, read from these
+        // entries: at a start the colours were applied before the apps were in,
+        // and an app opened after a restart had lost its own look (the pass of
+        // 2026-10-27).
+        crate::palette::exceptions_follow(&self.entries);
         self.kinds = kinds;
         self.placeholders = placeholders;
         self.base_len = self.entries.len();

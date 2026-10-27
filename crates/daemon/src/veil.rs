@@ -38,6 +38,12 @@ pub(crate) struct VeilLayer {
     /// no veil) that was ~3500 configures a second: the dock at 70 % of a
     /// core and Hyprland at 38 %, all the time (2026-10-22).
     mapped: bool,
+    /// The pixel last put (`[0; 4]` once taken away): a change of the
+    /// colours puts the veil again only when its pixel moved (`veil_follow`).
+    up: Option<[u8; 4]>,
+    /// An empty commit was sent to have the surface configured again (after
+    /// it was unmapped): a pixel waits for that configure.
+    asked: bool,
 }
 
 /// The pixel for `alpha` (0..1) as `wl_shm` ARGB8888 wants it on a
@@ -71,7 +77,7 @@ pub(crate) fn create(
         layer.wl_surface().set_input_region(Some(region.wl_region()));
     }
     layer.commit();
-    VeilLayer { layer, viewport, size: None, mapped: false }
+    VeilLayer { layer, viewport, size: None, mapped: false, up: None, asked: false }
 }
 
 impl VeilLayer {
@@ -104,6 +110,7 @@ impl App {
             if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
                 v.size = Some(configure.new_size);
             }
+            v.asked = false;
         }
         self.veil_sync();
     }
@@ -112,6 +119,17 @@ impl App {
     pub(crate) fn veil_closed(&mut self) {
         warn!("veil surface closed by the compositor; the background is not darkened");
         self.veil_layer = None;
+    }
+
+    /// The veil after a change of the colours: put again only when its pixel
+    /// moved — the wallpaper's own Lighting slider moved it only at the next
+    /// start (the pass of 2026-10-27).
+    pub(crate) fn veil_follow(&mut self) {
+        let px = pixel(crate::lighting::veil_now());
+        if self.veil_layer.as_ref().is_some_and(|v| v.up == Some(px)) {
+            return;
+        }
+        self.veil_sync();
     }
 
     /// Put the veil now in use: a new pixel for its alpha, or nothing at 0.
@@ -125,14 +143,29 @@ impl App {
             return;
         };
         let Some((w, h)) = v.size else {
+            // Unconfigured (taken away since, or not yet configured): an empty
+            // commit asks for a configure, once — and that configure puts the
+            // veil (`configure_veil`). Only when there is something to show: an
+            // empty commit with nothing to show was the configure storm.
+            if shown(alpha) && !v.asked {
+                v.asked = true;
+                v.layer.wl_surface().commit();
+            }
             return;
         };
         if !shown(alpha) {
+            v.up = Some(pixel(alpha));
             if v.mapped {
                 v.mapped = false;
                 let surface = v.layer.wl_surface();
                 surface.attach(None, 0, 0);
                 surface.commit();
+                // Unmapped, the layer surface is unconfigured again: a pixel
+                // attached before the compositor's next configure is a protocol
+                // error that ends the dock's connection (2026-10-27, the
+                // wallpaper's slider from Light to Dark). That configure gives
+                // the size back and puts the veil (`configure_veil`).
+                v.size = None;
             }
             return;
         }
@@ -153,6 +186,7 @@ impl App {
         surface.commit();
         // (The compositor keeps what it was given: the buffer and pool can go.)
         buffer.destroy();
+        v.up = Some(pixel(alpha));
     }
 }
 

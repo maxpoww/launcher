@@ -414,6 +414,12 @@ pub(crate) struct Theme {
     /// Both looks as the programs wear them (tinted, or the makers' own with
     /// the palette's accent): what writes both at once (foot, GTK 4) reads.
     pub pair: Option<([Rgb; 16], usize, [Rgb; 16], usize)>,
+    /// The palette in EACH look as the programs would wear it, whatever look
+    /// the apps keep (`pair` gives both halves the apps' look when it is not
+    /// the shell's): what a program or a webapp pinned to Dark or Light
+    /// wears. (Pinned from `pair`, a Dark app wore the light colours whenever
+    /// the apps were Light under a Dark shell — the pass of 2026-10-27.)
+    pub looks: Option<([Rgb; 16], usize, [Rgb; 16], usize)>,
 }
 
 impl Theme {
@@ -788,6 +794,7 @@ pub(crate) fn resolve(choice: &ColorChoice, dark: bool) -> Theme {
         web_sat: web.sat,
         icons_sat: icons.sat,
         pair: None,
+        looks: None,
     }
 }
 
@@ -1806,6 +1813,7 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
                 accent_slot: st.accent,
                 dark: t.apps_dark,
                 pair: Some(pair),
+                looks: Some((d, st.accent, l, st.accent)),
                 ..t.clone()
             };
         }
@@ -1814,7 +1822,8 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
     let (mut dark_v, mut light_v) = (dark_v, light_v);
     readable(&mut dark_v, true, pal.accent);
     readable(&mut light_v, false, pal.accent_light);
-    let mut pair = (dark_v, pal.accent, light_v, pal.accent_light);
+    let looks = (dark_v, pal.accent, light_v, pal.accent_light);
+    let mut pair = looks;
     if t.apps_dark != t.dark {
         // The apps keep a look of their own: both halves wear it, since
         // GTK 4 picks its half by the SYSTEM's look (prefers-color-scheme).
@@ -1825,6 +1834,7 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
         accent_slot: if t.apps_dark { pal.accent } else { pal.accent_light },
         dark: t.apps_dark,
         pair: Some(pair),
+        looks: Some(looks),
         ..t.clone()
     }
 }
@@ -1846,6 +1856,13 @@ const GTK3_PINNED: [&str; 2] = ["Golem-Dark", "Golem-Light"];
 fn program_of(exec: &str) -> String {
     let first = exec.split_whitespace().find(|w| !w.contains('=') && *w != "env").unwrap_or("");
     first.rsplit('/').next().unwrap_or("").to_owned()
+}
+
+/// The apps' own colours and looks as programs, for the entries there are now.
+pub(crate) fn exceptions_follow(entries: &[waverunner_core::index::AppEntry]) {
+    let c = choice();
+    set_skipped_programs(entries, c.skip_in_force());
+    set_looked_programs(entries, c.looks_in_force());
 }
 
 /// An app's own look (`ColorChoice::app_look`, by desktop id) as programs.
@@ -2289,6 +2306,29 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     // Seam leaves its site alone even with the web on.
     let skipped = crate::webapps::hosts_of(picked.skip_in_force());
     m.insert("webapp_hosts".into(), webapp_hosts.iter().filter(|h| !skipped.contains(h)).cloned().collect::<Vec<_>>().into());
+    // A webapp with a look of its own (the Apps page's Dark or Light, as a
+    // program has): its pages are told that look and, while it wears the
+    // palette, given that look's pair — the palette in it, as a program
+    // pinned to it wears (`Theme::looks`). Seam: `app_looks` in golem-chrome.js.
+    let mut looks = serde_json::Map::new();
+    for (id, look) in picked.looks_in_force() {
+        let dark = match look.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => continue,
+        };
+        for host in crate::webapps::hosts_of(std::slice::from_ref(id)) {
+            let mut o = serde_json::Map::new();
+            o.insert("dark".into(), dark.into());
+            if let (Some((dc, _, lc, _)), false) = (t.looks, skipped.contains(&host)) {
+                let c = if dark { dc } else { lc };
+                o.insert("bg".into(), format!("#{}", hex(c[1])).into());
+                o.insert("ink".into(), format!("#{}", hex(c[5])).into());
+            }
+            looks.insert(host, o.into());
+        }
+    }
+    m.insert("app_looks".into(), looks.into());
     m.insert("web_skip".into(), skipped.into());
     // The accent, for what Seam's chrome lights with it (the drop on its
     // bar: "your colours on this site").
@@ -2548,7 +2588,7 @@ fn gtk3_live(t: &Theme) {
     run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", &format!("'{next}'")]);
     // THE PINNED ONES (an app's own Dark or Light): the palette in each look
     // under a fixed name, written with the one in use, read at an app's start.
-    if let Some((dc, da, lc, la)) = t.pair {
+    if let Some((dc, da, lc, la)) = t.looks.or(t.pair) {
         for (name, dark, c, acc) in [(GTK3_PINNED[0], true, dc, da), (GTK3_PINNED[1], false, lc, la)] {
             let Some(base) = adw_gtk3(dark) else { continue };
             let v = Theme { c, accent_slot: acc, dark, ..t.clone() };
@@ -3180,7 +3220,7 @@ impl crate::App {
         // asks for a re-apply must not jump it back — `lighting.rs`.)
         let lit_now = picked.levels_now(Surface::Shell).light;
         tint::set_lighting(lit_now);
-        let veil_moved = crate::lighting::set_veil(picked.ambient_of(Surface::Wall));
+        crate::lighting::set_veil(picked.ambient_of(Surface::Wall));
         crate::lighting::tell_overview();
         self.lighting_mirror(picked.ambient_of(Surface::Shell) || picked.ambient_of(Surface::Wall));
         let theme = resolve(&picked, crate::look::dark());
@@ -3212,9 +3252,9 @@ impl crate::App {
         if changed || look_changed || lit_moved {
             publish(current(), look_changed);
         }
-        if !changed && !lit_moved && veil_moved {
-            self.veil_sync();
-        }
+        // The wash over the wallpaper, wherever its light now puts it (the
+        // wallpaper's own Lighting slider moved it only at the next start).
+        self.veil_follow();
         if changed || lit_moved {
             self.reassert_window_border();
             self.draw_options();
@@ -3429,7 +3469,17 @@ impl crate::App {
         match key {
             // The shell's look is the dock's whole look (its glass, figures,
             // boxes, the desktop) — what the general Light used to be.
-            "colors-shell-look" | "colors-shell-line" => self.look_set(c.levels_now(Surface::Shell).dark),
+            // (A move within the same look changes no look: the shell wears
+            // its new light at once all the same — it waited for the next
+            // change of anything, the pass of 2026-10-27.)
+            "colors-shell-look" | "colors-shell-line" => {
+                let dark = c.levels_now(Surface::Shell).dark;
+                if dark == crate::look::dark() {
+                    self.colors_apply(false);
+                } else {
+                    self.look_set(dark);
+                }
+            }
             // The apps' look is the one the system tells every program.
             "colors-apps-look" | "colors-apps-line" => {
                 let dark = c.levels_now(Surface::Apps).dark;
@@ -3446,6 +3496,13 @@ impl crate::App {
             "colors-auto" | "colors-ambient" | "colors-lighting-auto" => {
                 self.look_set(c.levels_now(Surface::Shell).dark);
                 self.colors_apply(true);
+            }
+            // An app's own colours or look changes no colour of the theme, so
+            // nothing was written: Seam's file says which webapps keep their own
+            // colours and which have a look of their own, and is written now.
+            "colors-skip" | "colors-app-look" => {
+                self.colors_apply(false);
+                publish(current(), false);
             }
             _ => self.colors_apply(false),
         }
@@ -3521,6 +3578,7 @@ mod tests {
             web_sat: 50,
             icons_sat: 50,
             pair: None,
+            looks: None,
         }
     }
 
@@ -3911,6 +3969,20 @@ mod tests {
         assert_eq!(skip_vars("blender"), vec![("GTK_THEME", "Golem-Light".to_owned())], "the palette, pinned Light");
         SKIPPED.lock().unwrap().clear();
         LOOKED.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn a_program_pinned_to_a_look_wears_that_look_whatever_the_apps_keep() {
+        // (The pass of 2026-10-27: Apps Light under a Dark shell gave the
+        // apps' pair Light in both halves, and a Dark app wore it.)
+        for apps_tint in [None, Some(0)] {
+            let c = ColorChoice { palette: Some(GOLEM.into()), shell_dark: Some(true), apps_dark: Some(false), apps_tint, ..ColorChoice::default() };
+            let t = for_apps(&resolve(&c, true));
+            let (pd, _, pl, _) = t.pair.expect("the apps' pair");
+            assert_eq!(pd, pl, "the apps' own files keep the apps' look ({apps_tint:?})");
+            let (dc, _, lc, _) = t.looks.expect("both looks");
+            assert!(tint::lch(dc[1]).0 < 0.5 && tint::lch(lc[1]).0 > 0.5, "Dark is dark and Light is light ({apps_tint:?})");
+        }
     }
 
     #[test]

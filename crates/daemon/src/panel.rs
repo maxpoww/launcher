@@ -572,6 +572,9 @@ pub(crate) enum PanelAction {
     Pick { group: u8, index: u8 },
     /// The screen a Scale or Resolution page sets: its place among them.
     Target(u8),
+    /// Colours (or Wallpaper, its tab) asked for on the card: it opens in its
+    /// box mid-screen, as Super+H opens it (`Panel::boxed`).
+    Boxed(&'static str),
 }
 
 /// One choice of an open setting: a floating pill, lit when it is the one
@@ -1454,8 +1457,32 @@ impl Panel {
         let Some(i) = self.pill_at(pos) else {
             return false;
         };
+        if let Some(label) = self.boxed(i) {
+            self.action = Some(PanelAction::Boxed(label));
+            return true;
+        }
         self.open_pill(i);
         true
+    }
+
+    /// The setting of pill `i` when it opens in its own box, not on the card:
+    /// Colours and Wallpaper. On the card its sliders fell under the screen's
+    /// edge and the dock's Search pill covered its tabs (the pass of
+    /// 2026-10-27); the box mid-screen fits it on every screen.
+    fn boxed(&self, i: usize) -> Option<&'static str> {
+        let label = self.pills.get(i)?.label;
+        (!self.solo && !self.modules && crate::controls::box_of(label) == "Colours").then_some(label)
+    }
+
+    /// A box asked for (`PanelAction::Boxed`), taken — and nothing else.
+    pub(crate) fn take_boxed(&mut self) -> Option<&'static str> {
+        match self.action {
+            Some(PanelAction::Boxed(label)) => {
+                self.action = None;
+                Some(label)
+            }
+            _ => None,
+        }
     }
 
     /// Grow pill `i` into its setting.
@@ -2853,7 +2880,10 @@ impl Panel {
             .map(|(.., i)| i);
         match best {
             Some(i) => {
-                self.open_pill(i);
+                match self.boxed(i) {
+                    Some(label) => self.action = Some(PanelAction::Boxed(label)),
+                    None => self.open_pill(i),
+                }
                 true
             }
             None => false,
@@ -4609,6 +4639,10 @@ impl App {
     /// A control from the apps grid's search: the card becomes the control
     /// panel with that setting opening out of its pill (a use in the game).
     pub(crate) fn open_control(&mut self, label: &'static str) {
+        if crate::controls::box_of(label) == "Colours" {
+            self.settings_box(label);
+            return;
+        }
         info!("control panel: {label} from the apps search");
         self.close_group();
         // The Controls row holds settings, never modules.
@@ -4700,6 +4734,7 @@ impl App {
                 Some(PanelAction::Revert) => self.revert_display(),
                 Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, false),
                 Some(PanelAction::Target(i)) => self.display_pick_screen(usize::from(i)),
+                Some(PanelAction::Boxed(label)) => self.settings_box(label),
                 None => {}
             }
             self.schedule_frame();
@@ -5241,6 +5276,7 @@ impl App {
                 Some(PanelAction::Revert) => self.revert_display(),
                 Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, quick),
                 Some(PanelAction::Target(i)) => self.display_pick_screen(usize::from(i)),
+                Some(PanelAction::Boxed(label)) => self.settings_box(label),
                 None => {}
             }
             self.schedule_frame();
@@ -5267,6 +5303,7 @@ impl App {
                 PanelAction::Revert => self.revert_display(),
                 PanelAction::Pick { group, index } => self.control_pick(group, index, true),
                 PanelAction::Target(i) => self.display_pick_screen(usize::from(i)),
+                PanelAction::Boxed(label) => self.settings_box(label),
             },
             // On no choice: the box's own empty space closes it, as its
             // last line says (Max, 2026-10-14: "the box says click empty
@@ -5284,6 +5321,11 @@ impl App {
     /// card is (the `display show …` verb: a key binding's way straight to
     /// a setting, and the pointer-free way to look at one).
     pub(crate) fn show_control(&mut self, label: &'static str) {
+        // (Colours has its box mid-screen: `Panel::boxed`.)
+        if crate::controls::box_of(label) == "Colours" {
+            self.settings_box(label);
+            return;
+        }
         if self.ui.target() == Target::Open && self.control_panel && self.panel.is_modules() {
             self.panel_switch(false);
         }
@@ -5313,6 +5355,9 @@ impl App {
     /// whether one opened.
     pub(crate) fn panel_open_best(&mut self) -> bool {
         let opened = self.panel.open_best();
+        if let Some(label) = self.panel.take_boxed() {
+            self.settings_box(label);
+        }
         if opened {
             self.schedule_frame();
         }
@@ -5598,6 +5643,24 @@ mod tests {
             p.step(1.0 / 60.0, None);
         }
         p
+    }
+
+    #[test]
+    fn colours_asked_for_on_the_card_opens_in_its_own_box() {
+        // (The pass of 2026-10-27: on the card its sliders fell under the
+        // screen's edge.)
+        let mut p = panel();
+        p.field = Rect::new(40.0, 90.0, 960.0, 560.0);
+        p.step(0.0, None);
+        p.set_query("colours");
+        assert!(p.open_best());
+        assert_eq!(p.take_boxed(), Some("Colours"), "the box is asked for");
+        assert!(p.open.is_none(), "nothing opens on the card");
+        assert_eq!(p.take_boxed(), None, "asked once");
+        p.set_query("scale");
+        assert!(p.open_best());
+        assert_eq!(p.take_boxed(), None, "another setting opens on the card");
+        assert!(p.open.is_some());
     }
 
     #[test]
