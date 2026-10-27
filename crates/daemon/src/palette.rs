@@ -1334,6 +1334,32 @@ pub(crate) mod tint {
             let (l, ch, h) = lch(*x);
             out[i] = from_lch(l, ch * k, h);
         }
+        // (The lightness is kept, the screen's rounding is not: an ink a hair
+        // over its floor fell a hair under it — the makers' grey for btop's
+        // dim words at Saturation 0, 4.48 on white. Each walks back to read
+        // as it did.)
+        inks_keep(c, out)
+    }
+
+    /// The inks of `out` (`c` saturated) walked in lightness, their own
+    /// chroma kept, until each reads on out's grounds as it read on c's
+    /// (up to 7:1).
+    fn inks_keep(c: &[Rgb; 16], mut out: [Rgb; 16]) -> [Rgb; 16] {
+        use super::{contrast, rel_lum};
+        let worst = |x: Rgb, g: &[Rgb; 16]| (0..3).map(|i| contrast(rel_lum(x), rel_lum(g[i]))).fold(f32::MAX, f32::min);
+        for k in 4..16 {
+            let want = worst(c[k], c).min(7.0);
+            let up = rel_lum(out[k]) > rel_lum(out[1]);
+            let (mut l, cc, h) = lch(out[k]);
+            let mut x = out[k];
+            let mut n = 0;
+            while worst(x, &out) < want && n < 100 {
+                l = (l + if up { 0.01 } else { -0.01 }).clamp(0.0, 1.0);
+                x = from_lch(l, cc, h);
+                n += 1;
+            }
+            out[k] = x;
+        }
         out
     }
 
