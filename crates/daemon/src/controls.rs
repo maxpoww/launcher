@@ -2021,7 +2021,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // (a switch), and its look: Dark, Light, or Follow the Apps section.
         "Colours" if APPS_LIST.load(std::sync::atomic::Ordering::Relaxed) => {
             let picked = crate::palette::choice();
-            view.subtitle = tr("How everything looks. Some apps need a restart, and some web pages a reload, to show changes.").to_owned();
+            view.subtitle = tr("How everything looks. Some apps need a reload to pick up changes.").to_owned();
             let find = APPS_FIND.lock().map(|f| f.to_lowercase()).unwrap_or_default();
             if ui.apps.len() > APPS_SHOWN || !find.is_empty() {
                 view.groups.push(field("colors-apps-find", &find, tr("Search (click to type)"), 320.0));
@@ -2074,7 +2074,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let picked = crate::palette::choice();
             let backgrounds = COLOURS_TAB.load(std::sync::atomic::Ordering::Relaxed) == 1;
             // (On the Wallpaper tab the words the Wallpaper box had.)
-            view.subtitle = if backgrounds { tr("The pictures in Pictures/Wallpapers.") } else { tr("How everything looks. Some apps need a restart, and some web pages a reload, to show changes.") }.to_owned();
+            view.subtitle = if backgrounds { tr("The pictures in Pictures/Wallpapers.") } else { tr("How everything looks. Some apps need a reload to pick up changes.") }.to_owned();
             let sec = usize::from(COLOURS_SECTION.load(std::sync::atomic::Ordering::Relaxed)).min(SECTIONS.len() - 1);
             if backgrounds {
                 wall_cards(&mut view.groups);
