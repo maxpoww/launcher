@@ -2232,6 +2232,18 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             view.groups.push(Group { labelled: true, ..group(Some("Position"), "launcher-side", 0.0, sides) });
             let ways = Arrange::ALL.iter().map(|&a| choice(tr(a.word()), a == s.launcher_arrange, a.value())).collect();
             view.groups.push(Group { labelled: true, ..group(Some("Arrange apps"), "launcher-arrange", 0.0, ways) });
+            // THE BOX'S RECENTS (Max, 2026-10-27): shown or not, and cleared.
+            let mut recents = on_off(Some("Recents"), "launcher-recents", !s.launcher_recents_off);
+            if let Some(on) = recents.choices.first_mut() {
+                on.hint = Some(tr("What an app opened lately, under it when it is alone in the box. Delete takes one away.").to_owned());
+            }
+            view.groups.push(recents);
+            if !s.launcher_recents_off {
+                // (Just cleared: it says so for a while.)
+                let cleared = crate::usage::now_secs() - crate::web_actions::Forgot::load().since < 60.0;
+                let word = if cleared { tr("Recents cleared") } else { tr("Clear recents") };
+                view.groups.push(Group { buttons: true, ..group(None, "launcher-recents-clear", 0.0, vec![choice(word, false, "clear")]) });
+            }
             // Only with more than one monitor: the ones that are not the
             // main one, each lit while the launcher is on it.
             let others = crate::launcher_prefs::others(&crate::display::monitors());

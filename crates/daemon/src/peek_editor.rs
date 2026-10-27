@@ -335,7 +335,8 @@ impl App {
     /// Whether the pencil may be taken on what Quick Look shows: a picture
     /// of a kind it can read whole (not a PDF's page, a video's frame…).
     pub(crate) fn peek_editable(&self) -> bool {
-        let Some(up) = self.peek.up.as_ref() else {
+        // (A page shown by its picture is not a file of one's own to edit.)
+        let Some(up) = self.peek.up.as_ref().filter(|u| !u.said_as_page()) else {
             return false;
         };
         let name = up

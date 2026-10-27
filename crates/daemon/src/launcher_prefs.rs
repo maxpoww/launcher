@@ -1,9 +1,9 @@
 //! THE LAUNCHER PAGE (Max, 2026-10-20; the lab
 //! https://claude.ai/artifact/XoqB8GaLMKp76AeFCA9eyc): the control panel's
-//! setting for the dock and its box. Five rows — Stay away, Animated icons,
-//! Position, Arrange apps, Other monitors — and a line that says how the
-//! icons are made bigger (Ctrl +/− with the launcher open: there is no row
-//! for it).
+//! setting for the dock and its box. Six rows — Stay away, Animated icons,
+//! Position, Arrange apps, Recents (and Clear recents: `app_actions.rs`),
+//! Other monitors — and a line that says how the icons are made bigger
+//! (Ctrl +/− with the launcher open: there is no row for it).
 //!
 //! The choices are the DOCK's own (`settings.json` in the data dir,
 //! [`crate::settings::Settings`]): the page is read on the controls' worker
@@ -212,6 +212,12 @@ impl App {
                     self.dock_bounce();
                 }
             }
+            // The box's recents shown or not; cleared.
+            "launcher-recents" => {
+                self.settings.launcher_recents_off = value == "off";
+                self.settings.save();
+            }
+            "launcher-recents-clear" => self.recents_clear(),
             // A monitor's word: the launcher on it goes, or comes back.
             "launcher-screen" => {
                 let off = &mut self.settings.launcher_screens_off;

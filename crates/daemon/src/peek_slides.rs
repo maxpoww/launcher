@@ -58,6 +58,7 @@ fn thing(path: &Path, of: Option<(usize, usize)>, screen: (f32, f32)) -> Thing {
         thumb: None,
         icon: Rect::new(screen.0 / 2.0 - 40.0, screen.1 / 2.0 - 40.0, 80.0, 80.0),
         of,
+        said: None,
     }
 }
 

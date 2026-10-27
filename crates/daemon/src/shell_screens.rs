@@ -533,6 +533,9 @@ impl App {
         // there, and each slide followed the pointer.)
         let target = if win == crate::quicklook::DESKTOP {
             self.part_output(Part::Desktop).cloned()
+        } else if win == crate::quicklook::BOX {
+            // (The dock box's: the dock's screen.)
+            self.dock_screen_name().and_then(|n| self.output_named(&n)).or_else(|| self.main_output())
         } else {
             self.filer
                 .screens

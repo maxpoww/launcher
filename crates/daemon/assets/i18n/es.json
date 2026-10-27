@@ -1376,5 +1376,10 @@
  "Keyboard mode on/off": "Activar o quitar el modo teclado",
  "Turn off keyboard mode (Ctrl+K)": "Quitar el modo teclado (Ctrl+K)",
  "Jump through the sidebar · stop to open": "Recorrer la barra lateral · al parar se abre",
- "Backwards": "Hacia atrás"
+ "Backwards": "Hacia atrás",
+ "What an app opened lately, under it when it is alone in the box. Delete takes one away.": "Lo que una app abrió hace poco, debajo de ella cuando está sola en la caja. Suprimir quita uno.",
+ "Clear recents": "Borrar recientes",
+ "Recents cleared": "Recientes borrados",
+ "Open copied link": "Abrir enlace copiado",
+ "Open in {app}": "Abrir en {app}"
 }

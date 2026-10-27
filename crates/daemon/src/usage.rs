@@ -135,6 +135,19 @@ impl UsageDb {
         crate::persist::write_json("usage", &self.path, &self.marks);
     }
 
+    /// Forget `key`; persisted.
+    pub fn forget(&mut self, key: &str) {
+        if self.marks.remove(key).is_some() {
+            crate::persist::write_json("usage", &self.path, &self.marks);
+        }
+    }
+
+    /// Forget every one; persisted.
+    pub fn forget_all(&mut self) {
+        self.marks.clear();
+        crate::persist::write_json("usage", &self.path, &self.marks);
+    }
+
     fn increment_at(&mut self, app_id: &str, now: f64) {
         let score = self.marks.get(app_id).map_or(0.0, |m| m.at(now)) + 1.0;
         self.marks.insert(app_id.to_owned(), Mark { score, at: now });

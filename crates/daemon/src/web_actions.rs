@@ -1381,6 +1381,9 @@ pub(crate) struct Recent {
     /// The picture's own shape (width / height) when it is a preview to be
     /// shown whole — a video's, a cover, a page's; none for a favicon's tile.
     pub aspect: Option<f32>,
+    /// When it was seen last (unix seconds; 0 unknown): one put away since
+    /// is not shown (`Forgot`).
+    pub last: f64,
 }
 
 /// `pages` made recents: each one's picture found.
@@ -1418,7 +1421,7 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
                 let data = favicon(browser, icons.as_deref()?, &v.url)?;
                 tile_in(tiles.as_deref()?, &data)
             });
-            Recent { url: v.url, title, picture, dir: false, aspect }
+            Recent { url: v.url, title, picture, dir: false, aspect, last: v.last }
         })
         .collect();
     // (Now and then: the picture caches kept under their bound.)
@@ -1518,7 +1521,7 @@ const CANDIDATES: usize = 400;
 /// What a webapp (named `name`, opening at `start`; of `site` when Golem
 /// knows it) showed lately: from Seam's history, where every webapp lives —
 /// in THE ORDER (`rank`, the owner's `picks` counted in), at most `max`.
-pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, picks: &Picks, max: usize) -> Vec<Recent> {
+pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, wanted: &Wanted) -> Vec<Recent> {
     let (browser, k) = (seam(), kitchen());
     // (Seam's title only when it says more than the app's name: an app that
     // keeps "YouTube Music" over a song must not hide the history's name of it.)
@@ -1527,9 +1530,12 @@ pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, picks
         let t = without_name(&clean_title(site, t), name).to_lowercase();
         !t.is_empty() && !names.contains(&t)
     };
-    let pages = webapp_pages(retitled(history(&browser, 4000), &k, says), site, start, name, CANDIDATES);
-    let pages = with_plays(pages, played(&k, site, start, crate::usage::now_secs()));
-    pictured(&browser, &k, ranked_pages(pages, picks, max))
+    // (A search in it: the whole history read looked through for its words.)
+    let visits = retitled(history(&browser, 4000), &k, says).into_iter().filter(|v| wanted.says(&v.url, &v.title)).collect();
+    let pages = webapp_pages(visits, site, start, name, CANDIDATES);
+    let mut pages = with_plays(pages, played(&k, site, start, crate::usage::now_secs()));
+    pages.retain(|(v, title)| wanted.keeps(&v.url, title, v.last));
+    pictured(&browser, &k, ranked_pages(pages, &wanted.picks, wanted.max))
 }
 
 /// A history with each page's title as Seam saw it last, where it kept one
@@ -1575,11 +1581,23 @@ fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit,
 
 /// What a browser showed lately: a page a site but those in `skip`, in THE
 /// ORDER (`rank`, the owner's `picks` counted in), at most `max`.
-pub(crate) fn browser_recents(browser: &Browser, skip: &[String], picks: &Picks, max: usize) -> Vec<Recent> {
+pub(crate) fn browser_recents(browser: &Browser, skip: &[String], wanted: &Wanted) -> Vec<Recent> {
     // (Seam's: as Seam saw its pages; another browser's as it wrote them.)
     let k = if *browser == seam() { kitchen() } else { Kitchen::default() };
-    let pages = browser_pages(retitled(history(browser, 3000), &k, |t| !t.trim().is_empty()), skip, CANDIDATES);
-    pictured(browser, &k, ranked_pages(pages, picks, max))
+    // (Each page looked at before a site's newest is kept: one put away
+    // gives way to the one before it, a search finds any page of a site.)
+    let visits = retitled(history(browser, 3000), &k, |t| !t.trim().is_empty())
+        .into_iter()
+        .filter(|v| wanted.keeps(&v.url, &v.title, v.last))
+        .collect();
+    let pages = browser_pages(visits, skip, CANDIDATES);
+    pictured(browser, &k, ranked_pages(pages, &wanted.picks, wanted.max))
+}
+
+/// Whether `url` is a page on one of `hosts` (patterns as a site's).
+pub(crate) fn on_hosts(url: &str, hosts: &[String]) -> bool {
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    is_web(url) && origin(url).is_some_and(|(_, h)| host_is(&h.to_lowercase(), &hosts))
 }
 
 /// The hosts a webapp's pages are on, as patterns: its site's when Golem
@@ -1593,11 +1611,122 @@ pub(crate) fn webapp_hosts(site: Option<&Site>, start: &str) -> Vec<String> {
 
 /// The recents read lately, by app (its desktop id), so typing over a lone
 /// app does not read a history on every letter (`app_actions.rs` asks;
-/// read off the loop).
+/// read off the loop) — and, a search in an app ("youtube daft"), those of
+/// its that said the words last asked for (the words, the recents).
 #[derive(Debug, Default)]
 pub(crate) struct Recents {
     pub got: HashMap<String, (Instant, Vec<Recent>)>,
+    pub found: HashMap<String, (Instant, Vec<String>, Vec<Recent>)>,
     pub asking: HashSet<String>,
+    /// What the owner put away from them.
+    pub forgot: Forgot,
+}
+
+/// What a reading of recents wants (`app_actions.rs`): the owner's picks
+/// counted in, none put away since it was last seen (`Forgot`), only those
+/// that say every one of `words` (a search in the app: "youtube daft"), at
+/// most `max`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Wanted {
+    pub picks: Picks,
+    pub forgot: Forgot,
+    pub words: Vec<String>,
+    pub max: usize,
+}
+
+impl Wanted {
+    /// Whether a page (or a file) seen last at `last` is one to show.
+    pub(crate) fn keeps(&self, url: &str, title: &str, last: f64) -> bool {
+        self.forgot.keeps(url, last) && self.says(url, title)
+    }
+
+    /// Whether its address or its title says every word.
+    pub(crate) fn says(&self, url: &str, title: &str) -> bool {
+        says(&self.words, url, title)
+    }
+}
+
+/// The words of a search in an app, as `says` takes them.
+pub(crate) fn words_of(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether a page's `title`, or its address, says every one of `words`
+/// (lowercase): a word of three letters or more in the address too ("pixel"
+/// in an Amazon product's); a shorter one in the title alone (an address has
+/// every letter and digit somewhere).
+pub(crate) fn says(words: &[String], url: &str, title: &str) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    let (title, url) = (title.to_lowercase(), url.to_lowercase());
+    words.iter().all(|w| title.contains(w.as_str()) || (w.chars().count() >= 3 && url.contains(w.as_str())))
+}
+
+/// RECENTS PUT AWAY (Max, 2026-10-27): everything seen before `since` (the
+/// Launcher page's Clear), and each recent Delete took in the box, by its
+/// address or path, as seen before then. One seen AGAIN after comes back,
+/// as a page visited again comes back to a history.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Forgot {
+    #[serde(default)]
+    pub since: f64,
+    #[serde(default)]
+    pub hidden: HashMap<String, f64>,
+}
+
+/// Where it is kept, in the data dir.
+const FORGOT_FILE: &str = "recents-forgot.json";
+/// The most recents kept put away one by one (the oldest go first).
+const HIDDEN_KEPT: usize = 4000;
+
+impl Forgot {
+    pub(crate) fn load() -> Self {
+        crate::persist::read_json(&crate::persist::data_path(FORGOT_FILE)).unwrap_or_default()
+    }
+
+    fn save(&self) {
+        crate::persist::write_json("recents", &crate::persist::data_path(FORGOT_FILE), self);
+    }
+
+    /// Whether a recent seen last at `last` (unix seconds; 0 unknown) is
+    /// still to be shown.
+    pub(crate) fn keeps(&self, key: &str, last: f64) -> bool {
+        (self.since <= 0.0 || last > self.since) && self.hidden.get(key).is_none_or(|&at| last > at)
+    }
+
+    /// Put `key` away, as seen before `now`.
+    pub(crate) fn hide(&mut self, key: &str, now: f64) {
+        self.hidden.insert(key.to_owned(), now);
+        if self.hidden.len() > HIDDEN_KEPT {
+            let mut ats: Vec<f64> = self.hidden.values().copied().collect();
+            ats.sort_by(f64::total_cmp);
+            let cut = ats[self.hidden.len() - HIDDEN_KEPT];
+            self.hidden.retain(|_, at| *at >= cut);
+        }
+        self.save();
+    }
+
+    /// Put away everything seen before `now`.
+    pub(crate) fn clear(&mut self, now: f64) {
+        self.since = now;
+        self.hidden.clear();
+        self.save();
+    }
+}
+
+/// The pictures read for recents (favicons on tiles, videos', pages'),
+/// gone: the box's recents were cleared.
+pub(crate) fn clear_pictures() {
+    for what in ["web-tiles", "web-pictures"] {
+        if let Some(dir) = cache(what) {
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
 }
 
 /// How long recents read stay good.
@@ -1606,6 +1735,45 @@ pub(crate) const FRESH: Duration = Duration::from_secs(60);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recent_put_away_comes_back_only_when_seen_again() {
+        let mut f = Forgot { since: 0.0, hidden: HashMap::new() };
+        // (Never cleared: one whose time is unknown is shown.)
+        assert!(f.keeps("/music/a.mp3", 0.0));
+        f.hidden.insert("https://www.youtube.com/watch?v=a".into(), 1000.0);
+        assert!(!f.keeps("https://www.youtube.com/watch?v=a", 900.0));
+        assert!(f.keeps("https://www.youtube.com/watch?v=a", 1100.0), "watched again after");
+        assert!(f.keeps("https://www.youtube.com/watch?v=b", 900.0));
+        // Clear: all seen until then, and the unknown.
+        f.since = 2000.0;
+        assert!(!f.keeps("https://www.youtube.com/watch?v=b", 1900.0));
+        assert!(!f.keeps("/music/a.mp3", 0.0));
+        assert!(f.keeps("https://www.youtube.com/watch?v=b", 2100.0));
+    }
+
+    #[test]
+    fn a_search_in_an_app_keeps_the_recents_that_say_every_word() {
+        let w = words_of("Daft  PUNK");
+        assert!(says(&w, "https://www.youtube.com/watch?v=x", "Daft Punk - Get Lucky"));
+        assert!(!says(&w, "https://www.youtube.com/watch?v=x", "Daft Bodies"));
+        // A word of three letters or more in the address too; a short one in the title alone.
+        assert!(says(&words_of("pixel 8"), "https://www.amazon.es/Google-Pixel-8/dp/B0C", "Google Pixel 8 128 GB"));
+        assert!(says(&words_of("pixel"), "https://www.amazon.es/Google-Pixel-8/dp/B0C", "Smartphone"));
+        assert!(!says(&words_of("8"), "https://www.youtube.com/watch?v=8a", "Gatos"));
+        assert!(says(&[], "https://x.org/", ""));
+    }
+
+    #[test]
+    fn a_copied_link_is_a_webapps_when_it_is_on_its_hosts() {
+        let yt = webapp_hosts(site("youtube"), "https://www.youtube.com");
+        assert!(on_hosts("https://www.youtube.com/watch?v=abc", &yt));
+        assert!(!on_hosts("https://music.youtube.com/watch?v=abc", &yt));
+        assert!(!on_hosts("ftp://www.youtube.com/x", &yt));
+        let own = webapp_hosts(None, "https://app.example.org/home");
+        assert!(on_hosts("https://APP.example.org/x", &own));
+        assert!(!on_hosts("https://example.org/x", &own));
+    }
 
     #[test]
     fn hosts_match_exactly_below_or_with_any_ending() {
@@ -1956,14 +2124,14 @@ mod tests {
         for slug in ["youtube", "claude", "amazon", "github", "google-docs", "chatgpt"] {
             let at = Instant::now();
             let s = site(slug).unwrap();
-            let got = webapp_recents(Some(s), &format!("https://{}", s.hosts[0]), s.name, &Picks::new(), 8);
+            let got = webapp_recents(Some(s), &format!("https://{}", s.hosts[0]), s.name, &Wanted { max: 8, ..Default::default() });
             println!("{slug}: {} in {:?}", got.len(), at.elapsed());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.picture.map(|p| p.display().to_string()).unwrap_or_default());
             }
         }
         for (name, start) in [("Google Keep", "https://keep.google.com"), ("Cloudflare", "https://dash.cloudflare.com")] {
-            let got = webapp_recents(None, start, name, &Picks::new(), 8);
+            let got = webapp_recents(None, start, name, &Wanted { max: 8, ..Default::default() });
             println!("{name}: {}", got.len());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);
@@ -1987,7 +2155,7 @@ mod tests {
         for prog in ["seam", "google-chrome-stable", "firefox"] {
             let Some(b) = browser_for(prog) else { continue };
             let at = Instant::now();
-            let got = browser_recents(&b, if prog == "seam" { &skip } else { &[] }, &Picks::new(), 8);
+            let got = browser_recents(&b, if prog == "seam" { &skip } else { &[] }, &Wanted { max: 8, ..Default::default() });
             println!("{prog}: {} in {:?}", got.len(), at.elapsed());
             for r in got {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);

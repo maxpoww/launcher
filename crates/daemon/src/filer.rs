@@ -7783,6 +7783,7 @@ impl App {
             thumb: win.chains.get(&item.icon).cloned(),
             icon: Rect::new(origin.0 + x, origin.1 + y, side, side),
             of,
+            said: None,
         })
     }
 

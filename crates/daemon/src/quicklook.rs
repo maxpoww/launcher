@@ -53,6 +53,8 @@ use crate::App;
 /// What `Up::win` is when Quick Look came from the DESKTOP's icons (a file
 /// window's id never gets there).
 pub(crate) const DESKTOP: u32 = u32::MAX;
+/// …and from a recent of the DOCK BOX's lone app (`app_actions.rs`).
+pub(crate) const BOX: u32 = u32::MAX - 1;
 
 /// A tile is one layer of the icon array; it carries `STEP` texels of the
 /// picture and the one beyond each edge again, so neighbours overlap.
@@ -264,11 +266,18 @@ pub(crate) struct Up {
     /// A moving picture: how far into it (ms), and the frame shown.
     anim_ms: f32,
     anim_frame: Option<usize>,
+    /// What the head says instead of the file's (`Thing::said`).
+    said: Option<Said>,
 }
 
 impl Up {
     fn key(&self) -> Key {
         (self.path.clone(), self.page)
+    }
+
+    /// Whether it is a page shown by its picture (`Thing::said`).
+    pub(crate) fn said_as_page(&self) -> bool {
+        self.said.is_some()
     }
 
     /// The page shown (a PDF's; 0 otherwise).
@@ -1095,6 +1104,17 @@ pub(crate) struct Thing {
     /// Its place among several selected (from 1), and how many: Quick Look
     /// walks only those.
     pub of: Option<(usize, usize)>,
+    /// Said as something else than its file: a page's picture.
+    pub said: Option<Said>,
+}
+
+/// What the head says of a page shown by its picture (a recent of the dock
+/// box's, `app_actions.rs`): where it is, under its name, and Open in its
+/// app — for the file's kind and size and its app.
+#[derive(Clone, Debug)]
+pub(crate) struct Said {
+    pub meta: String,
+    pub open: String,
 }
 
 /// The picture a body shows in its tiles.
@@ -1367,6 +1387,7 @@ impl App {
             zoom: crate::peek_zoom::Zoom::new(),
             anim_ms: 0.0,
             anim_frame: None,
+            said: thing.said,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1395,11 +1416,16 @@ impl App {
         self.request_desktop_top_draw();
     }
 
-    /// Open it with its app (as a double click would) and close.
+    /// Open it with its app (as a double click would) and close — a recent
+    /// of the dock box's, in its own app.
     fn peek_open_app(&mut self) {
         let Some(up) = self.peek.up.as_ref() else {
             return;
         };
+        if up.win == BOX {
+            self.box_peek_open();
+            return;
+        }
         let exec = format!(
             "xdg-open {}",
             crate::launch::shell_quote(&up.path.to_string_lossy())
@@ -2879,13 +2905,16 @@ impl App {
                 open,
             ));
         }
-        let open_word = prepared
-            .and_then(|p| p.app.as_deref())
-            .and_then(|id| self.entries.iter().find(|e| e.id == id))
-            .map_or_else(
-                || tr("Open").to_owned(),
-                |e| fill(tr("Open with {app}"), &[("app", &e.name)]),
-            );
+        let open_word = match &up.said {
+            Some(said) => said.open.clone(),
+            None => prepared
+                .and_then(|p| p.app.as_deref())
+                .and_then(|id| self.entries.iter().find(|e| e.id == id))
+                .map_or_else(
+                    || tr("Open").to_owned(),
+                    |e| fill(tr("Open with {app}"), &[("app", &e.name)]),
+                ),
+        };
         let open_w = parts.open.w.min(self.peek_word_w(&open_word) + 26.0);
         let open_rect = Rect::new(
             parts.open.x + parts.open.w - open_w,
@@ -2907,7 +2936,16 @@ impl App {
             Some(FONT_BOLD),
             ink,
         ));
-        if let Some(p) = prepared {
+        if let Some(said) = &up.said {
+            g.labels.push(text_label(
+                &said.meta,
+                (r.x + 46.0, r.y + 25.0),
+                text_w,
+                11.5,
+                None,
+                dim,
+            ));
+        } else if let Some(p) = prepared {
             let meta = match up.of {
                 Some((n, all)) => format!(
                     "{} · {}",

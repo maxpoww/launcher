@@ -81,6 +81,8 @@ pub(crate) struct Settings {
     pub(crate) launcher_side: crate::launcher_prefs::Side,
     /// How the Apps grid is ordered.
     pub(crate) launcher_arrange: crate::launcher_prefs::Arrange,
+    /// The box shows no recents under an app alone in it (Recents off).
+    pub(crate) launcher_recents_off: bool,
     /// The other monitors (by what they are known by, `Monitor::selector`)
     /// the launcher is NOT on; a monitor seen for the first time has it.
     pub(crate) launcher_screens_off: Vec<String>,

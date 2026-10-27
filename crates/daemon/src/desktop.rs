@@ -4762,6 +4762,7 @@ impl App {
             // (The top surface lies where the desktop does: a point is the same on both.)
             icon: icon_rect(&self.desktop.grid.rect(slot), self.desktop_icon_scale()),
             of,
+            said: None,
         };
         self.peek_show(crate::quicklook::DESKTOP, thing);
     }

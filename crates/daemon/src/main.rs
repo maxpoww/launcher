@@ -2738,6 +2738,8 @@ struct SearchState {
     actions: app_actions::Actions,
     /// The web's recents read lately, by app (`web_actions.rs`).
     web: web_actions::Recents,
+    /// The recent Quick Look shows (its address or path), opened by Enter.
+    peeked: Option<String>,
     /// What the owner picked from a lone app's recents (`web_actions::rank`).
     picks: usage::UsageDb,
     /// The recents' pager (the wheel over them turns their pages).
@@ -2770,7 +2772,8 @@ impl Default for SearchState {
             control_lift: Vec::new(),
             control_modules: Vec::new(),
             actions: Default::default(),
-            web: Default::default(),
+            web: web_actions::Recents { forgot: web_actions::Forgot::load(), ..Default::default() },
+            peeked: None,
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
             focus: None,
@@ -6217,8 +6220,10 @@ impl App {
             self.scroll.reset_sections();
             self.hover = None;
             self.search.open = false;
-            // (An app Shift took to its row goes back to the box's own.)
+            // (An app Shift took to its row goes back to the box's own; Quick
+            // Look of one of its recents goes with the box.)
             self.search.shifted = None;
+            self.box_peek_close();
             if self.search.focus.take().is_some() {
                 self.refilter();
             }

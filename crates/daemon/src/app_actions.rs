@@ -19,7 +19,9 @@
 //! - UNDER IT, "Recent in <app>": the files it opened lately (the system's
 //!   record, `recently-used.xbel`, by the app that opened each; and VLC's
 //!   own list) as the Files row shows things, a full line at most; a click
-//!   opens one in the app.
+//!   opens one in the app. Delete puts one away (`box_delete`), Space shows
+//!   it big (Quick Look, `box_peek`); a search in the app ("youtube daft")
+//!   shows those that say its words under the search (`add_recents`).
 //!
 //! Each side holds what fits beside the centred app; past that the app's own
 //! actions give way from the end, Uninstall last of all.
@@ -42,7 +44,7 @@
 //! keys or the pointer leaving it, or `ARM_FOR` with nothing done put it back.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
@@ -447,25 +449,37 @@ fn recent_for(app: &AppEntry, shared: bool) -> Vec<(PathBuf, f64, f64)> {
 }
 
 /// What `app` opened lately, as recents in THE ORDER (`web_actions::rank`,
-/// the owner's `picks` counted in), at most `max` — read off the loop.
-fn files_recents(app: &AppEntry, shared: bool, picks: &web_actions::Picks, max: usize) -> Vec<web_actions::Recent> {
+/// the owner's picks counted in), as `wanted` wants them — read off the loop.
+fn files_recents(app: &AppEntry, shared: bool, wanted: &web_actions::Wanted) -> Vec<web_actions::Recent> {
+    let name_of = |path: &Path| path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
     let files = recent_for(app, shared)
         .into_iter()
+        .filter(|(path, last, _)| wanted.keeps(&path.to_string_lossy(), &name_of(path), *last))
         .map(|(path, last, score)| {
-            let (pick, picked) = picks.get(&*path.to_string_lossy()).copied().unwrap_or((0.0, 0.0));
-            (path, last.max(picked), score + 3.0 * pick)
+            let (pick, picked) = wanted.picks.get(&*path.to_string_lossy()).copied().unwrap_or((0.0, 0.0));
+            ((path, last), last.max(picked), score + 3.0 * pick)
         })
         .collect();
-    web_actions::rank(files, max)
+    web_actions::rank(files, wanted.max)
         .into_iter()
-        .map(|path| web_actions::Recent {
-            title: path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
+        .map(|(path, last)| web_actions::Recent {
+            title: name_of(&path),
             dir: path.is_dir(),
             url: path.to_string_lossy().into_owned(),
             picture: None,
             aspect: None,
+            last,
         })
         .collect()
+}
+
+/// The recents `source` has, as `wanted` wants them — read off the loop.
+fn read_recents(source: &Source, wanted: &web_actions::Wanted) -> Vec<web_actions::Recent> {
+    match source {
+        Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, wanted),
+        Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, wanted),
+        Source::Files { app, shared } => files_recents(app, *shared, wanted),
+    }
 }
 
 /// A webapp's site, when Golem knows it (by its slug, else its address).
@@ -527,9 +541,13 @@ pub(crate) struct Actions {
     pub web: bool,
     /// The installed webapp a search opens in (its entry).
     pub opener: Option<usize>,
+    /// The app whose recents they are (its desktop id): the lone app, or
+    /// the one a search is in (its recents that say the words).
+    pub recents_of: Option<String>,
     /// What each recent is, as the owner's picks are kept (its address or
-    /// path), in `recents`' order.
+    /// path), in `recents`' order; and each as it was read.
     pub recent_keys: Vec<String>,
+    pub recent_items: Vec<web_actions::Recent>,
     /// The recents' page shown, and how many there are.
     pub recent_page: usize,
     pub recent_pages: usize,
@@ -602,15 +620,19 @@ const RECENT_STRIP: f32 = 1000.0;
 const RECENT_MAX: usize = 24;
 const RECENT_PAGES: usize = 4;
 
+/// How long a copied link is offered in its app's row ("Open copied link").
+const COPIED_FOR: Duration = Duration::from_secs(3600);
+
 impl Actions {
     /// The Uninstall action's place in `list`.
     fn uninstall(&self) -> Option<usize> {
         self.list.iter().position(|a| a.does == Does::Uninstall)
     }
 
-    /// How many cells the app's row has (the app and its actions).
+    /// How many cells the app's row has (the app and its actions; a
+    /// search's, its cell alone).
     fn row(&self) -> usize {
-        self.list.len() + 1
+        self.list.len() + usize::from(self.app.is_some())
     }
 
     /// Whether the row is a site's search (no app alone).
@@ -764,6 +786,11 @@ impl App {
                 symbol: symbol(l.symbol),
             }));
         }
+        // A LINK COPIED lately (Max, 2026-10-27): of its site, in a webapp's
+        // row; any, in a browser's. First beside it: it is why one came.
+        if let Some(exec) = source.as_ref().and_then(|src| self.copied_link_exec(&entry, src)) {
+            right.insert(0, Action { name: tr("Open copied link").to_string(), does: Does::Run(exec), symbol: symbol("link") });
+        }
         if self.can_uninstall(&entry.id) {
             right.push(Action {
                 name: fill(tr("Uninstall {app}"), &[("app", &entry.name)]),
@@ -828,35 +855,83 @@ impl App {
         }
         let cells = &self.search.actions.cells;
         *apps = cells[..n_left].iter().copied().chain([index]).chain(cells[n_left..].iter().copied()).collect();
-        // Under it: what it opened lately, opened again in it by a click —
-        // a webapp's or a browser's pages, else files —, in THE ORDER (the
-        // three newest, then by use: `web_actions::rank`), a line a PAGE.
-        let pages = |n: usize| n.div_ceil(cols.max(1)).min(RECENT_PAGES);
+        // Under it: what it opened lately (`add_recents`).
         if let Some(source) = source {
-            let all = self.web_recents(&entry.id, &source);
-            let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
-            self.search.actions.recent_pages = n;
-            self.search.actions.recent_page = page;
-            for item in all.into_iter().skip(page * cols).take(cols) {
-                let exec = match &source {
-                    Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &item.url),
-                    Source::Browser(..) | Source::Files { .. } => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
-                };
-                self.search.actions.recent_keys.push(item.url.clone());
-                let aspect = item.aspect;
-                let at = match &source {
-                    Source::Files { .. } => self.push_transient_file(&item.url, &item.title, exec, item.dir),
-                    _ => self.push_web_recent(item, exec, (placeholder, layer)),
-                };
-                if let Some(a) = aspect.filter(|a| a.is_finite() && *a > 0.1 && *a < 10.0) {
-                    self.search.actions.shapes.push((at, a));
-                }
-                self.search.actions.recents.push(at);
-                apps.push(at);
-            }
+            let recents = self.add_recents(index, &source, page, None, (placeholder, layer));
+            apps.extend(recents);
         }
-        if !self.search.actions.recents.is_empty() {
+    }
+
+    /// Under the row: what app `index` opened lately, opened again in it by
+    /// a click — a webapp's or a browser's pages, else files —, in THE
+    /// ORDER (the three newest, then by use: `web_actions::rank`), a line a
+    /// PAGE (`page` shown); a search in it, those that say its `words`.
+    /// None while the Launcher page has them off, none put away (Delete,
+    /// Clear). Their entries, in their line's order.
+    fn add_recents(&mut self, index: usize, source: &Source, page: usize, words: Option<&str>, looks: (bool, u32)) -> Vec<usize> {
+        if self.settings.launcher_recents_off {
+            return Vec::new();
+        }
+        let Some(entry) = self.entries.get(index).cloned() else {
+            return Vec::new();
+        };
+        let cols = self.search.actions.cols.max(1);
+        let pages = |n: usize| n.div_ceil(cols).min(RECENT_PAGES);
+        let mut all = match words {
+            Some(words) => self.found_recents(&entry.id, source, words),
+            None => self.web_recents(&entry.id, source),
+        };
+        // (One put away while it was being read: not again.)
+        let forgot = &self.search.web.forgot;
+        all.retain(|r| forgot.keeps(&r.url, r.last));
+        let (n, page) = (pages(all.len()), page.min(pages(all.len()).saturating_sub(1)));
+        self.search.actions.recents_of = Some(entry.id.clone());
+        self.search.actions.recent_pages = n;
+        self.search.actions.recent_page = page;
+        let mut out = Vec::new();
+        for item in all.into_iter().skip(page * cols).take(cols) {
+            let exec = match source {
+                Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &item.url),
+                Source::Browser(..) | Source::Files { .. } => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
+            };
+            self.search.actions.recent_keys.push(item.url.clone());
+            self.search.actions.recent_items.push(item.clone());
+            let aspect = item.aspect;
+            let at = match source {
+                Source::Files { .. } => self.push_transient_file(&item.url, &item.title, exec, item.dir),
+                _ => self.push_web_recent(item, exec, looks),
+            };
+            if let Some(a) = aspect.filter(|a| a.is_finite() && *a > 0.1 && *a < 10.0) {
+                self.search.actions.shapes.push((at, a));
+            }
+            self.search.actions.recents.push(at);
+            out.push(at);
+        }
+        if !out.is_empty() {
             self.search.actions.title = Some(fill(tr("Recent in {app}"), &[("app", &entry.name)]));
+        }
+        out
+    }
+
+    /// The command that opens the link copied last in `app` — copied within
+    /// `COPIED_FOR`, the clipboard's newest: a webapp's when it is a page of
+    /// its site, a browser's whatever it is (Seam's: not one of the
+    /// installed webapps', which open it in theirs).
+    fn copied_link_exec(&self, app: &AppEntry, source: &Source) -> Option<String> {
+        let clip = self.clip.history.first()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+        if now.saturating_sub(clip.timestamp_ms) > COPIED_FOR.as_millis() as u64 {
+            return None;
+        }
+        let url = clip.link_url()?;
+        match source {
+            Source::Webapp { site, slug, start, .. } => {
+                web_actions::on_hosts(url, &web_actions::webapp_hosts(*site, start)).then(|| webapps::app_open_exec(slug, url))
+            }
+            Source::Browser(_, skip) => {
+                (!web_actions::on_hosts(url, skip)).then(|| format!("{} {}", app.exec, launch::shell_quote(url)))
+            }
+            Source::Files { .. } => None,
         }
     }
 
@@ -873,7 +948,10 @@ impl App {
     /// search's symbol; Enter opens it in the webapp when it is installed,
     /// else in Seam.
     fn add_search_cell(&mut self, apps: &mut Vec<usize>, target: Searching, words: &str) {
-        self.search.actions = Actions::default();
+        // (The same search goes on turning its recents' pages, as a lone
+        // app's do; another starts afresh.)
+        let was = std::mem::take(&mut self.search.actions);
+        let same = was.list.first().is_some_and(|a| matches!(a.does, Does::Open(_))) && was.recents_of.is_some();
         let base = &self.entries[..self.base_len.min(self.entries.len())];
         let (exec, url, looks, opener, called) = match target {
             Searching::Site(site, app) => {
@@ -925,6 +1003,28 @@ impl App {
         let at = self.push_transient(cell, apps::EntryKind::App, placeholder, layer);
         self.search.actions.cells.push(at);
         apps.insert(0, at);
+        // RECENTS IN THE SEARCH (Max, 2026-10-27): under it, what the app it
+        // searches in opened that says the words — "youtube daft", the Daft
+        // Punk videos one watched —, in place of the other apps found.
+        let Some(app) = opener else {
+            return;
+        };
+        let Some(source) = self.entries.get(app).cloned().and_then(|e| self.source_of(&e)) else {
+            return;
+        };
+        let same = same && was.recents_of.as_deref() == self.entries.get(app).map(|e| e.id.as_str());
+        let page = if same { was.recent_page } else { 0 };
+        if same {
+            self.search.actions.leaving = was.leaving;
+            self.search.actions.turn_dir = was.turn_dir;
+        } else {
+            self.search.recent_pager.reset();
+        }
+        let recents = self.add_recents(app, &source, page, Some(words), (placeholder, layer));
+        if !recents.is_empty() {
+            apps.truncate(1);
+            apps.extend(recents);
+        }
     }
 
     /// What a query asks to SEARCH in, and the words: an installed app it
@@ -1011,31 +1111,79 @@ impl App {
         let got = self.search.web.got.get(id).cloned();
         let fresh = got.as_ref().is_some_and(|(at, _)| at.elapsed() < web_actions::FRESH);
         if !fresh && self.search.web.asking.insert(id.to_owned()) {
-            let (key, source, picks) = (id.to_owned(), source.clone(), self.search.picks.snapshot());
+            let (key, source, wanted) = (id.to_owned(), source.clone(), self.recents_wanted(Vec::new()));
             self.desktop_off_loop(
-                move || match &source {
-                    Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, &picks, RECENT_MAX),
-                    Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, &picks, RECENT_MAX),
-                    Source::Files { app, shared } => files_recents(app, *shared, &picks, RECENT_MAX),
-                },
+                move || read_recents(&source, &wanted),
                 move |app, pages| {
                     app.search.web.asking.remove(&key);
                     info!("web recents of {key}: {}", pages.len());
                     let new = app.search.web.got.get(&key).is_none_or(|(_, old)| *old != pages);
                     app.search.web.got.insert(key.clone(), (Instant::now(), pages));
                     if new && app.search.actions.app.as_deref() == Some(key.as_str()) {
-                        // The app's row is the same: the keys stay where they were on it.
-                        let (sel, row) = (app.search.selected, app.search.actions.row());
-                        app.refilter();
-                        if let Some(sel) = sel.filter(|&s| s < row && app.search.actions.app.as_deref() == Some(key.as_str())) {
-                            app.search.selected = Some(sel);
-                        }
-                        app.schedule_frame();
+                        app.recents_came(&key);
                     }
                 },
             );
         }
         got.map(|(_, pages)| pages).unwrap_or_default()
+    }
+
+    /// App `id`'s recents that say `words` (a search in it, "youtube
+    /// daft"): those found for them last, while fresh; else one reading off
+    /// the loop at a time — the whole history looked through — and
+    /// meanwhile, of those read already for it, the ones that say them.
+    fn found_recents(&mut self, id: &str, source: &Source, words: &str) -> Vec<web_actions::Recent> {
+        let words = web_actions::words_of(words);
+        let found = self.search.web.found.get(id).filter(|(at, w, _)| *w == words && at.elapsed() < web_actions::FRESH);
+        if let Some((_, _, pages)) = found {
+            return pages.clone();
+        }
+        let asking = format!("{id}\u{1f}found");
+        if self.search.web.asking.insert(asking.clone()) {
+            let (key, source, wanted) = (id.to_owned(), source.clone(), self.recents_wanted(words.clone()));
+            self.desktop_off_loop(
+                move || {
+                    let pages = read_recents(&source, &wanted);
+                    (wanted.words, pages)
+                },
+                move |app, (words, pages)| {
+                    app.search.web.asking.remove(&asking);
+                    info!("recents of {key} that say {words:?}: {}", pages.len());
+                    app.search.web.found.insert(key.clone(), (Instant::now(), words, pages));
+                    // (A search up: shown — and asked again when the words
+                    // went on meanwhile.)
+                    if app.search.actions.searching() {
+                        app.recents_came(&key);
+                    }
+                },
+            );
+        }
+        // (Meanwhile: what was read for it already, that says them.)
+        let mut seen = std::collections::HashSet::new();
+        let had = self.search.web.found.get(id).map(|(_, _, p)| p.as_slice()).unwrap_or_default();
+        let got = self.search.web.got.get(id).map(|(_, p)| p.as_slice()).unwrap_or_default();
+        had.iter()
+            .chain(got)
+            .filter(|r| web_actions::says(&words, &r.url, &r.title) && seen.insert(r.url.clone()))
+            .cloned()
+            .collect()
+    }
+
+    /// What a reading of recents wants now: the owner's picks, none put
+    /// away, these `words` (none: all).
+    fn recents_wanted(&self, words: Vec<String>) -> web_actions::Wanted {
+        web_actions::Wanted { picks: self.search.picks.snapshot(), forgot: self.search.web.forgot.clone(), words, max: RECENT_MAX }
+    }
+
+    /// New recents of app `id` came while its row (or a search in it) is
+    /// up: laid out again, the keys where they were on its row.
+    fn recents_came(&mut self, id: &str) {
+        let (sel, row) = (self.search.selected, self.search.actions.row());
+        self.refilter();
+        if let Some(sel) = sel.filter(|&s| s < row && self.search.actions.recents_of.as_deref() == Some(id)) {
+            self.search.selected = Some(sel);
+        }
+        self.schedule_frame();
     }
 
     /// A recent page's cell: its picture once the thumbnailer has it (the
@@ -1079,19 +1227,20 @@ impl App {
         let Some(exec) = self.entries.get(index).map(|e| e.exec.clone()) else {
             return;
         };
-        info!("opening a recent of {:?}", self.search.actions.app);
+        info!("opening a recent of {:?}", self.search.actions.recents_of);
         // A pick of one's own: it comes forward next time (`web_actions::rank`).
         let at = self.search.actions.recents.iter().position(|&r| r == index);
         if let Some(key) = at.and_then(|k| self.search.actions.recent_keys.get(k)).cloned() {
             self.search.picks.increment(&key);
-            if let Some(app) = &self.search.actions.app {
+            if let Some(app) = &self.search.actions.recents_of {
                 self.search.web.got.remove(app);
+                self.search.web.found.remove(app);
             }
         }
         if let Err(e) = launch::launch(&exec, false, &self.config.launch.terminal) {
             error!("recent failed to open: {e:#}");
         }
-        let app = self.search.actions.app.clone().and_then(|id| self.entries.iter().position(|e| e.id == id));
+        let app = self.search.actions.recents_of.clone().and_then(|id| self.entries.iter().position(|e| e.id == id));
         match app {
             Some(app) if self.search.actions.web => self.web_opened(app),
             _ => self.launched(index),
@@ -1263,8 +1412,26 @@ impl App {
     /// the app, ↓ from the recents on to what follows. Returns whether the
     /// key was theirs.
     pub(crate) fn app_actions_key(&mut self, keysym: Keysym) -> bool {
+        // QUICK LOOK up from a recent: its keys (Space and Escape put it
+        // back, Enter opens the recent), but the arrows, which walk the
+        // recents with it following (`box_peek_follow`).
+        if self.box_peeking() {
+            match keysym {
+                Keysym::Return | Keysym::KP_Enter => {
+                    self.box_peek_open();
+                    return true;
+                }
+                Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {}
+                _ => return self.peek_key(crate::quicklook::BOX, keysym, None),
+            }
+        }
+        // Delete on a recent puts it away.
+        if matches!(keysym, Keysym::Delete | Keysym::KP_Delete) && self.box_delete() {
+            return true;
+        }
         let a = &self.search.actions;
-        if a.app.is_none() {
+        // (A search in an app: its recents under it walk the same way.)
+        if a.app.is_none() && a.recents.is_empty() {
             return false;
         }
         if keysym == Keysym::Escape {
@@ -1288,6 +1455,11 @@ impl App {
             return false;
         };
         let in_row = cur < row;
+        // On a recent the keys went to: Space shows it big (Quick Look).
+        if !in_row && self.search.keyed && keysym == Keysym::space {
+            self.box_peek(cur - row);
+            return true;
+        }
         // Past either end of the recents' line: their next or previous page.
         let (page, pages) = (a.recent_page, a.recent_pages);
         let turn = match keysym {
@@ -1297,6 +1469,7 @@ impl App {
         };
         if let Some((to, first)) = turn {
             self.recents_turn(to, Some(first));
+            self.box_peek_follow();
             return true;
         }
         let to = match keysym {
@@ -1317,8 +1490,147 @@ impl App {
         self.search.keyed = true;
         self.search.selected = Some(to);
         self.actions_settle();
+        self.box_peek_follow();
         self.schedule_frame();
         true
+    }
+
+    /// DELETE on a recent (Max, 2026-10-27): the one under the pointer —
+    /// or the one the keys are on, when they moved last — is put away: not
+    /// shown again unless it is opened again (`web_actions::Forgot`), and no
+    /// longer counted among the owner's picks. Returns whether there was one.
+    pub(crate) fn box_delete(&mut self) -> bool {
+        let a = &self.search.actions;
+        if a.recents.is_empty() || self.ui.target() != crate::state::Target::Open {
+            return false;
+        }
+        let s = content::SECTION_APPS;
+        let hovered = match self.hover {
+            Some(content::Hit::GridCell(hs, i)) if hs == s && !self.search.keyed => self.search.visible[s].get(i).copied(),
+            _ => None,
+        };
+        let keyed = self.search.selected.filter(|_| self.search.keyed).and_then(|f| self.search.visible[s].get(f).copied());
+        let Some(k) = hovered.or(keyed).and_then(|e| a.recents.iter().position(|&r| r == e)) else {
+            return false;
+        };
+        self.recent_hide(k);
+        true
+    }
+
+    /// Put away recent `k` (of the line shown): the line closes up, the keys
+    /// on the one that took its place.
+    fn recent_hide(&mut self, k: usize) {
+        let Some(key) = self.search.actions.recent_keys.get(k).cloned() else {
+            return;
+        };
+        info!("recent put away: {key}");
+        self.box_peek_close();
+        self.search.web.forgot.hide(&key, crate::usage::now_secs());
+        self.search.picks.forget(&key);
+        let (sel, row, keyed) = (self.search.selected, self.search.actions.row(), self.search.keyed);
+        self.refilter();
+        let n = self.search.actions.recents.len();
+        if keyed && sel.is_some_and(|s| s >= row) {
+            self.search.selected = Some(if n > 0 { row + k.min(n - 1) } else { self.lone_anchor().unwrap_or(0) });
+        }
+        self.schedule_frame();
+    }
+
+    /// CLEAR THE BOX'S RECENTS (the Launcher page): everything seen until
+    /// now is put away, the owner's picks and the pictures read for them go.
+    pub(crate) fn recents_clear(&mut self) {
+        self.search.web.forgot.clear(crate::usage::now_secs());
+        self.search.web.got.clear();
+        self.search.web.found.clear();
+        self.search.picks.forget_all();
+        std::thread::spawn(web_actions::clear_pictures);
+        info!("the box's recents were cleared");
+    }
+
+    /// Whether Quick Look is up from one of the box's recents.
+    pub(crate) fn box_peeking(&self) -> bool {
+        self.peek.up.as_ref().is_some_and(|u| u.win == crate::quicklook::BOX && !u.closing)
+    }
+
+    /// SPACE ON A RECENT (Max, 2026-10-27): it shows big — a file as Quick
+    /// Look shows any; a page as its picture, said as the page (its address,
+    /// Open in its app).
+    fn box_peek(&mut self, k: usize) {
+        let a = &self.search.actions;
+        let (Some(item), Some(&entry)) = (a.recent_items.get(k), a.recents.get(k)) else {
+            return;
+        };
+        let app = a.recents_of.as_deref().and_then(|id| self.entries.iter().find(|e| e.id == id)).map(|e| e.name.clone()).unwrap_or_default();
+        let file = !a.web;
+        let (path, said) = if file {
+            (PathBuf::from(&item.url), None)
+        } else {
+            let Some(picture) = item.picture.clone() else {
+                return;
+            };
+            let at = web_actions::origin(&item.url).map_or_else(|| item.url.clone(), |(_, h)| h.trim_start_matches("www.").to_owned());
+            (picture, Some(crate::quicklook::Said { meta: at, open: fill(tr("Open in {app}"), &[("app", &app)]) }))
+        };
+        let Some(icon) = self.recent_icon_rect(entry) else {
+            return;
+        };
+        info!("quick look of a recent: {}", item.url);
+        self.search.peeked = Some(item.url.clone());
+        let thing = crate::quicklook::Thing { path, name: item.title.clone(), thumb: None, icon, of: None, said };
+        self.peek_show(crate::quicklook::BOX, thing);
+    }
+
+    /// Quick Look follows the keys along the recents; off them, it goes.
+    fn box_peek_follow(&mut self) {
+        if !self.box_peeking() {
+            return;
+        }
+        let a = &self.search.actions;
+        let row = a.row();
+        match self.search.selected.filter(|&s| s >= row && s < row + a.recents.len()) {
+            Some(s) => self.box_peek(s - row),
+            None => self.box_peek_close(),
+        }
+    }
+
+    /// Quick Look from the box goes (the box went, a recent was put away).
+    pub(crate) fn box_peek_close(&mut self) {
+        if self.box_peeking() {
+            self.peek_close();
+        }
+    }
+
+    /// Open the recent Quick Look shows, as a click on it would.
+    pub(crate) fn box_peek_open(&mut self) {
+        let key = self.search.peeked.clone();
+        self.peek_close();
+        let a = &self.search.actions;
+        if let Some(&entry) = key.and_then(|key| a.recent_keys.iter().position(|k| *k == key)).and_then(|k| a.recents.get(k)) {
+            self.run_recent(entry);
+        }
+    }
+
+    /// Where recent `entry`'s picture stands on the screen (logical px of
+    /// the output): Quick Look grows out of it and goes back into it.
+    fn recent_icon_rect(&self, entry: usize) -> Option<content::Rect> {
+        let s = content::SECTION_APPS;
+        let cell = self.search.visible[s].iter().position(|&e| e == entry)?;
+        let slot = *self.apps_slots.get(cell)?;
+        let layout = self.current_layout();
+        let sec = &layout.sections[s];
+        let cols = sec.cols.max(1);
+        let cw = sec.viewport.w / cols as f32;
+        let ch = if sec.vertical { sec.viewport.h / sec.rows.max(1) as f32 } else { cw * content::GRID_CELL_H / content::GRID_CELL_W };
+        let (row, col) = (slot / cols, slot % cols);
+        let mut y = sec.viewport.y + row as f32 * ch;
+        if let Some(part) = layout.apps_part.filter(|p| row as isize > p.row) {
+            y += part.down;
+        }
+        let x = sec.viewport.x + sec.row_shift(row * cols) + col as f32 * cw;
+        let side = cw.min(ch) * 0.62;
+        // (The dock's surface stands on the screen's bottom edge.)
+        let dy = self.dock_screen_h().map_or(0.0, |h| h - self.buffer_size.1 as f32);
+        Some(content::Rect::new(x + (cw - side) / 2.0, y + dy + (ch * 0.42 - side / 2.0).max(0.0), side, side))
     }
 
     /// SHIFT ON AN APP (Max, 2026-10-22: "press shift at any time on an
@@ -1425,7 +1737,7 @@ impl App {
     /// Returns whether it was theirs.
     pub(crate) fn recents_wheel(&mut self, value: f64) -> bool {
         let a = &self.search.actions;
-        if a.app.is_none() || a.recent_pages < 2 {
+        if a.recents.is_empty() || a.recent_pages < 2 {
             return false;
         }
         let over = match self.hover {
@@ -1448,7 +1760,7 @@ impl App {
     /// shapes, the slide between pages.
     pub(crate) fn recents_draw(&self) -> Option<content::RecentsDraw> {
         let a = &self.search.actions;
-        if a.app.is_none() || a.recents.is_empty() {
+        if a.recents.is_empty() {
             return None;
         }
         let p = &self.search.recent_pager;
@@ -1474,7 +1786,7 @@ impl App {
     /// The recents' page shown and how many there are, when more than one.
     pub(crate) fn recent_pages(&self) -> Option<(usize, usize)> {
         let a = &self.search.actions;
-        (a.app.is_some() && a.recent_pages > 1).then_some((a.recent_page, a.recent_pages))
+        (!a.recents.is_empty() && a.recent_pages > 1).then_some((a.recent_page, a.recent_pages))
     }
 
     /// The recent nearest under cell `cur` of the app's row (both rows are

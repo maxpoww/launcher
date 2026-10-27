@@ -1517,6 +1517,24 @@ The big daemon files are cohesive but long — go straight to the function:
   http(s) only, pictures only `<16 hex>.<jpg|png|webp>` plain files in its `pics/`). On a
   short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
-  Real data: `cargo test -- --ignored real_recents --nocapture`.
+  Real data: `cargo test -- --ignored real_recents --nocapture`. 2026-10-27 (Max: "do 1 2 3 and
+  5"): PUT AWAY — Delete on a recent (the pointer's, or the keys' when they moved last:
+  `box_delete`) hides it until it is SEEN AGAIN (`web_actions::Forgot`, `recents-forgot.json`: a
+  key → when; one visited after comes back, as in a history) and forgets its picks; the Launcher
+  page's Recents switch (`launcher_recents_off`: none shown, NONE READ) and Clear recents
+  (`recents_clear`: everything seen until now put away, picks and `web-tiles`/`web-pictures`
+  gone). Every reading takes a `Wanted` (picks, forgot, words, max) and filters BEFORE ranking;
+  the row filters again by `Recent::last` (a reading that was in flight). RECENTS IN A SEARCH
+  ("youtube daft", `add_search_cell` → `add_recents(.., Some(words))`): under the search cell,
+  the app's recents that say every word (`web_actions::says`: title, or the address for words of
+  3+), in place of the other apps found; read off the loop for the words (`found_recents`, the
+  whole history, one reading at a time per app; meanwhile those read already that say them).
+  SPACE on a recent the keys are on = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
+  a page as its picture with `Said` (its host under its name, "Open in <app>", no pencil); the
+  arrows walk the recents with it following, Enter / Open opens the recent in its app
+  (`box_peek_open` → `run_recent`), Space / Escape put it back, the box going closes it. OPEN
+  COPIED LINK: the clipboard's newest clip, a link copied within `COPIED_FOR` (1 h), first beside
+  a webapp when it is on its site's hosts (`web_actions::on_hosts`), beside a browser whatever it
+  is (Seam's: not an installed webapp's) — `copied_link_exec`.
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".
