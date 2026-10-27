@@ -2745,6 +2745,10 @@ struct SearchState {
     /// The app Shift took to its row (its id), the name Shift wrote in the
     /// search for it, and what was typed before (`app_actions::box_shift`).
     focus: Option<(String, String, String)>,
+    /// The app Shift wrote the name of, when it can search (its id and the
+    /// name as written): what is typed after it searches in it, even what
+    /// begins another app's name (`app_actions::add_action_cells`).
+    shifted: Option<(String, String)>,
     /// Shift is down with no other key since: let go, it is a tap.
     shift_tap: bool,
     /// The keys moved the selection since the pointer last did: Shift takes
@@ -2770,6 +2774,7 @@ impl Default for SearchState {
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
             focus: None,
+            shifted: None,
             shift_tap: false,
             keyed: false,
         }
@@ -6213,6 +6218,7 @@ impl App {
             self.hover = None;
             self.search.open = false;
             // (An app Shift took to its row goes back to the box's own.)
+            self.search.shifted = None;
             if self.search.focus.take().is_some() {
                 self.refilter();
             }

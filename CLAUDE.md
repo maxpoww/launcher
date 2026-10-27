@@ -1481,7 +1481,9 @@ The big daemon files are cohesive but long — go straight to the function:
   the one the keys are on when they moved last (`SearchState::keyed`), to its row, whatever was typed
   or with nothing typed (`SearchState::focus` = the app and the query then; `grid_resting` is false
   meanwhile); Shift again, Escape, typing or the box going away go back. Apps of the grid only (not a
-  file, a package, a box, an action, a recent). Shift WRITES THE APP'S NAME in the search (Max, 2026-10-27:
+  file, a package, a box, an action, a recent). Shift WRITES THE APP'S NAME in the search — with a space after
+  it when it can search, the words come next (`SearchState::shifted`: what is typed after that name searches in
+  it, even what begins another app's name) — (Max, 2026-10-27:
   "am, Shift on Amazon, space, pixel 8 = browse for pixel 8"; Shift again / Escape put back what was typed):
   a query that begins with an installed app's NAME then a space and words SEARCHES IN IT (`search_asked`,
   the longest name: "YouTube Music lofi" is YouTube Music's) — a webapp whose site has a search (in that

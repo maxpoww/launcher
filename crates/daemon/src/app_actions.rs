@@ -705,6 +705,23 @@ impl App {
         // A site's search asked by its name: its cell first, no app alone —
         // unless what is typed begins an app's name ("google maps", "youtube
         // music" are apps to find, not searches).
+        // The app Shift wrote the name of: what is typed after its name
+        // searches in it — even what begins another app's name ("Amazon P…"
+        // before "Amazon Prime") —, for as long as the name stays written.
+        let after_shift = self.search.shifted.as_ref().and_then(|(id, name)| {
+            let rest = self.search.query.strip_prefix(name.as_str())?;
+            let i = self.entries[..self.base_len.min(self.entries.len())].iter().position(|e| e.id == *id)?;
+            Some((i, rest.trim().to_owned()))
+        });
+        if after_shift.is_none() {
+            self.search.shifted = None;
+        }
+        if let Some((i, words)) = after_shift.filter(|(_, w)| !w.is_empty() && !resting && !self.control_panel) {
+            if let Some(target) = self.searches_in(i) {
+                self.add_search_cell(apps, target, &words);
+                return;
+            }
+        }
         if !resting && !self.control_panel && focused.is_none() {
             if let Some((target, words)) = self.search_asked(&self.search.query) {
                 if !self.begins_a_name(&self.search.query) {
@@ -929,14 +946,7 @@ impl App {
             if name.is_empty() || !lower.starts_with(&format!("{name} ")) || best.as_ref().is_some_and(|(_, m)| *m >= n) {
                 continue;
             }
-            let target = match webapps::exec_app_slug(&e.exec) {
-                Some(slug) => {
-                    let start = webapps::exec_app_url(&e.exec).unwrap_or_default();
-                    site_of(slug, start).filter(|s| s.search.is_some()).map(|s| Searching::Site(s, Some(i)))
-                }
-                None => web_actions::browser_for(&program(&e.exec)).map(|_| Searching::Browser(i)),
-            };
-            if let Some(t) = target {
+            if let Some(t) = self.searches_in(i) {
                 best = Some((t, n));
             }
         }
@@ -947,6 +957,19 @@ impl App {
             }
         }
         web_actions::asked(query).map(|(site, words)| (Searching::Site(site, None), words))
+    }
+
+    /// What app `i` searches in, when it can: a webapp whose site has a
+    /// search, or a browser.
+    fn searches_in(&self, i: usize) -> Option<Searching> {
+        let e = self.entries.get(i)?;
+        match webapps::exec_app_slug(&e.exec) {
+            Some(slug) => {
+                let start = webapps::exec_app_url(&e.exec).unwrap_or_default();
+                site_of(slug, start).filter(|s| s.search.is_some()).map(|s| Searching::Site(s, Some(i)))
+            }
+            None => web_actions::browser_for(&program(&e.exec)).map(|_| Searching::Browser(i)),
+        }
     }
 
     /// Where an app's recent pages come from: a webapp (every one), or a
@@ -1251,6 +1274,7 @@ impl App {
             }
             // (An app Shift took to its row: back to what was typed.)
             if let Some((_, _, before)) = self.search.focus.take() {
+                self.search.shifted = None;
                 self.search.query = before;
                 self.search.open = !self.search.query.is_empty();
                 self.refilter();
@@ -1310,6 +1334,7 @@ impl App {
             return;
         }
         if let Some((_, _, before)) = self.search.focus.take() {
+            self.search.shifted = None;
             self.search.query = before;
             self.search.open = !self.search.query.is_empty();
             self.refilter();
@@ -1331,7 +1356,7 @@ impl App {
         }
         let (id, name) = (self.entries[e].id.clone(), self.entries[e].name.clone());
         let special = [apps::CONTROL_PANEL_ID, apps::APPS_GRID_ID, apps::MODULES_ID].contains(&id.as_str());
-        let already = self.search.actions.app.as_deref() == Some(id.as_str()) && self.search.query == name;
+        let already = self.search.actions.app.as_deref() == Some(id.as_str()) && self.search.query.trim_end() == name;
         if special || already {
             return;
         }
@@ -1339,9 +1364,14 @@ impl App {
         // the search so I can do space and browse — am, Shift on Amazon, space,
         // pixel 8"): a space and words after it search in it (`search_asked`).
         info!("shift: {id} to its row (hovered {hovered:?}, keys on {keyed:?}, keys moved last: {})", self.search.keyed);
-        let before = std::mem::replace(&mut self.search.query, name.clone());
+        // (With a space after it when it can search: the words come next — Max:
+        // "it needs the space, so I can't type after pressing Shift".)
+        let can = self.searches_in(e).is_some();
+        let written = if can { format!("{name} ") } else { name.clone() };
+        let before = std::mem::replace(&mut self.search.query, written.clone());
         self.search.open = true;
-        self.search.focus = Some((id, name, before));
+        self.search.shifted = can.then(|| (id.clone(), written.clone()));
+        self.search.focus = Some((id, written, before));
         self.refilter();
         self.schedule_frame();
     }
