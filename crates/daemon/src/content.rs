@@ -2181,8 +2181,12 @@ pub struct FrameInput<'a> {
     /// Live search query (empty shows the placeholder).
     pub query: &'a str,
     /// Auto-selected grid position (best match while searching), as
-    /// (section, cell index within that section's visible list).
+    /// (section, cell index within that section's visible list). THE ONE
+    /// highlight of the grid: the pointer's hover is drawn only while
+    /// nothing is selected (the pointer moving onto a cell selects it).
     pub selected: Option<(usize, usize)>,
+    /// The pointer took the selection, not the keys: drawn as a hover is.
+    pub selected_soft: bool,
     /// Search box expansion: 0.0 = compact circle button, 1.0 = full pill.
     pub search_expand: f32,
     /// Which entries are using placeholder tiles (no resolved icon file).
@@ -2538,6 +2542,7 @@ pub fn scene(
         dock_hop,
         query,
         selected,
+        selected_soft,
         search_expand,
         placeholders,
         kinds,
@@ -3711,11 +3716,11 @@ pub fn scene(
                 g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,
-                    color: [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)],
+                    color: if selected_soft { hl } else { [hl[0], hl[1], hl[2], (hl[3] * 1.8).min(0.4)] },
                     glass: 0.0,
                     border: 0.0,
                 });
-            } else if hover == Some(Hit::GridCell(s, i)) {
+            } else if selected.is_none() && hover == Some(Hit::GridCell(s, i)) {
                 g.rects.push(RectInst {
                     rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
                     radius: 14.0,

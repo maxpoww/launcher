@@ -1749,6 +1749,7 @@ impl App {
                 dock_hop,
                 query: &self.search.query,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
+                selected_soft: !self.search.keyed,
                 search_expand: self.search.expand,
                 placeholders: &self.placeholders,
                 kinds: &self.kinds,

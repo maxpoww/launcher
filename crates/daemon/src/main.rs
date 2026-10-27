@@ -2753,8 +2753,10 @@ struct SearchState {
     shifted: Option<(String, String)>,
     /// Shift is down with no other key since: let go, it is a tap.
     shift_tap: bool,
-    /// The keys moved the selection since the pointer last did: Shift takes
-    /// the app they are on, not the one under the pointer.
+    /// The keys had the selection last (they moved it, or typing put it on
+    /// the best match), not the pointer: it is drawn as theirs, and Shift
+    /// takes the app it is on rather than the one under the pointer
+    /// (`App::pointer_takes_selection`).
     keyed: bool,
 }
 
@@ -5231,6 +5233,29 @@ impl App {
         }
     }
 
+    /// THE BOX'S ONE SELECTION (Max, 2026-10-27: "we have the pointer
+    /// selection + the buttons selection, we need to make it one"): the
+    /// pointer MOVING onto a cell takes it, and the keys go on from there
+    /// until the pointer moves onto one again. Over nothing it stays where
+    /// it was. Only the selection is drawn (`content::FrameInput::selected`).
+    fn pointer_takes_selection(&mut self) {
+        let Some(Hit::GridCell(s, i)) = self.hover else {
+            return;
+        };
+        if self.control_panel || self.ui.target() != Target::Open {
+            return;
+        }
+        let at = self.search.visible[..s].iter().map(Vec::len).sum::<usize>() + i;
+        if at >= self.flat_len() {
+            return;
+        }
+        self.search.keyed = false;
+        if self.search.selected != Some(at) {
+            self.search.selected = Some(at);
+            self.actions_settle();
+        }
+    }
+
     /// Total selectable cells across all sections (flat keyboard order:
     /// Apps, Install, Files).
     fn flat_len(&self) -> usize {
@@ -6914,6 +6939,7 @@ impl App {
                     // Editing the query means the user is searching again —
                     // release the drag-from-Install grid hold.
                     self.install_drag_reset = false;
+                    self.search.keyed = true;
                     if self.search.query.is_empty() {
                         self.search.open = false;
                     }
@@ -6970,6 +6996,8 @@ impl App {
                         // Typing means the user is searching again — release
                         // the drag-from-Install grid hold.
                         self.install_drag_reset = false;
+                        // (The best match it lands on is the keys'.)
+                        self.search.keyed = true;
                         self.search.query.push_str(&printable);
                         self.refilter();
                     }
@@ -7935,8 +7963,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 let prev_pos = app.pointer_pos; // save before update for velocity
                 let pos = (surface_x as f32, surface_y as f32);
                 app.pointer_pos = Some(pos);
-                // (Shift takes the app under the pointer again.)
-                app.search.keyed = false;
                 if app.fast.open {
                     app.fast_touch();
                 }
@@ -8072,6 +8098,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if app.ui.target() != Target::Hidden {
                     if app.gesture.dragging.is_none() {
                         app.update_hover();
+                        // (Moved — not a surface brought under a still pointer.)
+                        if prev_pos != Some(pos) {
+                            app.pointer_takes_selection();
+                        }
                     }
                     app.schedule_frame();
                 }

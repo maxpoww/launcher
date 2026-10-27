@@ -1509,8 +1509,8 @@ impl App {
             Some(content::Hit::GridCell(hs, i)) if hs == s && !self.search.keyed => self.search.visible[s].get(i).copied(),
             _ => None,
         };
-        let keyed = self.search.selected.filter(|_| self.search.keyed).and_then(|f| self.search.visible[s].get(f).copied());
-        let Some(k) = hovered.or(keyed).and_then(|e| a.recents.iter().position(|&r| r == e)) else {
+        let selected = self.search.selected.and_then(|f| self.search.visible[s].get(f).copied());
+        let Some(k) = hovered.or(selected).and_then(|e| a.recents.iter().position(|&r| r == e)) else {
             return false;
         };
         self.recent_hide(k);
