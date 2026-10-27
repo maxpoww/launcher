@@ -268,6 +268,9 @@ pub(crate) struct Up {
     anim_frame: Option<usize>,
     /// What the head says instead of the file's (`Thing::said`).
     pub(crate) said: Option<Said>,
+    /// A page's button the pointer rests on, and since when: its tooltip
+    /// (`peek_page.rs`).
+    pub(crate) tip: Option<(crate::peek_page::Button, Instant)>,
 }
 
 impl Up {
@@ -1396,6 +1399,7 @@ impl App {
             anim_ms: 0.0,
             anim_frame: None,
             said: thing.said,
+            tip: None,
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1846,6 +1850,8 @@ impl App {
                 if let Some(up) = self.peek.up.as_mut() {
                     up.ptr = Some((*surface_x as f32, *surface_y as f32));
                 }
+                // (A page's button rested on: its tooltip.)
+                self.page_tip_follow();
                 // (A zoomed photo being dragged.)
                 self.peek_zoom_motion((*surface_x as f32, *surface_y as f32));
                 self.request_desktop_top_draw();
@@ -1853,6 +1859,7 @@ impl App {
             Event::Leave { .. } => {
                 if let Some(up) = self.peek.up.as_mut() {
                     up.ptr = None;
+                    up.tip = None;
                 }
                 self.request_desktop_top_draw();
             }
@@ -3033,10 +3040,13 @@ impl App {
             glass: 0.0,
             border: 0.0,
         };
-        // A PAGE: the card's round buttons, and nothing more (`peek_page.rs`).
+        // A PAGE: the card's round buttons, and nothing more (`peek_page.rs`);
+        // the one rested on says what it does.
+        let mut tip_grid = None;
         if page_left.is_some() {
             let copied = up.notice.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
             self.page_head_push(&mut g, r, (ink, open), (up.ptr, copied));
+            tip_grid = self.page_tip_push(g.clip, r, open, copied);
         } else {
         g.rects.push(pill(open_rect, wash(open_rect)));
         g.labels.push(Label {
@@ -3116,6 +3126,7 @@ impl App {
         scene.grids.extend(zoom_grid);
         scene.grids.extend(over_page);
         scene.grids.extend(notice_grid);
+        scene.grids.extend(tip_grid);
     }
 
     pub(crate) fn peek_word_w(&self, word: &str) -> f32 {

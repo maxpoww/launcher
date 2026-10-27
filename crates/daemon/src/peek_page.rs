@@ -11,15 +11,20 @@
 //! the recent out of the box (Delete too), Copy link (a check a moment
 //! after), Open in its app, × (`head`, `page_head_push`) — in the order
 //! Open · Copy link · bin · ×, evenly, each icon's drawing in the middle of
-//! its button (Max: "change the order … and align those 4 buttons"). A page with no
-//! picture of its own (its favicon on a tile) has the tile small beside the
-//! words.
+//! its button (Max: "change the order … and align those 4 buttons"); one
+//! rested on `TIP_DELAY` says what it does in a pill under it (Max: "add
+//! tooltip to the buttons" — `page_tip_follow`, `page_tip_push`). A page
+//! with no picture of its own (its favicon on a tile) has the tile small
+//! beside the words.
 //!
 //! One layout (`page_layout`) is what the frame's size (`page_size`) and the
-//! draw (`page_words_push`) read; `head` is what the head's draw and the
-//! pointer (`page_copy_at`) read.
+//! draw (`page_words_push`) read; `head` is what the head's draw, its
+//! tooltips and the pointer (`page_button_at`) read.
+
+use smithay_client_toolkit::reexports::calloop;
 
 use crate::content::{GridContent, Label, Rect, RectInst, FONT_BOLD};
+use crate::i18n::tr;
 use crate::quicklook::{text_label, Said, HEAD};
 use crate::App;
 
@@ -39,8 +44,10 @@ const TILE_W: f32 = 640.0;
 const MIN_W: f32 = 560.0;
 /// How much of the screen's width a page's picture may take, at most, and
 /// how far past its own pixels it may grow (a little: more shows them).
-const SHARE: f32 = 0.62;
-const GROW: f32 = 1.5;
+const SHARE: f32 = 0.7;
+const GROW: f32 = 1.75;
+/// How long the pointer rests on a head button before its tooltip shows.
+const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Where everything of a page stands in its frame.
 pub(crate) struct PageLayout {
@@ -199,6 +206,58 @@ impl App {
         g.labels.push(text_label(&said.facts, (l.text_x, l.facts_y), l.text_w, FACTS_PX, None, dim));
         let url = crate::desktop::fit_name(&said.url, l.text_w, &mut |t| self.page_measure(t, URL_PX, false));
         g.labels.push(text_label(&url, (l.text_x, l.url_y), l.text_w, URL_PX, None, dim));
+    }
+
+    /// The pointer moved on Quick Look: the head button it is on now starts
+    /// its tooltip's wait (a frame is asked for when the wait is over).
+    pub(crate) fn page_tip_follow(&mut self) {
+        let on = self.peek.up.as_ref().and_then(|u| u.ptr).and_then(|p| self.page_button_at(p));
+        let Some(up) = self.peek.up.as_mut() else {
+            return;
+        };
+        if up.tip.map(|(b, _)| b) == on {
+            return;
+        }
+        up.tip = on.map(|b| (b, std::time::Instant::now()));
+        if on.is_some() {
+            let timer = calloop::timer::Timer::from_duration(TIP_DELAY + std::time::Duration::from_millis(20));
+            if let Err(e) = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+                app.request_desktop_top_draw();
+                calloop::timer::TimeoutAction::Drop
+            }) {
+                tracing::warn!("quick look: cannot wait for a tooltip: {e}");
+            }
+        }
+    }
+
+    /// The tooltip of the head button rested on (`TIP_DELAY` and more):
+    /// what it does, in Quick Look's own dark pill under it, inside the
+    /// frame at `r` — over the picture (a grid of its own, drawn last).
+    pub(crate) fn page_tip_push(&self, clip: Rect, r: Rect, open: f32, copied: bool) -> Option<GridContent> {
+        let up = self.peek.up.as_ref()?;
+        let said = up.said.as_ref()?;
+        let (b, since) = up.tip?;
+        if since.elapsed() < TIP_DELAY || up.closing {
+            return None;
+        }
+        let (_, at) = head(r).into_iter().find(|(x, _)| *x == b)?;
+        let word = match b {
+            Button::Open => said.open.clone(),
+            Button::Copy if copied => tr("Link copied").to_owned(),
+            Button::Copy => tr("Copy link").to_owned(),
+            Button::Bin => tr("Remove from recents").to_owned(),
+            Button::Close => tr("Close").to_owned(),
+        };
+        let w = self.page_measure(&word, 12.0, false) + 22.0;
+        let x = (at.x + at.w / 2.0 - w / 2.0).min(r.x + r.w - 8.0 - w).max(r.x + 8.0);
+        let pill = Rect::new(x.round(), (at.y + at.h + 6.0).round(), w.round(), 24.0);
+        let mut g = GridContent { clip, ..Default::default() };
+        g.rects.push(RectInst { rect: pill, radius: 12.0, color: [0.06, 0.07, 0.09, 0.85 * open], glass: 0.0, border: 0.0 });
+        g.labels.push(Label {
+            centered: true,
+            ..text_label(&word, (pill.x + pill.w / 2.0, pill.y + 5.0), w, 12.0, None, [1.0, 1.0, 1.0, open])
+        });
+        Some(g)
     }
 
     /// The page's head button a click at `at` is on.

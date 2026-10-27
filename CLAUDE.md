@@ -1534,8 +1534,8 @@ The big daemon files are cohesive but long — go straight to the function:
   = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
   a PAGE as the page (`peek_page.rs`, Max: "the quick look is small and tells nothing"): its picture
   as big as it was found (`web_actions::big_picture`: the kitchen's file, or a video's out of Seam's
-  cache, `Recent::big`) at most `SHARE` (62 %) of the screen's width and `GROW` (1.5×) its own pixels
-  (Max: "es muy grande, los thumbnails se pixelan", then "un poco más grande" twice), under it the
+  cache, `Recent::big`) at most `SHARE` (70 %) of the screen's width and `GROW` (1.75×) its own pixels
+  (Max: "es muy grande, los thumbnails se pixelan", then "un poco más grande" thrice), under it the
   WHOLE title (3 lines), "Watched / Played / Visited <when> · N times" (`seen_line`,
   `Recent::times`/`played`) and the address; a favicon-only page is a card, the tile beside the
   words; the head is the app's name, its host, and THE CARD'S BUTTONS (Max: "use the buttons we use
@@ -1543,7 +1543,9 @@ The big daemon files are cohesive but long — go straight to the function:
   under the pointer; `peek_page::head`/`page_head_push`): open · link · bin · ×, evenly (Max: "change
   the order … and align those 4 buttons"), each icon sized and placed so its DRAWING is ~12 px and in
   the middle of its button (`peek_page::icon`, measured on the rig with `measure-head.py`-style ink
-  boxes), a check on the link a moment after a copy. The bin or Delete puts the recent away and closes it (`box_peek_bin`);
+  boxes), a check on the link a moment after a copy; rested on `TIP_DELAY` (0.5 s) a button says
+  what it does in Quick Look's dark pill under it (`page_tip_follow`/`page_tip_push`, a grid drawn
+  last: over the picture). The bin or Delete puts the recent away and closes it (`box_peek_bin`);
   Ctrl+C copies. ⚠ rig: Nerd icons are tofu unless the rig dock gets a fonts.conf that includes the
   HOST's conf.d (its store path; the host fonts.conf includes `/etc/fonts/conf.d` = the toolbox's). ⚠ the box holds the
   keyboard EXCLUSIVELY, so Hyprland pins the POINTER to the dock's layer: while Quick Look is up from
