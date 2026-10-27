@@ -731,6 +731,13 @@ const FILE_WALK_DEPTH: usize = 6;
 /// with build output).
 const FILE_WALK_SKIP: [&str; 3] = ["target", "node_modules", "__pycache__"];
 
+/// Whether a thing the home walk meets is left out of file search: hidden,
+/// a build tree, a folder that says it is a cache (`file_search::list_top`
+/// leaves out the same).
+pub(crate) fn walk_skips(name: &str, path: &std::path::Path, is_dir: bool) -> bool {
+    name.starts_with('.') || FILE_WALK_SKIP.contains(&name) || (is_dir && path.join("CACHEDIR.TAG").exists())
+}
+
 /// Walk the home directory (breadth-first, hidden entries and symlinks
 /// skipped) into the search index. Runs on the indexer thread on every
 /// rescan, so results track the disk.
@@ -749,16 +756,13 @@ pub(crate) fn scan_home_files() -> Vec<FileEntry> {
         let folder = crate::file_search::dir_of(&dir.join("x"), &home_path);
         for e in read.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || FILE_WALK_SKIP.contains(&name.as_str()) {
-                continue;
-            }
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_symlink() {
                 continue;
             }
             let is_dir = ft.is_dir();
             let path = e.path();
-            if is_dir && path.join("CACHEDIR.TAG").exists() {
+            if walk_skips(&name, &path, is_dir) {
                 continue;
             }
             if is_dir && depth + 1 < FILE_WALK_DEPTH {

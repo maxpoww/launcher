@@ -128,11 +128,14 @@ pub(crate) fn fold(s: &str) -> String {
         .collect()
 }
 
-/// What a query asks of the files: the words to find (as typed) and a kind.
+/// What a query asks of the files: the words to find (as typed) and a kind
+/// — and, a kind asked, every word as typed, the kind's too: a file may be
+/// NAMED by it ("Documentos", "video tutorial notes.txt").
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Query {
     pub words: Vec<String>,
     pub kind: Option<Kind>,
+    pub all: Vec<String>,
 }
 
 /// A query read: its first kind word (when it has more than one word, or is
@@ -146,6 +149,10 @@ pub(crate) fn parse(query: &str) -> Query {
             Some(k) if q.kind.is_none() => q.kind = Some(k),
             _ => q.words.push(w.to_owned()),
         }
+        q.all.push(w.to_owned());
+    }
+    if q.kind.is_none() {
+        q.all.clear();
     }
     q
 }
@@ -201,46 +208,32 @@ impl Ranker {
         if q.words.is_empty() && q.kind.is_none() {
             return Vec::new();
         }
-        let atoms: Vec<Atom> = q
-            .words
-            .iter()
-            .map(|w| Atom::new(w, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring, false))
-            .collect();
-        let folded: Vec<String> = q.words.iter().map(|w| fold(w)).collect();
+        let atoms_of = |words: &[String]| -> Vec<(Atom, String)> {
+            words
+                .iter()
+                .map(|w| (Atom::new(w, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring, false), fold(w)))
+                .collect()
+        };
+        let (words, all) = (atoms_of(&q.words), atoms_of(&q.all));
         let mut buf = Vec::new();
         let mut scored: Vec<(usize, f64, f64)> = Vec::new();
         for (i, f) in index.iter().enumerate() {
-            if let Some(k) = q.kind {
-                if !is_kind(kind_of(&f.name, f.is_dir), k) {
-                    continue;
-                }
-            }
-            let worth = if atoms.is_empty() {
-                1.0
-            } else {
-                let hay = Utf32Str::new(&f.name, &mut buf);
-                let (mut total, mut in_name) = (0.0, 0usize);
-                let mut found = true;
-                for (atom, word) in atoms.iter().zip(&folded) {
-                    if let Some(s) = atom.score(hay, &mut self.matcher) {
-                        total += f64::from(s);
-                        in_name += 1;
-                    } else if word_start(&f.dir, word) {
-                        total += PATH_WORD;
-                    } else {
-                        found = false;
-                        break;
-                    }
-                }
-                // (One short word in no name: nothing — "a" is in every path.)
-                if !found || (in_name == 0 && atoms.len() == 1 && folded[0].chars().count() < 3) {
-                    continue;
-                }
-                if in_name == atoms.len() {
-                    total * NAME_ALL
-                } else {
-                    total
-                }
+            // Two readings when a kind is asked: of that kind, with the other
+            // words; or named by every word, the kind's too.
+            let as_kind = q
+                .kind
+                .filter(|&k| is_kind(kind_of(&f.name, f.is_dir), k))
+                .and_then(|_| if words.is_empty() { Some(1.0) } else { self.worth(f, &words, &mut buf) });
+            let as_named = if all.is_empty() { None } else { self.worth(f, &all, &mut buf) };
+            let worth = match (q.kind, as_kind, as_named) {
+                (None, _, _) => match self.worth(f, &words, &mut buf) {
+                    Some(w) => w,
+                    None => continue,
+                },
+                (Some(_), a, n) => match a.into_iter().chain(n).reduce(f64::max) {
+                    Some(w) => w,
+                    None => continue,
+                },
             };
             let used = opened.get(&f.path).map_or(0.0, |&t| crate::usage::decayed((now - t).max(0.0)));
             let fresh = if f.mtime > 0.0 { crate::usage::decayed((now - f.mtime).max(0.0)) } else { 0.0 };
@@ -248,6 +241,28 @@ impl Ranker {
         }
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.total_cmp(&a.2)).then(a.0.cmp(&b.0)));
         scored.into_iter().take(max).map(|(i, _, _)| i).collect()
+    }
+
+    /// What file `f` is worth to `words` (each a piece of its name, or the
+    /// start of a word of its folders' path): none when one is in neither.
+    fn worth(&mut self, f: &FileEntry, words: &[(Atom, String)], buf: &mut Vec<char>) -> Option<f64> {
+        let hay = Utf32Str::new(&f.name, buf);
+        let (mut total, mut in_name) = (0.0, 0usize);
+        for (atom, word) in words {
+            if let Some(s) = atom.score(hay, &mut self.matcher) {
+                total += f64::from(s);
+                in_name += 1;
+            } else if word_start(&f.dir, word) {
+                total += PATH_WORD;
+            } else {
+                return None;
+            }
+        }
+        // (One short word in no name: nothing — "a" is in every path.)
+        if in_name == 0 && words.len() == 1 && words[0].1.chars().count() < 3 {
+            return None;
+        }
+        Some(if in_name == words.len() { total * NAME_ALL } else { total })
     }
 }
 
@@ -299,8 +314,8 @@ pub(crate) fn watched_dirs() -> Vec<PathBuf> {
     if let Some(pics) = out.get(4).cloned() {
         out.push(pics.join("Screenshots"));
     }
-    out.retain(|d| d.is_dir());
-    out.dedup();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|d| d.is_dir() && seen.insert(d.components().collect::<PathBuf>()));
     out
 }
 
@@ -314,7 +329,7 @@ pub(crate) fn list_top(dir: &Path, home: &Path) -> Vec<FileEntry> {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let ft = e.file_type().ok()?;
-            if name.starts_with('.') || ft.is_symlink() {
+            if ft.is_symlink() || crate::apps::walk_skips(&name, &e.path(), ft.is_dir()) {
                 return None;
             }
             let mtime = e.metadata().map_or(0.0, |m| mtime_of(&m));
@@ -326,8 +341,8 @@ pub(crate) fn list_top(dir: &Path, home: &Path) -> Vec<FileEntry> {
 /// `index` with the tops of `dirs` as they are now (`tops`, listed off the
 /// loop): what left is gone, what came is there; the rest as it was.
 pub(crate) fn merge_tops(index: &mut Vec<FileEntry>, dirs: &[PathBuf], tops: Vec<FileEntry>) {
-    let parents: Vec<String> = dirs.iter().map(|d| d.to_string_lossy().into_owned()).collect();
-    index.retain(|f| !Path::new(&f.path).parent().is_some_and(|p| parents.iter().any(|d| p.as_os_str() == d.as_str())));
+    // (As paths, not text: "Downloads/" is "Downloads".)
+    index.retain(|f| !Path::new(&f.path).parent().is_some_and(|p| dirs.iter().any(|d| d.as_path() == p)));
     index.extend(tops);
 }
 
@@ -353,10 +368,12 @@ mod tests {
 
     #[test]
     fn a_kind_word_asks_for_that_kind_and_is_not_searched() {
-        assert_eq!(parse("pdf contrato"), Query { words: vec!["contrato".into()], kind: Some(Kind::Pdf) });
-        assert_eq!(parse("Fotos playa"), Query { words: vec!["playa".into()], kind: Some(Kind::Picture) });
-        assert_eq!(parse("música"), Query { words: vec![], kind: Some(Kind::Music) });
-        assert_eq!(parse("factura junio"), Query { words: vec!["factura".into(), "junio".into()], kind: None });
+        let q = parse("pdf contrato");
+        assert_eq!((q.words, q.kind), (vec!["contrato".to_owned()], Some(Kind::Pdf)));
+        assert_eq!(parse("Fotos playa").kind, Some(Kind::Picture));
+        let q = parse("música");
+        assert_eq!((q.words.len(), q.kind, q.all), (0, Some(Kind::Music), vec!["música".to_owned()]));
+        assert_eq!(parse("factura junio"), Query { words: vec!["factura".into(), "junio".into()], kind: None, all: vec![] });
         assert_eq!(kind_of("a.JPG", false), Some(Kind::Picture));
         assert_eq!(kind_of("x", true), Some(Kind::Folder));
         assert!(is_kind(Some(Kind::Pdf), Kind::Document));
@@ -391,6 +408,24 @@ mod tests {
         assert!(names(&index, r.rank(&index, &parse("fa"), &none, 0.0, 10)).is_empty());
         let got = names(&index, r.rank(&index, &parse("pdf"), &none, 0.0, 10));
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn a_kind_word_still_finds_what_it_names() {
+        let index = vec![
+            file("/h/Documentos", 0.0),
+            file("/h/Documentos/carta.odt", 5.0),
+            file("/h/Videos", 0.0),
+            file("/h/notes/video tutorial notes.txt", 0.0),
+            file("/h/Videos/clase.mp4", 3.0),
+        ];
+        let mut r = Ranker::default();
+        let none = Opened::new();
+        let got = names(&index, r.rank(&index, &parse("Documentos"), &none, 0.0, 10));
+        assert_eq!(got.first().map(String::as_str), Some("Documentos"), "the folder of that name first: {got:?}");
+        assert!(got.contains(&"carta.odt".to_owned()), "{got:?}");
+        let got = names(&index, r.rank(&index, &parse("video tutorial"), &none, 0.0, 10));
+        assert_eq!(got, vec!["video tutorial notes.txt".to_owned()]);
     }
 
     #[test]
@@ -439,7 +474,8 @@ mod tests {
     #[test]
     fn a_watched_top_is_replaced_and_the_rest_kept() {
         let mut index = vec![file("/h/Downloads/old.pdf", 0.0), file("/h/Downloads/sub/deep.pdf", 0.0), file("/h/x.txt", 0.0)];
-        merge_tops(&mut index, &[PathBuf::from("/h/Downloads")], vec![file("/h/Downloads/new.pdf", 5.0)]);
+        // (A folder written with its slash is that folder.)
+        merge_tops(&mut index, &[PathBuf::from("/h/Downloads/")], vec![file("/h/Downloads/new.pdf", 5.0)]);
         let got: Vec<&str> = index.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(got, vec!["deep.pdf", "x.txt", "new.pdf"]);
     }

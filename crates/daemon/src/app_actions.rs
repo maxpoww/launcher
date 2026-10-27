@@ -488,14 +488,14 @@ fn read_recents(source: &Source, wanted: &web_actions::Wanted) -> Vec<web_action
         Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, wanted),
         Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, wanted),
         Source::Files { app, shared } => files_recents(app, *shared, wanted),
-        Source::Folder(dir) => folder_recents(dir, wanted),
+        Source::Folder { dir, except } => folder_recents(dir, except, wanted),
     }
 }
 
 /// The things in `dir` but the hidden, the newest first, as `wanted` wants
 /// them (their words; never "put away": they are not recents) — read off
 /// the loop.
-fn folder_recents(dir: &Path, wanted: &web_actions::Wanted) -> Vec<web_actions::Recent> {
+fn folder_recents(dir: &Path, except: &str, wanted: &web_actions::Wanted) -> Vec<web_actions::Recent> {
     let mut all: Vec<web_actions::Recent> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -507,6 +507,9 @@ fn folder_recents(dir: &Path, wanted: &web_actions::Wanted) -> Vec<web_actions::
                 return None;
             }
             let url = e.path().to_string_lossy().into_owned();
+            if url == except {
+                return None;
+            }
             let last = e.metadata().map_or(0.0, |m| crate::file_search::mtime_of(&m));
             wanted.says(&url, &title).then_some(web_actions::Recent {
                 url,
@@ -564,6 +567,9 @@ pub(crate) enum Does {
     ShowInFiles,
     CopyFile,
     CopyPath,
+    /// …opened with this app (its desktop id): its own command, terminal and
+    /// graphics card, and noted as opened by it.
+    OpenWith(String),
     /// Close every window it has.
     CloseAll,
 }
@@ -636,8 +642,8 @@ enum Source {
     /// answer must not hold the box). Its program names it unless `shared`.
     Files { app: AppEntry, shared: bool },
     /// A found file's folder (Shift took the file to its row): the other
-    /// things in it, the newest first.
-    Folder(PathBuf),
+    /// things in it (`except` that file), the newest first.
+    Folder { dir: PathBuf, except: String },
 }
 
 /// What a search cell searches in.
@@ -943,7 +949,7 @@ impl App {
     /// Clear). Their entries, in their line's order.
     fn add_recents(&mut self, index: usize, source: &Source, page: usize, words: Option<&str>, looks: (bool, u32)) -> Vec<usize> {
         // (A folder's things are not recents: neither switched off nor put away.)
-        let folder = matches!(source, Source::Folder(_));
+        let folder = matches!(source, Source::Folder { .. });
         if self.settings.launcher_recents_off && !folder {
             return Vec::new();
         }
@@ -968,13 +974,13 @@ impl App {
             let exec = match source {
                 Source::Webapp { slug, .. } => webapps::app_open_exec(slug, &item.url),
                 Source::Browser(..) | Source::Files { .. } => format!("{} {}", entry.exec, launch::shell_quote(&item.url)),
-                Source::Folder(_) => format!("xdg-open {}", launch::shell_quote(&item.url)),
+                Source::Folder { .. } => format!("xdg-open {}", launch::shell_quote(&item.url)),
             };
             self.search.actions.recent_keys.push(item.url.clone());
             self.search.actions.recent_items.push(item.clone());
             let aspect = item.aspect;
             let at = match source {
-                Source::Files { .. } | Source::Folder(_) => self.push_transient_file(&item.url, &item.title, exec, item.dir),
+                Source::Files { .. } | Source::Folder { .. } => self.push_transient_file(&item.url, &item.title, exec, item.dir),
                 _ => self.push_web_recent(item, exec, looks),
             };
             if let Some(a) = aspect.filter(|a| a.is_finite() && *a > 0.1 && *a < 10.0) {
@@ -985,7 +991,7 @@ impl App {
         }
         if !out.is_empty() {
             self.search.actions.title = Some(match source {
-                Source::Folder(dir) => fill(tr("In {folder}"), &[("folder", &dir.file_name().map_or_else(|| dir.to_string_lossy(), |n| n.to_string_lossy()))]),
+                Source::Folder { dir, .. } => fill(tr("In {folder}"), &[("folder", &dir.file_name().map_or_else(|| dir.to_string_lossy(), |n| n.to_string_lossy()))]),
                 _ => fill(tr("Recent in {app}"), &[("app", &entry.name)]),
             });
         }
@@ -1017,11 +1023,7 @@ impl App {
         let open_with = |app: &App, i: usize| -> (Action, (bool, u32)) {
             let e = &app.entries[i];
             (
-                Action {
-                    name: fill(tr("Open with {app}"), &[("app", &e.name)]),
-                    does: Does::Run(format!("{} {}", e.exec, launch::shell_quote(&f.path))),
-                    symbol: symbol("openwith"),
-                },
+                Action { name: fill(tr("Open with {app}"), &[("app", &e.name)]), does: Does::OpenWith(e.id.clone()), symbol: symbol("openwith") },
                 looks(app, i),
             )
         };
@@ -1040,12 +1042,18 @@ impl App {
         let n_left = left.len();
         left.extend(right);
         let right = left;
-        let page = if self.search.actions.app.as_deref() == Some(f.path.as_str()) { self.search.actions.recent_page } else { 0 };
-        if page == 0 && self.search.actions.app.as_deref() != Some(f.path.as_str()) {
+        // (The same file goes on turning its pages, the page that went still
+        // sliding out; another starts afresh.)
+        let same = self.search.actions.app.as_deref() == Some(f.path.as_str());
+        let (page, leaving, turn_dir) = if same {
+            let a = &mut self.search.actions;
+            (a.recent_page, std::mem::take(&mut a.leaving), a.turn_dir)
+        } else {
             self.search.recent_pager.reset();
-        }
+            (0, Vec::new(), 0.0)
+        };
         let (list, looks_of): (Vec<Action>, Vec<(bool, u32)>) = right.into_iter().unzip();
-        self.search.actions = Actions { app: Some(f.path.clone()), list, left: n_left, cols, ..Default::default() };
+        self.search.actions = Actions { app: Some(f.path.clone()), list, left: n_left, cols, leaving, turn_dir, ..Default::default() };
         for (n, (placeholder, layer)) in looks_of.into_iter().enumerate() {
             let cell = AppEntry {
                 id: format!("{PREFIX}{n}"),
@@ -1066,14 +1074,8 @@ impl App {
         let cells = &self.search.actions.cells;
         *apps = cells[..n_left].iter().copied().chain([index]).chain(cells[n_left..].iter().copied()).collect();
         let dir = if f.is_dir { PathBuf::from(&f.path) } else { Path::new(&f.path).parent().map(Path::to_path_buf).unwrap_or_default() };
-        let mut under = self.add_recents(index, &Source::Folder(dir), page, None, own);
-        // (Itself is not one of the others.)
-        if let Some(k) = self.search.actions.recent_keys.iter().position(|k| *k == f.path) {
-            self.search.actions.recent_keys.remove(k);
-            self.search.actions.recent_items.remove(k);
-            self.search.actions.recents.remove(k);
-            under.remove(k);
-        }
+        // (Itself is not one of the others: left out as they are read.)
+        let under = self.add_recents(index, &Source::Folder { dir, except: f.path.clone() }, page, None, own);
         apps.extend(under);
     }
 
@@ -1126,7 +1128,7 @@ impl App {
             Source::Browser(_, skip) => {
                 (!web_actions::on_hosts(url, skip)).then(|| format!("{} {}", app.exec, launch::shell_quote(url)))
             }
-            Source::Files { .. } | Source::Folder(_) => None,
+            Source::Files { .. } | Source::Folder { .. } => None,
         }
     }
 
@@ -1680,6 +1682,14 @@ impl App {
             return false;
         };
         let in_row = cur < row;
+        // A found file's row: Space on its file or its actions shows the file
+        // big (on one of its folder's things, that one — below).
+        if in_row && keysym == Keysym::space && self.search.focus_file.is_some() {
+            if let Some(&anchor) = self.search.visible[content::SECTION_APPS].get(a.left) {
+                self.box_peek_file(anchor);
+                return true;
+            }
+        }
         // On the recent that is selected — the keys' or the pointer's (Max,
         // 2026-10-27: "hover a recent and press Space"): Space shows it big
         // (Quick Look). Typing puts the selection back on the app, so a
@@ -1730,7 +1740,8 @@ impl App {
     /// longer counted among the owner's picks. Returns whether there was one.
     pub(crate) fn box_delete(&mut self) -> bool {
         let a = &self.search.actions;
-        if a.recents.is_empty() || self.ui.target() != crate::state::Target::Open {
+        // (A found file's row: its folder's things are not recents to put away.)
+        if a.recents.is_empty() || self.ui.target() != crate::state::Target::Open || self.search.focus_file.is_some() {
             return false;
         }
         let s = content::SECTION_APPS;
@@ -1873,6 +1884,9 @@ impl App {
     /// The recent Quick Look shows, out of the box's recents (its bin, or
     /// Delete): Quick Look goes, the line closes up.
     pub(crate) fn box_peek_bin(&mut self) {
+        if self.search.focus_file.is_some() {
+            return;
+        }
         let key = self.search.peeked.clone();
         if let Some(k) = key.and_then(|key| self.search.actions.recent_keys.iter().position(|r| *r == key)) {
             self.recent_hide(k);
@@ -2195,11 +2209,29 @@ impl App {
         };
         let needs_terminal = self.entries[index].needs_terminal;
         let windows = self.running.get(&index).cloned().unwrap_or_default();
-        // (A found file's own.)
+        // (A found file's own; the file is the row's own cell, not its copy
+        // among the Files section's.)
+        let s = content::SECTION_APPS;
+        let index = self.search.visible[s].iter().copied().find(|&e| self.entries.get(e).is_some_and(|x| x.id == app)).unwrap_or(index);
         match action.does {
             Does::QuickLook => {
                 info!("quick look of {app} from its row");
                 self.box_peek_file(index);
+                return;
+            }
+            Does::OpenWith(ref id) => {
+                let base = self.base_len.min(self.entries.len());
+                let Some(ai) = self.entries[..base].iter().position(|e| e.id == *id) else {
+                    return;
+                };
+                let (name, exec, terminal) = (self.entries[ai].name.clone(), self.entries[ai].exec.clone(), self.entries[ai].needs_terminal);
+                info!("opening {app} with {id}");
+                let run = self.gpu_exec(id, format!("{exec} {}", launch::shell_quote(&app)));
+                if let Err(e) = launch::launch(&run, terminal, &self.config.launch.terminal) {
+                    error!("opening {app} with {id} failed: {e:#}");
+                }
+                self.file_opened_by(&app, Some((name, exec)));
+                self.launched(ai);
                 return;
             }
             Does::ShowInFiles => {
@@ -2248,7 +2280,7 @@ impl App {
                 }
             }
             // (Taken before: it needs no app; a file's own, above.)
-            Does::Open(_) | Does::QuickLook | Does::ShowInFiles | Does::CopyFile | Does::CopyPath => {}
+            Does::Open(_) | Does::QuickLook | Does::ShowInFiles | Does::CopyFile | Does::CopyPath | Does::OpenWith(_) => {}
             Does::CloseAll => {
                 info!("closing every window of {app} ({})", windows.len());
                 for addr in &windows {

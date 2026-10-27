@@ -1584,7 +1584,15 @@ The big daemon files are cohesive but long — go straight to the function:
   <app> (`file_openers`, off the loop) · Quick Look · next openers · Copy path (`Does::QuickLook|
   ShowInFiles|CopyFile|CopyPath`; `filer_show_item`), under it "In <folder>" — its folder's other
   things, a folder's own contents (`Source::Folder`, `folder_recents`; never switched off or put away
-  as recents are); Escape / Shift again / typing go back. Real home: `cargo test -- --ignored
+  as recents are; the file itself left out as they are read, `Source::Folder::except`); Escape /
+  Shift again / typing / the box folding (any way: `sync_surface_state`) go back. Open with runs the
+  APP's own command, terminal and graphics card (`Does::OpenWith`) and notes it as opened by it;
+  Space anywhere on the row shows the file; Delete there puts nothing away (not recents). A KIND
+  WORD is read both ways (`Query::all`): of that kind with the other words, or naming the file —
+  "Documentos" still finds ~/Documentos first. A record entry opened by another app gets that app
+  added (`noted_by`). A watched-folder change re-ranks only while the owner is not walking results
+  (`chosen`) or in Quick Look; one during a reading is read again after (`file_fresh_again`); the
+  tops leave out what the walk does (`apps::walk_skips`). Real home: `cargo test -- --ignored
   real_home_search --nocapture` (QUERIES=a,b,…). Rig: `HOME=<fake home>` for the rig dock, an
   `xdg-open` stub on its PATH, and the host's `xdg-mime`/`gio` (the toolbox has neither).
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.

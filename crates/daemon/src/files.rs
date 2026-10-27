@@ -129,6 +129,8 @@ impl App {
     /// times), and take them into the index.
     pub(crate) fn files_fresh_soon(&mut self) {
         if self.file_fresh_pending {
+            // (What happens while they are read is read once more after.)
+            self.file_fresh_again = true;
             return;
         }
         self.file_fresh_pending = true;
@@ -145,8 +147,14 @@ impl App {
                     app.file_fresh_pending = false;
                     info!("files: the watched folders read again ({} at their tops)", tops.len());
                     crate::file_search::merge_tops(&mut app.file_index, &dirs, tops);
-                    // (A search on screen finds what came.)
-                    if !app.search.query.is_empty() && app.ui.target() == crate::state::Target::Open {
+                    if std::mem::take(&mut app.file_fresh_again) {
+                        app.files_fresh_soon();
+                    }
+                    // (A search on screen finds what came — unless the owner
+                    // is walking its results or looking at one: the keys must
+                    // not jump. The next letter finds it.)
+                    let browsing = app.search.chosen || app.box_peeking();
+                    if !browsing && !app.search.query.is_empty() && app.ui.target() == crate::state::Target::Open {
                         app.refilter();
                         app.schedule_frame();
                     }
@@ -164,11 +172,22 @@ impl App {
     /// that app's "Recent in" has it too — and it comes first in file
     /// search from now on.
     pub(crate) fn file_opened_from_box(&mut self, path: &str) {
+        self.file_opened_by(path, None);
+    }
+
+    /// [`Self::file_opened_from_box`], by `opener` (its name and command)
+    /// when it is known — "Open with" in a found file's row —, else by the
+    /// app that opens its kind.
+    pub(crate) fn file_opened_by(&mut self, path: &str, opener: Option<(String, String)>) {
         let p = std::path::PathBuf::from(path);
         if !p.is_file() {
             return;
         }
         self.file_opened.insert(path.to_owned(), crate::usage::now_secs());
+        if let Some(by) = opener {
+            self.desktop_off_loop(move || crate::filer::recent::note_as(&p, Some(&by)), |_, ()| {});
+            return;
+        }
         let lower = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         let mime = crate::thumb_more::mime_of(&lower).unwrap_or("application/octet-stream").to_owned();
         self.desktop_off_loop(

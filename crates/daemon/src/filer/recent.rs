@@ -127,7 +127,23 @@ fn noted_by(text: &str, href: &str, mime: &str, when: &str, (app, exec): (&str, 
                 None => tag.push_str(&format!(" {name}=\"{when}\"")),
             }
         }
-        return format!("{}{tag}{}", &text[..at], &text[end..]);
+        let mut out = format!("{}{tag}{}", &text[..at], &text[end..]);
+        // (Opened by an app the entry does not name yet: that one too, as
+        // GTK adds it — so its own recents have the file.)
+        if let Some(close) = out[at..].find("</bookmark>").map(|e| at + e) {
+            let named = format!("name=\"{}\"", xml(app));
+            if !out[at..close].contains(&named) {
+                if let Some(apps_end) = out[at..close].find("</bookmark:applications>").map(|e| at + e) {
+                    let line = format!(
+                        "  <bookmark:application name=\"{}\" exec=\"&apos;{}&apos;\" modified=\"{when}\" count=\"1\"/>\n        ",
+                        xml(app),
+                        xml(exec)
+                    );
+                    out.insert_str(apps_end, &line);
+                }
+            }
+        }
+        return out;
     }
     let (app, exec) = (xml(app), xml(exec));
     let entry = format!(
@@ -238,9 +254,13 @@ mod tests {
         let href = "file:///home/max/n.txt";
         let by = noted_by("", href, "text/plain", "2026-10-27T00:00:00.000000Z", ("Neovim \"wrapper\"", "nvim %F"));
         assert!(by.contains(r#"<bookmark:application name="Neovim &quot;wrapper&quot;" exec="&apos;nvim %F&apos;""#), "{by}");
-        // (Used again: its entry's time, its app kept.)
+        // (Used again by another app: its entry's time, and that app named
+        // beside the first — once.)
         let again = noted(&by, href, "text/plain", "2026-10-28T00:00:00.000000Z");
-        assert!(again.contains("Neovim") && !again.contains("Golem Files"));
+        assert!(again.contains("Neovim") && again.contains(r#"name="Golem Files""#), "{again}");
         assert_eq!(entries(&again)[0].1, "2026-10-28T00:00:00.000000Z");
+        let thrice = noted(&again, href, "text/plain", "2026-10-29T00:00:00.000000Z");
+        assert_eq!(thrice.matches(r#"name="Golem Files""#).count(), 1);
+        assert_eq!(thrice.matches("<bookmark ").count(), 1);
     }
 }

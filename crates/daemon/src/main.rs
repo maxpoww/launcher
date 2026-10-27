@@ -934,6 +934,7 @@ fn main() -> anyhow::Result<()> {
         file_ranker: Default::default(),
         file_watched: Vec::new(),
         file_fresh_pending: false,
+        file_fresh_again: false,
         groups: groups::GroupDb::load(),
         app_group: None,
         dock_stack: None,
@@ -2193,6 +2194,7 @@ pub struct App {
     /// reading of their tops asked for.
     file_watched: Vec<std::path::PathBuf>,
     file_fresh_pending: bool,
+    file_fresh_again: bool,
     /// Persistent app groups ("boxes") shown in the Apps grid.
     groups: groups::GroupDb,
     /// Group the Apps section is navigated into (index into `groups`).
@@ -6306,11 +6308,18 @@ impl App {
             // (An app Shift took to its row goes back to the box's own; Quick
             // Look of one of its recents goes with the box.)
             self.search.shifted = None;
-            self.search.focus_file = None;
             self.box_peek_close();
-            if self.search.focus.take().is_some() {
+            // (A row Shift made — an app's or a file's — goes with the box.)
+            let file_row = self.search.focus_file.take().is_some();
+            if self.search.focus.take().is_some() || file_row {
                 self.refilter();
             }
+        }
+        // A found file's row goes as the box folds to the dock, too (an
+        // action collapses it: nothing typed would bring the row back).
+        if self.ui.target() != Target::Open && self.search.focus_file.take().is_some() {
+            self.box_peek_close();
+            self.refilter();
         }
         if self.ui.target() == Target::Open {
             self.scroll.reset_sections();
