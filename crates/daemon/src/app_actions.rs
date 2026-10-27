@@ -558,6 +558,39 @@ enum Source {
     Files { app: AppEntry, shared: bool },
 }
 
+/// What a search cell searches in.
+#[derive(Clone, Copy)]
+enum Searching {
+    /// A site (and the installed webapp of it the query named, if it did).
+    Site(&'static web_actions::Site, Option<usize>),
+    /// A browser (its entry): the web, with its own engine.
+    Browser(usize),
+}
+
+/// A browser's search of the web for `words`: its command and the address.
+/// The Firefox family is asked to search with its own engine
+/// (`--search`); Chromium's take the address of theirs (Brave's own, Edge's
+/// Bing, the rest Google's).
+fn browser_search(exec: &str, words: &str) -> (String, String) {
+    let prog = program(exec);
+    if matches!(prog.as_str(), "seam" | "firefox" | "firefox-esr" | "librewolf") {
+        return (format!("{exec} --search {}", launch::shell_quote(words)), format!("--search {words}"));
+    }
+    let q: String = words.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        b' ' => "+".to_owned(),
+        _ => format!("%{b:02X}"),
+    }).collect();
+    let url = if prog.contains("brave") {
+        format!("https://search.brave.com/search?q={q}")
+    } else if prog.contains("edge") {
+        format!("https://www.bing.com/search?q={q}")
+    } else {
+        format!("https://www.google.com/search?q={q}")
+    };
+    (format!("{exec} {}", launch::shell_quote(&url)), url)
+}
+
 /// How many measured names are kept before they are measured afresh.
 const NAME_FIT_KEPT: usize = 4000;
 
@@ -650,7 +683,7 @@ impl App {
         // An app Shift took to its row: that app alone, whatever was typed
         // — until what is typed changes (`box_shift`).
         let focused = match &self.search.focus {
-            Some((id, typed)) if *typed == self.search.query => {
+            Some((id, typed, _)) if *typed == self.search.query => {
                 self.entries[..self.base_len.min(self.entries.len())].iter().position(|e| e.id == *id)
             }
             _ => None,
@@ -673,9 +706,9 @@ impl App {
         // unless what is typed begins an app's name ("google maps", "youtube
         // music" are apps to find, not searches).
         if !resting && !self.control_panel && focused.is_none() {
-            if let Some((site, words)) = web_actions::asked(&self.search.query) {
+            if let Some((target, words)) = self.search_asked(&self.search.query) {
                 if !self.begins_a_name(&self.search.query) {
-                    self.add_search_cell(apps, site, &words);
+                    self.add_search_cell(apps, target, &words);
                     return;
                 }
             }
@@ -822,26 +855,38 @@ impl App {
     /// webapp's icon (installed or in the catalog, else Seam's) with the
     /// search's symbol; Enter opens it in the webapp when it is installed,
     /// else in Seam.
-    fn add_search_cell(&mut self, apps: &mut Vec<usize>, site: &'static web_actions::Site, words: &str) {
+    fn add_search_cell(&mut self, apps: &mut Vec<usize>, target: Searching, words: &str) {
         self.search.actions = Actions::default();
-        let id = webapps::id_for_slug(site.slug);
         let base = &self.entries[..self.base_len.min(self.entries.len())];
-        let webapp = base.iter().position(|e| e.id == id);
-        let opener = webapp.filter(|&i| !self.is_catalog_webapp(i));
-        let start = opener.and_then(|i| webapps::exec_app_url(&base[i].exec));
-        let Some(url) = web_actions::search_url_from(site, words, start) else {
-            return;
+        let (exec, url, looks, opener, called) = match target {
+            Searching::Site(site, app) => {
+                let id = webapps::id_for_slug(site.slug);
+                let webapp = app.or_else(|| base.iter().position(|e| e.id == id));
+                let opener = webapp.filter(|&i| !self.is_catalog_webapp(i));
+                let start = opener.and_then(|i| webapps::exec_app_url(&base[i].exec));
+                let Some(url) = web_actions::search_url_from(site, words, start) else {
+                    return;
+                };
+                // (In the webapp it is, by its own slug; else in Seam.)
+                let slug = opener.and_then(|i| webapps::exec_app_slug(&base[i].exec)).unwrap_or(site.slug);
+                let exec = match opener {
+                    Some(_) => webapps::app_open_exec(slug, &url),
+                    None => format!("seam {}", launch::shell_quote(&url)),
+                };
+                let looks = webapp.or_else(|| base.iter().position(|e| program(&e.exec) == "seam"));
+                let called = opener.map_or_else(|| site.name.to_owned(), |i| base[i].name.clone());
+                (exec, url, looks, opener, called)
+            }
+            Searching::Browser(i) => {
+                let (exec, url) = browser_search(&base[i].exec, words);
+                (exec, url, Some(i), Some(i), base[i].name.clone())
+            }
         };
-        let exec = match opener {
-            Some(_) => webapps::app_open_exec(site.slug, &url),
-            None => format!("seam {}", launch::shell_quote(&url)),
-        };
-        let looks = webapp.or_else(|| base.iter().position(|e| program(&e.exec) == "seam"));
         let (placeholder, layer) = looks.map_or((true, 0), |i| {
             (self.placeholders.get(i).copied().unwrap_or(true), self.icon_layers.get(i).copied().unwrap_or(0))
         });
-        // (On two lines: the site, then the words — whole, as the box has room.)
-        let name = format!("{}\n{}", fill(tr("Search {site}"), &[("site", &site.name)]), fill(tr("“{words}”"), &[("words", &words)]));
+        // (On two lines: where, then the words — whole, as the box has room.)
+        let name = format!("{}\n{}", fill(tr("Search {site}"), &[("site", &called)]), fill(tr("“{words}”"), &[("words", &words)]));
         info!("search cell: {name} → {url}");
         self.search.actions = Actions {
             list: vec![Action { name, does: Does::Open(exec.clone()), symbol: symbol("search") }],
@@ -863,6 +908,45 @@ impl App {
         let at = self.push_transient(cell, apps::EntryKind::App, placeholder, layer);
         self.search.actions.cells.push(at);
         apps.insert(0, at);
+    }
+
+    /// What a query asks to SEARCH in, and the words: an installed app it
+    /// begins with BY NAME, then a space and words ("Amazon pixel 8" — as
+    /// Shift writes the name, `box_shift`): a webapp whose site has a search,
+    /// or a browser (the longest such name: "YouTube Music lofi" is YouTube
+    /// Music's); else a site by one of its words ("yt gatos").
+    fn search_asked(&self, query: &str) -> Option<(Searching, String)> {
+        let q = query.trim_start();
+        let lower = q.to_lowercase();
+        let base = &self.entries[..self.base_len.min(self.entries.len())];
+        let mut best: Option<(Searching, usize)> = None;
+        for (i, e) in base.iter().enumerate() {
+            if self.kinds.get(i) != Some(&apps::EntryKind::App) || self.is_catalog_webapp(i) {
+                continue;
+            }
+            let name = e.name.trim().to_lowercase();
+            let n = name.chars().count();
+            if name.is_empty() || !lower.starts_with(&format!("{name} ")) || best.as_ref().is_some_and(|(_, m)| *m >= n) {
+                continue;
+            }
+            let target = match webapps::exec_app_slug(&e.exec) {
+                Some(slug) => {
+                    let start = webapps::exec_app_url(&e.exec).unwrap_or_default();
+                    site_of(slug, start).filter(|s| s.search.is_some()).map(|s| Searching::Site(s, Some(i)))
+                }
+                None => web_actions::browser_for(&program(&e.exec)).map(|_| Searching::Browser(i)),
+            };
+            if let Some(t) = target {
+                best = Some((t, n));
+            }
+        }
+        if let Some((target, n)) = best {
+            let words: String = q.chars().skip(n).collect::<String>().trim().to_owned();
+            if !words.is_empty() {
+                return Some((target, words));
+            }
+        }
+        web_actions::asked(query).map(|(site, words)| (Searching::Site(site, None), words))
     }
 
     /// Where an app's recent pages come from: a webapp (every one), or a
@@ -1165,8 +1249,10 @@ impl App {
                 self.actions_disarm();
                 return true;
             }
-            // (An app Shift took to its row: back to what the box showed.)
-            if self.search.focus.take().is_some() {
+            // (An app Shift took to its row: back to what was typed.)
+            if let Some((_, _, before)) = self.search.focus.take() {
+                self.search.query = before;
+                self.search.open = !self.search.query.is_empty();
                 self.refilter();
                 self.schedule_frame();
                 return true;
@@ -1223,7 +1309,9 @@ impl App {
         if self.ui.target() != crate::state::Target::Open || self.control_panel || self.fast.open {
             return;
         }
-        if self.search.focus.take().is_some() {
+        if let Some((_, _, before)) = self.search.focus.take() {
+            self.search.query = before;
+            self.search.open = !self.search.query.is_empty();
             self.refilter();
             self.schedule_frame();
             return;
@@ -1241,13 +1329,19 @@ impl App {
         if e >= base || self.kinds.get(e) != Some(&apps::EntryKind::App) || self.is_catalog_webapp(e) {
             return;
         }
-        let id = self.entries[e].id.clone();
+        let (id, name) = (self.entries[e].id.clone(), self.entries[e].name.clone());
         let special = [apps::CONTROL_PANEL_ID, apps::APPS_GRID_ID, apps::MODULES_ID].contains(&id.as_str());
-        if special || self.search.actions.app.as_deref() == Some(id.as_str()) {
+        let already = self.search.actions.app.as_deref() == Some(id.as_str()) && self.search.query == name;
+        if special || already {
             return;
         }
+        // Its NAME written in the search (Max, 2026-10-27: "the name written on
+        // the search so I can do space and browse — am, Shift on Amazon, space,
+        // pixel 8"): a space and words after it search in it (`search_asked`).
         info!("shift: {id} to its row (hovered {hovered:?}, keys on {keyed:?}, keys moved last: {})", self.search.keyed);
-        self.search.focus = Some((id, self.search.query.clone()));
+        let before = std::mem::replace(&mut self.search.query, name.clone());
+        self.search.open = true;
+        self.search.focus = Some((id, name, before));
         self.refilter();
         self.schedule_frame();
     }
@@ -1535,6 +1629,17 @@ mod tests {
         assert_eq!(right[0].does, Does::Uninstall);
         keep_right(&mut right, 0);
         assert!(right.is_empty());
+    }
+
+    #[test]
+    fn a_browser_searches_the_web_its_own_way() {
+        let (exec, _) = browser_search("seam", "pixel 8");
+        assert_eq!(exec, "seam --search 'pixel 8'");
+        let (exec, url) = browser_search("google-chrome-stable", "pixel 8 & co");
+        assert_eq!(url, "https://www.google.com/search?q=pixel+8+%26+co");
+        assert_eq!(exec, "google-chrome-stable 'https://www.google.com/search?q=pixel+8+%26+co'");
+        assert!(browser_search("brave", "x").1.starts_with("https://search.brave.com/"));
+        assert!(browser_search("microsoft-edge-stable", "x").1.starts_with("https://www.bing.com/"));
     }
 
     #[test]

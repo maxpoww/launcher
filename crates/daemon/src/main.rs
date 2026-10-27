@@ -2742,9 +2742,9 @@ struct SearchState {
     picks: usage::UsageDb,
     /// The recents' pager (the wheel over them turns their pages).
     recent_pager: pager::Pager,
-    /// The app Shift took to its row (its id), and what was typed then
-    /// (`app_actions::box_shift`).
-    focus: Option<(String, String)>,
+    /// The app Shift took to its row (its id), the name Shift wrote in the
+    /// search for it, and what was typed before (`app_actions::box_shift`).
+    focus: Option<(String, String, String)>,
     /// Shift is down with no other key since: let go, it is a tap.
     shift_tap: bool,
     /// The keys moved the selection since the pointer last did: Shift takes
