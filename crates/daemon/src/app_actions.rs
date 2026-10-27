@@ -1426,6 +1426,11 @@ impl App {
                     return true;
                 }
                 Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {}
+                // Delete: the recent shown out of the box.
+                Keysym::Delete | Keysym::KP_Delete => {
+                    self.box_peek_bin();
+                    return true;
+                }
                 // Ctrl+C: a page's address.
                 Keysym::c | Keysym::C if self.modifiers.ctrl => {
                     if let Some(url) = self.peek.up.as_ref().and_then(|u| u.said.as_ref()).map(|s| s.url.clone()) {
@@ -1623,6 +1628,15 @@ impl App {
     pub(crate) fn box_peek_close(&mut self) {
         if self.box_peeking() {
             self.peek_close();
+        }
+    }
+
+    /// The recent Quick Look shows, out of the box's recents (its bin, or
+    /// Delete): Quick Look goes, the line closes up.
+    pub(crate) fn box_peek_bin(&mut self) {
+        let key = self.search.peeked.clone();
+        if let Some(k) = key.and_then(|key| self.search.actions.recent_keys.iter().position(|r| *r == key)) {
+            self.recent_hide(k);
         }
     }
 

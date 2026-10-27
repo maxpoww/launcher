@@ -1534,11 +1534,13 @@ The big daemon files are cohesive but long — go straight to the function:
   = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
   a PAGE as the page (`peek_page.rs`, Max: "the quick look is small and tells nothing"): its picture
   as big as it was found (`web_actions::big_picture`: the kitchen's file, or a video's out of Seam's
-  cache, `Recent::big`) at most `SHARE` (45 %) of the screen's width and NEVER past its own pixels
-  (Max: "es muy grande, los thumbnails se pixelan"), under it the WHOLE title (3 lines), "Watched
-  / Played / Visited <when> · N times" (`seen_line`, `Recent::times`/`played`) and the address; a
-  favicon-only page is a card, the tile beside the words; the head is the app's name, its host, and
-  Copy link · Open in <app> · × (`peek_page::head`; no pencil; Ctrl+C too; "Link copied"). ⚠ the box holds the
+  cache, `Recent::big`) at most `SHARE` (55 %) of the screen's width and `GROW` (1.3×) its own pixels
+  (Max: "es muy grande, los thumbnails se pixelan", then "un poco más grande"), under it the WHOLE
+  title (3 lines), "Watched / Played / Visited <when> · N times" (`seen_line`, `Recent::times`/
+  `played`) and the address; a favicon-only page is a card, the tile beside the words; the head is
+  the app's name, its host, and BIN · Copy link · Open in <app> · × (`peek_page::head`; no pencil;
+  the bin — drawn in strokes, `bin_can`, no font needed — or Delete puts the recent away and closes
+  it, `box_peek_bin`; Ctrl+C copies; "Link copied"). ⚠ the box holds the
   keyboard EXCLUSIVELY, so Hyprland pins the POINTER to the dock's layer: while Quick Look is up from
   the box the dock hands it its pointer events (`box_point_on_screen`, moved by `box_to_peek_dy` —
   Quick Look's surface begins under the bar, the dock's at the screen's top); the

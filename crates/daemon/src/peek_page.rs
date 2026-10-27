@@ -2,18 +2,19 @@
 //! tells nothing … it does not even show the full title"): a recent of the
 //! dock box's that is a web page (`app_actions::box_peek`) is shown AS THE
 //! PAGE — its picture as big as it was found (`web_actions::big_picture`),
-//! never past its own pixels (Max: "es muy grande, los thumbnails se
-//! pixelan"); under it its WHOLE title (up to `TITLE_LINES` lines), how it
-//! was seen and how often ("Watched today at 13:02 · 5 times") and its
-//! address. In the head, beside "Open in <app>", Copy link (`head`). A page
-//! with no picture of its own (its favicon on a tile) has the tile small
-//! beside the words.
+//! at most `GROW` its own pixels (Max: "es muy grande, los thumbnails se
+//! pixelan", then "un poco más grande"); under it its WHOLE title (up to
+//! `TITLE_LINES` lines), how it was seen and how often ("Watched today at
+//! 13:02 · 5 times") and its address. In the head, beside "Open in <app>",
+//! Copy link and a BIN that takes the recent out of the box (`head`; Delete
+//! too). A page with no picture of its own (its favicon on a tile) has the
+//! tile small beside the words.
 //!
 //! One layout (`page_layout`) is what the frame's size (`page_size`) and the
 //! draw (`page_words_push`) read; `head` is what the head's draw and the
 //! pointer (`page_copy_at`) read.
 
-use crate::content::{GridContent, Rect, FONT_BOLD};
+use crate::content::{GridContent, Rect, RectInst, FONT_BOLD};
 use crate::i18n::tr;
 use crate::quicklook::{text_label, Said, HEAD};
 use crate::App;
@@ -32,8 +33,10 @@ const TILE: f32 = 88.0;
 const TILE_W: f32 = 640.0;
 /// The frame's narrowest for a page with a picture (a title needs room).
 const MIN_W: f32 = 560.0;
-/// How much of the screen's width a page's picture may take, at most.
-const SHARE: f32 = 0.45;
+/// How much of the screen's width a page's picture may take, at most, and
+/// how far past its own pixels it may grow (a little: more shows them).
+const SHARE: f32 = 0.55;
+const GROW: f32 = 1.3;
 
 /// Where everything of a page stands in its frame.
 pub(crate) struct PageLayout {
@@ -50,15 +53,38 @@ pub(crate) struct PageLayout {
     url_y: f32,
 }
 
+/// A page's head buttons.
+pub(crate) struct Head {
+    pub open: Rect,
+    pub copy: Rect,
+    /// Out of the box's recents.
+    pub bin: Rect,
+}
+
 /// A page's head buttons in a frame at `r`: Open in <app> (`open_word`)
-/// where the pencil and Open stand for a file — no pencil here —, and Copy
-/// link left of it. `word_w` measures a button's word.
-pub(crate) fn head(r: Rect, open_word: &str, word_w: impl Fn(&str) -> f32) -> (Rect, Rect) {
+/// where the pencil and Open stand for a file — no pencil here —, Copy
+/// link left of it, the bin left of that. `word_w` measures a button's word.
+pub(crate) fn head(r: Rect, open_word: &str, word_w: impl Fn(&str) -> f32) -> Head {
     let close_x = r.x + r.w - 12.0 - 26.0;
     let open_w = (r.w * 0.4).min(240.0).min(word_w(open_word) + 26.0);
     let open = Rect::new(close_x - 8.0 - open_w, r.y + 10.0, open_w, 26.0);
     let copy_w = word_w(tr("Copy link")).max(word_w(tr("Link copied"))) + 26.0;
-    (open, Rect::new(open.x - 8.0 - copy_w, r.y + 10.0, copy_w, 26.0))
+    let copy = Rect::new(open.x - 8.0 - copy_w, r.y + 10.0, copy_w, 26.0);
+    Head { open, copy, bin: Rect::new(copy.x - 8.0 - 32.0, r.y + 10.0, 32.0, 26.0) }
+}
+
+/// The bin's can, drawn in strokes in the middle of its button `b` (no
+/// font has to have it): the lid and its handle, the body open at the top.
+pub(crate) fn bin_can(b: Rect, ink: [f32; 4]) -> Vec<RectInst> {
+    let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
+    let r = |rect: Rect, radius: f32, border: f32| RectInst { rect, radius, color: ink, glass: 0.0, border };
+    vec![
+        r(Rect::new(cx - 2.5, cy - 7.5, 5.0, 3.0), 1.0, 1.3),
+        r(Rect::new(cx - 6.5, cy - 5.0, 13.0, 1.5), 0.75, 0.0),
+        r(Rect::new(cx - 5.0, cy - 3.0, 10.0, 10.5), 2.0, 1.3),
+        r(Rect::new(cx - 1.95, cy - 0.5, 1.2, 5.5), 0.6, 0.0),
+        r(Rect::new(cx + 0.75, cy - 0.5, 1.2, 5.5), 0.6, 0.0),
+    ]
 }
 
 /// `text` on up to `lines` lines of `room`, broken between words (a word
@@ -111,7 +137,7 @@ impl App {
                 // past its own pixels; the words under it.
                 let widest = (sw * SHARE).min(mw);
                 let words = self.page_words_h(said, widest - 2.0 * PAD);
-                let k = (widest / pw).min((mh - words).max(120.0) / ph).min(1.0);
+                let k = (widest / pw).min((mh - words).max(120.0) / ph).min(GROW);
                 let w = (pw * k).max(MIN_W.min(mw));
                 (w, ph * k + self.page_words_h(said, w - 2.0 * PAD))
             }
@@ -172,15 +198,22 @@ impl App {
         let Some((up, said)) = self.peek.up.as_ref().and_then(|u| Some((u, u.said.as_ref()?))) else {
             return false;
         };
-        head(up.rect, &said.open, |w| self.peek_word_w(w)).0.contains(at)
+        head(up.rect, &said.open, |w| self.peek_word_w(w)).open.contains(at)
+    }
+
+    /// Whether a click at `at` is on a page's bin.
+    pub(crate) fn page_bin_at(&self, at: (f32, f32)) -> bool {
+        let Some((up, said)) = self.peek.up.as_ref().and_then(|u| Some((u, u.said.as_ref()?))) else {
+            return false;
+        };
+        head(up.rect, &said.open, |w| self.peek_word_w(w)).bin.contains(at)
     }
 
     /// The address to copy when a click at `at` is on Copy link.
     pub(crate) fn page_copy_at(&self, at: (f32, f32)) -> Option<String> {
         let up = self.peek.up.as_ref()?;
         let said = up.said.as_ref()?;
-        let (_, copy) = head(up.rect, &said.open, |w| self.peek_word_w(w));
-        copy.contains(at).then(|| said.url.clone())
+        head(up.rect, &said.open, |w| self.peek_word_w(w)).copy.contains(at).then(|| said.url.clone())
     }
 }
 
