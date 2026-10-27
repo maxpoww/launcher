@@ -1621,7 +1621,7 @@ The big daemon files are cohesive but long — go straight to the function:
   "the FILE: will be /… a deep file search"): the box is files and nothing else. A "Files" CHIP
   in the search pill (`DeepDraw::chip`; "Files › Facturas" kept to a folder); the THREE SECTIONS
   ARE SHELVES, retitled (`Deep::shelves`, `DeepDraw::titles`): before a word Recent (the record
-  + what the box opened) / New (the watched tops, newest) / Places (the home's folders); with
+  + what the box opened) / New files (the watched tops, newest; "New" alone is a new palette's word) / Places (the home's folders); with
   words a shelf A KIND, the best kind first, "PDF · 4" (KRunner's categories), and "Inside
   files" — what SAYS the words; a shelf with nothing FOLDS away, its room the first's, which
   shows more rows (`content::fold_shelves`, `Layout::shelf_room`; the layout stacks the sections
