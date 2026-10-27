@@ -599,7 +599,9 @@ impl App {
     /// takes the new look's card (it stayed light behind dark apps — Max,
     /// 2026-10-22: "my BG is white still").
     fn lighting_turn(&mut self, dark: bool) {
-        let _ = std::thread::Builder::new().name("ambient-look".into()).spawn(move || crate::controls::assert_dark(dark));
+        // (Through the one teller: the apps' own look, told in order.)
+        let _ = dark;
+        palette::tell_apps_look(palette::choice().levels_now(palette::Surface::Apps).dark);
         self.look_set(dark);
         crate::wall_follow::refresh();
     }
@@ -837,7 +839,23 @@ impl App {
     pub(crate) fn lighting_cancel(&mut self) -> Option<u8> {
         self.lighting.apply_pending = false;
         SHOWN.store(NONE, Ordering::Relaxed);
-        self.lighting.fade.take().map(|f| f.shown)
+        // (The step shown stays the sun's: the other tab, still on Ambient,
+        // goes on from there — it jumped to the fade's end.)
+        let shown = self.lighting.fade.take().map(|f| f.shown);
+        if let Some(v) = shown {
+            SUN.store(v, Ordering::Relaxed);
+        }
+        shown
+    }
+
+    /// A fade in progress made again for what is picked now (its plan was
+    /// made once, at its start).
+    pub(crate) fn lighting_replan(&mut self, picked: &palette::ColorChoice) {
+        if let Some(f) = self.lighting.fade.as_mut() {
+            if f.colours {
+                f.shell = (palette::shell_plan_look(picked, true), palette::shell_plan_look(picked, false));
+            }
+        }
     }
 
     /// Make everything for the new step once it is quiet — or at once when

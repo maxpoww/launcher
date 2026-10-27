@@ -14,6 +14,27 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static DARK: AtomicBool = AtomicBool::new(true);
+/// The icons' tone: the Icons section's look (`palette::colors_apply`).
+static ICONS_DARK: AtomicBool = AtomicBool::new(true);
+
+/// Tests that set the icons' tone, or draw in it, take turns (one flag for
+/// the whole process, and tests run side by side).
+#[cfg(test)]
+pub(crate) static TONE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn icons_dark() -> bool {
+    ICONS_DARK.load(Ordering::Relaxed)
+}
+
+/// The icons' tone set; true when it changed (the generation moves: every
+/// icon loader rebuilds itself).
+pub(crate) fn set_icons_dark(dark: bool) -> bool {
+    let changed = ICONS_DARK.swap(dark, Ordering::Relaxed) != dark;
+    if changed {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    changed
+}
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 /// Whether the desktop is in its dark look.
@@ -41,7 +62,7 @@ pub(crate) fn generation() -> u32 {
 /// `-Dark` theme gives way to its light self in the light.
 pub(crate) fn icon_theme(configured: &str) -> String {
     let base = configured.strip_suffix("-Dark").unwrap_or(configured);
-    let want = if dark() { format!("{base}-Dark") } else { base.to_owned() };
+    let want = if icons_dark() { format!("{base}-Dark") } else { base.to_owned() };
     if want == configured || installed(&want) {
         want
     } else {
@@ -63,7 +84,7 @@ pub(crate) fn installed(theme: &str) -> bool {
 /// in the dark they are the same figure in GRAPHITE, as Golem's icons are
 /// (the cast's stops and the gloss and bevel lights brought down).
 pub(crate) fn figure(svg: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    if !dark() {
+    if !icons_dark() {
         return std::borrow::Cow::Borrowed(svg);
     }
     let mut s = String::from_utf8_lossy(svg).into_owned();
@@ -111,13 +132,19 @@ mod tests {
     #[test]
     fn the_look_recolours_figures_and_picks_the_theme() {
         let silver = include_bytes!("../assets/dock/apps.svg");
+        let _turn = TONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        // (The figures' and the icons' tone is the Icons section's look.)
         set_dark(false);
+        set_icons_dark(false);
         assert_eq!(&*figure(silver), &silver[..]);
         assert_eq!(icon_theme("no-such-theme-anywhere-Dark"), "no-such-theme-anywhere-Dark");
         let before = generation();
         set_dark(true);
         assert_eq!(generation(), before + 1, "a change moves the generation");
         assert!(!set_dark(true), "setting it again is no change");
+        assert_eq!(&*figure(silver), &silver[..], "the shell's look leaves the icons' tone alone");
+        assert!(set_icons_dark(true), "the icons' tone moves on its own");
+        assert_eq!(generation(), before + 2, "…and moves the generation too");
         let graphite = figure(silver);
         let text = String::from_utf8_lossy(&graphite);
         assert!(!text.contains("#fefefe") && text.contains("#9a9fa8"), "every cast stop is graphite");

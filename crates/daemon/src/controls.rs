@@ -1131,6 +1131,8 @@ pub(crate) fn assert_dark(dark: bool) {
     if crate::palette::rig() {
         return;
     }
+    // (Whoever asks, it is the look last told: `palette::tell_apps_look`.)
+    crate::palette::APPS_TOLD.store(crate::palette::told_code(dark), std::sync::atomic::Ordering::Relaxed);
     let scheme = if dark { "'prefer-dark'" } else { "'prefer-light'" };
     let theme = if dark { "'Adwaita-dark'" } else { "'Adwaita'" };
     run("dconf", &["write", "/org/gnome/desktop/interface/color-scheme", scheme]);

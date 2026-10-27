@@ -158,7 +158,7 @@ pub(crate) fn rest_cycle() -> f32 {
 
 /// The figure with the big gear turned by `angle` degrees, in the look's tone.
 pub(crate) fn svg(angle: f32) -> String {
-    let dark = crate::look::dark();
+    let dark = crate::look::icons_dark();
     // The dock figures' cast (silver, or graphite: `look::figure`).
     let (stops, gloss, hi) = if dark {
         (["#9a9fa8", "#8d929b", "#757a83", "#666a73"], 0.12, 0.25)

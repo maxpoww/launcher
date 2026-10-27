@@ -4718,6 +4718,10 @@ impl App {
             crate::wall_tint::drag_begin();
             crate::palette::set_wall_live(Some((k.key == WALL_SAT, knob_level(k.v))));
         } else if let Some((group, index)) = pick {
+            // (A colour slider in hand: the programs are written as it is let go.)
+            if knob.is_some() {
+                crate::palette::drag_begin();
+            }
             self.control_pick(group, index, quick);
         }
         if knob.is_some() {
@@ -4732,6 +4736,7 @@ impl App {
         let panel = if quick { &mut self.quick } else { &mut self.panel };
         let Some(k) = panel.knob_let_go() else { return };
         if k.key != WALL_SLIDER && k.key != WALL_SAT {
+            crate::palette::drag_end();
             return;
         }
         // (The lit stop first, as a pick does, then the exact level.)

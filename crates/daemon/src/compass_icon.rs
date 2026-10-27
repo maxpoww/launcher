@@ -54,7 +54,7 @@ fn at(a: f32, r: f32) -> String {
 
 /// The figure: the needle at `needle` degrees, the plate turned `plate`.
 fn figure(needle: f32, plate: f32, part: Part) -> String {
-    let dark = crate::look::dark();
+    let dark = crate::look::icons_dark();
     let (stops, gloss, hi) = if dark {
         (["#9a9fa8", "#8d929b", "#757a83", "#666a73"], 0.12, 0.25)
     } else {
@@ -431,6 +431,7 @@ mod tests {
 
     #[test]
     fn the_parts_laid_together_are_the_figure() {
+        let _turn = crate::look::TONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let (n, p) = (
             draw(&figure(SLANT + 12.0, -4.0, Part::Needle)).unwrap(),
             draw(&figure(SLANT, -4.0, Part::Plate)).unwrap(),

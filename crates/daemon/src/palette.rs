@@ -240,6 +240,24 @@ pub(crate) fn clear_alpha(v: u8) -> f32 {
     1.0 - 0.95 * f32::from(v.min(100)) / 100.0
 }
 
+/// A colour slider is being dragged: the programs are written as it is let
+/// go (`drag_end`), with whether the look changed meanwhile.
+static DRAGGING: AtomicBool = AtomicBool::new(false);
+static DRAG_DUE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+pub(crate) fn drag_begin() {
+    DRAGGING.store(true, Ordering::Relaxed);
+}
+
+/// The drag let go (or its box gone): the programs written now, once.
+pub(crate) fn drag_end() {
+    if DRAGGING.swap(false, Ordering::Relaxed) {
+        if let Some(look_changed) = DRAG_DUE.lock().ok().and_then(|mut d| d.take()) {
+            publish(current(), look_changed);
+        }
+    }
+}
+
 /// Every section's Transparency, as the Colours box opened.
 static CLEAR_AT_OPEN: std::sync::Mutex<Option<[u8; 4]>> = std::sync::Mutex::new(None);
 
@@ -260,8 +278,13 @@ pub(crate) fn clear_remember() {
 /// as made (what Golem is made with costs no word).
 pub(crate) fn clear_rose() -> bool {
     let before = CLEAR_AT_OPEN.lock().ok().and_then(|mut g| g.take());
-    before.is_some_and(|b| rose(b, clears(&choice())))
+    // (Under reduce transparency nothing rose on the screen.)
+    !REDUCE.load(Ordering::Relaxed) && before.is_some_and(|b| rose(b, clears(&choice())))
 }
+
+/// The reduce-transparency intent (`config.accessibility`): no Transparency
+/// anywhere — the shell's (`colors_apply`) and the windows' rules alike.
+static REDUCE: AtomicBool = AtomicBool::new(false);
 
 fn rose(was: [u8; 4], now: [u8; 4]) -> bool {
     let made = [Surface::Shell, Surface::Apps, Surface::Web, Surface::Icons].map(clear_made);
@@ -278,7 +301,8 @@ static RULES_TOLD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new(
 /// value). The later rule wins for Seam, so it is always there while the
 /// first is. Off (both solid): both rules are turned off.
 pub(crate) fn clear_rules_lua(c: &ColorChoice) -> String {
-    let (apps, web) = (clear_alpha(c.clear_of(Surface::Apps)), clear_alpha(c.clear_of(Surface::Web)));
+    let reduce = REDUCE.load(Ordering::Relaxed);
+    let (apps, web) = if reduce { (1.0, 1.0) } else { (clear_alpha(c.clear_of(Surface::Apps)), clear_alpha(c.clear_of(Surface::Web))) };
     let any = apps < 1.0 || web < 1.0;
     // (In a pcall of their own: settings.lua runs as one, and a rule the
     // compositor refused must not take the screens and keys after it along.)
@@ -699,19 +723,30 @@ pub(crate) fn bin_own(id: &str) -> std::io::Result<()> {
 /// drag across the Lighting's gap is many steps, and threads racing each
 /// other could leave the system on the other side of the row. Each teller
 /// waits its turn and tells the look asked for LAST.
-fn tell_apps_look(dark: bool) {
-    static TOLD: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
-    if TOLD.lock().is_ok_and(|t| *t == Some(dark)) {
+pub(crate) fn tell_apps_look(dark: bool) {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if APPS_TOLD.load(Ordering::Relaxed) == told_code(dark) {
         return;
     }
     let _ = std::thread::Builder::new().name("apps-look".into()).spawn(|| {
-        let Ok(mut told) = TOLD.lock() else { return };
+        let Ok(_one) = ONE.lock() else { return };
         let now = choice().levels_now(Surface::Apps).dark;
-        if *told != Some(now) {
+        if APPS_TOLD.load(Ordering::Relaxed) != told_code(now) {
             crate::controls::assert_dark(now);
-            *told = Some(now);
         }
     });
+}
+
+/// The look last told the system (`controls::assert_dark` keeps it, whoever
+/// asked): 0 none yet, 1 light, 2 dark.
+pub(crate) static APPS_TOLD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn told_code(dark: bool) -> u8 {
+    if dark {
+        2
+    } else {
+        1
+    }
 }
 
 /// The owner's own palettes' directory (none under test: the tests must not
@@ -1686,7 +1721,8 @@ fn publish_icons(mine: u64) {
     if !crate::look::installed(base) {
         return;
     }
-    if k <= 0.0 && !dim {
+    // (At 0% the Saturation still reaches them: f[0][3] is its factor, 1 as made.)
+    if k <= 0.0 && !dim && (f[0][3] - 1.0).abs() < 1e-3 {
         dconf(base);
         for n in names {
             remove_later(icons.join(n), n);
@@ -1960,13 +1996,33 @@ pub(crate) fn filter_rgb(rgb: Rgb, f: &[[f32; 4]; 7]) -> Rgb {
 /// Whether two themes dress the programs alike: the same colours, accent and
 /// look (the web switch and the name aside).
 fn same_for_apps(a: &Theme, b: &Theme) -> bool {
-    a.id == b.id && a.c == b.c && a.dark == b.dark && a.accent_slot == b.accent_slot
+    // (The pair too: a look of the apps' own against the system's writes
+    // both halves of gtk4.css with it — a Shell look change moves only that.)
+    a.id == b.id && a.c == b.c && a.dark == b.dark && a.accent_slot == b.accent_slot && a.pair == b.pair
 }
 
 /// Only the file every reader shares (`colors.json`: Seam's web switches).
 fn write_shared(dir: &Path, shell: &Theme) {
     let t = &for_apps(shell);
     crate::persist::write_text("theme", &dir.join("colors.json"), &colors_json(t, shell, &choice(), &crate::webapps::app_hosts()));
+    crate::persist::write_text("theme", &dir.join("hyprlock.conf"), &hyprlock_conf(&shell_wears(shell)));
+}
+
+/// What the shell wears, as a theme for the lock screen: the palette walked
+/// by the Shell's Lighting, Palette and Saturation; Golem's own at 0%; the
+/// palette as it is where the shell reads the screen (the Light look,
+/// Dynamic).
+fn shell_wears(shell: &Theme) -> Theme {
+    let mut picked = choice();
+    picked.palette = Some(shell.id.clone());
+    picked.dynamic = None;
+    let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), crate::look::dark());
+    let c = match shell_plan(&picked, crate::look::dark()) {
+        ShellPlan::Walked { unlit, dark, sat } => tint::saturate(&tint::lit(&unlit, dark, lv.light), sat),
+        ShellPlan::Fixed(_) => resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, lv.dark).c,
+        ShellPlan::Screen => return shell.clone(),
+    };
+    Theme { c, ..shell.clone() }
 }
 
 /// What the programs wear: the palette walked to the Apps slider in the apps'
@@ -2407,7 +2463,7 @@ pub(crate) fn write_all(dir: &Path, shell: &Theme) {
     let put = |name: &str, text: String| crate::persist::write_text("theme", &dir.join(name), &text);
     put("colors.json", colors_json(t, shell, &choice(), &crate::webapps::app_hosts()));
     put("foot.ini", foot_ini(t));
-    put("hyprlock.conf", hyprlock_conf(shell));
+    put("hyprlock.conf", hyprlock_conf(&shell_wears(shell)));
     put("gtk4.css", gtk4_css(t));
     put("qt.conf", qt_scheme(t));
     put("qt5.conf", qt5_scheme(t));
@@ -2778,7 +2834,9 @@ fn gtk3_live(t: &Theme) {
     if let Some((dc, da, lc, la)) = t.looks.or(t.pair) {
         for (name, dark, c, acc) in [(GTK3_PINNED[0], true, dc, da), (GTK3_PINNED[1], false, lc, la)] {
             let Some(base) = adw_gtk3(dark) else { continue };
-            let v = Theme { c, accent_slot: acc, dark, ..t.clone() };
+            // (Both halves its own look: GTK 4 picks a half by the SYSTEM's
+            // look, and a pinned app is that look whatever the system's.)
+            let v = Theme { c, accent_slot: acc, dark, pair: Some((c, acc, c, acc)), looks: None, ..t.clone() };
             let dir = PathBuf::from(&data_home).join("themes").join(name);
             crate::persist::write_text("theme", &dir.join("gtk-3.0").join("gtk.css"), &gtk3_theme_css(&v, &base));
             crate::persist::write_text("theme", &dir.join("gtk-4.0").join("gtk.css"), &gtk4_css(&v));
@@ -3426,7 +3484,8 @@ impl crate::App {
         let theme = resolve(&picked, crate::look::dark());
         // The Dynamic palette of a new wallpaper is being made: Golem's
         // stands in, and this comes back when it is ready.
-        if theme.dynamic && dynamic_pending() {
+        let theme_dynamic_pending = theme.dynamic && dynamic_pending();
+        if theme_dynamic_pending {
             let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(250));
             let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut crate::App| {
                 app.colors_apply(look_changed);
@@ -3434,6 +3493,18 @@ impl crate::App {
             });
         }
         set_icon_filter(&theme);
+        // THE ICONS' TONE is the Icons section's look (graphite in the dark,
+        // silver in the light) — the dock's, the desktop's and Files' icons;
+        // it followed the Shell's.
+        if crate::look::set_icons_dark(theme.icons_dark) {
+            self.indexer.request_rescan_fresh();
+            self.desktop_look_changed();
+            self.filer_look_changed();
+        }
+        // A fade of the Lighting in progress wears what was just picked (its
+        // plan was made at its start: a palette picked meanwhile was put
+        // back at every step).
+        self.lighting_replan(&picked);
         // The wallpapers' slider: the box's thumbnails and the picture up.
         let lw = picked.levels_now(Surface::Wall);
         let wall = filter_for(&theme.id, lw.tint.unwrap_or(0).min(100), false, lw.sat);
@@ -3452,6 +3523,7 @@ impl crate::App {
         // The Shell's and the dock icons' Transparency, for every frame (the
         // reduce-transparency intent: none — its glass is solid already).
         let reduce = self.config.accessibility.reduce_transparency;
+        REDUCE.store(reduce, Ordering::Relaxed);
         let clear_moved = crate::options::set_clear(
             if reduce { 0 } else { c.clear_of(Surface::Shell) },
             if reduce { 0 } else { c.clear_of(Surface::Icons) },
@@ -3461,8 +3533,9 @@ impl crate::App {
         // for the compositor's own start).
         let rules = clear_rules_lua(&c);
         if let Ok(mut told) = RULES_TOLD.lock() {
-            if *told != rules {
-                crate::hypr::eval(&rules);
+            // (Kept as told only once the compositor took it: refused, it is
+            // told again at the next apply.)
+            if *told != rules && crate::hypr::eval_ok(&rules) {
                 *told = rules;
             }
         }
@@ -3470,8 +3543,20 @@ impl crate::App {
         // A move of the Lighting alone leaves the theme as it was, yet the
         // shell, the apps and the web all wear it.
         let lit_moved = crate::lighting::applied(lit_now);
-        if changed || look_changed || lit_moved {
-            publish(current(), look_changed);
+        // (Not while Dynamic is still being made — Golem's stands in, and
+        // terminals, GTK and every page took it for a moment — nor during a
+        // drag of a slider: the shell follows each stop, the programs are
+        // written once, as it is let go.)
+        // (The Shell's own Palette or Saturation too: the lock screen wears it —
+        // written with the shared files only, the programs untouched.)
+        if (changed || look_changed || lit_moved || shell_moved) && !(theme_dynamic_pending) {
+            if DRAGGING.load(Ordering::Relaxed) {
+                if let Ok(mut due) = DRAG_DUE.lock() {
+                    *due = Some(due.unwrap_or(false) || look_changed);
+                }
+            } else {
+                publish(current(), look_changed);
+            }
         }
         // The wash over the wallpaper, wherever its light now puts it (the
         // wallpaper's own Lighting slider moved it only at the next start).
@@ -3519,7 +3604,10 @@ impl crate::App {
                     let level = match value {
                         "made" | "on" => None,
                         "off" => Some(0),
+                        // (The middle IS as made — what its caption says: each
+                        // palette's own made point, not a walk to 50.)
                         v => match v.parse::<u8>() {
+                            Ok(50) if key != "colors-icons" => None,
                             Ok(n) => Some(n.min(100)),
                             Err(_) => return,
                         },
@@ -3581,21 +3669,27 @@ impl crate::App {
                         for &sf in surfaces {
                             let d = defaults.levels(sf, None, true);
                             match sf {
+                                // (The Transparency too: Auto showed it as made, and
+                                // nothing jumps as Auto goes.)
                                 Surface::Shell => {
                                     c.shell_tint = d.tint;
                                     c.shell_sat = None;
+                                    c.shell_clear = None;
                                 }
                                 Surface::Apps => {
                                     c.apps_tint = d.tint;
                                     c.apps_sat = None;
+                                    c.apps_clear = None;
                                 }
                                 Surface::Icons => {
                                     c.icons_tint = d.tint.unwrap_or(0);
                                     c.icons_sat = None;
+                                    c.dock_clear = None;
                                 }
                                 Surface::Web => {
                                     c.web_tint = d.tint;
                                     c.web_sat = None;
+                                    c.web_clear = None;
                                 }
                                 Surface::Wall => {
                                     c.wallpaper_tint = d.tint.filter(|t| *t > 0);
@@ -3739,6 +3833,7 @@ impl crate::App {
                 self.look_set(c.levels_now(Surface::Shell).dark);
                 self.colors_apply(true);
                 self.lighting_auto_on();
+                tell_apps_look(choice().levels_now(Surface::Apps).dark);
             }
             "colors-auto" | "colors-ambient" | "colors-lighting-auto" => {
                 self.look_set(c.levels_now(Surface::Shell).dark);

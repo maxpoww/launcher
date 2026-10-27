@@ -635,7 +635,8 @@ impl GolemSettings {
     }
 
     fn colours_lua_of(&self, colors: &crate::palette::ColorChoice) -> String {
-        let theme = crate::palette::resolve(colors, self.dark.unwrap_or(true));
+        // (The Shell's own look: the old general `dark` is no one's now.)
+        let theme = crate::palette::resolve(colors, colors.levels_now(crate::palette::Surface::Shell).dark);
         let ground = crate::palette::hex(theme.bg());
         let dim = crate::palette::dim_inactive_for(theme.apps_dark);
         if theme.dynamic {

@@ -106,7 +106,7 @@ fn folder_svg(t: &Tone, k: f32, symbol: bool) -> String {
 
 /// The four layers' SVGs in the present look, in upload order.
 pub(crate) fn figures() -> [Vec<u8>; 4] {
-    let t = if crate::look::dark() { &GRAPHITE } else { &SILVER };
+    let t = if crate::look::icons_dark() { &GRAPHITE } else { &SILVER };
     [
         br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"/>"#.to_vec(),
         folder_svg(t, 0.0, true).into_bytes(),

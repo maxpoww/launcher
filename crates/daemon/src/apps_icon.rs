@@ -48,7 +48,7 @@ pub(crate) fn page() -> u32 {
 
 /// The figure with the squares moved by (dx, dy) units, in the look's tone.
 pub(crate) fn svg(dx: f32, dy: f32) -> String {
-    let (stops, gloss, hi) = if crate::look::dark() {
+    let (stops, gloss, hi) = if crate::look::icons_dark() {
         (["#9a9fa8", "#8d929b", "#757a83", "#666a73"], 0.12, 0.25)
     } else {
         (["#fefefe", "#fafafa", "#eeeeee", "#e6e6e6"], 0.22, 0.5)

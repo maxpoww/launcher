@@ -628,6 +628,8 @@ impl App {
     /// Every one of those ends must come here — a box left up belongs to
     /// nothing: drawn, deaf, and never closed.
     pub(crate) fn quick_gone(&mut self) {
+        // (A colour slider still in hand as its box goes: written now.)
+        crate::palette::drag_end();
         if let Some(label) = self.fast.boxed.take() {
             self.quick_left(label);
             // (A palette being made goes with its box, however it went: the

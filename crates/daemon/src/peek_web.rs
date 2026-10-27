@@ -370,7 +370,9 @@ fn forget_old(dir: &Path) {
 /// the look in use (so a document reads like the rest of Golem).
 fn style() -> String {
     use crate::palette::hex;
-    let t = crate::palette::current();
+    // (What the programs wear — the Apps section's — as the Files window
+    // around it does.)
+    let t = crate::palette::for_apps(&crate::palette::current());
     let c = |i: usize| format!("#{}", hex(t.c[i]));
     let accent = format!("#{}", hex(t.accent()));
     let (bg, ink, head, dim, rule, code, zebra) = (c(0), c(5), c(6), c(4), c(2), c(1), c(1));

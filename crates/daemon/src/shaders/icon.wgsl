@@ -386,7 +386,7 @@ fn fs_icon(in: VsOut) -> vec4<f32> {
     if (wall && a > 0.004) {
         // A wallpaper's tile wears the Colours slider, live (not the icon filter).
         painted = wall_grade(texel.rgb / a) * a;
-    } else if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5) && !is_thumb && a > 0.004) {
+    } else if ((globals.filt[0].x > 0.0 || globals.filt[0].y > 0.5 || (globals.filt[0].w > 0.0 && globals.filt[0].w != 1.0)) && !is_thumb && a > 0.004) {
         painted = icon_filter(texel.rgb / a) * a;
     }
     var rgb = mix(painted, in.tint.rgb * a, in.tint.a);
