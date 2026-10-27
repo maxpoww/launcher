@@ -1922,14 +1922,16 @@ impl App {
                     // (A click on the line: from there.)
                     let k = ((at.0 - bar.track.x) / bar.track.w).clamp(0.0, 1.0);
                     self.peek_play_from(k * secs);
+                } else if let Some(url) = self.page_copy_at(at) {
+                    self.peek_copy_link(&url);
+                } else if self.page_open_at(at) {
+                    self.peek_open_app();
                 } else if parts.pencil.contains(at) && self.peek_editable() {
                     self.edit_begin();
                 } else if parts.close.contains(at) {
                     self.peek_close();
                 } else if parts.open.contains(at) {
                     self.peek_open_app();
-                } else if let Some(url) = self.page_copy_at(at) {
-                    self.peek_copy_link(&url);
                 } else if song && song_parts(self.song_area(up.rect)).play.contains(at) {
                     self.peek_play();
                 } else if !up.rect.contains(at) {
@@ -2549,8 +2551,7 @@ impl App {
                         tiles_in(&mut g, pic, crate::peek_editor::pic_rect(room, pic.w, pic.h), a, 0);
                     }
                 }
-                let copied = up.notice.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
-                self.page_words_push(&mut g, said, &l, (ink, dim, open), (up.ptr, copied));
+                self.page_words_push(&mut g, said, &l, ink, dim);
             }
             Some(Body::Picture(pic)) if tiles_up => {
                 soft_square(&mut g, soft);
@@ -2964,13 +2965,18 @@ impl App {
                 ),
         };
         let open_w = parts.open.w.min(self.peek_word_w(&open_word) + 26.0);
-        let open_rect = Rect::new(
-            parts.open.x + parts.open.w - open_w,
-            parts.open.y,
-            open_w,
-            parts.open.h,
-        );
-        let text_w = (open_rect.x - (r.x + 46.0) - 12.0).max(20.0);
+        // (A page: Open where the pencil would be, Copy link beside it.)
+        let (open_rect, copy) = match &up.said {
+            Some(_) => {
+                let (o, c) = crate::peek_page::head(r, &open_word, |w| self.peek_word_w(w));
+                (o, Some(c))
+            }
+            None => (
+                Rect::new(parts.open.x + parts.open.w - open_w, parts.open.y, open_w, parts.open.h),
+                None,
+            ),
+        };
+        let text_w = (copy.unwrap_or(open_rect).x - (r.x + 46.0) - 12.0).max(20.0);
         // (Cut in the middle, as names are: `desktop::fit_name`.)
         let name = self.desktop_top.renderer.as_ref().map_or_else(
             || up.name.clone(),
@@ -3039,6 +3045,22 @@ impl App {
                 ink,
             )
         });
+        // COPY LINK (a page's), "Link copied" a moment after.
+        if let Some(c) = copy {
+            let copied = up.notice.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
+            g.rects.push(pill(c, wash(c)));
+            g.labels.push(Label {
+                centered: true,
+                ..text_label(
+                    tr(if copied { "Link copied" } else { "Copy link" }),
+                    (c.x + c.w / 2.0, c.y + 5.0),
+                    c.w - 8.0,
+                    12.0,
+                    Some(FONT_BOLD),
+                    ink,
+                )
+            });
+        }
         if self.peek_editable() {
             g.rects.push(pill(parts.pencil, wash(parts.pencil)));
             g.labels.push(Label {
@@ -3106,7 +3128,7 @@ impl App {
         scene.grids.extend(notice_grid);
     }
 
-    fn peek_word_w(&self, word: &str) -> f32 {
+    pub(crate) fn peek_word_w(&self, word: &str) -> f32 {
         // (Close enough without shaping: the bold sans is ~0.56 em a letter.)
         word.chars().count() as f32 * 12.0 * 0.56
     }
