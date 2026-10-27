@@ -459,20 +459,26 @@ impl Ranker {
         }
         let kind = narrow.kind.or(q.kind);
         let span = q.when.map(|w| w.span(now));
-        let mut buf = Vec::new();
+        let typed: Vec<String> = words.iter().map(|(w, _)| w.iter().collect()).collect();
+        let (mut buf, mut part) = (Vec::new(), Vec::new());
         let mut scored: Vec<(usize, f64, f64)> = Vec::new();
         'files: for (i, f) in index.iter().enumerate() {
             if !self.keeps(f, q, narrow, span, opened) || kind.is_some_and(|k| !is_kind(kind_of(&f.name, f.is_dir), k)) {
                 continue;
             }
-            let name = fold(&f.name);
-            let parts: Vec<Vec<char>> = name.split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()).map(|p| p.chars().collect()).collect();
+            // (The name folded at the walk; its words read into one buffer.)
+            let name = f.folded.as_str();
             let mut worth = 0.0;
-            for (w, atom) in &words {
-                let s: String = w.iter().collect();
-                if name.contains(&s) {
+            for ((w, atom), s) in words.iter().zip(&typed) {
+                if name.contains(s.as_str()) {
                     worth += 2.0;
-                } else if w.len() >= 4 && parts.iter().any(|p| near(w, p) || (p.len() > w.len() && near(w, &p[..w.len()]))) {
+                } else if w.len() >= 4
+                    && name.split(|c: char| !c.is_alphanumeric()).filter(|p| p.len() + 2 >= w.len()).any(|p| {
+                        part.clear();
+                        part.extend(p.chars());
+                        near(w, &part) || (part.len() > w.len() && near(w, &part[..w.len()]))
+                    })
+                {
                     worth += 1.0;
                 } else if w.len() >= 4 && atom.score(Utf32Str::new(&f.name, &mut buf), &mut self.matcher).is_some_and(|sc| f64::from(sc) >= 12.0 * w.len() as f64) {
                     worth += 0.5;
@@ -579,7 +585,8 @@ pub(crate) fn list_top(dir: &Path, home: &Path) -> Vec<FileEntry> {
             let meta = e.metadata().ok();
             let mtime = meta.as_ref().map_or(0.0, mtime_of);
             let size = meta.as_ref().filter(|_| !ft.is_dir()).map_or(0, std::fs::Metadata::len);
-            Some(FileEntry { path: e.path().to_string_lossy().into_owned(), name, is_dir: ft.is_dir(), dir: folder.clone(), mtime, size })
+            let folded = fold(&name);
+            Some(FileEntry { path: e.path().to_string_lossy().into_owned(), name, is_dir: ft.is_dir(), dir: folder.clone(), mtime, size, folded })
         })
         .collect()
 }
@@ -606,6 +613,7 @@ mod tests {
             dir: dir_of(p, home),
             mtime,
             size: 1000,
+            folded: fold(&p.file_name().unwrap().to_string_lossy()),
         }
     }
 

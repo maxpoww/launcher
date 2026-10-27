@@ -113,6 +113,16 @@ struct Found {
     name: String,
     is_dir: bool,
     when: f64,
+    size: u64,
+}
+
+/// A size, short: "8.4 MB", "1.2 GB" (from a megabyte; less says nothing).
+pub(crate) fn big(size: u64) -> Option<String> {
+    let mb = size as f64 / (1024.0 * 1024.0);
+    if mb < 1.0 {
+        return None;
+    }
+    Some(if mb >= 1024.0 { format!("{:.1} GB", mb / 1024.0) } else if mb >= 100.0 { format!("{mb:.0} MB") } else { format!("{mb:.1} MB") })
 }
 
 /// What a kind is called on its shelf and chip.
@@ -304,6 +314,7 @@ impl App {
                     name: f.name.clone(),
                     is_dir: f.is_dir,
                     when: f.mtime.max(self.file_opened.get(&f.path).copied().unwrap_or(0.0)),
+                    size: f.size,
                 })
                 .collect();
             let inside = self.deep_inside_shelf(&q, &narrow, &found);
@@ -348,7 +359,12 @@ impl App {
             for f in list.into_iter().filter(|f| seen.insert(f.path.clone())).take(SHELF_MAX) {
                 let exec = format!("xdg-open {}", launch::shell_quote(&f.path));
                 let entry = self.push_transient_file(&f.path, &f.name, exec, f.is_dir);
-                let sub = ago(f.when, now);
+                // When it was used, and how big when that says something.
+                let sub = match (ago(f.when, now), big(f.size).filter(|_| !f.is_dir)) {
+                    (w, Some(b)) if !w.is_empty() => format!("{w} · {b}"),
+                    (w, Some(b)) if w.is_empty() => b,
+                    (w, _) => w,
+                };
                 if !sub.is_empty() {
                     subs.insert(entry, sub);
                 }
@@ -392,7 +408,7 @@ impl App {
                 let p = Path::new(path);
                 let meta = std::fs::metadata(p).ok()?;
                 let name = p.file_name()?.to_string_lossy().into_owned();
-                (!name.starts_with('.')).then(|| Found { path: path.clone(), name, is_dir: meta.is_dir(), when })
+                (!name.starts_with('.')).then(|| Found { path: path.clone(), name, is_dir: meta.is_dir(), when, size: meta.len() })
             })
             .take(BEFORE_MAX)
             .collect()
@@ -410,7 +426,7 @@ impl App {
         new.sort_by(|a, b| b.mtime.total_cmp(&a.mtime));
         new.into_iter()
             .take(BEFORE_MAX)
-            .map(|f| Found { path: f.path.clone(), name: f.name.clone(), is_dir: false, when: f.mtime })
+            .map(|f| Found { path: f.path.clone(), name: f.name.clone(), is_dir: false, when: f.mtime, size: f.size })
             .collect()
     }
 
@@ -441,7 +457,7 @@ impl App {
                 let kind = file_search::kind_of(&name, meta.is_dir());
                 let keep = narrow.kind.is_none_or(|k| kind == Some(k) || (k == Kind::Document && kind == Some(Kind::Pdf)));
                 let when = file_search::mtime_of(&meta).max(self.file_opened.get(&path).copied().unwrap_or(0.0));
-                keep.then_some(Found { path, name, is_dir: meta.is_dir(), when })
+                keep.then_some(Found { path, name, is_dir: meta.is_dir(), when, size: meta.len() })
             })
             .collect()
     }
@@ -719,6 +735,14 @@ mod tests {
         assert_eq!(ago(midnight - 3600.0, now), "yesterday");
         assert_eq!(ago(midnight - 3.0 * 86_400.0 + 10.0, now), "3 d");
         assert!(ago(now - 40.0 * 86_400.0, now).contains('/'));
+    }
+
+    #[test]
+    fn a_size_is_said_from_a_megabyte() {
+        assert_eq!(big(500 << 10), None);
+        assert_eq!(big(8_800_000).as_deref(), Some("8.4 MB"));
+        assert_eq!(big(300 << 20).as_deref(), Some("300 MB"));
+        assert_eq!(big(3 << 30).as_deref(), Some("3.0 GB"));
     }
 
     #[test]
