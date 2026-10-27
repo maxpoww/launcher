@@ -86,6 +86,8 @@ pub struct FileEntry {
     pub dir: String,
     /// When it changed last (unix seconds; 0 unknown).
     pub mtime: f64,
+    /// Its size in bytes (0 for a folder).
+    pub size: u64,
 }
 
 /// The indexer thread's result: entries plus one RGBA8 (premultiplied)
@@ -768,13 +770,16 @@ pub(crate) fn scan_home_files() -> Vec<FileEntry> {
             if is_dir && depth + 1 < FILE_WALK_DEPTH {
                 queue.push_back((path.clone(), depth + 1));
             }
-            let mtime = e.metadata().map_or(0.0, |m| crate::file_search::mtime_of(&m));
+            let meta = e.metadata().ok();
+            let mtime = meta.as_ref().map_or(0.0, crate::file_search::mtime_of);
+            let size = meta.as_ref().filter(|_| !is_dir).map_or(0, std::fs::Metadata::len);
             out.push(FileEntry {
                 name,
                 path: path.to_string_lossy().into_owned(),
                 is_dir,
                 dir: folder.clone(),
                 mtime,
+                size,
             });
             if out.len() >= FILE_INDEX_CAP {
                 return out;
