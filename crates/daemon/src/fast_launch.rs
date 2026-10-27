@@ -630,6 +630,9 @@ impl App {
     pub(crate) fn quick_gone(&mut self) {
         if let Some(label) = self.fast.boxed.take() {
             self.quick_left(label);
+            // (A palette being made goes with its box, however it went: the
+            // keyboard to a window, the screen locked, another box called.)
+            self.colours_preview_check(true);
             // The box goes as a window does, and nothing is left under it:
             // the card it came from must not show again on the way out (it
             // did, for half a second — Max, 2026-10-13).

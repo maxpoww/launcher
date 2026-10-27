@@ -164,22 +164,28 @@ fn build(soul: &[Rgb; 6], acc_idx: usize) -> ([Rgb; 16], [Rgb; 16], usize, usize
     (d, l, a, al)
 }
 
-/// The owner's palette: each chosen colour exactly in its place, the rest made.
+/// The owner's palette: each chosen colour exactly in its place in ITS look
+/// (a dark ground: the dark one; a light ground: the light one), the rest
+/// made — the other look keeps the greys made from the same colours (worn as
+/// they were in the Light look, a dark palette stayed dark there, and its
+/// Lighting pushed the words past reading). Its words read on its ground and
+/// panels (4.5:1): moved toward white or black as little as it takes.
 pub(crate) fn direct(id: &str, name: &str, soul: [Rgb; 6]) -> Palette {
     let (mut d, mut l, a, al) = build(&soul, 0);
     let [acc, ground, panels, _web, text, detail] = soul;
-    let set = |x: &mut [Rgb; 16]| {
-        x[0] = mix(ground, [0, 0, 0], 0.18);
-        x[1] = ground;
-        x[2] = panels;
-        x[3] = detail;
-        x[4] = mix(text, ground, 0.45);
-        x[5] = text;
-        x[6] = mix(text, [255, 255, 255], 0.3);
-        x[7] = mix(text, [255, 255, 255], 0.6);
-    };
-    set(&mut d);
-    set(&mut l);
+    let dark = ratio(ground, [255, 255, 255]) >= ratio(ground, [0, 0, 0]);
+    let (edge, away) = if dark { ([0, 0, 0], [255, 255, 255]) } else { ([255, 255, 255], [0, 0, 0]) };
+    let reads = |t: Rgb| ratio(t, ground) >= 4.5 && ratio(t, panels) >= 4.5;
+    let text = if reads(text) { text } else { (1..=20).map(|i| mix(text, away, i as f32 / 20.0)).find(|t| reads(*t)).unwrap_or(away) };
+    let x = if dark { &mut d } else { &mut l };
+    x[0] = mix(ground, edge, 0.18);
+    x[1] = ground;
+    x[2] = panels;
+    x[3] = detail;
+    x[4] = mix(text, ground, 0.45);
+    x[5] = text;
+    x[6] = mix(text, away, 0.3);
+    x[7] = mix(text, away, 0.6);
     d[a] = acc;
     l[al] = acc;
     Palette { id: id.to_owned(), name: name.to_owned(), dark: d, light: l, accent: a, accent_light: al, soul: soul.to_vec(), family: "own".to_owned() }
@@ -201,6 +207,22 @@ mod tests {
         // The made hues read on the ground.
         for k in 8..16 {
             assert!(ratio(p.dark[k], p.dark[1]) >= 2.5 || k == p.accent, "base{k:02X}");
+        }
+        // …and the Light look is light: the made greys, not these.
+        assert!(ratio(p.light[1], [0, 0, 0]) > ratio(p.light[1], [255, 255, 255]), "a light ground in the Light look");
+    }
+
+    #[test]
+    fn a_light_palette_is_exact_in_the_light_and_its_words_always_read() {
+        let light = [[0x2b, 0x6c, 0xd0], [0xf4, 0xf1, 0xea], [0xe6, 0xe2, 0xd8], [0xf4, 0xf1, 0xea], [0x22, 0x22, 0x26], [0xc8, 0xc4, 0xba]];
+        let p = direct("mine", "Mine", light);
+        assert_eq!((p.light[1], p.light[2], p.light[5]), (light[1], light[2], light[4]));
+        assert!(ratio(p.dark[1], [255, 255, 255]) > ratio(p.dark[1], [0, 0, 0]), "a dark ground in the Dark look");
+        // Words the colour of the ground (or nearly): moved until they read.
+        for ground in [[0x1d, 0x20, 0x26], [0xf4, 0xf1, 0xea], [0x80, 0x80, 0x80]] {
+            let p = direct("mine", "Mine", [[0xe0, 0x52, 0x52], ground, ground, ground, ground, ground]);
+            let half = if ratio(ground, [255, 255, 255]) >= ratio(ground, [0, 0, 0]) { p.dark } else { p.light };
+            assert!(ratio(half[5], half[1]) >= 4.5, "words on {ground:?}: {:.2}", ratio(half[5], half[1]));
         }
     }
 }

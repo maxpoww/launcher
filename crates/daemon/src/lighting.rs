@@ -716,7 +716,11 @@ impl App {
     }
 
     fn lighting_fade(&mut self, from: u8, to: u8) {
-        let picked = palette::choice();
+        let mut picked = palette::choice();
+        // (The editor's palette, while it is being made, is the one worn.)
+        if palette::previewing() {
+            picked.palette = Some(palette::DRAFT_ID.to_owned());
+        }
         let (colours, wall) = (picked.ambient_of(palette::Surface::Shell), picked.ambient_of(palette::Surface::Wall));
         if !colours && !wall {
             return;

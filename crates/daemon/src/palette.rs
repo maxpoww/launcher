@@ -678,12 +678,38 @@ pub(crate) fn save_own(p: &Palette) -> std::io::Result<()> {
     let dir = own_dir();
     std::fs::create_dir_all(&dir)?;
     let text = serde_json::to_string_pretty(&file).unwrap_or_default() + "\n";
-    crate::persist::write_text("palette", &dir.join(format!("{}.json", p.id)), &text);
-    Ok(())
+    // (Written whole or not at all, and a failure said: Save picks it next.)
+    let path = dir.join(format!("{}.json", p.id));
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)
 }
 
-/// The owner's own palettes' directory.
+/// The apps' look told the system (dconf) once a change and in order: a
+/// drag across the Lighting's gap is many steps, and threads racing each
+/// other could leave the system on the other side of the row. Each teller
+/// waits its turn and tells the look asked for LAST.
+fn tell_apps_look(dark: bool) {
+    static TOLD: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+    if TOLD.lock().is_ok_and(|t| *t == Some(dark)) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("apps-look".into()).spawn(|| {
+        let Ok(mut told) = TOLD.lock() else { return };
+        let now = choice().levels_now(Surface::Apps).dark;
+        if *told != Some(now) {
+            crate::controls::assert_dark(now);
+            *told = Some(now);
+        }
+    });
+}
+
+/// The owner's own palettes' directory (none under test: the tests must not
+/// depend on, nor write, what the owner made).
 fn own_dir() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join("golem-test-no-own-palettes");
+    }
     config_home().join("golem").join("palettes")
 }
 
@@ -1569,7 +1595,8 @@ fn publish_icons(mine: u64) {
     let f = icon_filter();
     let (k, dim) = (f[0][0], f[0][1] > 0.5);
     // (The icons' tone is the Icons row's look: graphite in the dark, silver in the light.)
-    let base = if dim || choice().icons_dark.unwrap_or(true) { "Golem-Dark" } else { "Golem" };
+    // (The look in force: Auto's and Ambient's included, not only the row's own.)
+    let base = if dim || current().icons_dark { "Golem-Dark" } else { "Golem" };
     let home = std::env::var("HOME").unwrap_or_default();
     let data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let icons = std::path::Path::new(&data).join("icons");
@@ -1579,9 +1606,7 @@ fn publish_icons(mine: u64) {
         if rig() {
             return;
         }
-        let _ = std::process::Command::new("dconf")
-            .args(["write", "/org/gnome/desktop/interface/icon-theme", &format!("'{name}'")])
-            .status();
+        run("dconf", &["write", "/org/gnome/desktop/interface/icon-theme", &format!("'{name}'")]);
         // Qt apps are told the same name at the same moment (their settings
         // file, where it is ours): a name told earlier could be one already
         // gone.
@@ -1627,11 +1652,7 @@ fn publish_icons(mine: u64) {
     }
     // The one not in use now gets the new drawings (in use = the one dconf
     // names; failing that, the one with a stamp).
-    let in_use = std::process::Command::new("dconf")
-        .args(["read", "/org/gnome/desktop/interface/icon-theme"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned());
+    let in_use = out("dconf", &["read", "/org/gnome/desktop/interface/icon-theme"]).map(|o| o.trim().trim_matches('\'').to_owned());
     let now = names
         .iter()
         .find(|n| in_use.as_deref() == Some(**n))
@@ -3341,7 +3362,11 @@ impl crate::App {
         if set_wall_filter(wall) {
             crate::wall_tint::refresh();
         }
+        // (The Shell's own Palette and Saturation move only its pair: the
+        // theme the apps wear stays as it was, yet every shell surface wears it.)
+        let shell_before = shell();
         set_shell(&picked, crate::look::dark());
+        let shell_moved = shell() != shell_before;
         let c = choice();
         set_skipped_programs(&self.entries, c.skip_in_force());
         set_looked_programs(&self.entries, c.looks_in_force());
@@ -3372,7 +3397,7 @@ impl crate::App {
         // The wash over the wallpaper, wherever its light now puts it (the
         // wallpaper's own Lighting slider moved it only at the next start).
         self.veil_follow();
-        if changed || lit_moved {
+        if changed || lit_moved || shell_moved {
             self.reassert_window_border();
             self.draw_options();
             self.draw();
@@ -3626,8 +3651,7 @@ impl crate::App {
             }
             // The apps' look is the one the system tells every program.
             "colors-apps-look" | "colors-apps-line" => {
-                let dark = c.levels_now(Surface::Apps).dark;
-                let _ = std::thread::Builder::new().name("apps-look".into()).spawn(move || crate::controls::assert_dark(dark));
+                tell_apps_look(c.levels_now(Surface::Apps).dark);
                 self.colors_apply(true);
             }
             // Auto or Ambient turned ON is the owner's own act, and they are

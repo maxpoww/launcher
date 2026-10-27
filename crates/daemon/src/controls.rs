@@ -222,6 +222,21 @@ pub(crate) fn field_typed(key: &str, text: &str, done: bool) {
     }
 }
 
+/// A click elsewhere (Save, a colour, the other field, another tab) ends
+/// the editor's field being typed in, KEEPING what was typed as Enter does
+/// (a name typed then Save was saved as "My palette N"). True when it kept
+/// something.
+pub(crate) fn typing_commit() -> bool {
+    let typed = TYPING.lock().ok().and_then(|mut t| t.take());
+    match typed {
+        Some((key @ ("colors-edit-hex" | "colors-edit-name"), text)) => {
+            field_typed(key, &text, true);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(crate) static EDITOR: std::sync::Mutex<Option<Editor>> = std::sync::Mutex::new(None);
 
 /// The editor's field: chroma across, lightness down.

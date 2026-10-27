@@ -141,6 +141,9 @@ const PALETTE_TILE_MIN: f32 = 170.0;
 const PALETTE_COLS: (usize, usize) = (4, 7);
 const PALETTE_ROWS: usize = 4;
 const PALETTE_ROWS_FEWER: usize = 3;
+/// …and two, when three still run past (the Apps section's own line of apps
+/// under its sliders, at 1440×900).
+const PALETTE_ROWS_FEWEST: usize = 2;
 /// An app's icon on its card, logical px.
 const TILE_ICON: f32 = 72.0;
 /// A ROW OF SLIDERS: the air between two columns, the label line's height
@@ -2477,22 +2480,22 @@ impl Panel {
         y + 27.0 * self.scale
     }
 
-    /// Whether a grid of cards laid with four rows runs the box past the
-    /// room it has — the box's own height where it is made to hug its
-    /// content (`tile_room_h`), else the field's — with the closing hint
+    /// Whether a grid of cards laid with more than `rows` rows runs the box
+    /// past the room it has — the box's own height where it is made to hug
+    /// its content (`tile_room_h`), else the field's — with the closing hint
     /// under the content.
-    fn cards_overflow(&self, view: &ControlView, content: &OpenContent) -> bool {
+    fn cards_overflow(&self, view: &ControlView, content: &OpenContent, rows: usize) -> bool {
         let four = view.groups.iter().any(|g| {
-            g.tiles && g.grid_rows.is_none_or(|r| r > PALETTE_ROWS_FEWER) && (g.grid_rows.is_some() || g.choices.iter().any(|c| !c.swatch.is_empty() || c.icon.is_some()))
+            g.tiles && g.grid_rows.is_none_or(|r| r > rows) && (g.grid_rows.is_some() || g.choices.iter().any(|c| !c.swatch.is_empty() || c.icon.is_some()))
         });
         let whole = if self.tile_room_h > 0.0 { self.tile_room_h } else { self.field.h.max(self.key.1) };
         four && content.foot_y + QUICK_FOOT * self.scale > whole
     }
 
     /// A control's content (`open_content`): the view's groups laid out
-    /// from the top down, into `out`. `fewer`: a grid of cards takes three
-    /// rows a page, not four.
-    fn control_content(&self, view: &ControlView, mut out: OpenContent, fewer: bool) -> OpenContent {
+    /// from the top down, into `out`. `fewer`: a grid of cards takes at most
+    /// that many rows a page, not four.
+    fn control_content(&self, view: &ControlView, mut out: OpenContent, fewer: Option<usize>) -> OpenContent {
         let s = self.scale;
         let top = CONTENT_TOP * s;
         out.subtitle = view.subtitle.clone();
@@ -2601,7 +2604,10 @@ impl Panel {
                 continue;
             }
             if g.tiles {
-                let rows = if fewer { Some(g.grid_rows.map_or(PALETTE_ROWS_FEWER, |r| r.min(PALETTE_ROWS_FEWER))) } else { g.grid_rows };
+                let rows = match fewer {
+                    Some(n) => Some(g.grid_rows.map_or(n, |r| r.min(n))),
+                    None => g.grid_rows,
+                };
                 y = self.flow_tiles(&mut out, y, gi as u8, &g.choices, rows);
                 continue;
             }
@@ -2685,7 +2691,7 @@ impl Panel {
                 return Some(out);
             };
             self.screens_h.set(0.0);
-            let content = self.control_content(view, blank(), false);
+            let content = self.control_content(view, blank(), None);
             // THE SCREENS' DRAWING gives up height to a box too short for the
             // whole page (the rows under it stay on it), down to a floor.
             if view.groups.iter().any(|g| !g.screens.is_empty()) {
@@ -2693,14 +2699,18 @@ impl Panel {
                 let over = content.foot_y + QUICK_FOOT * self.scale - whole;
                 if over > 0.0 {
                     self.screens_h.set((SCREENS_H - over / self.scale.max(0.01)).max(SCREENS_MIN_H));
-                    return Some(self.control_content(view, blank(), false));
+                    return Some(self.control_content(view, blank(), None));
                 }
             }
             // FOUR ROWS OF CARDS, OR THREE (the Colours model, 2026-10-20):
             // laid out with four, a box that would run past its height is
-            // laid out again with three.
-            if self.cards_overflow(view, &content) {
-                return Some(self.control_content(view, blank(), true));
+            // laid out again with three — and two, if three still do.
+            let mut content = content;
+            for rows in [PALETTE_ROWS_FEWER, PALETTE_ROWS_FEWEST] {
+                if !self.cards_overflow(view, &content, rows) {
+                    break;
+                }
+                content = self.control_content(view, blank(), Some(rows));
             }
             return Some(content);
         }
@@ -4931,14 +4941,24 @@ impl App {
             }
             // A click on a text field: it takes the keys (`colours_type`).
             "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "printers-add" => {
+                let kept = crate::controls::typing_commit();
                 if let Ok(mut t) = crate::controls::TYPING.lock() {
                     *t = crate::controls::field_start(key);
+                }
+                if kept {
+                    crate::palette::set_preview(crate::controls::editor_draft());
+                    self.colors_apply(false);
                 }
             }
             // The editor's two fields on one row: the value names the field.
             "colors-edit-text" => {
+                let kept = crate::controls::typing_commit();
                 if let Ok(mut t) = crate::controls::TYPING.lock() {
                     *t = crate::controls::field_start(&value);
+                }
+                if kept {
+                    crate::palette::set_preview(crate::controls::editor_draft());
+                    self.colors_apply(false);
                 }
             }
             // The "+" tile after the palettes opens the editor.
@@ -4948,6 +4968,8 @@ impl App {
                 self.colors_apply(false);
             }
             "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" => {
+                // (What a field held, kept first: the click then has its say.)
+                crate::controls::typing_commit();
                 let mut saved = None;
                 crate::controls::editor_pick(key, &value, &mut saved);
                 // Worn while it is made; Save or Cancel takes the preview off.
@@ -4961,6 +4983,7 @@ impl App {
             // THE COLOURS BOX'S PLACE (the Colours model, 2026-10-20): its
             // tab, its section, the Apps page and the app chosen there.
             "colors-tab" => {
+                crate::controls::typing_commit();
                 crate::controls::COLOURS_TAB.store(u8::from(value == "backgrounds"), std::sync::atomic::Ordering::Relaxed);
                 crate::controls::APPS_LIST.store(false, std::sync::atomic::Ordering::Relaxed);
             }
