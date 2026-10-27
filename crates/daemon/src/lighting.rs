@@ -100,6 +100,9 @@ const MIN_STEP: u8 = 1;
 const SLEPT_GAP: Duration = Duration::from_secs(20);
 /// The veil's strongest wash (at Lighting 0).
 const VEIL_MAX: f32 = 0.45;
+/// Where the light wash begins (Light 50, as designed) and its strongest.
+const VEIL_WHITE_FROM: u8 = 78;
+const VEIL_WHITE_MAX: f32 = 0.30;
 
 // ------------------------------------------------------------ the pure part
 
@@ -213,6 +216,17 @@ pub(crate) fn veil_alpha(line: u8, on: bool) -> f32 {
     }
     let t = (f32::from(VEIL_FROM.saturating_sub(line)) / f32::from(VEIL_FROM)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t) * VEIL_MAX
+}
+
+/// THE LIGHT WASH (Max, 2026-10-27: the wallpaper's Lighting brightens it
+/// too, past its Light as designed): white over the wallpaper, eased, up to
+/// `VEIL_WHITE_MAX` at Light 100. Never with the dark one.
+pub(crate) fn veil_white(line: u8, on: bool) -> f32 {
+    if !on || line <= VEIL_WHITE_FROM {
+        return 0.0;
+    }
+    let t = (f32::from(line - VEIL_WHITE_FROM) / f32::from(100 - VEIL_WHITE_FROM)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t) * VEIL_WHITE_MAX
 }
 
 /// The slot of a moment: the sun is looked at once a slot.
@@ -375,6 +389,11 @@ pub(crate) fn tell_overview() {
 
 pub(crate) fn veil_now() -> f32 {
     veil_alpha(wall_line_now(), true)
+}
+
+/// The light wash over the wallpaper now (0: none).
+pub(crate) fn veil_white_now() -> f32 {
+    veil_white(wall_line_now(), true)
 }
 
 // -------------------------------------------------------- the clock and /proc
@@ -773,8 +792,11 @@ impl App {
             let follows = f.shell_follows();
             if follows {
                 palette::store_shell(f.shell_pair(v));
+                // (The screen's filter, at the step too.)
+                let (dark, light) = palette::line_to(v);
+                palette::screen_light(dark, light);
             }
-            let veil_moved = f.wall && veil_alpha(before, true) != veil_alpha(v, true);
+            let veil_moved = f.wall && (veil_alpha(before, true) != veil_alpha(v, true) || veil_white(before, true) != veil_white(v, true));
             if follows {
                 self.draw_options();
                 self.draw();

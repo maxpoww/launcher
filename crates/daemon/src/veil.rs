@@ -53,7 +53,18 @@ pub(crate) fn pixel(alpha: f32) -> [u8; 4] {
     [0, 0, 0, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8]
 }
 
+/// The pixel now: the dark wash, or the light one (white, premultiplied).
+pub(crate) fn pixel_now() -> [u8; 4] {
+    let dark = crate::lighting::veil_now();
+    if dark > 0.0 {
+        return pixel(dark);
+    }
+    let w = (crate::lighting::veil_white_now().clamp(0.0, 1.0) * 255.0).round() as u8;
+    [w, w, w, w]
+}
+
 /// Whether anything is attached for `alpha` — at 0 the surface is unmapped.
+#[cfg(test)]
 pub(crate) fn shown(alpha: f32) -> bool {
     pixel(alpha)[3] > 0
 }
@@ -125,7 +136,7 @@ impl App {
     /// moved — the wallpaper's own Lighting slider moved it only at the next
     /// start (the pass of 2026-10-27).
     pub(crate) fn veil_follow(&mut self) {
-        let px = pixel(crate::lighting::veil_now());
+        let px = pixel_now();
         if self.veil_layer.as_ref().is_some_and(|v| v.up == Some(px)) {
             return;
         }
@@ -135,7 +146,8 @@ impl App {
     /// Put the veil now in use: a new pixel for its alpha, or nothing at 0.
     /// Cheap — called when the veil moves (a fade is ~30 steps), never per frame.
     pub(crate) fn veil_sync(&mut self) {
-        let alpha = crate::lighting::veil_now();
+        // (The dark wash or the light one: one pixel either way.)
+        let px = pixel_now();
         if self.part_lost(crate::shell_screens::Part::Veil) {
             return;
         }
@@ -147,14 +159,14 @@ impl App {
             // commit asks for a configure, once — and that configure puts the
             // veil (`configure_veil`). Only when there is something to show: an
             // empty commit with nothing to show was the configure storm.
-            if shown(alpha) && !v.asked {
+            if px[3] > 0 && !v.asked {
                 v.asked = true;
                 v.layer.wl_surface().commit();
             }
             return;
         };
-        if !shown(alpha) {
-            v.up = Some(pixel(alpha));
+        if px[3] == 0 {
+            v.up = Some(px);
             if v.mapped {
                 v.mapped = false;
                 let surface = v.layer.wl_surface();
@@ -179,14 +191,14 @@ impl App {
                 return;
             }
         };
-        pool.mmap()[..4].copy_from_slice(&pixel(alpha));
+        pool.mmap()[..4].copy_from_slice(&px);
         let buffer = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, (), &self.qh);
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, 1, 1);
         surface.commit();
         // (The compositor keeps what it was given: the buffer and pool can go.)
         buffer.destroy();
-        v.up = Some(pixel(alpha));
+        v.up = Some(px);
     }
 }
 

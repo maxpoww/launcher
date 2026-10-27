@@ -2019,7 +2019,6 @@ fn shell_wears(shell: &Theme) -> Theme {
     let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), crate::look::dark());
     let c = match shell_plan(&picked, crate::look::dark()) {
         ShellPlan::Walked { unlit, dark, sat } => tint::saturate(&tint::lit(&unlit, dark, lv.light), sat),
-        ShellPlan::Fixed(_) => resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, lv.dark).c,
         ShellPlan::Screen => return shell.clone(),
     };
     Theme { c, ..shell.clone() }
@@ -2183,7 +2182,111 @@ fn set_shell(picked: &ColorChoice, system_dark: bool) {
     let lv = picked.levels(Surface::Shell, crate::lighting::ambient_line(), system_dark);
     SHELL_COLOURED.store(lv.tint != Some(0), Ordering::Relaxed);
     SHELL_IS_DARK.store(lv.dark, Ordering::Relaxed);
-    store_shell(shell_plan(picked, system_dark).pair(lv.light));
+    let plan = shell_plan(picked, system_dark);
+    SCREEN_ON.store(matches!(plan, ShellPlan::Screen), Ordering::Relaxed);
+    screen_light(lv.dark, lv.light);
+    SCREEN_SAT.store(lv.sat, Ordering::Relaxed);
+    store_shell(plan.pair(lv.light));
+}
+
+/// THE SHELL READING THE SCREEN (Dynamic, the Light look) keeps its colours
+/// as it reads them — and shows them through the Shell's Lighting and
+/// Saturation, as a filter (Max, 2026-10-27: "los colores son tomados como
+/// hoy, pero cuando se muestran ya pasaron por la saturación y la
+/// iluminación"): Saturation 50 is the colour read, 0 black and white, 100
+/// twice as vivid; Lighting 50 (of its look's half) as read, lighter or
+/// darker by as much as a palette's grounds move. The ink is measured on the
+/// colour as shown.
+static SCREEN_ON: AtomicBool = AtomicBool::new(false);
+static SCREEN_DARK: AtomicBool = AtomicBool::new(true);
+static SCREEN_LIGHT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(50);
+static SCREEN_SAT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(50);
+
+/// The filter's Lighting (a fade of the Lighting moves it step by step).
+pub(crate) fn screen_light(dark: bool, light: u8) {
+    SCREEN_DARK.store(dark, Ordering::Relaxed);
+    SCREEN_LIGHT.store(light.min(100), Ordering::Relaxed);
+}
+
+/// The filter now, to tell a change by (`colors_apply` redraws on one).
+fn screen_state() -> (bool, bool, u8, u8) {
+    (SCREEN_ON.load(Ordering::Relaxed), SCREEN_DARK.load(Ordering::Relaxed), SCREEN_LIGHT.load(Ordering::Relaxed), SCREEN_SAT.load(Ordering::Relaxed))
+}
+
+/// A colour the shell read from the screen (linear), as it is shown.
+pub(crate) fn shell_filter(c: [f32; 4]) -> [f32; 4] {
+    let (on, dark, light, sat) = screen_state();
+    if !on || (light == 50 && sat == 50) {
+        return c;
+    }
+    let [l, a, b] = oklab_of(c);
+    let k = (f32::from(light) - 50.0) / 50.0;
+    // (Within the look's band, as a palette's grounds are (`tint::lit`): the
+    // dark shell no lighter than a dark ground, the light no darker than a
+    // light one — unless what was read already is.)
+    let l = if dark { (l + 0.14 * k).clamp(0.0, l.max(0.39)) } else { (l + 0.12 * k).clamp(l.min(0.62), 1.0) };
+    let s = f32::from(sat) / 50.0;
+    let [r, g, bl] = linear_of([l, a * s, b * s]);
+    [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), bl.clamp(0.0, 1.0), c[3]]
+}
+
+/// OKLab of a linear colour, and back.
+fn oklab_of(c: [f32; 4]) -> [f32; 3] {
+    let (r, g, b) = (c[0], c[1], c[2]);
+    let l = (0.412_221_47 * r + 0.536_332_54 * g + 0.051_445_99 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+fn linear_of(lab: [f32; 3]) -> [f32; 3] {
+    let [l, a, b] = lab;
+    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
+    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
+    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    [
+        4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_94 * s3,
+        -1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_38 * s3,
+        -0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3,
+    ]
+}
+
+/// A slider moved where it cannot change anything: what the box says above
+/// it, and the slider goes back (Max, 2026-10-27: "dejá que el usuario los
+/// mueva y cuando los mueve mostrá un mensaje… y volvé el slider a su
+/// lugar"). Only where nothing CAN move: the Shell's Palette while it reads
+/// the screen; the Web's Lighting and Saturation at 0% (the pages as each
+/// site made them); the Icons' Lighting within its look (two tones); a
+/// Transparency under reduce transparency.
+pub(crate) fn refusal(key: &str, value: &str, c: &ColorChoice, reduce: bool) -> Option<&'static str> {
+    let n = value.parse::<u8>().ok();
+    match key {
+        "colors-shell" => {
+            let lv = c.levels_now(Surface::Shell);
+            let new = n.map(|n| if n == 50 { None } else { Some(n) })?;
+            let dynamic = c.palette_id() == DYNAMIC_ID;
+            let reads = |tint: Option<u8>| !lv.dark || (dynamic && tint != Some(0));
+            (reads(lv.tint) && reads(new)).then(|| crate::i18n::tr("Takes its colours from the screen"))
+        }
+        "colors-web-line" | "colors-web-sat" => {
+            let lv = c.levels_now(Surface::Web);
+            if lv.tint != Some(0) {
+                return None;
+            }
+            let stays_light = key == "colors-web-line" && !lv.dark && !line_to(n?).0;
+            (key == "colors-web-sat" || stays_light).then(|| crate::i18n::tr("Pages keep their own colours at 0%"))
+        }
+        "colors-icons-line" => {
+            let lv = c.levels_now(Surface::Icons);
+            (line_to(n?).0 == lv.dark).then(|| crate::i18n::tr("Icons are only light or dark"))
+        }
+        "colors-shell-clear" | "colors-apps-clear" | "colors-web-clear" | "colors-icons-clear" if reduce => Some(crate::i18n::tr("Off while Reduce transparency is on")),
+        _ => None,
+    }
 }
 
 /// Put the shell's pair in use (None: it reads the screen).
@@ -2198,11 +2301,12 @@ pub(crate) fn store_shell(out: Option<([f32; 4], [f32; 4])>) {
 /// each value without finding the palette, walking its path or reading the
 /// settings again: that is done once, here.
 pub(crate) enum ShellPlan {
-    /// The shell reads the screen (the Dynamic palette): no pair.
+    /// The shell reads the screen (Dynamic, the Light look): no pair — what it
+    /// reads goes through the Lighting and the Saturation as a filter
+    /// (`shell_filter`).
     Screen,
-    /// A pair the Lighting does not move (Off: Golem's own neutral ground).
-    Fixed(([f32; 4], [f32; 4])),
-    /// The palette's variant walked to the Shell slider, not yet lit; its Saturation.
+    /// The palette's variant walked to the Shell slider, not yet lit; its
+    /// Saturation. (At 0%: Golem's own neutral ground, walked the same way.)
     Walked { unlit: [Rgb; 16], dark: bool, sat: u8 },
 }
 
@@ -2211,7 +2315,6 @@ impl ShellPlan {
     pub(crate) fn pair(&self, v: u8) -> Option<([f32; 4], [f32; 4])> {
         match self {
             Self::Screen => None,
-            Self::Fixed(p) => Some(*p),
             // (`readable` moves only the hues, slots 8..16: neither the
             // surface nor the ink, so it is not run for every frame.)
             Self::Walked { unlit, dark, sat } => {
@@ -2221,9 +2324,11 @@ impl ShellPlan {
         }
     }
 
-    /// Whether the Lighting moves the shell's colours at all.
+    /// Whether the Lighting moves the shell's colours: always — a palette's
+    /// walked, the screen's through the filter (Max, 2026-10-27: "the sliders
+    /// should work").
     pub(crate) fn follows_lighting(&self) -> bool {
-        matches!(self, Self::Walked { .. })
+        true
     }
 }
 
@@ -2247,9 +2352,10 @@ pub(crate) fn shell_plan_look(picked: &ColorChoice, dark: bool) -> ShellPlan {
     } else if lv.tint == Some(0) {
         // OFF is neutral (Max, 2026-10-17: the dock box and the Super+H
         // boxes "have a reddish ground" — they sampled a desert wallpaper):
-        // Golem's own ground and ink, in the shell's Dark/Light.
-        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, lv.dark);
-        ShellPlan::Fixed((linear(t.surface()), linear(t.ink())))
+        // Golem's own ground and ink — moved by the Lighting and the
+        // Saturation as any palette's (Max, 2026-10-27: no slider is dead).
+        let g = golem();
+        ShellPlan::Walked { unlit: if lv.dark { g.dark } else { g.light }, dark: lv.dark, sat: lv.sat }
     } else if want == DYNAMIC_ID {
         ShellPlan::Screen
     } else {
@@ -3514,9 +3620,9 @@ impl crate::App {
         }
         // (The Shell's own Palette and Saturation move only its pair: the
         // theme the apps wear stays as it was, yet every shell surface wears it.)
-        let shell_before = shell();
+        let shell_before = (shell(), screen_state());
         set_shell(&picked, crate::look::dark());
-        let shell_moved = shell() != shell_before;
+        let shell_moved = (shell(), screen_state()) != shell_before;
         let c = choice();
         set_skipped_programs(&self.entries, c.skip_in_force());
         set_looked_programs(&self.entries, c.looks_in_force());
@@ -3582,6 +3688,10 @@ impl crate::App {
 
     /// A choice in the "Colours" setting: save it, then put it in use.
     pub(crate) fn colors_pick(&mut self, key: &str, value: &str) {
+        if let Some(note) = refusal(key, value, &choice(), REDUCE.load(Ordering::Relaxed)) {
+            self.colours_note(key, note);
+            return;
+        }
         // The slider is the owner's own hand, and Auto turned off keeps the
         // light it was showing: a fade in progress ends here (`lighting.rs`).
         let frozen = if matches!(key, "colors-lighting" | "colors-lighting-auto" | "colors-ambient" | "colors-wall-ambient" | "colors-auto" | "colors-wall-auto") { self.lighting_cancel() } else { None };
@@ -3861,6 +3971,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_slider_that_cannot_move_anything_says_so_and_nothing_else() {
+        let manual = ColorChoice { auto: Some(false), palette: Some("iris".into()), shell_dark: Some(true), web_dark: Some(false), web_tint: Some(60), icons_dark: Some(true), ..Default::default() };
+        // The Shell in the Light look, or on Dynamic past 0%: its Palette.
+        assert!(refusal("colors-shell", "80", &ColorChoice { shell_dark: Some(false), ..manual.clone() }, false).is_some());
+        let dynamic = ColorChoice { palette: Some(DYNAMIC_ID.into()), shell_tint: Some(40), ..manual.clone() };
+        assert!(refusal("colors-shell", "80", &dynamic, false).is_some());
+        assert!(refusal("colors-shell", "0", &dynamic, false).is_none(), "to 0% it changes: Golem's own");
+        assert!(refusal("colors-shell", "80", &manual, false).is_none(), "a palette in the dark: it walks");
+        // …and its Lighting and Saturation never: they filter the screen.
+        assert!(refusal("colors-shell-line", "80", &dynamic, false).is_none());
+        assert!(refusal("colors-shell-sat", "10", &dynamic, false).is_none());
+        // The Web at 0%: its Saturation; its Lighting within the Light half, not across it.
+        let web0 = ColorChoice { web_tint: Some(0), ..manual.clone() };
+        assert!(refusal("colors-web-sat", "80", &web0, false).is_some());
+        assert!(refusal("colors-web-line", "90", &web0, false).is_some());
+        assert!(refusal("colors-web-line", "20", &web0, false).is_none(), "to Dark: the pages go dark");
+        assert!(refusal("colors-web-sat", "80", &manual, false).is_none());
+        // The Icons' Lighting: across the gap only.
+        assert!(refusal("colors-icons-line", "20", &manual, false).is_some());
+        assert!(refusal("colors-icons-line", "80", &manual, false).is_none());
+        // Transparency under reduce transparency.
+        assert!(refusal("colors-apps-clear", "60", &manual, true).is_some());
+        assert!(refusal("colors-apps-clear", "60", &manual, false).is_none());
+    }
+
+    #[test]
+    fn the_shell_reading_the_screen_shows_it_through_its_lighting_and_saturation() {
+        // (A dark red, as a dark shell reads one: room to lighten in the band.)
+        let red = [0.05, 0.02, 0.015, 1.0];
+        SCREEN_ON.store(true, Ordering::Relaxed);
+        screen_light(true, 50);
+        SCREEN_SAT.store(50, Ordering::Relaxed);
+        assert_eq!(shell_filter(red), red, "as read at the middles");
+        SCREEN_SAT.store(0, Ordering::Relaxed);
+        let grey = shell_filter(red);
+        assert!((grey[0] - grey[1]).abs() < 0.01 && (grey[1] - grey[2]).abs() < 0.01, "black and white at 0: {grey:?}");
+        SCREEN_SAT.store(50, Ordering::Relaxed);
+        screen_light(true, 100);
+        let lighter = oklab_of(shell_filter(red))[0];
+        assert!(lighter > oklab_of(red)[0] + 0.02 && lighter <= 0.39 + 1e-3, "lighter, within the dark band: {lighter}");
+        screen_light(true, 50);
+        SCREEN_ON.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
     fn the_windows_rules_and_the_word_on_closing() {
         // Each rule on only while it shows anything; the web's rides the
         // apps' when it has none of its own (it is declared later and wins).
@@ -3971,11 +4126,12 @@ mod tests {
         let (dim, _) = plan.pair(10).unwrap();
         let (bright, _) = plan.pair(90).unwrap();
         assert!(dim[0] <= bright[0] && dim != bright, "less light, a darker ground");
-        // Off is Golem's own neutral pair: the Lighting does not move it.
+        // Off is Golem's own neutral pair, moved by the Lighting too.
         let off = ColorChoice { shell_tint: Some(0), ..picked.clone() };
         let plan = shell_plan(&off, true);
-        assert!(!plan.follows_lighting());
-        assert_eq!(plan.pair(10), plan.pair(90));
+        let t = resolve(&ColorChoice { palette: Some(GOLEM.to_owned()), ..Default::default() }, true);
+        assert_eq!(plan.pair(50), Some((linear(t.surface()), linear(t.ink()))), "as made: Golem's own pair");
+        assert_ne!(plan.pair(10), plan.pair(90));
         // Dynamic: the shell reads the screen, there is no pair.
         let dynamic = ColorChoice { palette: Some(DYNAMIC_ID.to_owned()), ..Default::default() };
         assert!(shell_plan(&dynamic, true).pair(30).is_none());

@@ -141,6 +141,8 @@ const PALETTE_TILE_MIN: f32 = 170.0;
 const PALETTE_COLS: (usize, usize) = (4, 7);
 const PALETTE_ROWS: usize = 4;
 const PALETTE_ROWS_FEWER: usize = 3;
+/// How long a slider's "cannot" is said in its words' place.
+const NOTE_MS: u64 = 2400;
 /// …and two, when three still run past (the Apps section's own line of apps
 /// under its sliders, at 1440×900).
 const PALETTE_ROWS_FEWEST: usize = 2;
@@ -913,6 +915,9 @@ pub(crate) struct Panel {
     /// What the field holds: the settings ([`SETTINGS`]) or the modules
     /// (the catalog's, `modules.rs`).
     items: &'static [Item],
+    /// A slider moved where it cannot change anything: its key, what is said
+    /// in its words' place, until when (`App::colours_note`).
+    pub(crate) note: Option<(String, &'static str, std::time::Instant)>,
     modules: bool,
     /// An open module: its switches and confirmation (MODULES only).
     mods: ModView,
@@ -2271,6 +2276,18 @@ impl Panel {
         for (k, (group, g, beside)) in sliders.iter().enumerate() {
             let left = x0 + k as f32 * (col_w + gap);
             let right = left + col_w;
+            // WHAT CANNOT MOVE IS SAID in the slider's words' place, a moment
+            // (Max, 2026-10-27), and the knob goes back to its stop.
+            let note = self.note.as_ref().filter(|(key, _, until)| key == g.key && std::time::Instant::now() < *until);
+            if let Some((_, words, _)) = note {
+                out.texts.push(Text { text: (*words).to_owned(), x: left + col_w / 2.0, y: y + (lh - 18.0 * s) / 2.0, px: 13.5, alpha: 0.95, centered: true });
+                let track = Rect::new(left, y + lh + th / 2.0 - 1.0 * s, col_w, 2.0 * s);
+                let count = g.choices.len().max(2);
+                let lit = g.choices.iter().position(|c| c.on).unwrap_or(0);
+                let stops = self.slider_stops(out, *group, &g.choices, track, (left - 14.0 * s, right + 14.0 * s), (y - 4.0 * s, y + lh + th + 4.0 * s), g.split);
+                out.sliders.push(Slider { track, value: lit as f32 / (count - 1) as f32, stops, group: *group, count, split: g.split, mark: g.mark });
+                continue;
+            }
             let (name, value) = slider_words(g);
             out.texts.push(Text { text: name, x: left, y: y + (lh - 18.0 * s) / 2.0, px: 13.5, alpha: 0.6, centered: false });
             // Its value at the right end, what stands beside it before that.
@@ -5323,6 +5340,25 @@ impl App {
         if !self.panel_keys(keysym, true) && keysym == Keysym::Escape {
             self.quick_leave();
         }
+        self.schedule_frame();
+    }
+
+    /// A slider moved where it cannot change anything (`palette::refusal`):
+    /// said in its words' place for a moment, nothing saved, the knob back at
+    /// its stop.
+    pub(crate) fn colours_note(&mut self, key: &str, words: &'static str) {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(NOTE_MS);
+        for p in [&mut self.panel, &mut self.quick] {
+            p.note = Some((key.to_owned(), words, until));
+        }
+        // (A frame as it ends, for the words to come back.)
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(NOTE_MS + 30));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.schedule_frame();
+            calloop::timer::TimeoutAction::Drop
+        });
+        let ui = self.ui_facts();
+        self.controls_send(ControlCommand::Read("Colours", ui));
         self.schedule_frame();
     }
 

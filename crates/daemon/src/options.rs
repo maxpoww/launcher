@@ -1357,6 +1357,9 @@ struct Backdrop {
     /// The ink to wear instead of measuring one: the palette's, when the
     /// shell wears the palette rather than the screen.
     ink: Option<[f32; 4]>,
+    /// What is made of it is shown through the Shell's Lighting and
+    /// Saturation (`palette::shell_filter`): the shell reading the screen.
+    filter: bool,
 }
 
 impl Backdrop {
@@ -1370,7 +1373,15 @@ impl Backdrop {
         // (The ink is WORDS: the text renderer takes sRGB, the palette's pair
         // is linear — handed over as it was, a light ink drew a shade dimmer
         // than designed: the legibility audit, 2026-10-23.)
-        Some(Backdrop { matched: Some(surface), frost: None, ink: Some(words(ink)) })
+        Some(Backdrop { matched: Some(surface), frost: None, ink: Some(words(ink)), filter: false })
+    }
+
+    /// What the shell read, as it shows it: the colour MADE of it (its wash
+    /// laid — the night's dim flattened a filter laid before it) through
+    /// the Shell's Lighting and Saturation (`palette::shell_filter`), its ink
+    /// measured on that. Not the bar's: it stays as made.
+    fn filtered(self) -> Backdrop {
+        Backdrop { filter: true, ..self }
     }
 
     /// What this surface actually sits on right now: the match if there is
@@ -1444,11 +1455,19 @@ impl Backdrop {
         match self.get() {
             Some(backdrop) => {
                 let mut fill = box_fill(backdrop, self.surface_wash());
+                if self.filter {
+                    fill = crate::palette::shell_filter(fill);
+                }
                 let ink = self.ink.unwrap_or_else(|| ink_on(fill));
                 if !opaque {
                     fill[3] = fallback_fill[3];
                 }
                 (fill, ink)
+            }
+            // (Nothing read yet: the theme's own glass, filtered too.)
+            None if self.filter => {
+                let fill = crate::palette::shell_filter(fallback_fill);
+                (fill, if fill == fallback_fill { fallback_ink } else { ink_on(fill) })
             }
             None => (fallback_fill, fallback_ink),
         }
@@ -2919,6 +2938,7 @@ impl App {
             matched: self.options_bar_matched,
             frost: self.options_pill_color,
             ink: None,
+            filter: false,
         }
     }
 
@@ -3030,7 +3050,7 @@ impl App {
     /// than by one borrowing the other's decision.
     pub(crate) fn options_box_surface(&self) -> ([f32; 4], [f32; 4]) {
         let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
-        Backdrop::palette().unwrap_or(self.options_regime()).surface(slab, ink_on(slab), true)
+        Backdrop::palette().unwrap_or_else(|| self.options_regime().filtered()).surface(slab, ink_on(slab), true)
     }
 
     /// The clipboard box's OWN regime — same matched window (that's genuinely
@@ -3048,6 +3068,7 @@ impl App {
             matched: self.options_bar_matched,
             frost: self.clip_pill_color,
             ink: None,
+            filter: false,
         }
     }
 
@@ -3082,6 +3103,7 @@ impl App {
                 matched: self.options_bar_matched,
                 frost,
                 ink: None,
+                filter: true,
             })
             .surface(slab, ink_on(slab), true)
     }
@@ -3090,7 +3112,7 @@ impl App {
     /// its OWN correctly-positioned frost (see `clip_regime`).
     pub(crate) fn clip_box_surface(&self) -> ([f32; 4], [f32; 4]) {
         let slab = [BOX_SLAB[0], BOX_SLAB[1], BOX_SLAB[2], 1.0];
-        Backdrop::palette().unwrap_or(self.clip_regime()).surface(slab, ink_on(slab), true)
+        Backdrop::palette().unwrap_or_else(|| self.clip_regime().filtered()).surface(slab, ink_on(slab), true)
     }
 
     /// Hover wash — stronger than the resting wash, with the same asymmetry.
@@ -7174,10 +7196,14 @@ impl App {
 impl crate::App {
     /// The dock's live colour regime — matched window, else sampled frost.
     fn dock_regime(&self) -> Backdrop {
-        Backdrop::palette().unwrap_or(Backdrop {
-            matched: self.dock_bar_matched,
-            frost: self.dock_pill_color,
-            ink: None,
+        Backdrop::palette().unwrap_or_else(|| {
+            Backdrop {
+                matched: self.dock_bar_matched,
+                frost: self.dock_pill_color,
+                ink: None,
+                filter: false,
+            }
+            .filtered()
         })
     }
 
@@ -7398,7 +7424,8 @@ impl crate::App {
         const RATE: f32 = 12.0;
         let (fill_to, ink_to) = match self.wall_guess.filter(|_| crate::palette::dynamic()) {
             Some(guess) => {
-                let backdrop = Backdrop { matched: None, frost: Some(guess), ink: None };
+                // (The new picture as the shell will show it: filtered too.)
+                let backdrop = Backdrop { matched: None, frost: Some(guess), ink: None, filter: true };
                 let (mut fill, ink) = backdrop.surface(dock_fill, dock_ink, true);
                 fill[3] = dock_fill[3];
                 (fill, ink)
