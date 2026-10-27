@@ -1359,7 +1359,8 @@ pub(crate) fn zoom_scene(scene: &mut Scene, origin: (f32, f32), zoom: f32) {
 /// whole underneath and `shown` of its height is let through.
 pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     let mut scene = Scene {
-        alpha: 1.0,
+        // (On the Shell's glass: its Transparency past as made.)
+        alpha: crate::options::shell_content(),
         ..Default::default()
     };
     let rect = view.rect;

@@ -189,6 +189,9 @@ pub struct GridContent {
     pub rects: Vec<RectInst>,
     pub icons: Vec<IconInst>,
     pub labels: Vec<Label>,
+    /// Opacity of `icons`; none = whole (the dock's edge pins and Apps
+    /// button wear the Icons section's "Dock icons").
+    pub fade: Option<f32>,
 }
 
 /// Everything the renderer draws for one frame, in draw order.
@@ -3276,10 +3279,13 @@ pub fn scene(
             };
             dock_dots_col(&mut scene.rects, edge_x, apps_cy, ov.hidden_right, apps.h * 0.8);
         }
+        // (The edge pins and the Apps button are dock icons too.)
+        edge.fade = Some(crate::options::dock_icons());
         scene.grids.push(edge);
         scene.grids.push(GridContent {
             clip: Rect::new(0.0, 0.0, surface.0, surface.1),
             icons: std::mem::take(&mut apps_top),
+            fade: Some(crate::options::dock_icons()),
             ..Default::default()
         });
     } else if let (Some(ov), Some(apps)) = (overflow, apps_drawn) {
@@ -3326,10 +3332,13 @@ pub fn scene(
             let baseline = slot_rect.y + slot_rect.h - DOCK_BASELINE_PAD * icon_scale;
             dock_dots(&mut scene.rects, apps_cx, baseline + DOCK_DOT_R - DOCK_DOT_GAP, ov.hidden_right, apps.w * 0.8);
         }
+        // (The edge pins and the Apps button are dock icons too.)
+        edge.fade = Some(crate::options::dock_icons());
         scene.grids.push(edge);
         scene.grids.push(GridContent {
             clip: Rect::new(0.0, 0.0, surface.0, surface.1),
             icons: std::mem::take(&mut apps_top),
+            fade: Some(crate::options::dock_icons()),
             ..Default::default()
         });
     }
@@ -4819,6 +4828,9 @@ pub fn scene(
     if dock < 1.0 {
         scene.icon_fade = vec![dock; scene.icons.len()];
     }
+    // The glows on its pills fade with them (the shader leaves a shadow at
+    // the strength it was given).
+    crate::options::shell_halos(&mut scene);
 
     scene
 }

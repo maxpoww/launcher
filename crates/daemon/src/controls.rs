@@ -468,12 +468,14 @@ fn clear_key(s: crate::palette::Surface) -> (&'static str, &'static str) {
     }
 }
 
-/// What a Transparency reads: as made, Solid, or how much shows through.
+/// What a Transparency reads, as Saturation does: as made, its two ends by
+/// name, else where the slider stands.
 fn clear_text(v: u8, made: u8) -> String {
     match v {
         v if v == made => tr("as made").to_owned(),
         0 => tr("Solid").to_owned(),
-        v => format!("{:.0}%", f32::from(v) * 0.95),
+        100 => tr("Nearly invisible").to_owned(),
+        v => format!("{v}%"),
     }
 }
 
@@ -2762,7 +2764,13 @@ mod tests {
         assert_eq!((g[4].caption.as_deref(), g[4].mark), (Some("Transparency · as made"), None));
         let mut g = Vec::new();
         colour_row(&mut g, &ColorChoice { apps_clear: Some(50), ..manual.clone() }, Surface::Apps);
-        assert_eq!(g[4].caption.as_deref(), Some("Transparency · 48%"));
+        assert_eq!(g[4].caption.as_deref(), Some("Transparency · 50%"));
+        let mut g = Vec::new();
+        colour_row(&mut g, &ColorChoice { apps_clear: Some(100), ..manual.clone() }, Surface::Apps);
+        assert_eq!(g[4].caption.as_deref(), Some("Transparency · Nearly invisible"));
+        // Under Auto (the tab's Golem defaults) a Transparency is as made.
+        assert_eq!(ColorChoice { auto: Some(true), shell_clear: Some(90), apps_clear: Some(70), ..manual.clone() }.clear_of(Surface::Shell), crate::palette::SHELL_CLEAR_MADE);
+        assert_eq!(ColorChoice { auto: Some(true), apps_clear: Some(70), ..manual.clone() }.clear_of(Surface::Apps), 0);
         // The Shell's as made is its glass today, marked; the Icons' slider is the dock's icons.
         let mut g = Vec::new();
         colour_row(&mut g, &manual, Surface::Shell);

@@ -218,6 +218,10 @@ impl ColorChoice {
     /// A section's Transparency (0 solid … 100 nearly invisible); the Icons
     /// section's is the dock's icons'.
     pub(crate) fn clear_of(&self, s: Surface) -> u8 {
+        // (Auto is the tab's Golem defaults: as made, as its other sliders.)
+        if self.auto_of(s) {
+            return clear_made(s);
+        }
         let v = match s {
             Surface::Shell => self.shell_clear,
             Surface::Apps => self.apps_clear,
@@ -236,13 +240,37 @@ pub(crate) fn clear_alpha(v: u8) -> f32 {
     1.0 - 0.95 * f32::from(v.min(100)) / 100.0
 }
 
-/// A Transparency was moved since the Colours box last said what it costs.
-static CLEAR_TOUCHED: AtomicBool = AtomicBool::new(false);
+/// Every section's Transparency, as the Colours box opened.
+static CLEAR_AT_OPEN: std::sync::Mutex<Option<[u8; 4]>> = std::sync::Mutex::new(None);
 
-/// Whether to say it now (once a visit of the box: it is said as it closes).
-pub(crate) fn clear_touched() -> bool {
-    CLEAR_TOUCHED.swap(false, Ordering::Relaxed)
+fn clears(c: &ColorChoice) -> [u8; 4] {
+    [Surface::Shell, Surface::Apps, Surface::Web, Surface::Icons].map(|s| c.clear_of(s))
 }
+
+/// The Colours box opened: what it costs is said as it closes, only if then
+/// something is MORE transparent than now (moved back, or toward Solid, it is
+/// not worth a word).
+pub(crate) fn clear_remember() {
+    if let Ok(mut g) = CLEAR_AT_OPEN.lock() {
+        *g = Some(clears(&choice()));
+    }
+}
+
+/// The Colours box closed: whether a Transparency rose in this visit, past
+/// as made (what Golem is made with costs no word).
+pub(crate) fn clear_rose() -> bool {
+    let before = CLEAR_AT_OPEN.lock().ok().and_then(|mut g| g.take());
+    before.is_some_and(|b| rose(b, clears(&choice())))
+}
+
+fn rose(was: [u8; 4], now: [u8; 4]) -> bool {
+    let made = [Surface::Shell, Surface::Apps, Surface::Web, Surface::Icons].map(clear_made);
+    (0..4).any(|i| now[i] > was[i] && now[i] > made[i])
+}
+
+/// The windows' rules last told the compositor: told again only when they
+/// change (`colors_apply` runs at every step of the light).
+static RULES_TOLD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 /// The compositor's rules for the windows: every window wears the Apps'
 /// opacity, Seam's own windows the Web's (a webapp is an app: its class is
@@ -252,9 +280,11 @@ pub(crate) fn clear_touched() -> bool {
 pub(crate) fn clear_rules_lua(c: &ColorChoice) -> String {
     let (apps, web) = (clear_alpha(c.clear_of(Surface::Apps)), clear_alpha(c.clear_of(Surface::Web)));
     let any = apps < 1.0 || web < 1.0;
+    // (In a pcall of their own: settings.lua runs as one, and a rule the
+    // compositor refused must not take the screens and keys after it along.)
     format!(
-        "hl.window_rule({{ name = \"golem-clear-apps\", match = {{ class = \".*\" }}, opacity = \"{apps:.2} {apps:.2} 1.0\", enabled = {} }}) \
-         hl.window_rule({{ name = \"golem-clear-web\", match = {{ class = \"^(seam|firefox)$\" }}, opacity = \"{web:.2} {web:.2} 1.0\", enabled = {any} }})",
+        "pcall(function() hl.window_rule({{ name = \"golem-clear-apps\", match = {{ class = \".*\" }}, opacity = \"{apps:.2} {apps:.2} 1.0\", enabled = {} }}) \
+         hl.window_rule({{ name = \"golem-clear-web\", match = {{ class = \"^(seam|firefox)$\" }}, opacity = \"{web:.2} {web:.2} 1.0\", enabled = {any} }}) end)",
         apps < 1.0
     )
 }
@@ -3315,8 +3345,23 @@ impl crate::App {
         let c = choice();
         set_skipped_programs(&self.entries, c.skip_in_force());
         set_looked_programs(&self.entries, c.looks_in_force());
-        // The Shell's and the dock icons' Transparency, for every frame.
-        let clear_moved = crate::options::set_clear(c.clear_of(Surface::Shell), c.clear_of(Surface::Icons));
+        // The Shell's and the dock icons' Transparency, for every frame (the
+        // reduce-transparency intent: none — its glass is solid already).
+        let reduce = self.config.accessibility.reduce_transparency;
+        let clear_moved = crate::options::set_clear(
+            if reduce { 0 } else { c.clear_of(Surface::Shell) },
+            if reduce { 0 } else { c.clear_of(Surface::Icons) },
+        );
+        // The windows' opacity is the compositor's: told when it changes — a
+        // pick, Auto, a start (settings.lua, written with the choice, has it
+        // for the compositor's own start).
+        let rules = clear_rules_lua(&c);
+        if let Ok(mut told) = RULES_TOLD.lock() {
+            if *told != rules {
+                crate::hypr::eval(&rules);
+                *told = rules;
+            }
+        }
         let changed = set(theme);
         // A move of the Lighting alone leaves the theme as it was, yet the
         // shell, the apps and the web all wear it.
@@ -3340,6 +3385,7 @@ impl crate::App {
         if clear_moved {
             self.draw_options();
             self.draw();
+            self.draw_card();
             self.request_desktop_draw();
             self.request_desktop_top_draw();
         }
@@ -3488,7 +3534,6 @@ impl crate::App {
                             Surface::Web => c.web_clear = v,
                             _ => c.dock_clear = v,
                         }
-                        CLEAR_TOUCHED.store(true, Ordering::Relaxed);
                     }
                     Err(_) => return,
                 },
@@ -3603,9 +3648,6 @@ impl crate::App {
                 self.colors_apply(false);
                 publish(current(), false);
             }
-            // The windows' opacity is the compositor's: told at once (and in
-            // settings.lua, written with the choice, for its next start).
-            "colors-apps-clear" | "colors-web-clear" => crate::hypr::eval(&clear_rules_lua(&c)),
             _ => self.colors_apply(false),
         }
     }
@@ -3619,6 +3661,25 @@ mod audit;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_rules_and_the_word_on_closing() {
+        // Each rule on only while it shows anything; the web's rides the
+        // apps' when it has none of its own (it is declared later and wins).
+        let at = |apps, web| clear_rules_lua(&ColorChoice { auto: Some(false), apps_clear: apps, web_clear: web, ..Default::default() });
+        let on = |l: &str| (l.contains("1.0\", enabled = true }) hl"), l.ends_with("enabled = true }) end)"));
+        assert_eq!(on(&at(None, None)), (false, false));
+        assert_eq!(on(&at(Some(60), None)), (true, true));
+        assert_eq!(on(&at(None, Some(60))), (false, true));
+        assert!(at(Some(60), None).contains("opacity = \"0.43 0.43 1.0\""));
+        assert!(at(None, None).starts_with("pcall(function() "));
+        // The word as Colours closes: only for MORE transparency, past as made.
+        assert!(rose([35, 0, 0, 0], [60, 0, 0, 0]));
+        assert!(rose([35, 0, 0, 0], [35, 0, 0, 10]));
+        assert!(!rose([60, 0, 0, 0], [35, 0, 0, 0]));
+        assert!(!rose([0, 0, 0, 0], [20, 0, 0, 0]));
+        assert!(!rose([35, 40, 0, 0], [35, 40, 0, 0]));
+    }
 
     #[test]
     fn a_swatch_is_the_ground_of_the_look_then_the_soul() {

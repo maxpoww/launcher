@@ -2117,6 +2117,7 @@ impl App {
         self.push_stats_child(&mut scene);
         // A hover tooltip for the icon-only OPTION pills (discoverability).
         self.push_options_tooltip(&mut scene);
+        crate::options::shell_halos(&mut scene);
         // Adaptive: black text on a bright matched bar, white on a dark one.
         let text_rgba = self.options_text_color();
         let squircle = self.config.theme.icon_squircle;

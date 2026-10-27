@@ -2035,7 +2035,7 @@ impl Renderer {
                 let r0 = rects.len() as u32;
                 rects.extend(grid.rects.iter().map(rect_instance));
                 let i0 = icons.len() as u32;
-                icons.extend(grid.icons.iter().map(icon_instance));
+                icons.extend(grid.icons.iter().map(|i| IconInstance { fade: grid.fade.unwrap_or(1.0), ..icon_instance(i) }));
                 (grid.clip, r0..rects.len() as u32, i0..icons.len() as u32)
             })
             .collect();

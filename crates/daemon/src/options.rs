@@ -4321,7 +4321,9 @@ impl App {
                 // sits ON this banner, and the banner changes shape with it
                 // (grows as the box opens). Quad = pill + rim + neck margin; the
                 // shader insets the SDF back by the neck `k` to (pill + rim).
+                // (As made whatever the Shell's Transparency, as the strip.)
                 let (banner, _) = self.options_bar_fill();
+                let banner = [banner[0], banner[1], banner[2], banner[3] / shell_content()];
                 let rim = MODULE_BANNER_RIM * s;
                 let nk = MODULE_NECK_K * s;
                 let brect = Rect::new(
@@ -7754,6 +7756,15 @@ pub(crate) fn shell_shade() -> f32 {
 /// Shell's [`shell_content`], which the dock's scene already wears).
 pub(crate) fn dock_icons() -> f32 {
     crate::palette::clear_alpha(DOCK_CLEAR.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The halos and glows over a Shell scene's pills, at its [`shell_content`]
+/// (a shadow is drawn at the strength it was given, whatever the scene's).
+pub(crate) fn shell_halos(scene: &mut Scene) {
+    let k = shell_content();
+    for s in &mut scene.overlay_shadows {
+        s.color[3] *= k;
+    }
 }
 
 /// THE GLASS DENSE ENOUGH TO READ ON (the legibility audit, 2026-10-23): the

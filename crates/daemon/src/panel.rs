@@ -5036,6 +5036,10 @@ impl App {
     /// of its own mid-screen. Opens `label` growing out of `from` (the quick
     /// controls' card, in surface coordinates).
     pub(crate) fn quick_open(&mut self, label: &'static str, from: Rect) {
+        // (What the Transparency is as Colours opens: said as it closes if it rose.)
+        if crate::controls::box_of(label) == "Colours" {
+            crate::palette::clear_remember();
+        }
         let rect = self.quick_rect();
         self.quick_ensure(rect);
         let from = Rect::new(from.x - rect.x, from.y - rect.y, from.w, from.h);
@@ -5196,9 +5200,9 @@ impl App {
                 self.schedule_autohide();
             }
         }
-        // A Transparency moved in this visit: what it costs is said once, as
+        // A Transparency rose in this visit: what it costs is said once, as
         // the box closes (Max, 2026-10-27).
-        if (label == "Wallpaper" || label == "Colours") && crate::palette::clear_touched() {
+        if (label == "Wallpaper" || label == "Colours") && crate::palette::clear_rose() {
             let (title, body) = (tr("Colours").to_owned(), tr("Transparency can make things feel slower. Solid is the lightest.").to_owned());
             let _ = std::thread::Builder::new()
                 .name("clear-notice".into())
