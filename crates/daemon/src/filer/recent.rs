@@ -106,7 +106,8 @@ fn now() -> String {
 
 /// `text` with the entry for `href` used again at `when` — or with a new
 /// entry for it, as GTK writes one (its kind, Golem Files as the app).
-pub(crate) fn noted(text: &str, href: &str, mime: &str, when: &str) -> String {
+#[cfg(test)]
+fn noted(text: &str, href: &str, mime: &str, when: &str) -> String {
     noted_by(text, href, mime, when, ("Golem Files", "xdg-open %u"))
 }
 

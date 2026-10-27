@@ -77,25 +77,40 @@ impl App {
     /// How much shorter the open card should be: the Apps rows the page in
     /// view leaves empty (Max, 2026-09-30: "card shrinks to fit"). Full
     /// height on the control panel; a box open in the grid gets its row's room; held
-    /// while a drag is in hand so the grid doesn't move under it.
-    pub(crate) fn apps_trim_target(&self) -> f32 {
+    /// while a drag is in hand so the grid doesn't move under it. And how much
+    /// of a second line Files want (0 or 1): a search that left no app gives
+    /// them the Apps' row when they fill more than one line
+    /// (`content::files_take_apps_row`).
+    pub(crate) fn apps_trim_target(&self) -> (f32, f32) {
         // (Beside a side dock the sections stand side by side: nothing to trim.)
         if self.control_panel || self.dock_side() != crate::launcher_prefs::Side::Bottom {
-            return 0.0;
-        }
-        if self.gesture.dragging.is_some() || self.box_drag.is_some() {
-            return self.ui.open_trim();
+            return (0.0, 0.0);
         }
         let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
         let sec = &layout.sections[content::SECTION_APPS];
+        let cell = content::GRID_CELL_H * self.icon_scale();
+        let room = layout.apps_full_h.min(layout.apps_avail - self.controls_band_target());
+        let files = &layout.sections[content::SECTION_FILES];
+        let second = if layout.apps_none && files.cells > files.cols { 1.0 } else { 0.0 };
+        if self.gesture.dragging.is_some() || self.box_drag.is_some() {
+            // Held, so the grid doesn't move under the drag — but a package
+            // lifted out of Install over a search that left no app brings the
+            // grid back, and it gets a row to be let go on.
+            let held = self.ui.open_trim();
+            return (if layout.apps_none { held } else { held.min(room - cell) }, second);
+        }
+        if layout.apps_none {
+            // A search that left no app: its "No results" line, and the
+            // row Files take for a second line when they fill one.
+            return ((room - content::NO_APPS_H - second * cell).max(0.0), second);
+        }
         // With more than one page every page keeps the full page's rows
         // (Max: "the lines on both pages have to be the same"); pages fill
         // before the next one exists, so only a lone page can be short.
         if sec.n_pages > 1 {
-            return 0.0;
+            return (0.0, 0.0);
         }
         let (cols, rows) = (sec.cols.max(1), sec.rows.max(1));
-        let room = layout.apps_full_h.min(layout.apps_avail - self.controls_band_target());
         let per_page = cols * rows;
         // (Pages wrap cyclically, so the pager's target can run past them.)
         let page = self.scroll.per[content::SECTION_APPS].page(sec.page_len().max(1.0)) % sec.n_pages.max(1);
@@ -112,8 +127,7 @@ impl App {
         let needed = last.map_or(1, |l| l / cols + 1);
         let keep = needed.min(rows);
         // A box open in the grid: the room its row takes under its tile.
-        let cell = content::GRID_CELL_H * self.icon_scale();
-        let box_room = if self.app_group.is_some() || self.dir_stack.as_ref().is_some_and(|ds| ds.in_grid) {
+        let box_room = if self.box_in_grid() {
             cell
         } else {
             // The lone app's recents' title, under its row.
@@ -123,14 +137,20 @@ impl App {
         // viewport lands on exactly `keep` rows.
         let trim = room - keep as f32 * cell - box_room;
         if trim >= 0.0 || self.app_group.is_some() || self.lone_room() <= 0.0 {
-            return trim.max(0.0);
+            return (trim.max(0.0), 0.0);
         }
         // A lone app's recents want more than the rows the card holds (a
         // short screen): the card GROWS by what is missing — the trim the
         // other way —, as far as the screen over it lets it.
         // (The card's top untrimmed: the trim in use moved it by as much.)
         let over = layout.card_top - self.ui.open_trim() - self.dock_top_reserved() - LONE_GROW_AIR;
-        trim.max(-over.max(0.0))
+        (trim.max(-over.max(0.0)), 0.0)
+    }
+
+    /// A box open in the grid (an app group, or a dock folder's stack shown
+    /// there): its row takes room under its tile.
+    fn box_in_grid(&self) -> bool {
+        self.app_group.is_some() || self.dir_stack.as_ref().is_some_and(|ds| ds.in_grid)
     }
 
     /// The Controls row's pill height: the control panel's near layer.
@@ -209,6 +229,15 @@ impl App {
         let centre_rows = !self.grid_resting();
         for sec in &mut layout.sections {
             sec.centre_rows = centre_rows;
+        }
+        // A search that left no app: Apps a short line, Files two
+        // (`content::files_take_apps_row`). Not under a box open in the
+        // grid: that keeps its row's room.
+        let bottom = !self.control_panel && layout.side == crate::launcher_prefs::Side::Bottom;
+        layout.apps_none = bottom && centre_rows && apps_cells == 0 && !self.box_in_grid();
+        if bottom && self.files_second > 0.0 {
+            let extra = self.files_second * content::GRID_CELL_H * self.icon_scale();
+            content::files_take_apps_row(&mut layout, extra, self.scroll.per[content::SECTION_FILES].pos);
         }
         // THE LONE APP (`app_actions.rs`): its row laid out round it, and
         // room under that row for its recents' title.
@@ -513,8 +542,19 @@ impl App {
                 }
             }
         }
-        let trim_want = self.apps_trim_target();
+        let (trim_want, second_want) = self.apps_trim_target();
         let trim = self.ui.open_trim();
+        // Files' second line (a search that left no app) opens and closes
+        // with the trim, at its rate: the sections glide, none jumps a row.
+        if out_of_sight || animation::reduce_motion() || (second_want - self.files_second).abs() < 0.003 {
+            if self.files_second != second_want {
+                self.files_second = second_want;
+                fit_animating = true;
+            }
+        } else {
+            self.files_second += (second_want - self.files_second) * k;
+            fit_animating = true;
+        }
         if self.ui.target() != Target::Open && !self.ui.is_animating() {
             if trim != trim_want {
                 self.ui.set_open_trim(trim_want);

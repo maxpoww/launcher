@@ -947,6 +947,9 @@ pub struct Layout {
     pub apps_avail: f32,
     /// How far the Controls band has opened (0..1): its row fades in with it.
     pub controls_k: f32,
+    /// A search left no app: Apps is its title over a short "No results"
+    /// line, its row going to Files ([`files_take_apps_row`]). Set by the App.
+    pub apps_none: bool,
     /// The screen's edge the dock stands on (the Launcher page's Position):
     /// at the bottom a row the box rises from; on a side a column, the box
     /// growing out of that edge with the dock riding its far side
@@ -1410,6 +1413,7 @@ pub fn layout(
         apps_full_h: fits as f32 * grid_cell_h,
         apps_avail: avail,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
+        apps_none: false,
         side: Side::Bottom,
         dock_band: Rect::new(0.0, card_top, w, (dock_hit_bottom - card_top).max(0.0)),
     }
@@ -1444,6 +1448,40 @@ pub fn side_open_w(config: &Config, icon_scale: f32) -> f32 {
     let band = config.window.input_bar_height as f32 * icon_scale;
     let cell = SIDE_CELL_W * icon_scale;
     band + 2.0 * GRID_PAD_X + (2 + SIDE_APPS_COLS) as f32 * cell + 2.0 * SECTION_GAP
+}
+
+/// How tall the Apps' line is when a search leaves no app: its "No
+/// results", under the title.
+pub const NO_APPS_H: f32 = 30.0;
+
+/// A SEARCH THAT LEFT NO APP (Max, 2026-10-27: "when there is no app matched,
+/// we should show the apps empty, install (1 line) and two lines of files"):
+/// Apps is its title over a short "No results" line ([`NO_APPS_H`], what the
+/// App's trim aims at; `Layout::apps_none`), Install keeps its line, and Files
+/// take the row Apps gave up as a SECOND line when they fill more than one.
+/// `extra` is how much of that row they have now — eased by the App, so
+/// Install and Files glide up as the line opens and back as it closes (cells
+/// are as tall as they are wide, whatever the viewport: a part-open second
+/// line is only clipped). It is taken out of the Apps' room, so Files'
+/// bottom (the System row, the search) stays put. `scroll` is Files' pager
+/// position as it is, wrapped again for the two-line pages.
+pub fn files_take_apps_row(l: &mut Layout, extra: f32, scroll: f32) {
+    let extra = extra.min(l.sections[SECTION_APPS].viewport.h);
+    if extra <= 0.0 || l.sections[SECTION_FILES].vertical {
+        return;
+    }
+    l.sections[SECTION_APPS].viewport.h -= extra;
+    for s in [SECTION_INSTALL, SECTION_FILES] {
+        l.sections[s].title_pos.1 -= extra;
+        l.sections[s].viewport.y -= extra;
+    }
+    let f = &mut l.sections[SECTION_FILES];
+    f.viewport.h += extra;
+    f.rows += 1;
+    f.cap = f.cols * f.rows;
+    f.n_pages = if f.cells == 0 { 0 } else { f.cells.div_ceil(f.cap).max(1) };
+    let total_w = f.n_pages as f32 * f.viewport.w;
+    f.scroll = if total_w > 0.0 { scroll.rem_euclid(total_w) } else { 0.0 };
 }
 
 /// [`layout`] for the dock on `side`: at the bottom as it always was, on
@@ -1729,6 +1767,7 @@ fn layout_side(
         apps_full_h: fits as f32 * cell_h,
         apps_avail: room,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
+        apps_none: false,
         side: if left { Side::Left } else { Side::Right },
         dock_band,
     }
@@ -3622,6 +3661,28 @@ pub fn scene(
             clip: reveal_clip(sec.viewport),
             ..Default::default()
         };
+        if sec.cells == 0 && s == SECTION_APPS && layout.apps_none {
+            // A search that left no app: "No results" under the title, as
+            // the line makes room for it (`files_take_apps_row`).
+            let line = LABEL_LINE_PX + 2.0;
+            let mut color = faded_on(dock_ink, dock_seen, 0.45, 4.5);
+            color[3] *= (sec.viewport.h / NO_APPS_H).clamp(0.0, 1.0);
+            grid.labels.push(Label {
+                text: crate::i18n::tr("No results").to_string(),
+                pos: (sec.viewport.x + sec.viewport.w / 2.0, sec.viewport.y + NO_APPS_H - line),
+                max_w: 200.0,
+                font_px: LABEL_FONT_PX + 2.0,
+                line_px: line,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: None,
+                color: Some(color),
+                clip: Some(reveal_rect),
+            });
+            scene.grids.push(grid);
+            continue;
+        }
         if sec.cells == 0 {
             // Empty state: Install shows its index/search hint;
             // Apps/Files show one only when a search matched nothing.
@@ -4931,6 +4992,47 @@ mod tests {
             },
         );
         assert!(s.grids.iter().all(|g| g.clip.h <= 0.0));
+    }
+
+    #[test]
+    fn a_search_with_no_app_gives_files_a_second_line() {
+        let cfg = config();
+        let at = |files: usize, trim: f32| {
+            layout(&cfg, 1.0, SURFACE, OPEN - trim, 10, 0, 0, 0.0, &[], [0, 1, files], [0.0; N_SECTIONS], false, (1.0, 1.0), None, 0.0, trim, 1)
+        };
+        let cell = GRID_CELL_H;
+        let bottom = |v: Rect| v.y + v.h;
+        // The trim the App aims at: the "No results" line and a row for Files.
+        let full = at(12, 0.0);
+        let trim = full.sections[SECTION_APPS].viewport.h - NO_APPS_H - cell;
+        let before = at(12, trim);
+        let mut l = at(12, trim);
+        files_take_apps_row(&mut l, cell, 0.0);
+        let (apps, files) = (&l.sections[SECTION_APPS], &l.sections[SECTION_FILES]);
+        assert!((apps.viewport.h - NO_APPS_H).abs() < 0.01, "Apps is its short line");
+        assert_eq!((files.rows, files.cap, files.n_pages), (2, 2 * files.cols, 1));
+        assert!((bottom(files.viewport) - bottom(before.sections[SECTION_FILES].viewport)).abs() < 0.01, "Files' bottom stays put");
+        assert!(l.sections[SECTION_INSTALL].viewport.y >= bottom(apps.viewport), "Install under Apps");
+        assert!(files.viewport.y >= bottom(l.sections[SECTION_INSTALL].viewport), "Files under Install");
+        assert_eq!(l.sections[SECTION_INSTALL].rows, 1, "Install keeps one line");
+        // Half open: Install and Files half way up, Files' bottom where it was.
+        let mut half = at(12, trim);
+        files_take_apps_row(&mut half, cell / 2.0, 0.0);
+        let dy = before.sections[SECTION_INSTALL].viewport.y - half.sections[SECTION_INSTALL].viewport.y;
+        assert!((dy - cell / 2.0).abs() < 0.01);
+        assert!((bottom(half.sections[SECTION_FILES].viewport) - bottom(before.sections[SECTION_FILES].viewport)).abs() < 0.01);
+        // Never more than the Apps' room.
+        let mut short = at(12, full.sections[SECTION_APPS].viewport.h - 20.0);
+        files_take_apps_row(&mut short, cell, 0.0);
+        assert!(short.sections[SECTION_APPS].viewport.h.abs() < 0.01);
+        // The pager's own position, wrapped for the two-line pages: a wheel
+        // that wrapped forward to -w is on the second page of two.
+        let cols = full.sections[SECTION_FILES].cols;
+        let mut wrapped = at(2 * cols + 3, trim);
+        let w = wrapped.sections[SECTION_FILES].viewport.w;
+        files_take_apps_row(&mut wrapped, cell, -w);
+        assert_eq!(wrapped.sections[SECTION_FILES].n_pages, 2);
+        assert!((wrapped.sections[SECTION_FILES].scroll - w).abs() < 0.01);
     }
 
     #[test]

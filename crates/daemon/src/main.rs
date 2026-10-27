@@ -959,6 +959,7 @@ fn main() -> anyhow::Result<()> {
         dissolve: None,
         dissolve_runs: 0,
         controls_band: 0.0,
+        files_second: 0.0,
         control_panel_from_apps: false,
         box_from_dock: false,
         box_drag: None,
@@ -2246,6 +2247,10 @@ pub struct App {
     /// The room the Controls row has under Files right now, eased toward
     /// `controls_band_target` (see `content::layout`).
     controls_band: f32,
+    /// How much of a second line Files have (0..1) — a search that left no
+    /// app gives them the Apps' row (`content::files_take_apps_row`) —,
+    /// eased with the trim.
+    files_second: f32,
     /// The panel was entered from the open apps grid: the gear goes back to
     /// the apps instead of closing the card.
     control_panel_from_apps: bool,

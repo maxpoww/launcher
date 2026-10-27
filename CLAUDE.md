@@ -1592,7 +1592,16 @@ The big daemon files are cohesive but long — go straight to the function:
   "Documentos" still finds ~/Documentos first. A record entry opened by another app gets that app
   added (`noted_by`). A watched-folder change re-ranks only while the owner is not walking results
   (`chosen`) or in Quick Look; one during a reading is read again after (`file_fresh_again`); the
-  tops leave out what the walk does (`apps::walk_skips`). Real home: `cargo test -- --ignored
+  tops leave out what the walk does (`apps::walk_skips`). A SEARCH THAT LEAVES NO APP (Max,
+  2026-10-27: "show the apps empty, install (1 line) and two lines of files";
+  `Layout::apps_none`, `content::files_take_apps_row`, from `layout_stretched`): Apps is its
+  title over a short "No results" line (`NO_APPS_H`), Install keeps its line, and Files take the
+  Apps' row as a SECOND line when they fill more than one (12 a page at six across) — taken out
+  of the Apps' room, so what is under Files stays put; `apps_trim_target` aims the card at exactly
+  that and says whether the line is wanted, and `App::files_second` eases it open and shut with
+  the trim (Install and Files glide, never jump a row). Not under a box open in the grid
+  (`box_in_grid`: it keeps its row's room); a package lifted out of Install brings the grid back
+  with at least a row to let it go on (the held trim, never under a row). Real home: `cargo test -- --ignored
   real_home_search --nocapture` (QUERIES=a,b,…). Rig: `HOME=<fake home>` for the rig dock, an
   `xdg-open` stub on its PATH, and the host's `xdg-mime`/`gio` (the toolbox has neither).
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.

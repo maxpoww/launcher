@@ -1941,7 +1941,9 @@ impl App {
         let layout = self.current_layout();
         let sec = &layout.sections[s];
         let cols = sec.cols.max(1);
-        let slot = slot % (cols * sec.rows.max(1));
+        let per_page = cols * sec.rows.max(1);
+        let page_start = slot / per_page * per_page;
+        let slot = slot % per_page;
         let cw = sec.viewport.w / cols as f32;
         let ch = if sec.vertical { sec.viewport.h / sec.rows.max(1) as f32 } else { cw * content::GRID_CELL_H / content::GRID_CELL_W };
         let (row, col) = (slot / cols, slot % cols);
@@ -1949,7 +1951,8 @@ impl App {
         if let Some(part) = layout.apps_part.filter(|p| s == content::SECTION_APPS && row as isize > p.row) {
             y += part.down;
         }
-        let x = sec.viewport.x + sec.row_shift(row * cols) + col as f32 * cw;
+        // (A short last row is centred: asked of its first cell, page and all.)
+        let x = sec.viewport.x + sec.row_shift(page_start + row * cols) + col as f32 * cw;
         let side = cw.min(ch) * 0.62;
         let dy = self.box_to_peek_dy();
         Some(content::Rect::new(x + (cw - side) / 2.0, y + dy + (ch * 0.42 - side / 2.0).max(0.0), side, side))
