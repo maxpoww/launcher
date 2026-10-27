@@ -1628,10 +1628,21 @@ The big daemon files are cohesive but long — go straight to the function:
   from the Apps' trimmed room even past nothing, so what is under them stays where the card's
   bottom holds it; `apps_trim_target`'s deep branch aims at the rows the first's page needs).
   Under each name when it was used and, from a MB, how big ("2 h · 8.4 MB", `ago`/`big`; the
-  page dots a line lower). THE KIND CHIPS (`CHIPS`: All · Documents · PDF · Pictures · Videos ·
-  Music · Folders) stand over the field in the System row's place, at the search pill's size
-  (`controls_layer`, tighter), the one in use lit (`deep_lit`: chosen, else a kind word typed);
-  a click, Tab / Shift+Tab. Tab on a CHOSEN FOLDER keeps the search to it (`Narrow::scope`);
+  page dots a line lower). THE TABS (Max, 2026-10-27: "no pills… letters as we use on the boxes… under
+  the searchbox… 9, then two, three pages more… the ones the user uses start being closer… if i search
+  '.html' the tag should be there"): WORDS under the search field (the field moves up into the band
+  the System row has — `deep_band`, `controls_layer` —, the tabs take its place: `Layout::tabs_row`,
+  their rects `Layout::controls`, `tabs_scale` when a box is too narrow for nine, `tabs_page`, dots
+  under them), the lit one(s) in the full ink, the others quieter (`DeepDraw::tabs`/`lit`). A `Tag`:
+  All, a kind, a TYPE by its ending (".html"), a PLACE ("Downloads/" — keeps the search to it);
+  NINE a page (`TABS_PAGE`), the first as `first_tabs` (the kinds, Downloads/, .html; then Desktop/,
+  Archives, .txt .md .docx … , the other places), then ORDERED BY USE (`by_use`,
+  `SearchState::tab_uses` = `deep-tabs.json`, fast launch's forgetting; a use = a click, or a file
+  opened while it is lit — `deep_used`; All first; made as "/" opens, never under the pointer). A
+  click (again: off), Tab / Shift+Tab (`deep_tab_walk`: one alone, its page shown), the wheel over
+  them (`deep_tabs_wheel`), or typing: a kind word or an ENDING (`file_search::ext_of`, `Query::ext`,
+  `Narrow::ext`) lights its tab and turns to its page once; an ending some file has and no tab has
+  gets one (`deep_tabs`), and kept by use it is a tab from then on. Tab on a CHOSEN FOLDER keeps the search to it (`Narrow::scope`);
   Backspace in the empty field takes the folder off, then the kind, then the deep search; Escape
   lets go of what is picked, then leaves. Ctrl+↑/↓ jump shelves (`deep_jump`). Ctrl+Space or
   Ctrl+click PICK files (`deep_mark`, a check at the picture's corner); Shift then opens the row

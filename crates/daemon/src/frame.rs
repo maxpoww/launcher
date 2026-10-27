@@ -11,7 +11,7 @@ use tracing::error;
 
 use crate::install::FAIL_FLASH;
 use crate::state::Target;
-use crate::{animation, apps, content, groups, pager, pages};
+use crate::{animation, apps, content, deep_search, groups, pager, pages};
 use crate::{App, BOUNCE_DURATION, BOUNCE_HEIGHT, DOCK_HOP_DURATION, DOCK_HOP_HEIGHT, DOCK_REST_AFTER_CLOSE};
 
 /// Exponential make-room glide rate (per second) for the grid and dock
@@ -33,6 +33,8 @@ const PIN_SLIDE_RATE: f32 = 20.0;
 const TRIM_RATE: f32 = 22.0;
 /// Space between the pills of the Controls row (px at bar scale 1).
 const CONTROLS_GAP: f32 = 10.0;
+/// The air between two of the deep search's tabs.
+const TAB_GAP: f32 = 16.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
@@ -171,8 +173,8 @@ impl App {
     }
 
     /// The size the System row's pills are drawn at: the control panel's near
-    /// layer — the deep search's kind chips, the search pill's own (smaller:
-    /// seven of them fit over the field).
+    /// layer — in the deep search the band holds the search field itself
+    /// (moved up, its tabs under it), at its own size.
     pub(crate) fn controls_layer(&self) -> f32 {
         crate::panel::LAYER_SCALE[if self.search.deep.is_some() { 1 } else { 0 }]
     }
@@ -180,7 +182,7 @@ impl App {
     /// The room the Controls band is heading for: a row's worth while a
     /// search matches settings, none otherwise.
     pub(crate) fn controls_band_target(&self) -> f32 {
-        if self.search.controls.is_empty() {
+        if self.search.controls.is_empty() && !self.deep_band() {
             0.0
         } else {
             content::controls_band_h(self.icon_scale(), self.controls_pill_h()) * self.control_rows() as f32
@@ -189,7 +191,13 @@ impl App {
 
     /// The band's rows: the one System row, while anything matches.
     pub(crate) fn control_rows(&self) -> usize {
-        usize::from(!self.search.controls.is_empty())
+        usize::from(!self.search.controls.is_empty() || self.deep_band())
+    }
+
+    /// The deep search's band: the room the search field moves up into, its
+    /// tabs taking the field's place under it (`deep_search.rs`).
+    pub(crate) fn deep_band(&self) -> bool {
+        self.search.deep.is_some() && !self.control_panel && self.dock_side() == crate::launcher_prefs::Side::Bottom
     }
 
     pub(crate) fn layout_at(&self, extent: f32) -> content::Layout {
@@ -238,7 +246,7 @@ impl App {
             std::array::from_fn(|s| self.scroll.per[s].pos),
             self.stack_open() || self.closing_members.is_some(),
             stretch,
-            (!self.search.controls.is_empty()).then(|| self.controls_pill_h()),
+            (!self.search.controls.is_empty() || self.deep_band()).then(|| self.controls_pill_h()),
             self.controls_band,
             self.ui.open_trim(),
             self.control_rows(),
@@ -280,14 +288,12 @@ impl App {
         // chance; one passed over gets no rect.
         if let Some(&(_, row)) = layout.control_bands.first() {
             let s = self.options_scale() * self.controls_layer();
-            // (The deep search's kind chips sit closer, all seven over the field.)
-            let tight = if self.search.deep.is_some() { 0.6 } else { 1.0 };
-            let gap = CONTROLS_GAP * self.options_scale() * tight;
+            let gap = CONTROLS_GAP * self.options_scale();
             let widths: Vec<f32> = self
                 .search
                 .controls
                 .iter()
-                .map(|&(_, w)| (w + 2.0 * crate::options::PILL_PAD_X * s * tight).max(row.h))
+                .map(|&(_, w)| (w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
                 .collect();
             let fits = content::row_fits(row, &widths, gap);
             let kept: Vec<f32> = fits.iter().map(|&i| widths[i]).collect();
@@ -296,6 +302,33 @@ impl App {
                 rects[i] = r;
             }
             layout.controls = rects;
+        }
+        // THE DEEP SEARCH'S TABS (`deep_search.rs`): the field moves up into
+        // the band, the tabs take its place under it — the page shown, words
+        // a little smaller on a box too narrow for its nine.
+        if let (Some(d), Some(&(_, band)), true) = (self.search.deep.as_ref(), layout.control_bands.first(), self.deep_band()) {
+            let was = layout.search_box;
+            let up = band.y + band.h / 2.0 - (was.y + was.h / 2.0);
+            layout.search_box.y += up;
+            layout.search_btn.y += up;
+            let row = content::Rect::new(band.x, was.y, band.w, was.h);
+            layout.tabs_row = Some(row);
+            let pages = d.tags.len().div_ceil(deep_search::TABS_PAGE).max(1);
+            let page = d.page.min(pages - 1);
+            let shown = page * deep_search::TABS_PAGE..((page + 1) * deep_search::TABS_PAGE).min(d.tags.len());
+            let gap = TAB_GAP * self.options_scale();
+            let widths: Vec<f32> = shown.clone().map(|i| d.tab_w.get(i).copied().unwrap_or(40.0)).collect();
+            let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+            let scale = ((row.w - 2.0 * gap) / total.max(1.0)).min(1.0);
+            let mut rects = vec![content::Rect::new(0.0, 0.0, 0.0, 0.0); d.tags.len()];
+            let mut x = row.x + (row.w - total * scale) / 2.0;
+            for (i, w) in shown.zip(widths) {
+                rects[i] = content::Rect::new(x - gap * scale / 2.0, row.y, (w + gap) * scale, row.h);
+                x += (w + gap) * scale;
+            }
+            layout.controls = rects;
+            layout.tabs_scale = scale;
+            layout.tabs_page = (page, pages);
         }
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
@@ -764,8 +797,11 @@ impl App {
                 )
             })
             .unwrap_or((0.0, 0.0));
-        // The deep search's chip and placeholder in the pill, measured.
+        // The deep search's chip and placeholder in the pill, measured; its
+        // tabs' words and the ones lit.
         let deep_chip = self.deep_chip_text();
+        let deep_tab_words: Vec<String> = self.search.deep.as_ref().map(|d| d.tags.iter().map(deep_search::Tag::label).collect()).unwrap_or_default();
+        let deep_lit = self.deep_lit();
         let (deep_chip_w, deep_placeholder_w) = match (deep_chip.as_deref(), self.renderer.as_mut()) {
             (Some(chip), Some(r)) => (
                 r.measure_text(chip, search_font, crate::options::TEXT_FONT),
@@ -1815,7 +1851,8 @@ impl App {
                     hidden: [false, d.shelves[1].hidden, d.shelves[2].hidden],
                     subs: &d.subs,
                     marked: &d.marked_cells,
-                    lit: self.deep_lit(),
+                    tabs: &deep_tab_words,
+                    lit: &deep_lit,
                     chip: deep_chip.as_deref().unwrap_or(""),
                     chip_w: deep_chip_w,
                     placeholder_w: deep_placeholder_w,

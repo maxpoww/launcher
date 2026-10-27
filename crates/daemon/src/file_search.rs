@@ -150,13 +150,28 @@ pub(crate) struct Query {
     pub all: Vec<String>,
     pub when: Option<When>,
     pub size: Option<(u64, u64)>,
+    /// A file type typed as its ending (".html": "html").
+    pub ext: Option<String>,
 }
 
 impl Query {
     /// Whether it asks for anything at all.
     pub(crate) fn asks(&self) -> bool {
-        !self.words.is_empty() || self.kind.is_some() || self.when.is_some() || self.size.is_some()
+        !self.words.is_empty() || self.kind.is_some() || self.when.is_some() || self.size.is_some() || self.ext.is_some()
     }
+}
+
+/// An ending typed: ".html" → "html" (a dot, then 1 to 8 letters or digits).
+pub(crate) fn ext_of(word: &str) -> Option<String> {
+    let rest = word.strip_prefix('.')?;
+    (!rest.is_empty() && rest.len() <= 8 && rest.chars().all(|c| c.is_ascii_alphanumeric())).then(|| rest.to_ascii_lowercase())
+}
+
+/// Whether file `name` ends in `ext` (lower case, no dot).
+pub(crate) fn has_ext(name: &str, ext: &str) -> bool {
+    name.len() > ext.len() + 1
+        && name.as_bytes()[name.len() - ext.len() - 1] == b'.'
+        && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext)
 }
 
 /// A time a query asks for, in days back from today's start (local): from
@@ -256,6 +271,13 @@ pub(crate) fn parse(query: &str) -> Query {
                 continue;
             }
         }
+        if q.ext.is_none() {
+            if let Some(ext) = ext_of(typed[i]) {
+                q.ext = Some(ext);
+                i += 1;
+                continue;
+            }
+        }
         let w = typed[i];
         let kind = KIND_WORDS.iter().find(|(k, _)| *k == folded[i]).map(|&(_, k)| k);
         match kind {
@@ -276,6 +298,8 @@ pub(crate) fn parse(query: &str) -> Query {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Narrow {
     pub kind: Option<Kind>,
+    /// A file type chosen (its ending, no dot): it stands for one typed.
+    pub ext: Option<String>,
     pub scope: Option<PathBuf>,
 }
 
@@ -442,6 +466,11 @@ impl Ranker {
                 return false;
             }
         }
+        if let Some(ext) = narrow.ext.as_deref().or(q.ext.as_deref()) {
+            if f.is_dir || !has_ext(&f.name, ext) {
+                return false;
+            }
+        }
         true
     }
 
@@ -543,9 +572,10 @@ pub(crate) fn mtime_of(meta: &std::fs::Metadata) -> f64 {
         .map_or(0.0, |d| d.as_secs_f64())
 }
 
-/// The owner's folders whose tops are watched: Desktop, Documents,
-/// Downloads, Music, Pictures (and its Screenshots), Videos — those there.
-pub(crate) fn watched_dirs() -> Vec<PathBuf> {
+/// The owner's folders by their XDG key (DESKTOP, DOCUMENTS, DOWNLOAD,
+/// MUSIC, PICTURES, VIDEOS — as `user-dirs.dirs` names them, else the
+/// English names), then Pictures' Screenshots as SCREENSHOTS; those there.
+pub(crate) fn user_places() -> Vec<(&'static str, PathBuf)> {
     let home = crate::filer::home();
     let conf = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from);
     let text = std::fs::read_to_string(conf.join("user-dirs.dirs")).unwrap_or_default();
@@ -557,16 +587,22 @@ pub(crate) fn watched_dirs() -> Vec<PathBuf> {
         "PICTURES" => "Pictures",
         _ => "Videos",
     };
-    let mut out: Vec<PathBuf> = ["DESKTOP", "DOCUMENTS", "DOWNLOAD", "MUSIC", "PICTURES", "VIDEOS"]
+    let mut out: Vec<(&'static str, PathBuf)> = ["DESKTOP", "DOCUMENTS", "DOWNLOAD", "MUSIC", "PICTURES", "VIDEOS"]
         .iter()
-        .map(|k| crate::filer::user_dir(&text, &home, k).unwrap_or_else(|| home.join(fallback(k))))
+        .map(|&k| (k, crate::filer::user_dir(&text, &home, k).unwrap_or_else(|| home.join(fallback(k)))))
         .collect();
-    if let Some(pics) = out.get(4).cloned() {
-        out.push(pics.join("Screenshots"));
+    if let Some(pics) = out.get(4).map(|(_, p)| p.clone()) {
+        out.push(("SCREENSHOTS", pics.join("Screenshots")));
     }
     let mut seen = std::collections::HashSet::new();
-    out.retain(|d| d.is_dir() && seen.insert(d.components().collect::<PathBuf>()));
+    out.retain(|(_, d)| d.is_dir() && d.as_path() != home.as_path() && seen.insert(d.components().collect::<PathBuf>()));
     out
+}
+
+/// The owner's folders whose tops are watched: Desktop, Documents,
+/// Downloads, Music, Pictures (and its Screenshots), Videos — those there.
+pub(crate) fn watched_dirs() -> Vec<PathBuf> {
+    user_places().into_iter().map(|(_, d)| d).collect()
 }
 
 /// A watched folder's top as the index has it (no hidden, no links).
@@ -653,6 +689,21 @@ mod tests {
     }
 
     #[test]
+    fn an_ending_typed_keeps_to_that_type() {
+        assert_eq!(parse(".HTML").ext.as_deref(), Some("html"));
+        assert_eq!(parse("informe .pdf").words, vec!["informe".to_owned()]);
+        assert_eq!(parse(".").ext, None);
+        assert!(has_ext("a.Html", "html") && !has_ext("html", "html") && !has_ext("ahtml", "html"));
+        let index = vec![file("/h/a/page.html", 0.0), file("/h/a/page.txt", 0.0), file("/h/a/notes.html", 0.0)];
+        let mut r = Ranker::default();
+        let o = Opened::new();
+        assert_eq!(r.rank(&index, &parse(".html"), &o, 0.0, 9).len(), 2);
+        assert_eq!(names(&index, r.rank(&index, &parse("page .html"), &o, 0.0, 9)), vec!["page.html"]);
+        let html = Narrow { ext: Some("html".into()), ..Default::default() };
+        assert_eq!(names(&index, r.rank_narrow(&index, &parse("page"), &html, &o, 0.0, 9)), vec!["page.html"]);
+    }
+
+    #[test]
     fn when_and_size_keep_to_what_they_say_and_alone_list_it() {
         let now = 1_800_000_000.0;
         let mut index = vec![file("/h/Downloads/new.pdf", now - 100.0), file("/h/Downloads/old.pdf", now - 90.0 * 86_400.0)];
@@ -694,11 +745,11 @@ mod tests {
         ];
         let mut r = Ranker::default();
         let o = Opened::new();
-        let pics = Narrow { kind: Some(Kind::Picture), scope: None };
+        let pics = Narrow { kind: Some(Kind::Picture), ..Default::default() };
         assert_eq!(names(&index, r.rank_narrow(&index, &parse("playa"), &pics, &o, 0.0, 9)), vec!["playa.jpg"]);
         // A chosen kind with nothing typed lists that kind.
         assert_eq!(names(&index, r.rank_narrow(&index, &parse(""), &pics, &o, 0.0, 9)), vec!["playa.jpg"]);
-        let docs = Narrow { kind: None, scope: Some(PathBuf::from("/h/Documents")) };
+        let docs = Narrow { scope: Some(PathBuf::from("/h/Documents")), ..Default::default() };
         assert_eq!(names(&index, r.rank_narrow(&index, &parse("playa"), &docs, &o, 0.0, 9)), vec!["playa notes.txt"]);
         assert_eq!(names(&index, r.rank_narrow(&index, &parse(""), &docs, &o, 0.0, 9)), vec!["playa notes.txt"]);
     }

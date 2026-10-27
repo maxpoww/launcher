@@ -328,7 +328,7 @@ pub const LABEL_FONT_PX: f32 = 12.0;
 pub const LABEL_LINE_PX: f32 = 16.0;
 /// Section titles (Apps, Install, Files, Controls), from Max's mockup
 /// (2026-09-30): small and bold, faint, raised a little in their band.
-const TITLE_FONT_PX: f32 = 13.0;
+pub(crate) const TITLE_FONT_PX: f32 = 13.0;
 const TITLE_LINE_PX: f32 = 16.0;
 pub(crate) const TITLE_ALPHA: f32 = 0.3;
 const TITLE_DROP: f32 = -1.0;
@@ -365,16 +365,18 @@ impl Default for SearchPill {
 /// What THE DEEP FILE SEARCH draws (`deep_search.rs`): its shelves' titles
 /// (the three sections', retitled: "PDF · 4"; a hidden one "" — its room is
 /// the first's, [`fold_shelves`]), a line under each file's name (when it
-/// was used), the files picked to act on together, the kind chip lit in the
-/// chips' row (the System row's place) and the chip in the search pill
-/// ("Files", "Files › Facturas", with its shaped width).
+/// was used), the files picked to act on together, its TABS' words (under
+/// the field: `Layout::tabs_row`, their rects `Layout::controls`) and the
+/// ones lit, and the chip in the search pill ("Files", "Files › Facturas",
+/// with its shaped width).
 #[derive(Clone, Copy, Debug)]
 pub struct DeepDraw<'a> {
     pub titles: [&'a str; N_SECTIONS],
     pub hidden: [bool; N_SECTIONS],
     pub subs: &'a std::collections::HashMap<usize, String>,
     pub marked: &'a [usize],
-    pub lit: Option<usize>,
+    pub tabs: &'a [String],
+    pub lit: &'a [usize],
     pub chip: &'a str,
     pub chip_w: f32,
     /// The shaped width of the pill's placeholder ("Search files").
@@ -975,6 +977,12 @@ pub struct Layout {
     /// The room the deep search's folded shelves gave the first
     /// ([`fold_shelves`]); 0 otherwise.
     pub shelf_room: f32,
+    /// The deep search's tabs: their row (where the search field stood), how
+    /// much smaller their words are drawn, and the page shown of how many
+    /// (`App::layout_stretched`; their rects are `controls`).
+    pub tabs_row: Option<Rect>,
+    pub tabs_scale: f32,
+    pub tabs_page: (usize, usize),
     /// The screen's edge the dock stands on (the Launcher page's Position):
     /// at the bottom a row the box rises from; on a side a column, the box
     /// growing out of that edge with the dock riding its far side
@@ -1443,6 +1451,9 @@ pub fn layout(
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
         apps_none: false,
         shelf_room: 0.0,
+        tabs_row: None,
+        tabs_scale: 1.0,
+        tabs_page: (0, 1),
         side: Side::Bottom,
         dock_band: Rect::new(0.0, card_top, w, (dock_hit_bottom - card_top).max(0.0)),
     }
@@ -1847,6 +1858,9 @@ fn layout_side(
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
         apps_none: false,
         shelf_room: 0.0,
+        tabs_row: None,
+        tabs_scale: 1.0,
+        tabs_page: (0, 1),
         side: if left { Side::Left } else { Side::Right },
         dock_band,
     }
@@ -3821,8 +3835,8 @@ pub fn scene(
             // Empty state: Install shows its index/search hint;
             // Apps/Files show one only when a search matched nothing.
             let text = match s {
-                SECTION_INSTALL if !install_hint.is_empty() => install_hint,
-                _ if !query.is_empty() => crate::i18n::tr("No results"),
+                SECTION_INSTALL if !install_hint.is_empty() && deep.is_none() => install_hint,
+                _ if !query.is_empty() || deep.is_some() => crate::i18n::tr("No results"),
                 _ => {
                     scene.grids.push(grid);
                     continue;
@@ -4442,10 +4456,61 @@ pub fn scene(
     // The Controls row: the settings the search matches, as the control
     // panel's near-layer pills under a section title. Apps content: it
     // rides the push with the rest.
-    if !layout.control_bands.is_empty() && !layout.controls.is_empty() && !panel {
+    // THE DEEP SEARCH'S TABS: words under the field, the ones lit in the full
+    // ink, the others as the titles' quieter, the page's dots under them.
+    if let (Some(d), Some(row), false) = (deep, layout.tabs_row, panel) {
+        let s = layout.tabs_scale;
+        let (font, line) = (TITLE_FONT_PX * s, TITLE_LINE_PX * s);
+        let mut tgrid = GridContent { clip: reveal_rect, ..Default::default() };
+        for (i, r) in layout.controls.iter().enumerate() {
+            let Some(word) = d.tabs.get(i).filter(|_| r.w > 0.0) else {
+                continue;
+            };
+            let a = if d.lit.contains(&i) {
+                1.0
+            } else if hover == Some(Hit::Control(i)) {
+                0.78
+            } else {
+                0.5
+            };
+            tgrid.labels.push(Label {
+                text: word.clone(),
+                pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0 - 2.0),
+                max_w: r.w,
+                font_px: font,
+                line_px: line,
+                centered: true,
+                dim: false,
+                cache: (s - 1.0).abs() < 0.001,
+                family: Some(FONT_BOLD),
+                color: Some(if a >= 1.0 { [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3]] } else { faded_on(dock_ink, dock_seen, a, 2.5) }),
+                clip: Some(reveal_rect),
+            });
+        }
+        let (page, pages) = layout.tabs_page;
+        if pages > 1 {
+            let (dot_r, spacing) = (2.5, 9.0);
+            let total = pages as f32 * spacing - (spacing - dot_r * 2.0);
+            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 3.0);
+            let hl = dock_highlight;
+            for p in 0..pages {
+                let x = cx - total / 2.0 + p as f32 * spacing + dot_r;
+                let on = if p == page { 1.0 } else { 0.28 };
+                tgrid.rects.push(RectInst {
+                    rect: Rect::new(x - dot_r, cy - dot_r, dot_r * 2.0, dot_r * 2.0),
+                    radius: dot_r,
+                    color: [hl[0], hl[1], hl[2], hl[3] * on],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+        }
+        scene.grids.push(tgrid);
+    }
+    if !layout.control_bands.is_empty() && !layout.controls.is_empty() && !panel && deep.is_none() {
         // One title over the one row: "System" — the settings and the
         // modules together (Max, 2026-10-22).
-        if let Some(&(title, _)) = layout.control_bands.first().filter(|_| deep.is_none()) {
+        if let Some(&(title, _)) = layout.control_bands.first() {
             scene.labels.push(Label {
                 text: crate::i18n::tr("System").to_string(),
                 pos: (title.0, title.1 + TITLE_DROP),
@@ -4470,8 +4535,7 @@ pub fn scene(
             (LAYER_WASH_DARK[0], HOVER_WASH_DARK)
         };
         let sc = search_pill.scale;
-        // (The deep search's kind chips: the search pill's size.)
-        let near = LAYER_SCALE[if deep.is_some() { 1 } else { 0 }];
+        let near = LAYER_SCALE[0];
         let (font, line) = (crate::options::FONT_PX * sc * near, crate::options::LINE_PX * sc * near);
         let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[0]];
         let glow = if bright { 0.0 } else { 1.0 };
@@ -4484,8 +4548,6 @@ pub fn scene(
                 continue; // didn't fit its row
             }
             let lift = control_lift.get(i).copied().unwrap_or(0.0);
-            // (The deep search's kind chip in use: lit, as a choice in use is.)
-            let lit = deep.is_some_and(|d| d.lit == Some(i));
             let k = 1.0 + LIFT * lift;
             let (pw, ph) = (r.w * k, r.h * k);
             let rect = Rect::new(r.x + r.w / 2.0 - pw / 2.0, r.y + r.h / 2.0 - ph / 2.0, pw, ph);
@@ -4502,13 +4564,12 @@ pub fn scene(
             cgrid.rects.push(RectInst {
                 rect,
                 radius: ph / 2.0,
-                color: crate::options::wash(!bright, lerp(rest_a, hover_a, if lit { 1.0 } else { lift }) * if lit { 2.2 } else { 1.0 } * layout.controls_k),
+                color: crate::options::wash(!bright, lerp(rest_a, hover_a, lift) * layout.controls_k),
                 glass: 0.0,
                 border: 0.0,
             });
             cgrid.labels.push(Label {
-                // (The deep search's chips are words of the shell's.)
-                text: if deep.is_some() { crate::i18n::tr(label).to_string() } else { label.to_string() },
+                text: label.to_string(),
                 pos: (rect.x + pw / 2.0, rect.y + (ph - line * k) / 2.0),
                 max_w: pw,
                 font_px: font * k,

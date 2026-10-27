@@ -22,7 +22,7 @@ const SLIDE_RATE: f32 = 12.0;
 
 /// Horizontal paging state: a visual position easing toward a
 /// page-aligned target, plus the wheel-turn accumulator.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Pager {
     /// Scroll offset in pixels (visual, lags behind `target`).
     pub pos: f32,

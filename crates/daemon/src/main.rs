@@ -2811,8 +2811,10 @@ struct SearchState {
     /// not the best match typing landed on: Space shows a chosen file big
     /// (Quick Look), and types a space on a found one.
     chosen: bool,
-    /// THE DEEP FILE SEARCH ("/", `deep_search.rs`), while it is up.
+    /// THE DEEP FILE SEARCH ("/", `deep_search.rs`), while it is up, and
+    /// how much each of its tabs was used (`deep-tabs.json`).
     deep: Option<deep_search::Deep>,
+    tab_uses: usage::UsageDb,
 }
 
 impl Default for SearchState {
@@ -2842,6 +2844,7 @@ impl Default for SearchState {
             keyed: false,
             chosen: false,
             deep: None,
+            tab_uses: usage::UsageDb::load_named("deep-tabs.json"),
         }
     }
 }
@@ -5213,9 +5216,9 @@ impl App {
             })
             .collect();
         self.search.control_lift = vec![0.0; self.search.controls.len()];
-        // (The deep search's kind chips stand in the System row's place.)
+        // (The deep search's tabs: measured, one made for a type typed.)
         if deep {
-            self.deep_chips();
+            self.deep_tabs();
         }
         // Search results are a flat ranked list: dense identity slots. (A
         // resting grid keeps the paged slots built just above.)
@@ -6067,7 +6070,7 @@ impl App {
                     self.activate(entry_idx, LaunchFrom::Box);
                 }
             }
-            Hit::Control(i) if self.search.deep.is_some() => self.deep_chip(i),
+            Hit::Control(i) if self.search.deep.is_some() => self.deep_tab(i),
             Hit::Control(i) => {
                 if let Some(&(label, _)) = self.search.controls.get(i) {
                     if self.search.control_modules.get(i).copied().unwrap_or(false) {
@@ -6181,6 +6184,10 @@ impl App {
     /// feedback), then the card gets out of the way. `from` decides what a
     /// running app means — see [`LaunchFrom`].
     fn activate(&mut self, index: usize, from: LaunchFrom) {
+        // (A file opened from the deep search: its tabs lit were used.)
+        if self.search.deep.is_some() && self.kinds.get(index) == Some(&apps::EntryKind::File) {
+            self.deep_used();
+        }
         // "Show all in Files" (`deep_search.rs`): the search in Golem Files.
         if self.entries.get(index).is_some_and(|e| e.id == deep_search::SHOW_ALL_ID) {
             if self.search.deep.is_some() {
@@ -6786,6 +6793,10 @@ impl App {
                 }
                 // A lone app's recents turn their own pages.
                 if self.recents_wheel(value) {
+                    return;
+                }
+                // The deep search's tabs turn theirs.
+                if self.deep_tabs_wheel(value) {
                     return;
                 }
                 if let Some(section) = self

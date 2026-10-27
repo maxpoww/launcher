@@ -8,10 +8,17 @@
 //!   folder): Backspace in an empty field takes the folder off, then the kind,
 //!   then the deep search; Escape leaves it (KRunner's one-runner mode,
 //!   Spotlight's `/PDF`).
-//! - THE KINDS as chips in the System row's place, over the field (`CHIPS`:
-//!   All · Documents · PDF · Pictures · Videos · Music · Folders, and "Show all
-//!   in Files" after them): a click, Tab / Shift+Tab, or a kind word typed
-//!   lights one (Spotlight's Files mode, Everything's filter bar).
+//! - THE TABS under the field (Max, 2026-10-27: "letters as we use on the
+//!   boxes… under the searchbox… 9, and two, three pages more… the ones the
+//!   user uses start being closer… if i search '.html' the tag should be
+//!   there"): words, not pills (`Tag`: All, the kinds, file types as ".html",
+//!   places as "Downloads/"), NINE a page (`TABS_PAGE`) and pages after them
+//!   (`first_tabs`: the kinds and Downloads first, then types and places);
+//!   ORDERED BY USE as fast launch is (`SearchState::tab_uses`, a use = a
+//!   click on one, or a file opened while it is lit; All stays first; the
+//!   order is made as "/" opens, never under the pointer). A click, Tab /
+//!   Shift+Tab (the page follows), the wheel over them, or a kind word or an
+//!   ending typed (".html" — a tab made for it if there is none) lights one.
 //! - BEFORE A WORD: three SHELVES — what was opened lately (the system's
 //!   record and what the box opened), what came lately (the watched folders'
 //!   tops, newest first) and the places (the home's folders).
@@ -41,16 +48,98 @@ use crate::file_search::{self, Kind, Narrow};
 use crate::i18n::{fill, tr};
 use crate::{apps, content, launch, App};
 
-/// The kinds the deep search keeps to, as chips: the word on it and the kind.
-pub(crate) const CHIPS: [(&str, Option<Kind>); 7] = [
-    ("All", None),
-    ("Documents", Some(Kind::Document)),
-    ("PDF", Some(Kind::Pdf)),
-    ("Pictures", Some(Kind::Picture)),
-    ("Videos", Some(Kind::Video)),
-    ("Music", Some(Kind::Music)),
-    ("Folders", Some(Kind::Folder)),
-];
+/// A TAB of the deep search: what a search keeps to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum Tag {
+    #[default]
+    All,
+    Kind(Kind),
+    /// A file type, by its ending (no dot).
+    Ext(String),
+    /// One of the owner's folders.
+    Place(PathBuf),
+}
+
+impl Tag {
+    /// Its key in the tabs' use.
+    fn key(&self) -> String {
+        match self {
+            Tag::All => "all".to_owned(),
+            Tag::Kind(k) => format!("kind:{}", kind_title(Some(*k))),
+            Tag::Ext(e) => format!("ext:{e}"),
+            Tag::Place(p) => format!("place:{}", p.display()),
+        }
+    }
+
+    /// Its word on the tab: "PDF", ".html", "Downloads/".
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Tag::All => tr("All").to_owned(),
+            Tag::Kind(k) => tr(kind_title(Some(*k))).to_owned(),
+            Tag::Ext(e) => format!(".{e}"),
+            Tag::Place(p) => format!("{}/", p.file_name().map_or_else(|| p.to_string_lossy(), |n| n.to_string_lossy())),
+        }
+    }
+}
+
+/// Tabs a page.
+pub(crate) const TABS_PAGE: usize = 9;
+
+/// The tabs as they first stand (`places`: the owner's folders by key): the
+/// kinds and the downloads, then file types and the other places — what is
+/// used moves up from there.
+fn first_tabs(places: &[(&'static str, PathBuf)]) -> Vec<Tag> {
+    let place = |key: &str| places.iter().find(|(k, _)| *k == key).map(|(_, p)| Tag::Place(p.clone()));
+    let ext = |e: &str| Some(Tag::Ext(e.to_owned()));
+    [
+        Some(Tag::All),
+        Some(Tag::Kind(Kind::Document)),
+        Some(Tag::Kind(Kind::Pdf)),
+        Some(Tag::Kind(Kind::Picture)),
+        Some(Tag::Kind(Kind::Video)),
+        Some(Tag::Kind(Kind::Music)),
+        Some(Tag::Kind(Kind::Folder)),
+        place("DOWNLOAD"),
+        ext("html"),
+        place("DESKTOP"),
+        Some(Tag::Kind(Kind::Archive)),
+        ext("txt"),
+        ext("md"),
+        ext("docx"),
+        ext("xlsx"),
+        ext("pptx"),
+        ext("odt"),
+        ext("csv"),
+        ext("png"),
+        ext("jpg"),
+        ext("gif"),
+        ext("svg"),
+        ext("mp4"),
+        ext("mp3"),
+        ext("zip"),
+        ext("json"),
+        place("SCREENSHOTS"),
+        place("DOCUMENTS"),
+        place("PICTURES"),
+        place("MUSIC"),
+        place("VIDEOS"),
+        ext("py"),
+        ext("rs"),
+        ext("sh"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// `tabs` in the order of use (`score` by key): All first, then the more
+/// used, the rest as they stood.
+fn by_use(mut tabs: Vec<Tag>, score: &HashMap<String, (f64, f64)>) -> Vec<Tag> {
+    let worth = |t: &Tag| if *t == Tag::All { f64::INFINITY } else { score.get(&t.key()).map_or(0.0, |&(s, _)| s) };
+    // (A stable sort: equal worth keeps the first order.)
+    tabs.sort_by(|a, b| worth(b).total_cmp(&worth(a)));
+    tabs
+}
 
 /// The chip after the kinds, and the last cell of the box's Files while it
 /// searches: every file found, in Golem Files.
@@ -82,10 +171,20 @@ pub(crate) struct Shelf {
 /// The deep search, while it is up.
 #[derive(Debug, Default)]
 pub(crate) struct Deep {
-    /// The kind chosen (`None`: All).
-    pub chip: Option<Kind>,
-    /// The folder the search keeps to.
+    /// The tab chosen (All: none) — a kind or a type; a place is `scope`.
+    pub tag: Tag,
+    /// The folder the search keeps to (a place's tab, or Tab on a folder),
+    /// and whether a tab set it (Tab walking the tabs lets go of it).
     pub scope: Option<PathBuf>,
+    pub scope_tab: bool,
+    /// The tabs in their order (made as "/" opens), their words' widths at
+    /// the tabs' size, the page shown, and its wheel.
+    pub tags: Vec<Tag>,
+    pub tab_w: Vec<f32>,
+    pub page: usize,
+    pub pager: crate::pager::Pager,
+    /// The tab what is typed lit last (its page shown once, as it comes).
+    pub typed_was: Option<usize>,
     /// The files picked to act on together (their paths), and their cells.
     pub marked: Vec<String>,
     pub marked_cells: Vec<usize>,
@@ -209,7 +308,20 @@ impl App {
     /// "/" typed into an empty search: the deep search comes up.
     pub(crate) fn deep_enter(&mut self) {
         info!("deep search: up");
-        self.search.deep = Some(Deep::default());
+        // (The tabs in the order of use, made now — never under the pointer;
+        // a type typed and used once is one of them from then on.)
+        let uses = self.search.tab_uses.snapshot();
+        let mut tags = first_tabs(&file_search::user_places());
+        let mut typed: Vec<&String> = uses.keys().filter(|k| k.starts_with("ext:")).collect();
+        typed.sort();
+        for key in typed {
+            let tag = Tag::Ext(key["ext:".len()..].to_owned());
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+        let tags = by_use(tags, &uses);
+        self.search.deep = Some(Deep { tags, ..Default::default() });
         self.search.open = true;
         self.search.query.clear();
         self.search.focus = None;
@@ -249,47 +361,175 @@ impl App {
         })
     }
 
-    /// The kind chips, in the System row's place (`search.controls`), and
-    /// the one lit.
-    pub(crate) fn deep_chips(&mut self) {
-        let font = crate::options::FONT_PX * self.options_scale() * self.controls_layer();
-        let labels: Vec<&'static str> = CHIPS.iter().map(|&(l, _)| l).collect();
-        self.search.controls = labels
-            .into_iter()
-            .map(|label| {
-                let shown = tr(label);
-                let w = match self.renderer.as_mut() {
-                    Some(r) => r.measure_text(shown, font, crate::options::TEXT_FONT),
-                    None => crate::options::est_text_w(shown, font),
-                };
-                (label, w)
-            })
-            .collect();
-        self.search.control_modules = vec![false; self.search.controls.len()];
-        self.search.control_lift = vec![0.0; self.search.controls.len()];
+    /// The tabs' words measured (as many as there are), and — what is typed
+    /// asking for a type there is no tab of — a tab made for it; the page
+    /// turned to the tab lit as what is typed lights another.
+    pub(crate) fn deep_tabs(&mut self) {
+        let q = file_search::parse(&self.search.query);
+        // (A type some file has: ".g" on the way to ".gif" makes none.)
+        let real = q.ext.filter(|e| self.file_index.iter().any(|f| !f.is_dir && file_search::has_ext(&f.name, e)));
+        let Some(d) = self.search.deep.as_mut() else {
+            return;
+        };
+        if let Some(ext) = real.filter(|e| !d.tags.contains(&Tag::Ext(e.clone()))) {
+            info!("deep search: a tab for .{ext}");
+            d.tags.push(Tag::Ext(ext));
+        }
+        if d.tab_w.len() != d.tags.len() {
+            let labels: Vec<String> = d.tags.iter().map(Tag::label).collect();
+            let widths: Vec<f32> = labels
+                .iter()
+                .map(|l| match self.renderer.as_ref() {
+                    Some(r) => r.measure_text(l, content::TITLE_FONT_PX, Some(content::FONT_BOLD)),
+                    None => crate::options::est_text_w(l, content::TITLE_FONT_PX),
+                })
+                .collect();
+            if let Some(d) = self.search.deep.as_mut() {
+                d.tab_w = widths;
+            }
+        }
+        // (Typing lit a tab on another page: that page — once, as it comes.)
+        let typed = self.deep_typed_tab();
+        if let Some(d) = self.search.deep.as_mut() {
+            if typed != d.typed_was {
+                if let Some(i) = typed {
+                    d.page = i / TABS_PAGE;
+                }
+                d.typed_was = typed;
+            }
+        }
     }
 
-    /// Which chip is lit: the kind chosen, else the kind a word asks for,
-    /// else All.
-    pub(crate) fn deep_lit(&self) -> Option<usize> {
-        let d = self.search.deep.as_ref()?;
-        let kind = d.chip.or_else(|| file_search::parse(&self.search.query).kind);
-        CHIPS.iter().position(|&(_, k)| k == kind)
+    /// The tab what is typed asks for, while no tab is chosen: a type's
+    /// ending, else a kind word.
+    fn deep_typed_tab(&self) -> Option<usize> {
+        let d = self.search.deep.as_ref().filter(|d| d.tag == Tag::All)?;
+        let q = file_search::parse(&self.search.query);
+        let want = q.ext.map(Tag::Ext).or(q.kind.map(Tag::Kind))?;
+        d.tags.iter().position(|t| *t == want)
     }
 
-    /// A chip clicked (or walked to by Tab): its kind.
-    pub(crate) fn deep_chip(&mut self, i: usize) {
-        let Some(&(label, kind)) = CHIPS.get(i) else {
+    /// The tabs lit: the one chosen (else the one typed), the place kept to;
+    /// All when neither.
+    pub(crate) fn deep_lit(&self) -> Vec<usize> {
+        let Some(d) = self.search.deep.as_ref() else {
+            return Vec::new();
+        };
+        let mut lit: Vec<usize> = Vec::new();
+        let chosen = (d.tag != Tag::All).then(|| d.tags.iter().position(|t| *t == d.tag)).flatten();
+        lit.extend(chosen.or_else(|| self.deep_typed_tab()));
+        if let Some(s) = &d.scope {
+            lit.extend(d.tags.iter().position(|t| *t == Tag::Place(s.clone())));
+        }
+        if lit.is_empty() {
+            lit.push(0);
+        }
+        lit
+    }
+
+    /// A tab clicked: on, or off again (a place: kept to, or let go); it is
+    /// used — it moves up the next time.
+    pub(crate) fn deep_tab(&mut self, i: usize) {
+        let Some(tag) = self.search.deep.as_ref().and_then(|d| d.tags.get(i).cloned()) else {
             return;
         };
         if let Some(d) = self.search.deep.as_mut() {
-            info!("deep search: {label}");
-            d.chip = kind;
+            match &tag {
+                Tag::Place(p) if d.scope.as_ref() == Some(p) => {
+                    d.scope = None;
+                    d.scope_tab = false;
+                }
+                Tag::Place(p) => {
+                    d.scope = Some(p.clone());
+                    d.scope_tab = true;
+                }
+                Tag::All => {
+                    d.tag = Tag::All;
+                    if d.scope_tab {
+                        d.scope = None;
+                        d.scope_tab = false;
+                    }
+                }
+                t if d.tag == *t => d.tag = Tag::All,
+                t => d.tag = t.clone(),
+            }
+            info!("deep search: tab {:?} (scope {:?})", d.tag, d.scope);
+        }
+        if tag != Tag::All {
+            self.search.tab_uses.increment(&tag.key());
         }
         self.search.selected = None;
         self.search.chosen = false;
         self.refilter();
         self.schedule_frame();
+    }
+
+    /// Tab walking the tabs: the next one (or the one before) chosen alone,
+    /// its page shown.
+    fn deep_tab_walk(&mut self, back: bool) {
+        let Some(d) = self.search.deep.as_mut() else {
+            return;
+        };
+        let n = d.tags.len().max(1);
+        let at = self.deep_lit().first().copied().unwrap_or(0);
+        let next = if back { (at + n - 1) % n } else { (at + 1) % n };
+        let Some(d) = self.search.deep.as_mut() else {
+            return;
+        };
+        match d.tags.get(next).cloned().unwrap_or_default() {
+            Tag::Place(p) => {
+                d.tag = Tag::All;
+                d.scope = Some(p);
+                d.scope_tab = true;
+            }
+            t => {
+                d.tag = t;
+                if d.scope_tab {
+                    d.scope = None;
+                    d.scope_tab = false;
+                }
+            }
+        }
+        d.page = next / TABS_PAGE;
+        self.search.selected = None;
+        self.search.chosen = false;
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// The tabs' page turned (the wheel over them): `dir` +1 the next.
+    pub(crate) fn deep_tab_page(&mut self, dir: i64) {
+        let Some(d) = self.search.deep.as_mut() else {
+            return;
+        };
+        let pages = d.tags.len().div_ceil(TABS_PAGE).max(1);
+        d.page = (d.page as i64 + dir).rem_euclid(pages as i64) as usize;
+        self.schedule_frame();
+    }
+
+    /// The wheel over the tabs: their pages. Whether it was over them.
+    pub(crate) fn deep_tabs_wheel(&mut self, value: f64) -> bool {
+        let over = self.search.deep.is_some()
+            && self.pointer_pos.is_some_and(|p| self.current_layout().tabs_row.is_some_and(|r| r.contains(p)));
+        if !over {
+            return false;
+        }
+        let dir = self.search.deep.as_mut().and_then(|d| d.pager.wheel(value));
+        if let Some(dir) = dir {
+            self.deep_tab_page(dir);
+        }
+        true
+    }
+
+    /// A file opened from the deep search: the tabs lit were used.
+    pub(crate) fn deep_used(&mut self) {
+        let keys: Vec<String> = match self.search.deep.as_ref() {
+            Some(d) => self.deep_lit().into_iter().filter_map(|i| d.tags.get(i)).filter(|t| **t != Tag::All).map(Tag::key).collect(),
+            None => return,
+        };
+        for k in keys {
+            self.search.tab_uses.increment(&k);
+        }
     }
 
     /// The shelves (the three sections' lists), what each is called, and
@@ -299,7 +539,7 @@ impl App {
         let Some(d) = self.search.deep.as_ref() else {
             return out;
         };
-        let (chip, scope) = (d.chip, d.scope.clone());
+        let (tag, scope) = (d.tag.clone(), d.scope.clone());
         let mut shelves: [Shelf; content::N_SECTIONS] = Default::default();
         // A file Shift took to its row: that row, on the first shelf.
         if self.search.focus_file.is_some() {
@@ -317,7 +557,7 @@ impl App {
         let now = crate::usage::now_secs();
         let mut lists: Vec<(String, Vec<Found>)> = Vec::new();
         let mut places = false;
-        if !q.asks() && chip.is_none() && scope.is_none() {
+        if !q.asks() && tag == Tag::All && scope.is_none() {
             // BEFORE A WORD: used lately, come lately, the places.
             let recent = self.deep_recent();
             let fresh = self.deep_fresh(&recent);
@@ -329,7 +569,11 @@ impl App {
             }
             places = true;
         } else {
-            let narrow = Narrow { kind: chip, scope: scope.clone() };
+            let narrow = Narrow {
+                kind: if let Tag::Kind(k) = tag { Some(k) } else { None },
+                ext: if let Tag::Ext(e) = &tag { Some(e.clone()) } else { None },
+                scope: scope.clone(),
+            };
             let ranked = self.file_ranker.rank_narrow(&self.file_index, &q, &narrow, &self.file_opened, now, DEEP_MAX);
             let found: Vec<Found> = ranked
                 .into_iter()
@@ -343,12 +587,13 @@ impl App {
                 })
                 .collect();
             let inside = self.deep_inside_shelf(&q, &narrow, &found);
-            if chip.is_some() || q.words.is_empty() && q.kind.is_none() {
-                // One kind (or a folder, a time, a size): one shelf.
-                let title = match (chip, &scope) {
-                    (Some(k), _) => tr(kind_title(Some(k))).to_owned(),
-                    (None, Some(dir)) => dir.file_name().map_or_else(|| tr("Files").to_owned(), |n| n.to_string_lossy().into_owned()),
-                    (None, None) => tr("Files").to_owned(),
+            if tag != Tag::All || q.ext.is_some() || q.words.is_empty() && q.kind.is_none() {
+                // One kind or type (or a folder, a time, a size): one shelf.
+                let title = match (&tag, &q.ext, &scope) {
+                    (Tag::All, Some(e), _) => Tag::Ext(e.clone()).label(),
+                    (Tag::All, None, Some(dir)) => dir.file_name().map_or_else(|| tr("Files").to_owned(), |n| n.to_string_lossy().into_owned()),
+                    (Tag::All, None, None) => tr("Files").to_owned(),
+                    (t, _, _) => t.label(),
                 };
                 let n = found.len();
                 lists.push((counted(&title, n), found));
@@ -608,10 +853,11 @@ impl App {
                 let Some(d) = self.search.deep.as_mut() else {
                     return false;
                 };
-                if d.scope.take().is_none() && d.chip.take().is_none() {
+                if d.scope.take().is_none() && std::mem::take(&mut d.tag) == Tag::All {
                     self.deep_leave();
                     return true;
                 }
+                d.scope_tab = false;
                 self.refilter();
                 self.schedule_frame();
                 true
@@ -632,11 +878,8 @@ impl App {
                         return true;
                     }
                 }
-                // Else the next kind (Shift: the one before), round.
-                let n = CHIPS.len();
-                let at = self.deep_lit().unwrap_or(0);
-                let next = if shift || keysym == Keysym::ISO_Left_Tab { (at + n - 1) % n } else { (at + 1) % n };
-                self.deep_chip(next);
+                // Else the next tab (Shift: the one before), round.
+                self.deep_tab_walk(shift || keysym == Keysym::ISO_Left_Tab);
                 true
             }
             Keysym::Up | Keysym::Down if ctrl => {
@@ -783,10 +1026,26 @@ mod tests {
     }
 
     #[test]
-    fn every_chip_and_shelf_has_its_words() {
-        for (label, kind) in CHIPS {
-            assert_eq!(label == "All", kind.is_none());
-        }
+    fn the_tabs_stand_kinds_first_and_move_up_with_use() {
+        let places = vec![("DOWNLOAD", PathBuf::from("/h/Descargas")), ("DESKTOP", PathBuf::from("/h/Escritorio"))];
+        let tabs = first_tabs(&places);
+        assert_eq!(tabs[0], Tag::All);
+        assert_eq!(tabs[7], Tag::Place(PathBuf::from("/h/Descargas")));
+        assert_eq!(tabs[8], Tag::Ext("html".into()));
+        assert!(tabs.len() > 3 * TABS_PAGE, "pages after the first");
+        assert_eq!(Tag::Place(PathBuf::from("/h/Descargas")).label(), "Descargas/");
+        assert_eq!(Tag::Ext("md".into()).label(), ".md");
+        // Used: up the order, All still first; the rest as they stood.
+        let score: HashMap<String, (f64, f64)> = [(Tag::Ext("gif".into()).key(), (3.0, 0.0)), (Tag::Kind(Kind::Music).key(), (1.0, 0.0))].into();
+        let ordered = by_use(tabs.clone(), &score);
+        assert_eq!(ordered[0], Tag::All);
+        assert_eq!(ordered[1], Tag::Ext("gif".into()));
+        assert_eq!(ordered[2], Tag::Kind(Kind::Music));
+        assert_eq!(ordered[3], Tag::Kind(Kind::Document));
+    }
+
+    #[test]
+    fn every_shelf_has_its_words() {
         assert_eq!(kind_title(Some(Kind::Pdf)), "PDF");
         assert_eq!(counted("PDF", 4), "PDF · 4");
         for k in [None, Some(Kind::Pdf), Some(Kind::Picture), Some(Kind::Video), Some(Kind::Music), Some(Kind::Document), Some(Kind::Archive), Some(Kind::Folder)] {
