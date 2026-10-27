@@ -85,8 +85,8 @@ impl Tag {
 /// Tabs a page.
 pub(crate) const TABS_PAGE: usize = 9;
 /// The tabs' type size (bigger than a title's: Max, "make them bigger").
-pub(crate) const TAB_FONT_PX: f32 = 15.0;
-pub(crate) const TAB_LINE_PX: f32 = 19.0;
+pub(crate) const TAB_FONT_PX: f32 = 16.5;
+pub(crate) const TAB_LINE_PX: f32 = 21.0;
 /// How fast the tabs' pages slide (the box's own pages').
 const TAB_SLIDE_RATE: f32 = 12.0;
 

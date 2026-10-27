@@ -4499,7 +4499,7 @@ pub fn scene(
             tgrid.labels.push(Label {
                 text: word.clone(),
                 // (A little up from the row's middle: the dots under them.)
-                pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0 - 6.0),
+                pos: (r.x + r.w / 2.0, r.y + (r.h - line) / 2.0 - 9.0),
                 max_w: r.w,
                 font_px: font,
                 line_px: line,
@@ -4514,7 +4514,7 @@ pub fn scene(
         if pages > 1 {
             let (dot_r, spacing) = (2.5, 9.0);
             let total = pages as f32 * spacing - (spacing - dot_r * 2.0);
-            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 4.0);
+            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 6.0);
             let hl = dock_highlight;
             for p in 0..pages {
                 let x = cx - total / 2.0 + p as f32 * spacing + dot_r;
