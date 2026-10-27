@@ -35,6 +35,9 @@ const TRIM_RATE: f32 = 22.0;
 const CONTROLS_GAP: f32 = 10.0;
 /// The air between two of the deep search's tabs.
 const TAB_GAP: f32 = 16.0;
+/// How much higher the deep search's field and tabs stand than the band's
+/// middle and the field's own place.
+const DEEP_LIFT: f32 = 14.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
@@ -308,10 +311,13 @@ impl App {
         // a little smaller on a box too narrow for its nine.
         if let (Some(d), Some(&(_, band)), true) = (self.search.deep.as_ref(), layout.control_bands.first(), self.deep_band()) {
             let was = layout.search_box;
-            let up = band.y + band.h / 2.0 - (was.y + was.h / 2.0);
+            // (Both a little higher than the band's middle and the field's
+            // place — Max: "move the tabs and the search a little higher".)
+            let lift = DEEP_LIFT * self.options_scale();
+            let up = band.y + band.h / 2.0 - (was.y + was.h / 2.0) - lift;
             layout.search_box.y += up;
             layout.search_btn.y += up;
-            let row = content::Rect::new(band.x, was.y, band.w, was.h);
+            let row = content::Rect::new(band.x, was.y - lift, band.w, was.h);
             layout.tabs_row = Some(row);
             let pages = d.tags.len().div_ceil(deep_search::TABS_PAGE).max(1);
             let page = d.page.min(pages - 1);
