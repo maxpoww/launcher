@@ -685,6 +685,16 @@ pub(crate) fn save_own(p: &Palette) -> std::io::Result<()> {
     std::fs::rename(&tmp, &path)
 }
 
+/// One of the owner's own palettes to the Bin (only theirs: a curated one
+/// has no file here).
+pub(crate) fn bin_own(id: &str) -> std::io::Result<()> {
+    let path = own_dir().join(format!("{id}.json"));
+    if id.contains('/') || !path.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not one of the owner's palettes"));
+    }
+    crate::trash::Trash::home().trash(&path).map(|_| ())
+}
+
 /// The apps' look told the system (dconf) once a change and in order: a
 /// drag across the Lighting's gap is many steps, and threads racing each
 /// other could leave the system on the other side of the row. Each teller

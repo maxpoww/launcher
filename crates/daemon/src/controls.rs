@@ -156,6 +156,17 @@ pub(crate) struct Editor {
     pub hue: f32,
     /// Its name (empty: "My palette N" at Save).
     pub name: String,
+    /// The owner's palette being changed (its id), or a new one.
+    pub editing: Option<String>,
+}
+
+/// What a pick in the editor came to.
+pub(crate) enum EditorDone {
+    Nothing,
+    /// Saved: the palette to put in use.
+    Saved(String),
+    /// Sent to the Bin, and whether it was the one in use.
+    Binned { name: String, in_use: bool },
 }
 
 /// THE FIELD BEING TYPED IN (Colours: the editor's colour and name, the
@@ -254,10 +265,16 @@ fn field_colour(col: usize, row: usize, hue: f32) -> [u8; 3] {
     crate::palette::tint::from_lch(l, c, hue)
 }
 
-/// Open the editor on the palette in use (its six as the start).
+/// Open the editor on a new palette, the one in use as its start.
 pub(crate) fn editor_open() {
-    let pick = crate::palette::choice();
-    let id = pick.palette_id().to_owned();
+    if let Ok(mut g) = EDITOR.lock() {
+        *g = Some(editor_new());
+    }
+}
+
+/// A new palette, the six of the one in use as its start.
+fn editor_new() -> Editor {
+    let id = crate::palette::choice().palette_id().to_owned();
     let soul = crate::palette::all()
         .into_iter()
         .find(|p| p.id == id)
@@ -267,9 +284,20 @@ pub(crate) fn editor_open() {
         })
         .unwrap_or([[0xff, 0xbe, 0x98], [0x1d, 0x20, 0x26], [0x2a, 0x2e, 0x36], [0x1d, 0x20, 0x26], [0xe6, 0xe6, 0xe0], [0x44, 0x48, 0x50]]);
     let hue = crate::palette::tint::lch(soul[0]).2;
-    if let Ok(mut g) = EDITOR.lock() {
-        *g = Some(Editor { soul, cur: 0, hue, name: String::new() });
-    }
+    Editor { soul, cur: 0, hue, name: String::new(), editing: None }
+}
+
+/// One of the owner's own palettes, as the six they gave it and its name.
+fn editor_of(id: &str) -> Option<Editor> {
+    let p = crate::palette::all().into_iter().find(|p| p.id == id && p.family == "own")?;
+    let soul: [[u8; 3]; 6] = p.soul.clone().try_into().unwrap_or([p.dark[p.accent], p.dark[1], p.dark[2], p.dark[1], p.dark[5], p.dark[3]]);
+    let hue = crate::palette::tint::lch(soul[0]).2;
+    Some(Editor { soul, cur: 0, hue, name: p.name, editing: Some(p.id) })
+}
+
+/// The owner's own palettes: (id, name), as the grid shows them.
+fn own_palettes() -> Vec<(String, String)> {
+    crate::palette::all().into_iter().filter(|p| p.family == "own").map(|p| (p.id, p.name)).collect()
 }
 
 /// The palette the editor holds now (for its live preview).
@@ -278,11 +306,17 @@ pub(crate) fn editor_draft() -> Option<crate::palette::Palette> {
     Some(crate::palette_gen::direct(crate::palette::DRAFT_ID, tr("New palette"), crate::palette_gen::with_web_ground(e.soul)))
 }
 
-/// A pick in the editor (`key`, `value`); true when it was the editor's.
-/// Save makes the palette and hands its id back through `saved`.
-pub(crate) fn editor_pick(key: &str, value: &str, saved: &mut Option<String>) -> bool {
-    let Ok(mut g) = EDITOR.lock() else { return false };
+/// A pick in the editor (`key`, `value`): Save makes the palette (or
+/// changes the owner's own) and hands its id back; the Bin sends theirs away.
+pub(crate) fn editor_pick(key: &str, value: &str) -> EditorDone {
+    let Ok(mut g) = EDITOR.lock() else { return EditorDone::Nothing };
     match key {
+        // A new palette, or one of the owner's to change (the row at the top).
+        "colors-edit-which" => {
+            if let Some(e) = if value == "new" { Some(editor_new()) } else { editor_of(value) } {
+                *g = Some(e);
+            }
+        }
         "colors-edit-role" => {
             if let (Some(e), Ok(i)) = (g.as_mut(), value.parse::<usize>()) {
                 e.cur = i.min(5);
@@ -302,20 +336,36 @@ pub(crate) fn editor_pick(key: &str, value: &str, saved: &mut Option<String>) ->
         "colors-edit" => match value {
             "save" => {
                 if let Some(e) = g.take() {
+                    // The owner's own palette keeps its id (a name typed renames it).
                     let n = (1..100).find(|n| !crate::palette::all().iter().any(|p| p.id == format!("mine-{n}"))).unwrap_or(1);
-                    let id = format!("mine-{n}");
-                    let name = if e.name.is_empty() { crate::i18n::fill(tr("My palette {n}"), &[("n", &n.to_string())]) } else { e.name.clone() };
+                    let id = e.editing.clone().unwrap_or_else(|| format!("mine-{n}"));
+                    let was = e.editing.as_deref().and_then(|id| own_palettes().into_iter().find(|(o, _)| o == id)).map(|(_, name)| name);
+                    let name = match (e.name.trim(), was) {
+                        ("", Some(was)) => was,
+                        ("", None) => crate::i18n::fill(tr("My palette {n}"), &[("n", &n.to_string())]),
+                        (typed, _) => typed.to_owned(),
+                    };
                     let p = crate::palette_gen::direct(&id, &name, crate::palette_gen::with_web_ground(e.soul));
                     if crate::palette::save_own(&p).is_ok() {
-                        *saved = Some(id);
+                        return EditorDone::Saved(id);
+                    }
+                }
+            }
+            "bin" => {
+                if let Some(id) = g.as_ref().and_then(|e| e.editing.clone()) {
+                    let name = own_palettes().into_iter().find(|(o, _)| *o == id).map_or_else(|| id.clone(), |(_, name)| name);
+                    if crate::palette::bin_own(&id).is_ok() {
+                        *g = None;
+                        let in_use = crate::palette::choice().palette_id() == id;
+                        return EditorDone::Binned { name, in_use };
                     }
                 }
             }
             _ => *g = None,
         },
-        _ => return false,
+        _ => {}
     }
-    true
+    EditorDone::Nothing
 }
 
 /// What an open setting shows.
@@ -2031,8 +2081,16 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // the colours go, then the palettes — the Dynamic one (made from the
         // wallpaper; the shell keeps reading the screen place by place) first.
         "Colours" if EDITOR.lock().is_ok_and(|g| g.is_some()) => {
-            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0, name: String::new() });
+            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0, name: String::new(), editing: None });
             view.subtitle = tr("Pick a place, then its colour. Each goes exactly there.").to_owned();
+            // A new one, or one of the owner's to change: words as the
+            // sections' (only once there is one of theirs).
+            let own = own_palettes();
+            if !own.is_empty() {
+                let mut which = vec![choice(tr("New"), e.editing.is_none(), "new")];
+                which.extend(own.into_iter().map(|(id, name)| choice(name, e.editing.as_deref() == Some(id.as_str()), id)));
+                view.groups.push(Group { centred: true, ..group(None, "colors-edit-which", 0.0, which) });
+            }
             // (No "Web": the web wears the Ground, as with every palette, and
             // the Web section's sliders take it from there — a place of its
             // own here went nowhere.)
@@ -2071,7 +2129,12 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 Choice { value: "colors-edit-name".to_owned(), ..name.choices[0].clone() },
             ];
             view.groups.push(Group { field: true, ..group(None, "colors-edit-text", 240.0, both) });
-            view.groups.push(Group { buttons: true, ..group(None, "colors-edit", 120.0, vec![choice(tr("Cancel"), false, "cancel"), choice(tr("Save"), false, "save")]) });
+            // (The owner's own palette can go to the Bin — the way back is there.)
+            let mut buttons = vec![choice(tr("Cancel"), false, "cancel"), choice(tr("Save"), false, "save")];
+            if e.editing.is_some() {
+                buttons.insert(0, choice(tr("Bin"), false, "bin"));
+            }
+            view.groups.push(Group { buttons: true, ..group(None, "colors-edit", 120.0, buttons) });
         }
         // THE APPS PAGE (the Colours model, 2026-10-20): the exceptions. The
         // apps as cards with their own icons where the palettes are; under
@@ -2097,24 +2160,36 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 Some((id, name, _)) => {
                     let own = picked.skip.contains(id);
                     let look = picked.app_look.get(id).map_or("", String::as_str);
+                    // (A look of its own reaches GTK apps and webapps; a Qt app
+                    // takes its own colours only — `app_caps`. One set before stays
+                    // offered, to be taken back.)
+                    let looks_reach = crate::app_caps::of(id) != Some(crate::app_caps::Caps::OwnOnly) || !look.is_empty();
                     view.groups.push(Group { centred: true, ..line(name.clone()) });
-                    let about = format!(
-                        "{}, {}.",
-                        if own { tr("Its own colours") } else { tr("The palette") },
-                        match look {
-                            "dark" => tr("always dark"),
-                            "light" => tr("always light"),
-                            _ => tr("the Apps' look"),
-                        }
-                    );
+                    let colours = if own { tr("Its own colours") } else { tr("The palette") };
+                    let about = if looks_reach {
+                        format!(
+                            "{colours}, {}.",
+                            match look {
+                                "dark" => tr("always dark"),
+                                "light" => tr("always light"),
+                                _ => tr("the Apps' look"),
+                            }
+                        )
+                    } else {
+                        format!("{colours}.")
+                    };
                     view.groups.push(Group { centred: true, ..line(about) });
                     // One line: the look's three words in the middle, the
                     // Colours switch at its left (on: the palette).
-                    let looks = vec![
-                        choice(tr("Dark"), look == "dark", format!("{id}:dark")),
-                        choice(tr("Light"), look == "light", format!("{id}:light")),
-                        choice(tr("Follow"), look.is_empty(), format!("{id}:follow")),
-                    ];
+                    let looks = if looks_reach {
+                        vec![
+                            choice(tr("Dark"), look == "dark", format!("{id}:dark")),
+                            choice(tr("Light"), look == "light", format!("{id}:light")),
+                            choice(tr("Follow"), look.is_empty(), format!("{id}:follow")),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
                     view.groups.push(Group { centred: true, hug: true, ..group(None, "colors-app-look", 0.0, looks) });
                     view.groups.push(Group { beside: true, ..on_off(Some("Colours"), "colors-app-colours", !own) });
                 }

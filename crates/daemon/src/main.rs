@@ -10,6 +10,7 @@
 
 mod action_track;
 mod app_actions;
+mod app_caps;
 mod web_actions;
 mod animation;
 mod app_themes;
@@ -4755,6 +4756,8 @@ impl App {
         // and an app opened after a restart had lost its own look (the pass of
         // 2026-10-27).
         crate::palette::exceptions_follow(&self.entries);
+        // …and what an exception can reach in each app (`app_caps`).
+        crate::app_caps::learn(&self.entries);
         self.kinds = kinds;
         self.placeholders = placeholders;
         self.base_len = self.entries.len();

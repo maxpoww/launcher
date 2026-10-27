@@ -2630,7 +2630,14 @@ impl Panel {
             if g.centred && !g.buttons && !g.field && !coloured {
                 let line = y;
                 // (No words — the Backgrounds tab's line — is still a line, for what sits on it.)
-                y = if chips.is_empty() { y + 40.0 * s } else { self.flow_words(&mut out, y, chips, false) };
+                // (A hugging line with no words — an app with only its Colours
+                // switch — is as tall as one with them: picking another app
+                // moves nothing.)
+                y = if chips.is_empty() {
+                    y + if g.hug { (26.0 + GROUP_GAP) * s } else { 40.0 * s }
+                } else {
+                    self.flow_words(&mut out, y, chips, false)
+                };
                 // Every group beside it, left to right (Auto, then Ambient while on):
                 // at the box's left, or — hugging — just left of the words,
                 // the whole centred.
@@ -2645,6 +2652,10 @@ impl Panel {
                     }
                     let left = out.chips[first..].iter().map(|c| c.rect.x).fold(f32::MAX, f32::min);
                     x = left - bw;
+                } else if g.hug && !besides.is_empty() {
+                    // (No words: what is beside them, alone, centred.)
+                    let bw: f32 = besides.iter().map(|(_, b)| self.inline_w(b)).sum::<f32>() + air * (besides.len() - 1) as f32;
+                    x = (self.key.0 - bw) / 2.0;
                 }
                 for (j, b) in besides {
                     self.inline(&mut out, x, line, 26.0 * s, j as u8, b);
@@ -4856,6 +4867,7 @@ impl App {
     /// The grid's apps for the Colours list, most used first (a webapp only
     /// once it is installed).
     fn colours_apps(&self) -> Vec<(String, String, usize)> {
+        let picked = crate::palette::choice();
         let mut apps: Vec<(u32, String, String, usize)> = self
             .entries
             .iter()
@@ -4865,6 +4877,9 @@ impl App {
             .filter(|(i, e)| self.kinds.get(*i) == Some(&crate::apps::EntryKind::App) && e.path.is_some() && !e.name.trim().is_empty())
             .filter(|(_, e)| !e.id.starts_with("golem-") && !e.id.starts_with("waverunner"))
             .filter(|(_, e)| !e.id.starts_with("webapp-") || self.managed_webapps.contains(&e.id["webapp-".len()..]))
+            // Only an app an exception can reach (`app_caps`) — or one that
+            // has an exception already, so it can be taken back.
+            .filter(|(_, e)| crate::app_caps::of(&e.id) != Some(crate::app_caps::Caps::None) || picked.skip.contains(&e.id) || picked.app_look.contains_key(&e.id))
             .map(|(i, e)| (self.usage.count(&e.id), e.id.clone(), e.name.clone(), i))
             .collect();
         apps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
@@ -4972,17 +4987,28 @@ impl App {
                 crate::palette::set_preview(crate::controls::editor_draft());
                 self.colors_apply(false);
             }
-            "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" => {
+            "colors-edit" | "colors-edit-which" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" => {
                 // (What a field held, kept first: the click then has its say.)
                 crate::controls::typing_commit();
-                let mut saved = None;
-                crate::controls::editor_pick(key, &value, &mut saved);
-                // Worn while it is made; Save or Cancel takes the preview off.
+                let done = crate::controls::editor_pick(key, &value);
+                // Worn while it is made; Save, Cancel or the Bin takes the preview off.
                 crate::palette::set_preview(crate::controls::editor_draft());
-                if let Some(id) = saved {
-                    self.colors_pick("colors-palette", &id);
-                } else {
-                    self.colors_apply(false);
+                match done {
+                    crate::controls::EditorDone::Saved(id) => self.colors_pick("colors-palette", &id),
+                    // To the Bin (restored from there, it is back in the grid):
+                    // the one in use gives way to Golem's as it comes.
+                    crate::controls::EditorDone::Binned { name, in_use } => {
+                        let body = crate::i18n::fill(tr("Moved “{name}” to the Bin"), &[("name", &name)]);
+                        let _ = std::thread::Builder::new()
+                            .name("palette-binned".into())
+                            .spawn(move || crate::desktop_send_notify_open(tr("Colours"), "preferences-desktop-color", &body, None));
+                        if in_use {
+                            self.colors_pick("colors-palette", crate::palette::DYNAMIC_ID);
+                        } else {
+                            self.colors_apply(false);
+                        }
+                    }
+                    crate::controls::EditorDone::Nothing => self.colors_apply(false),
                 }
             }
             // THE COLOURS BOX'S PLACE (the Colours model, 2026-10-20): its
