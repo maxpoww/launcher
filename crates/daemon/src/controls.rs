@@ -101,6 +101,10 @@ pub(crate) struct Group {
     /// A grid of tiles may have fewer rows a page than it would (the Apps
     /// page's few tiles, the box shrinking to them). None: as many as fit.
     pub grid_rows: Option<usize>,
+    /// Nothing, as tall as a line of words: a section without a line another
+    /// section has keeps the box's height (tabs of one box are the size of
+    /// the tallest, as macOS's and Windows' tab views are).
+    pub spacer: bool,
     /// A CENTRED LINE THAT HUGS what is beside it: the switches stand just
     /// left of the words and the whole is centred (the chosen app's
     /// `Colours ●  Dark · Light · Follow`), not at the box's left edge.
@@ -271,7 +275,7 @@ pub(crate) fn editor_open() {
 /// The palette the editor holds now (for its live preview).
 pub(crate) fn editor_draft() -> Option<crate::palette::Palette> {
     let e = EDITOR.lock().ok()?.clone()?;
-    Some(crate::palette_gen::direct(crate::palette::DRAFT_ID, tr("New palette"), e.soul))
+    Some(crate::palette_gen::direct(crate::palette::DRAFT_ID, tr("New palette"), crate::palette_gen::with_web_ground(e.soul)))
 }
 
 /// A pick in the editor (`key`, `value`); true when it was the editor's.
@@ -301,7 +305,7 @@ pub(crate) fn editor_pick(key: &str, value: &str, saved: &mut Option<String>) ->
                     let n = (1..100).find(|n| !crate::palette::all().iter().any(|p| p.id == format!("mine-{n}"))).unwrap_or(1);
                     let id = format!("mine-{n}");
                     let name = if e.name.is_empty() { crate::i18n::fill(tr("My palette {n}"), &[("n", &n.to_string())]) } else { e.name.clone() };
-                    let p = crate::palette_gen::direct(&id, &name, e.soul);
+                    let p = crate::palette_gen::direct(&id, &name, crate::palette_gen::with_web_ground(e.soul));
                     if crate::palette::save_own(&p).is_ok() {
                         *saved = Some(id);
                     }
@@ -752,7 +756,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false, screens: Vec::new() }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, spacer: false, hug: false, labelled: false, screens: Vec::new() }
 }
 
 /// [`group`], for the pages built in their own modules.
@@ -777,7 +781,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, hug: false, labelled: false, screens: Vec::new() }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, spacer: false, hug: false, labelled: false, screens: Vec::new() }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -2029,9 +2033,13 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Colours" if EDITOR.lock().is_ok_and(|g| g.is_some()) => {
             let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0, name: String::new() });
             view.subtitle = tr("Pick a place, then its colour. Each goes exactly there.").to_owned();
+            // (No "Web": the web wears the Ground, as with every palette, and
+            // the Web section's sliders take it from there — a place of its
+            // own here went nowhere.)
             let roles = crate::palette_gen::ROLES
                 .iter()
                 .enumerate()
+                .filter(|(i, _)| *i != crate::palette_gen::WEB_ROLE)
                 .map(|(i, r)| Choice { swatch: vec![e.soul[i]], ..choice(tr(r), i == e.cur, i.to_string()) })
                 .collect();
             view.groups.push(group(None, "colors-edit-role", 104.0, roles));
@@ -2149,9 +2157,13 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 }
                 view.groups.push(Group { centred: true, ..line(tr(about).to_owned()) });
                 colour_row(&mut view.groups, &picked, s);
-                // The way to the apps' exceptions: under the Apps section's sliders.
+                // The way to the apps' exceptions: under the Apps section's
+                // sliders — its line kept on the other sections, empty, so the
+                // box and its cards stay put as the sections change.
                 if s == Surface::Apps {
                     view.groups.push(Group { centred: true, ..group(None, "colors-apps-list", 0.0, vec![choice(tr("Apps"), false, "list")]) });
+                } else if !backgrounds {
+                    view.groups.push(Group { spacer: true, ..group(None, "", 0.0, Vec::new()) });
                 }
             }
         }

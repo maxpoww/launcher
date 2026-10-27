@@ -14,6 +14,15 @@ const LIGHT_L: [f32; 8] = [0.955, 0.918, 0.872, 0.780, 0.520, 0.285, 0.225, 0.17
 
 /// The roles of the six, in the editor's order.
 pub(crate) const ROLES: [&str; 6] = ["Accent", "Ground", "Panels", "Web", "Text", "Detail"];
+/// The soul's fourth place: the web's, which is the Ground's (the editor
+/// shows no place for it).
+pub(crate) const WEB_ROLE: usize = 3;
+
+/// An editor's six with the web's place on the Ground.
+pub(crate) fn with_web_ground(mut soul: [Rgb; 6]) -> [Rgb; 6] {
+    soul[WEB_ROLE] = soul[1];
+    soul
+}
 
 fn gap(a: f32, b: f32) -> f32 {
     let d = (a - b).abs() % 360.0;
@@ -168,15 +177,27 @@ fn build(soul: &[Rgb; 6], acc_idx: usize) -> ([Rgb; 16], [Rgb; 16], usize, usize
 /// (a dark ground: the dark one; a light ground: the light one), the rest
 /// made — the other look keeps the greys made from the same colours (worn as
 /// they were in the Light look, a dark palette stayed dark there, and its
-/// Lighting pushed the words past reading). Its words read on its ground and
-/// panels (4.5:1): moved toward white or black as little as it takes.
+/// Lighting pushed the words past reading). Its words read (4.5:1) on its
+/// ground and panels, moved toward white or black as little as it takes; on
+/// its ground at least when the two lie on opposite sides (the owner's
+/// panels are theirs: a light ground over the starting palette's dark panels).
 pub(crate) fn direct(id: &str, name: &str, soul: [Rgb; 6]) -> Palette {
     let (mut d, mut l, a, al) = build(&soul, 0);
     let [acc, ground, panels, _web, text, detail] = soul;
     let dark = ratio(ground, [255, 255, 255]) >= ratio(ground, [0, 0, 0]);
     let (edge, away) = if dark { ([0, 0, 0], [255, 255, 255]) } else { ([255, 255, 255], [0, 0, 0]) };
-    let reads = |t: Rgb| ratio(t, ground) >= 4.5 && ratio(t, panels) >= 4.5;
-    let text = if reads(text) { text } else { (1..=20).map(|i| mix(text, away, i as f32 / 20.0)).find(|t| reads(*t)).unwrap_or(away) };
+    let on_ground = |t: Rgb| ratio(t, ground) >= 4.5;
+    let on_both = |t: Rgb| on_ground(t) && ratio(t, panels) >= 4.5;
+    let push = |ok: &dyn Fn(Rgb) -> bool| (1..=20).map(|i| mix(text, away, i as f32 / 20.0)).find(|t| ok(*t));
+    let text = if on_both(text) {
+        text
+    } else if let Some(t) = push(&on_both) {
+        t
+    } else if on_ground(text) {
+        text
+    } else {
+        push(&on_ground).unwrap_or(away)
+    };
     let x = if dark { &mut d } else { &mut l };
     x[0] = mix(ground, edge, 0.18);
     x[1] = ground;
@@ -224,5 +245,11 @@ mod tests {
             let half = if ratio(ground, [255, 255, 255]) >= ratio(ground, [0, 0, 0]) { p.dark } else { p.light };
             assert!(ratio(half[5], half[1]) >= 4.5, "words on {ground:?}: {:.2}", ratio(half[5], half[1]));
         }
+        // A light ground over dark panels: the words read on the ground, the
+        // panels stay the owner's.
+        let mixed = [[0x88, 0x8d, 0xec], [0xac, 0xb5, 0xfc], [0x26, 0x26, 0x2e], [0xac, 0xb5, 0xfc], [0xd6, 0xd9, 0xe1], [0x3f, 0x40, 0x48]];
+        let p = direct("mine", "Mine", mixed);
+        assert_eq!(p.light[2], mixed[2]);
+        assert!(ratio(p.light[5], p.light[1]) >= 4.5);
     }
 }

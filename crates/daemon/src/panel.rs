@@ -2511,6 +2511,11 @@ impl Panel {
             if g.beside || gi < laid {
                 continue; // (laid out with the group before it)
             }
+            // (As tall as one line of words, `flow_words`: 26 and its gap.)
+            if g.spacer {
+                y += (26.0 + GROUP_GAP) * s;
+                continue;
+            }
             // THE MAIN CHOICE: bold words centred on the title's line.
             if g.main {
                 let chips = g.choices.iter().enumerate().map(|(ci, c)| (c.text.clone(), c.on, PanelAction::Pick { group: gi as u8, index: ci as u8 })).collect();
@@ -5756,6 +5761,7 @@ mod tests {
             mark: None,
             centred: false,
             grid_rows: None,
+            spacer: false,
             hug: false,
             labelled: false,
             screens: Vec::new(),

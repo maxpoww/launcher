@@ -1918,9 +1918,15 @@ pub(crate) fn for_apps(t: &Theme) -> Theme {
     let (dark_v, light_v) = match t.apps_tint {
         Some(0) => {
             let st = parse("stock", STOCK).expect("the Stock palette parses");
-            let (mut d, mut l) = (st.dark, st.light);
+            // The makers' own colours walked by the Apps' Lighting and
+            // Saturation, as every palette is (and as the web's and the
+            // icons' 0% are): as made at their middles, so 0% stays the
+            // makers' own and next to 1% nothing jumps (Max, 2026-10-20),
+            // and no slider of the row is dead at 0%.
+            let (mut d, mut l) = (tint::lit(&st.dark, true, t.apps_light), tint::lit(&st.light, false, t.apps_light));
             d[st.accent] = pal.dark[pal.accent];
             l[st.accent] = pal.light[pal.accent_light];
+            let (mut d, mut l) = (tint::saturate(&d, t.apps_sat), tint::saturate(&l, t.apps_sat));
             readable(&mut d, true, st.accent);
             readable(&mut l, false, st.accent);
             // (the palette's accent goes where the makers keep theirs)
@@ -4009,8 +4015,14 @@ mod tests {
     fn apps_off_wear_the_makers_colours_with_the_palettes_accent() {
         let t = resolve(&golem_choice(), true);
         let s = stock(&t);
-        let off = for_apps(&Theme { apps_tint: Some(0), apps: false, ..t.clone() });
+        let off = for_apps(&Theme { apps_tint: Some(0), apps: false, apps_light: 50, apps_sat: 50, ..t.clone() });
         assert_eq!(off.c[1], s.c[1], "the makers' ground");
+        // …walked by the Lighting and the Saturation like any palette: no
+        // slider of the row is dead at 0%.
+        let darker = for_apps(&Theme { apps_tint: Some(0), apps: false, apps_light: 10, apps_sat: 50, ..t.clone() });
+        assert!(rel_lum(darker.c[1]) < rel_lum(off.c[1]), "the Lighting at 0%");
+        let grey = for_apps(&Theme { apps_tint: Some(0), apps: false, apps_light: 50, apps_sat: 0, ..t.clone() });
+        assert_ne!(grey.accent(), off.accent(), "the Saturation at 0%");
         assert_eq!(off.accent(), t.accent(), "the palette's accent kept");
         for dark in [true, false] {
             let s = stock(&Theme { dark, ..t.clone() });
