@@ -7755,7 +7755,17 @@ pub(crate) fn shell_shade() -> f32 {
 /// The dock's icons: the Icons section's "Dock icons" (on top of the
 /// Shell's [`shell_content`], which the dock's scene already wears).
 pub(crate) fn dock_icons() -> f32 {
-    crate::palette::clear_alpha(DOCK_CLEAR.load(std::sync::atomic::Ordering::Relaxed))
+    dock_fade(DOCK_CLEAR.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// "Dock icons" at `v`. The dock blends in linear light, the compositor (the
+/// windows' Transparency) in the screen's: the same opacity left a bright
+/// icon on the dark dock still 73% there at the middle and 19% at the far
+/// end, where a window is nearly gone. Bent by 1.5 it reads close to a
+/// window's there (a dark icon on a light dock, already quicker in linear
+/// light, goes a little quicker still: no one bend fits both).
+fn dock_fade(v: u8) -> f32 {
+    crate::palette::clear_alpha(v).powf(1.5)
 }
 
 /// The halos and glows over a Shell scene's pills, at its [`shell_content`]
@@ -7831,6 +7841,18 @@ mod tests {
         }
         assert_eq!((content_at(0), content_at(m)), (1.0, 1.0), "the words whole up to as made");
         assert!((content_at(100) - 0.5).abs() < 1e-6, "the words at 50% at the far end");
+        // The dock's icons, as seen: a bright icon on the dark dock, blended
+        // in linear light, how much of it is left (0..1, in the screen's light).
+        let seen = |f: f32| {
+            let (icon, back) = (srgb_to_linear(244.0 / 255.0), srgb_to_linear(24.0 / 255.0));
+            let l = f * icon + (1.0 - f) * back;
+            let enc = |l: f32| if l <= 0.003_130_8 { 12.92 * l } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+            (enc(l) - enc(back)) / (enc(icon) - enc(back))
+        };
+        assert_eq!(dock_fade(0), 1.0, "Solid is whole");
+        assert!(seen(dock_fade(100)) < 0.08, "nearly gone at the far end: {}", seen(dock_fade(100)));
+        assert!((seen(dock_fade(50)) - 0.5).abs() < 0.12, "about half at the middle: {}", seen(dock_fade(50)));
+        assert!((1..=100).all(|v| dock_fade(v) < dock_fade(v - 1)), "every step fades");
     }
 
     #[test]
