@@ -89,7 +89,8 @@ impl App {
         let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
         let sec = &layout.sections[content::SECTION_APPS];
         let cell = content::GRID_CELL_H * self.icon_scale();
-        let room = layout.apps_full_h.min(layout.apps_avail - self.controls_band_target());
+        // (The deep search's folded shelves gave the first their room.)
+        let room = layout.apps_full_h.min(layout.apps_avail - self.controls_band_target()) + layout.shelf_room;
         let files = &layout.sections[content::SECTION_FILES];
         let second = if layout.apps_none && files.cells > files.cols { 1.0 } else { 0.0 };
         if self.gesture.dragging.is_some() || self.box_drag.is_some() {
@@ -103,6 +104,17 @@ impl App {
             // A search that left no app: its "No results" line, and the
             // row Files take for a second line when they fill one.
             return ((room - content::NO_APPS_H - second * cell).max(0.0), second);
+        }
+        // THE DEEP SEARCH's first shelf: the rows its page needs (a full
+        // page all of them; nothing found, one for its words).
+        if self.search.deep.is_some() && self.search.focus_file.is_none() {
+            let (cols, rows) = (sec.cols.max(1), sec.rows.max(1));
+            let per_page = cols * rows;
+            let n = self.search.visible[content::SECTION_APPS].len();
+            let page = self.scroll.per[content::SECTION_APPS].page(sec.page_len().max(1.0)) % sec.n_pages.max(1);
+            let on_page = n.saturating_sub(page * per_page).min(per_page);
+            let needed = if sec.n_pages > 1 { rows } else { on_page.div_ceil(cols).clamp(1, rows) };
+            return ((room - needed as f32 * cell).max(0.0), 0.0);
         }
         // With more than one page every page keeps the full page's rows
         // (Max: "the lines on both pages have to be the same"); pages fill
@@ -155,7 +167,14 @@ impl App {
 
     /// The Controls row's pill height: the control panel's near layer.
     pub(crate) fn controls_pill_h(&self) -> f32 {
-        self.options_pill_h() * crate::panel::LAYER_SCALE[0]
+        self.options_pill_h() * self.controls_layer()
+    }
+
+    /// The size the System row's pills are drawn at: the control panel's near
+    /// layer — the deep search's kind chips, the search pill's own (smaller:
+    /// seven of them fit over the field).
+    pub(crate) fn controls_layer(&self) -> f32 {
+        crate::panel::LAYER_SCALE[if self.search.deep.is_some() { 1 } else { 0 }]
     }
 
     /// The room the Controls band is heading for: a row's worth while a
@@ -234,10 +253,16 @@ impl App {
         // (`content::files_take_apps_row`). Not under a box open in the
         // grid: that keeps its row's room.
         let bottom = !self.control_panel && layout.side == crate::launcher_prefs::Side::Bottom;
-        layout.apps_none = bottom && centre_rows && apps_cells == 0 && !self.box_in_grid();
+        let deep = self.search.deep.as_ref().filter(|_| bottom && centre_rows);
+        layout.apps_none = bottom && centre_rows && apps_cells == 0 && !self.box_in_grid() && deep.is_none();
         if bottom && self.files_second > 0.0 {
             let extra = self.files_second * content::GRID_CELL_H * self.icon_scale();
             content::files_take_apps_row(&mut layout, extra, self.scroll.per[content::SECTION_FILES].pos);
+        }
+        // THE DEEP SEARCH: its empty shelves folded, their room the first's.
+        if let Some(d) = deep {
+            let hidden = [false, d.shelves[1].hidden, d.shelves[2].hidden];
+            content::fold_shelves(&mut layout, hidden, content::GRID_CELL_H * self.icon_scale(), self.scroll.per[content::SECTION_APPS].pos);
         }
         // THE LONE APP (`app_actions.rs`): its row laid out round it, and
         // room under that row for its recents' title.
@@ -254,13 +279,15 @@ impl App {
         // what is left is passed over and the next ones still have their
         // chance; one passed over gets no rect.
         if let Some(&(_, row)) = layout.control_bands.first() {
-            let s = self.options_scale() * crate::panel::LAYER_SCALE[0];
-            let gap = CONTROLS_GAP * self.options_scale();
+            let s = self.options_scale() * self.controls_layer();
+            // (The deep search's kind chips sit closer, all seven over the field.)
+            let tight = if self.search.deep.is_some() { 0.6 } else { 1.0 };
+            let gap = CONTROLS_GAP * self.options_scale() * tight;
             let widths: Vec<f32> = self
                 .search
                 .controls
                 .iter()
-                .map(|&(_, w)| (w + 2.0 * crate::options::PILL_PAD_X * s).max(row.h))
+                .map(|&(_, w)| (w + 2.0 * crate::options::PILL_PAD_X * s * tight).max(row.h))
                 .collect();
             let fits = content::row_fits(row, &widths, gap);
             let kept: Vec<f32> = fits.iter().map(|&i| widths[i]).collect();
@@ -737,6 +764,15 @@ impl App {
                 )
             })
             .unwrap_or((0.0, 0.0));
+        // The deep search's chip and placeholder in the pill, measured.
+        let deep_chip = self.deep_chip_text();
+        let (deep_chip_w, deep_placeholder_w) = match (deep_chip.as_deref(), self.renderer.as_mut()) {
+            (Some(chip), Some(r)) => (
+                r.measure_text(chip, search_font, crate::options::TEXT_FONT),
+                r.measure_text(crate::i18n::tr("Search files"), search_font, crate::options::TEXT_FONT),
+            ),
+            _ => (0.0, 0.0),
+        };
         let search_pill = content::SearchPill {
             scale: pill_scale,
             h: self.options_pill_h(),
@@ -1774,6 +1810,16 @@ impl App {
                 act_asking,
                 act_wide,
                 recent_title: self.search.actions.title.as_deref(),
+                deep: self.search.deep.as_ref().map(|d| content::DeepDraw {
+                    titles: [d.shelves[0].title.as_str(), d.shelves[1].title.as_str(), d.shelves[2].title.as_str()],
+                    hidden: [false, d.shelves[1].hidden, d.shelves[2].hidden],
+                    subs: &d.subs,
+                    marked: &d.marked_cells,
+                    lit: self.deep_lit(),
+                    chip: deep_chip.as_deref().unwrap_or(""),
+                    chip_w: deep_chip_w,
+                    placeholder_w: deep_placeholder_w,
+                }),
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()

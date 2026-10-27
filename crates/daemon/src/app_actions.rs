@@ -537,6 +537,16 @@ pub(crate) struct FocusFile {
     pub name: String,
     pub is_dir: bool,
     pub typed: String,
+    /// The other files picked with it (the deep search's): the row acts on
+    /// them all.
+    pub more: Vec<String>,
+}
+
+impl FocusFile {
+    /// Every file the row acts on: it, then the others picked.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        std::iter::once(self.path.clone()).chain(self.more.iter().cloned()).collect()
+    }
 }
 
 /// A webapp's site, when Golem knows it (by its slug, else its address).
@@ -570,6 +580,10 @@ pub(crate) enum Does {
     /// …opened with this app (its desktop id): its own command, terminal and
     /// graphics card, and noted as opened by it.
     OpenWith(String),
+    /// …put in the bin (every file picked, the deep search's).
+    Bin,
+    /// Every file picked opened, each with its app.
+    OpenAll,
     /// Close every window it has.
     CloseAll,
 }
@@ -1011,7 +1025,9 @@ impl App {
     fn add_file_row(&mut self, apps: &mut Vec<usize>, f: &FocusFile) {
         let cols = self.apps_cols();
         let side = cols.saturating_sub(1) / 2;
-        let index = self.push_transient_file(&f.path, &f.name, format!("xdg-open {}", launch::shell_quote(&f.path)), f.is_dir);
+        // (Several picked: the first stands for them, named by how many.)
+        let shown = if f.more.is_empty() { f.name.clone() } else { fill(tr("{n} files"), &[("n", &(f.more.len() + 1).to_string())]) };
+        let index = self.push_transient_file(&f.path, &shown, format!("xdg-open {}", launch::shell_quote(&f.path)), f.is_dir);
         let looks = |app: &App, i: usize| (app.placeholders.get(i).copied().unwrap_or(true), app.icon_layers.get(i).copied().unwrap_or(0));
         let own = looks(self, index);
         let base = self.base_len.min(self.entries.len());
@@ -1028,15 +1044,26 @@ impl App {
             )
         };
         let act = |name: &'static str, does: Does, sym: &str| (Action { name: tr(name).to_string(), does, symbol: symbol(sym) }, own);
+        let set = !f.more.is_empty();
         let mut right: Vec<(Action, (bool, u32))> = Vec::new();
-        right.extend(openers.first().map(|&i| open_with(self, i)));
-        right.push(act("Quick Look", Does::QuickLook, "eye"));
-        right.extend(openers.get(1).map(|&i| open_with(self, i)));
-        right.push(act("Copy path", Does::CopyPath, "link"));
-        right.extend(openers.get(2).map(|&i| open_with(self, i)));
+        if set {
+            // (Several picked: what can be done to them all.)
+            right.push(act("Open all", Does::OpenAll, "open"));
+            right.push(act("Copy paths", Does::CopyPath, "link"));
+        } else {
+            right.extend(openers.first().map(|&i| open_with(self, i)));
+            right.push(act("Quick Look", Does::QuickLook, "eye"));
+            right.extend(openers.get(1).map(|&i| open_with(self, i)));
+            right.push(act("Copy path", Does::CopyPath, "link"));
+            right.extend(openers.get(2).map(|&i| open_with(self, i)));
+        }
         right.truncate(side);
-        // (Nearest the file first, then laid out leftward.)
-        let mut left = vec![act("Show in Files", Does::ShowInFiles, "folder"), act("Copy", Does::CopyFile, "copy")];
+        // (Nearest the file first, then laid out leftward; the bin furthest.)
+        let mut left = vec![
+            act("Show in Files", Does::ShowInFiles, "folder"),
+            act(if set { "Copy all" } else { "Copy" }, Does::CopyFile, "copy"),
+            act("Move to Bin", Does::Bin, "trash"),
+        ];
         left.truncate(cols.saturating_sub(1 + right.len()).min(side));
         left.reverse();
         let n_left = left.len();
@@ -1638,13 +1665,26 @@ impl App {
                 _ => return self.peek_key(crate::quicklook::BOX, keysym, None),
             }
         }
+        // Ctrl+Delete on a found file (or its row): into the bin — its row's
+        // button too, where the row is wide enough to hold it.
+        if matches!(keysym, Keysym::Delete | Keysym::KP_Delete) && self.modifiers.ctrl {
+            let paths = match &self.search.focus_file {
+                Some(f) => f.paths(),
+                None => self.chosen_file().and_then(|e| self.entries.get(e)).map(|e| vec![e.id.clone()]).unwrap_or_default(),
+            };
+            if !paths.is_empty() {
+                self.box_bin(&paths);
+                return true;
+            }
+        }
         // Delete on a recent puts it away.
         if matches!(keysym, Keysym::Delete | Keysym::KP_Delete) && self.box_delete() {
             return true;
         }
         // Space on a found FILE the arrows or the pointer chose: it shows big
-        // (Quick Look) — on the best match typing landed on, a space.
-        if keysym == Keysym::space && self.search.chosen {
+        // (Quick Look) — on the best match typing landed on, a space. (Not with
+        // Ctrl: the deep search picks it.)
+        if keysym == Keysym::space && self.search.chosen && !self.modifiers.ctrl {
             if let Some(entry) = self.chosen_file() {
                 self.box_peek_file(entry);
                 return true;
@@ -1850,11 +1890,44 @@ impl App {
         }
     }
 
-    /// The found file (the Files section's) the selection is on.
-    fn chosen_file(&self) -> Option<usize> {
+    /// The found file (the Files section's, or any shelf's of the deep
+    /// search) the selection is on.
+    pub(crate) fn chosen_file(&self) -> Option<usize> {
         let (s, cell) = self.search.selected.and_then(|f| self.flat_to_pos(f))?;
         let entry = *self.search.visible[s].get(cell)?;
-        (s == content::SECTION_FILES && self.kinds.get(entry) == Some(&apps::EntryKind::File)).then_some(entry)
+        self.found_file(s, entry).then_some(entry)
+    }
+
+    /// Whether cell `entry` of section `s` is a found file — the Files
+    /// section's, or any shelf's of the deep search, not a lone app's row.
+    pub(crate) fn found_file(&self, s: usize, entry: usize) -> bool {
+        let shelf = s == content::SECTION_FILES || (self.search.deep.is_some() && self.search.focus_file.is_none());
+        shelf && self.kinds.get(entry) == Some(&apps::EntryKind::File) && self.entries.get(entry).is_some_and(|e| e.id.starts_with('/'))
+    }
+
+    /// Ctrl+Enter on a found file (or its row's): shown in Files, selected
+    /// there. Whether there was one.
+    pub(crate) fn box_show_in_files(&mut self) -> bool {
+        let path = match &self.search.focus_file {
+            Some(f) => Some(f.path.clone()),
+            None => self.chosen_file().or_else(|| {
+                let (s, cell) = self.search.selected.and_then(|f| self.flat_to_pos(f))?;
+                let e = *self.search.visible[s].get(cell)?;
+                self.found_file(s, e).then_some(e)
+            }).and_then(|e| self.entries.get(e)).map(|e| e.id.clone()),
+        };
+        let Some(path) = path else {
+            return false;
+        };
+        info!("ctrl+enter: {path} in Files");
+        self.search.query.clear();
+        self.search.open = false;
+        self.search.deep = None;
+        self.search.focus_file = None;
+        self.refilter();
+        self.dismiss();
+        self.filer_show_item(Path::new(&path));
+        true
     }
 
     /// QUICK LOOK OF A FOUND FILE (Max, 2026-10-27: "also quick view on
@@ -1903,8 +1976,12 @@ impl App {
             return;
         }
         // (A found file: opened as a click on it would.)
-        let s = content::SECTION_FILES;
-        if let Some(entry) = key.and_then(|key| self.search.visible[s].iter().copied().find(|&e| self.entries.get(e).is_some_and(|x| x.id == key))) {
+        let found = key.and_then(|key| {
+            (0..content::N_SECTIONS).find_map(|s| {
+                self.search.visible[s].iter().copied().find(|&e| self.found_file(s, e) && self.entries.get(e).is_some_and(|x| x.id == key))
+            })
+        });
+        if let Some(entry) = found {
             self.activate(entry, crate::LaunchFrom::Box);
         }
     }
@@ -1985,17 +2062,22 @@ impl App {
         }
         // A FOUND FILE (the Files section's) under the pointer, or the keys'
         // when they moved last: to its row (`add_file_row`).
-        let fs = content::SECTION_FILES;
         let on_file = match self.hover {
-            Some(content::Hit::GridCell(hs, i)) if hs == fs && !self.search.keyed => self.search.visible[fs].get(i).copied(),
+            Some(content::Hit::GridCell(hs, i)) if !self.search.keyed => {
+                self.search.visible[hs].get(i).copied().filter(|&e| self.found_file(hs, e))
+            }
             _ if self.search.keyed => self.chosen_file(),
             _ => None,
         };
+        // (The deep search's files picked to act on together: their row,
+        // the one Shift is on first.)
+        let picked = self.deep_picked();
         if let Some(e) = on_file.filter(|&e| self.kinds.get(e) == Some(&apps::EntryKind::File)) {
             let (path, name) = (self.entries[e].id.clone(), self.entries[e].name.clone());
             let is_dir = Path::new(&path).is_dir();
-            info!("shift: {path} to its row");
-            self.search.focus_file = Some(FocusFile { path, name, is_dir, typed: self.search.query.clone() });
+            let more: Vec<String> = if picked.contains(&path) { picked.into_iter().filter(|p| *p != path).collect() } else { Vec::new() };
+            info!("shift: {path} to its row (and {} more picked)", more.len());
+            self.search.focus_file = Some(FocusFile { path, name, is_dir, typed: self.search.query.clone(), more });
             self.refilter();
             self.schedule_frame();
             return;
@@ -2177,6 +2259,23 @@ impl App {
 
     /// The box goes, the keyboard back to where it was (Show all and Close
     /// all leave no app starting to give it to).
+    /// Files put in the bin from the box (a file's row): gone from what the
+    /// box finds at once, the row with them; the box stays, on the search.
+    fn box_bin(&mut self, paths: &[String]) {
+        info!("putting {} file(s) in the bin from the box", paths.len());
+        self.search.focus_file = None;
+        for p in paths {
+            self.trash_file(p);
+        }
+        let gone: Vec<&String> = paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect();
+        self.file_index.retain(|f| !gone.contains(&&f.path));
+        if let Some(d) = self.search.deep.as_mut() {
+            d.marked.retain(|p| !gone.contains(&p));
+        }
+        self.refilter();
+        self.schedule_frame();
+    }
+
     fn lone_leave(&mut self) {
         if self.interactive {
             self.begin_keyboard_handback(KbSurface::Launcher, None);
@@ -2244,15 +2343,34 @@ impl App {
                 return;
             }
             Does::CopyFile => {
-                info!("copying {app} (the file)");
-                self.serve_files(std::slice::from_ref(&app), false);
+                let all = self.search.focus_file.as_ref().map_or_else(|| vec![app.clone()], FocusFile::paths);
+                info!("copying {} file(s), {app} first", all.len());
+                self.serve_files(&all, false);
                 self.lone_leave();
                 return;
             }
             Does::CopyPath => {
-                info!("copying the path of {app}");
-                self.copy_text(&app);
+                let all = self.search.focus_file.as_ref().map_or_else(|| vec![app.clone()], FocusFile::paths);
+                info!("copying the path(s) of {} file(s)", all.len());
+                self.copy_text(&all.join("\n"));
                 self.lone_leave();
+                return;
+            }
+            Does::OpenAll => {
+                let all = self.search.focus_file.as_ref().map_or_else(|| vec![app.clone()], FocusFile::paths);
+                info!("opening {} files", all.len());
+                for p in &all {
+                    if let Err(e) = launch::launch(&format!("xdg-open {}", launch::shell_quote(p)), false, &self.config.launch.terminal) {
+                        error!("opening {p} failed: {e:#}");
+                    }
+                    self.file_opened_from_box(p);
+                }
+                self.lone_leave();
+                return;
+            }
+            Does::Bin => {
+                let all = self.search.focus_file.as_ref().map_or_else(|| vec![app.clone()], FocusFile::paths);
+                self.box_bin(&all);
                 return;
             }
             _ => {}
@@ -2283,7 +2401,14 @@ impl App {
                 }
             }
             // (Taken before: it needs no app; a file's own, above.)
-            Does::Open(_) | Does::QuickLook | Does::ShowInFiles | Does::CopyFile | Does::CopyPath | Does::OpenWith(_) => {}
+            Does::Open(_)
+            | Does::QuickLook
+            | Does::ShowInFiles
+            | Does::CopyFile
+            | Does::CopyPath
+            | Does::OpenWith(_)
+            | Does::Bin
+            | Does::OpenAll => {}
             Does::CloseAll => {
                 info!("closing every window of {app} ({})", windows.len());
                 for addr in &windows {

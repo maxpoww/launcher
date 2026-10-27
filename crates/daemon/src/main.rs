@@ -75,6 +75,8 @@ mod peek_slides;
 mod peek_syntax;
 mod peek_web;
 mod peek_page;
+mod deep_search;
+mod file_inside;
 mod file_search;
 mod peek_zoom;
 mod apps_icon;
@@ -934,6 +936,7 @@ fn main() -> anyhow::Result<()> {
         file_opened: Default::default(),
         file_ranker: Default::default(),
         file_watched: Vec::new(),
+        inside_read: None,
         file_fresh_pending: false,
         file_fresh_again: false,
         groups: groups::GroupDb::load(),
@@ -2195,6 +2198,8 @@ pub struct App {
     /// The owner's watched folders (`file_search::watched_dirs`), and a
     /// reading of their tops asked for.
     file_watched: Vec<std::path::PathBuf>,
+    /// When the papers' text was last brought up to date (`file_inside`).
+    inside_read: Option<Instant>,
     file_fresh_pending: bool,
     file_fresh_again: bool,
     /// Persistent app groups ("boxes") shown in the Apps grid.
@@ -2806,6 +2811,8 @@ struct SearchState {
     /// not the best match typing landed on: Space shows a chosen file big
     /// (Quick Look), and types a space on a found one.
     chosen: bool,
+    /// THE DEEP FILE SEARCH ("/", `deep_search.rs`), while it is up.
+    deep: Option<deep_search::Deep>,
 }
 
 impl Default for SearchState {
@@ -2834,6 +2841,7 @@ impl Default for SearchState {
             shift_tap: false,
             keyed: false,
             chosen: false,
+            deep: None,
         }
     }
 }
@@ -4922,7 +4930,8 @@ impl App {
     /// though the query is still live for the Install list itself.
     fn grid_resting(&self) -> bool {
         // (An app Shift took to its row lays the box out as a search does.)
-        (self.search.query.is_empty() && self.search.focus.is_none() && self.search.focus_file.is_none()) || self.install_drag_reset
+        (self.search.query.is_empty() && self.search.focus.is_none() && self.search.focus_file.is_none() && self.search.deep.is_none())
+            || self.install_drag_reset
     }
 
     /// Whether entry `idx` is an app whose uninstall is in flight — hidden
@@ -5022,7 +5031,18 @@ impl App {
         let group_cells = self.group_cells();
         if !resting_grid {
             // (Nothing typed — an app Shift took to its row —: the home's.)
-            visible[content::SECTION_FILES] = if searching { self.file_results() } else { self.home_listing() };
+            visible[content::SECTION_FILES] = if self.search.deep.is_some() {
+                Vec::new()
+            } else if searching {
+                let mut found = self.file_results();
+                // (Then every file found, in Golem Files.)
+                if !found.is_empty() {
+                    found.push(self.show_all_cell());
+                }
+                found
+            } else {
+                self.home_listing()
+            };
         } else {
             // Hide pinned apps from the grid when the search box is
             // empty — they're already visible on the dock. Grouped
@@ -5129,9 +5149,19 @@ impl App {
             // (everything but dotfiles).
             visible[content::SECTION_FILES] = self.home_listing();
         }
+        // THE DEEP SEARCH ("/"): its shelves are the sections.
+        let deep = self.search.deep.is_some() && !resting_grid;
+        if deep {
+            visible = self.deep_results();
+        }
         // One app left in a search: its actions follow it as cells of their
-        // own (`app_actions.rs`).
-        self.add_action_cells(&mut visible[content::SECTION_APPS], resting_grid);
+        // own (`app_actions.rs`) — in the deep search, only a file's row.
+        if !deep || self.search.focus_file.is_some() {
+            self.add_action_cells(&mut visible[content::SECTION_APPS], resting_grid);
+        } else {
+            // (A row that was — a file's, gone back to the shelves — goes.)
+            self.search.actions = app_actions::Actions::default();
+        }
         // Pinned filesystem paths render on the dock through transient
         // entries; an open directory stack lists its contents the same way.
         self.pinned_path_entries();
@@ -5150,7 +5180,7 @@ impl App {
         // width holds (`content::controls_rects` leaves the rest out). The app
         // found stays the one selected, so the row is never in the way. Not
         // on the control panel, which searches its own field.
-        let picked: Vec<(&'static str, bool)> = if self.control_panel {
+        let picked: Vec<(&'static str, bool)> = if self.control_panel || deep {
             Vec::new()
         } else {
             let q = &self.search.query;
@@ -5178,6 +5208,10 @@ impl App {
             })
             .collect();
         self.search.control_lift = vec![0.0; self.search.controls.len()];
+        // (The deep search's kind chips stand in the System row's place.)
+        if deep {
+            self.deep_chips();
+        }
         // Search results are a flat ranked list: dense identity slots. (A
         // resting grid keeps the paged slots built just above.)
         if !resting_grid {
@@ -6006,6 +6040,11 @@ impl App {
             }
             Hit::GridCell(s, i) => {
                 if let Some(entry_idx) = self.search.visible[s].get(i).copied() {
+                    // Ctrl+click in the deep search: picked to act on together.
+                    if self.search.deep.is_some() && self.modifiers.ctrl && self.kinds.get(entry_idx) == Some(&apps::EntryKind::File) {
+                        self.deep_mark(entry_idx);
+                        return;
+                    }
                     // Files-section folders launch like anything else:
                     // xdg-open hands them to the file manager. Boxes in
                     // the Apps grid open in place.
@@ -6023,6 +6062,7 @@ impl App {
                     self.activate(entry_idx, LaunchFrom::Box);
                 }
             }
+            Hit::Control(i) if self.search.deep.is_some() => self.deep_chip(i),
             Hit::Control(i) => {
                 if let Some(&(label, _)) = self.search.controls.get(i) {
                     if self.search.control_modules.get(i).copied().unwrap_or(false) {
@@ -6136,6 +6176,16 @@ impl App {
     /// feedback), then the card gets out of the way. `from` decides what a
     /// running app means — see [`LaunchFrom`].
     fn activate(&mut self, index: usize, from: LaunchFrom) {
+        // "Show all in Files" (`deep_search.rs`): the search in Golem Files.
+        if self.entries.get(index).is_some_and(|e| e.id == deep_search::SHOW_ALL_ID) {
+            if self.search.deep.is_some() {
+                self.deep_show_all();
+            } else {
+                let words = file_search::parse(&self.search.query).all_or_words();
+                self.files_show_all(&words, None);
+            }
+            return;
+        }
         // One of the lone app's actions (`app_actions.rs`).
         if let Some(n) = self.action_of(index) {
             self.run_app_action(n);
@@ -6319,7 +6369,8 @@ impl App {
             self.box_peek_close();
             // (A row Shift made — an app's or a file's — goes with the box.)
             let file_row = self.search.focus_file.take().is_some();
-            if self.search.focus.take().is_some() || file_row {
+            let deep = self.search.deep.take().is_some();
+            if self.search.focus.take().is_some() || file_row || deep {
                 self.refilter();
             }
         }
@@ -6957,6 +7008,10 @@ impl App {
         if self.app_actions_key(keysym) {
             return;
         }
+        // The deep search's own (`deep_search.rs`).
+        if self.deep_key(keysym) {
+            return;
+        }
         match keysym {
             // The Mac's Launchpad key (F4 → XF86LaunchB) opens the box through
             // a Hyprland bind, but while the box is open it holds the keyboard
@@ -6995,6 +7050,10 @@ impl App {
                 // On the panel, Enter opens the best match of the search.
                 if self.control_panel {
                     self.panel_open_best();
+                    return;
+                }
+                // Ctrl+Enter on a file: shown in Files, selected there.
+                if self.modifiers.ctrl && self.box_show_in_files() {
                     return;
                 }
                 if let Some((s, i)) = self.search.selected.and_then(|i| self.flat_to_pos(i)) {
@@ -7070,6 +7129,11 @@ impl App {
                             self.search.open = true;
                             self.search.query.push_str(&printable);
                             self.panel_search();
+                            return;
+                        }
+                        // "/" into an empty search: THE DEEP FILE SEARCH.
+                        if printable == "/" && self.search.query.is_empty() && self.search.deep.is_none() {
+                            self.deep_enter();
                             return;
                         }
                         self.search.open = true;
@@ -8153,6 +8217,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                         app.busy_ids.contains(&e.id)
                                             || e.id.starts_with("min:")
                                             || e.id.starts_with(app_actions::PREFIX)
+                                            || e.id == deep_search::SHOW_ALL_ID
                                             || apps::is_dock_fixed(&e.id)
                                     })
                                 });

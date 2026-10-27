@@ -362,6 +362,28 @@ impl Default for SearchPill {
     }
 }
 
+/// What THE DEEP FILE SEARCH draws (`deep_search.rs`): its shelves' titles
+/// (the three sections', retitled: "PDF · 4"; a hidden one "" — its room is
+/// the first's, [`fold_shelves`]), a line under each file's name (when it
+/// was used), the files picked to act on together, the kind chip lit in the
+/// chips' row (the System row's place) and the chip in the search pill
+/// ("Files", "Files › Facturas", with its shaped width).
+#[derive(Clone, Copy, Debug)]
+pub struct DeepDraw<'a> {
+    pub titles: [&'a str; N_SECTIONS],
+    pub hidden: [bool; N_SECTIONS],
+    pub subs: &'a std::collections::HashMap<usize, String>,
+    pub marked: &'a [usize],
+    pub lit: Option<usize>,
+    pub chip: &'a str,
+    pub chip_w: f32,
+    /// The shaped width of the pill's placeholder ("Search files").
+    pub placeholder_w: f32,
+}
+
+/// How far the chip in the search pill stands from the words typed after it.
+const PILL_CHIP_GAP: f32 = 8.0;
+
 /// How much the content ride trails the opening card (1.0 = glued to
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
 const RIDE_PARALLAX: f32 = 1.18;
@@ -950,6 +972,9 @@ pub struct Layout {
     /// A search left no app: Apps is its title over a short "No results"
     /// line, its row going to Files ([`files_take_apps_row`]). Set by the App.
     pub apps_none: bool,
+    /// The room the deep search's folded shelves gave the first
+    /// ([`fold_shelves`]); 0 otherwise.
+    pub shelf_room: f32,
     /// The screen's edge the dock stands on (the Launcher page's Position):
     /// at the bottom a row the box rises from; on a side a column, the box
     /// growing out of that edge with the dock riding its far side
@@ -1310,7 +1335,10 @@ pub fn layout(
             cols as f32 * grid_cell_w,
             if s == SECTION_APPS { apps_h } else { rows as f32 * grid_cell_h },
         );
-        y += viewport.h + DOT_ROOM + SECTION_GAP;
+        // (The Apps' room as trimmed, even past nothing — drawn at nothing —:
+        // what follows stays where the card's bottom holds it. The deep
+        // search's folded shelves give the first theirs back, `fold_shelves`.)
+        y += if s == SECTION_APPS { apps_room - trim } else { viewport.h } + DOT_ROOM + SECTION_GAP;
         // Horizontal paging: each page is viewport.w wide. Pages wrap
         // cyclically (infinite scroll), so the offset is normalized into
         // [0, n_pages * viewport.w) rather than clamped.
@@ -1414,6 +1442,7 @@ pub fn layout(
         apps_avail: avail,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
         apps_none: false,
+        shelf_room: 0.0,
         side: Side::Bottom,
         dock_band: Rect::new(0.0, card_top, w, (dock_hit_bottom - card_top).max(0.0)),
     }
@@ -1482,6 +1511,55 @@ pub fn files_take_apps_row(l: &mut Layout, extra: f32, scroll: f32) {
     f.n_pages = if f.cells == 0 { 0 } else { f.cells.div_ceil(f.cap).max(1) };
     let total_w = f.n_pages as f32 * f.viewport.w;
     f.scroll = if total_w > 0.0 { scroll.rem_euclid(total_w) } else { 0.0 };
+}
+
+/// THE DEEP SEARCH'S SHELVES (`deep_search.rs`): the sections, a shelf with
+/// nothing on it FOLDED away — no title, no row — and its room the first
+/// shelf's, which shows as many more rows as that holds (its pages hold them
+/// too). What is under the shelves stays put; the card's trim shortens the
+/// first to what its page needs (`App::apps_trim_target`). `scroll` is the
+/// first's pager position as it is, wrapped again for its bigger pages.
+pub fn fold_shelves(l: &mut Layout, hidden: [bool; N_SECTIONS], cell_h: f32, scroll: f32) {
+    if l.sections[SECTION_APPS].vertical {
+        return;
+    }
+    // Each hidden one's room: from its title to the next's (the last's: past
+    // its dots and the gap after them).
+    let span = |l: &Layout, s: usize| -> f32 {
+        let end = match l.sections.get(s + 1) {
+            Some(next) => next.title_pos.1,
+            None => l.sections[s].viewport.y + l.sections[s].viewport.h + DOT_ROOM + SECTION_GAP,
+        };
+        end - l.sections[s].title_pos.1
+    };
+    let rooms: [f32; N_SECTIONS] = std::array::from_fn(|s| if s > 0 && hidden[s] { span(l, s) } else { 0.0 });
+    let total: f32 = rooms.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    // The first's room as trimmed (the layout draws it at nothing at least),
+    // read before anything moves; it takes the hidden shelves' too.
+    let room = l.sections[SECTION_INSTALL].title_pos.1 - l.sections[SECTION_APPS].viewport.y - DOT_ROOM - SECTION_GAP;
+    for s in 1..N_SECTIONS {
+        if hidden[s] {
+            let sec = &mut l.sections[s];
+            sec.viewport.h = 0.0;
+            sec.cells = 0;
+            sec.n_pages = 0;
+            continue;
+        }
+        let after: f32 = rooms[s + 1..].iter().sum();
+        l.sections[s].title_pos.1 += after;
+        l.sections[s].viewport.y += after;
+    }
+    let first = &mut l.sections[SECTION_APPS];
+    first.viewport.h = (room + total).max(0.0);
+    first.rows += (total / cell_h).floor() as usize;
+    first.cap = first.cols * first.rows;
+    first.n_pages = if first.cells == 0 { 0 } else { first.cells.div_ceil(first.cap.max(1)).max(1) };
+    let total_w = first.n_pages as f32 * first.viewport.w;
+    first.scroll = if total_w > 0.0 { scroll.rem_euclid(total_w) } else { 0.0 };
+    l.shelf_room = total;
 }
 
 /// [`layout`] for the dock on `side`: at the bottom as it always was, on
@@ -1768,6 +1846,7 @@ fn layout_side(
         apps_avail: room,
         controls_k: if controls_h > 0.0 { (controls_band / controls_h).clamp(0.0, 1.0) } else { 0.0 },
         apps_none: false,
+        shelf_room: 0.0,
         side: if left { Side::Left } else { Side::Right },
         dock_band,
     }
@@ -2189,6 +2268,9 @@ pub struct FrameInput<'a> {
     /// The lone app's recents' title ("Recent in VLC"), drawn in the room
     /// opened under its row.
     pub recent_title: Option<&'a str>,
+    /// THE DEEP FILE SEARCH (`deep_search.rs`): what its shelves, chips and
+    /// pill draw, while it is up.
+    pub deep: Option<DeepDraw<'a>>,
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
     pub quick: Option<QuickDraw<'a>>,
@@ -2574,6 +2656,7 @@ pub fn scene(
         act_asking,
         act_wide,
         recent_title,
+        deep,
         fast,
         quick,
         stretch,
@@ -3540,7 +3623,13 @@ pub fn scene(
         // SEARCH_W_MIN, growing snugly with the shaped query (measured, not
         // estimated) plus caret room.
         let compact_w = (sp.label_px + 2.0 * pad).max(sp.h);
-        let content_w = (query_px + 2.0 * pad + 8.0)
+        // (The deep search's chip stands before the words: "Files ›".)
+        let chip_room = deep.map_or(0.0, |d| d.chip_w + 2.0 * pad * 0.6 + PILL_CHIP_GAP);
+        let typed_px = match deep {
+            Some(d) if query.is_empty() => d.placeholder_w,
+            _ => query_px,
+        };
+        let content_w = (typed_px + chip_room + 2.0 * pad + 8.0)
             .max(SEARCH_W_MIN)
             .min(card_w - 2.0 * GRID_PAD_X);
         let k = 1.0 + LIFT * sp.lift;
@@ -3566,13 +3655,46 @@ pub fn scene(
         let ink = faded_on(dock_ink, dock_seen, LAYER_INK[1], 4.5);
         let (text, dim) = if search_expand >= 0.5 && !query.is_empty() {
             (query.to_string(), false)
+        } else if deep.is_some() {
+            (crate::i18n::tr("Search files").to_string(), true)
         } else {
             // The label, then the placeholder once open.
             (crate::i18n::tr("Search").to_string(), search_expand >= 0.5)
         };
+        // The deep search's chip, at the pill's start: the words after it,
+        // centred in what it leaves.
+        let text_cx = match deep.filter(|_| search_expand >= 0.5) {
+            Some(d) => {
+                let (cw, ch) = (d.chip_w + 2.0 * pad * 0.6, (sh - 6.0 * sp.scale).max(line));
+                let left = cx - (typed_px + chip_room) / 2.0;
+                let chip = Rect::new(left, cy - ch / 2.0, cw, ch);
+                sgrid.rects.push(RectInst {
+                    rect: chip,
+                    radius: ch / 2.0,
+                    color: crate::options::wash(!bright, lerp(rest_a, hover_a, 1.0) * 1.6),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                sgrid.labels.push(Label {
+                    text: d.chip.to_string(),
+                    pos: (chip.x + cw / 2.0, cy - line * k / 2.0),
+                    max_w: cw,
+                    font_px: font * k,
+                    line_px: line * k,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: crate::options::TEXT_FONT,
+                    color: Some(ink),
+                    clip: Some(reveal_clip(draw_rect)),
+                });
+                left + chip_room + typed_px / 2.0
+            }
+            None => cx,
+        };
         sgrid.labels.push(Label {
             text,
-            pos: (cx, cy - line * k / 2.0),
+            pos: (text_cx, cy - line * k / 2.0),
             max_w: sw - 2.0 * pad,
             font_px: font * k,
             line_px: line * k,
@@ -3588,8 +3710,13 @@ pub fn scene(
         // A real caret sitting exactly after the shaped text, only once
         // the morph has (nearly) landed, so it can't drift during the
         // stretch.
-        if search_expand >= 0.5 && !query.is_empty() && search_expand > 0.9 {
-            let caret_x = (cx + query_px / 2.0 + 3.0).min(draw_rect.x + sw - 8.0);
+        if search_expand >= 0.5 && (!query.is_empty() || deep.is_some()) && search_expand > 0.9 {
+            let caret_x = if deep.is_some() && query.is_empty() {
+                text_cx - typed_px / 2.0 - 1.0
+            } else {
+                text_cx + query_px / 2.0 + 3.0
+            }
+            .min(draw_rect.x + sw - 8.0);
             let t = dock_ink;
             sgrid.rects.push(RectInst {
                 rect: Rect::new(caret_x, cy - line / 2.0 + 1.0, 1.5, line - 2.0),
@@ -3616,7 +3743,14 @@ pub fn scene(
             });
             continue;
         }
-        let title = if s == SECTION_APPS && !apps_group.is_empty() {
+        // (A deep search's hidden shelf: nothing at all.)
+        if deep.is_some_and(|d| d.hidden[s]) {
+            scene.grids.push(GridContent { clip: reveal_clip(sec.viewport), ..Default::default() });
+            continue;
+        }
+        let title = if let Some(d) = deep {
+            d.titles[s].to_string()
+        } else if s == SECTION_APPS && !apps_group.is_empty() {
             format!("{} — {}", crate::i18n::tr(SECTION_TITLES[s]), apps_group)
         } else {
             crate::i18n::tr(SECTION_TITLES[s]).to_string()
@@ -4092,11 +4226,67 @@ pub fn scene(
             let bottom = cell.y + grid_cell_h > sec.viewport.y + sec.viewport.h - 0.5;
             let dots = sec.n_pages > 1 || (s == SECTION_APPS && recent_pages.is_some());
             let room_under = parted || if bottom { !dots } else { !taken.contains(&(slot + sec.cols)) };
-            let (name, second) = match fit {
-                Some(fit) if !room_under => (fit.one.clone(), None),
-                Some(fit) => (fit.two.0.clone(), Some(fit.two.1.clone())),
-                None => (name, None),
+            // (A deep search's file: its name on one line and, under it, when
+            // it was used — where nothing stands under it; the page dots stand
+            // lower than a line's first letters.)
+            let sub = deep.and_then(|d| d.subs.get(&entry_idx)).filter(|_| !is_busy && !is_failed);
+            let (name, second) = match (sub, fit) {
+                (Some(_), Some(fit)) => (fit.one.clone(), None),
+                (Some(_), None) => (name, None),
+                (None, Some(fit)) if !room_under => (fit.one.clone(), None),
+                (None, Some(fit)) => (fit.two.0.clone(), Some(fit.two.1.clone())),
+                (None, None) => (name, None),
             };
+            let free_under = parted || if bottom { true } else { !taken.contains(&(slot + sec.cols)) };
+            if let (Some(sub), true, false) = (sub, free_under, covered) {
+                let v = sec.viewport;
+                g.labels.push(Label {
+                    text: sub.clone(),
+                    pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP + SECOND_LINE - 1.0),
+                    max_w: cell.w - 12.0,
+                    font_px: LABEL_FONT_PX - 1.5,
+                    line_px: LABEL_LINE_PX - 2.0,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: None,
+                    color: Some(faded_on(dock_ink, dock_seen, 0.55, 3.0)),
+                    clip: Some(reveal_clip(Rect::new(v.x, v.y, v.w, v.h + 2.0 * LABEL_LINE_PX))),
+                });
+            }
+            // (Picked to act on together: a check at the picture's corner.)
+            if deep.is_some_and(|d| d.marked.contains(&entry_idx)) {
+                let hl = dock_highlight;
+                g.rects.push(RectInst {
+                    rect: Rect::new(cell.x + 4.0, cell.y + 4.0, cell.w - 8.0, cell.h - 8.0),
+                    radius: 14.0,
+                    color: [hl[0], hl[1], hl[2], (hl[3] * 1.4).min(0.32)],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                let r = 9.0;
+                let (bx, by) = (cx + grid_icon * 0.42, cell.y + grid_icon_top + 2.0);
+                g.rects.push(RectInst {
+                    rect: Rect::new(bx - r, by - r + r, 2.0 * r, 2.0 * r),
+                    radius: r,
+                    color: crate::palette::accent_srgb(),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                g.labels.push(Label {
+                    text: "✓".to_string(),
+                    pos: (bx, by + r - 7.0),
+                    max_w: 2.0 * r,
+                    font_px: 12.0,
+                    line_px: 14.0,
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    family: None,
+                    color: Some([1.0, 1.0, 1.0, 1.0]),
+                    clip: None,
+                });
+            }
             if let (Some(second), false) = (second, covered) {
                 let v = sec.viewport;
                 g.labels.push(Label {
@@ -4202,7 +4392,9 @@ pub fn scene(
             }
             continue;
         }
-        let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0 - DOTS_RAISE;
+        // (Under the deep search's lines of when, a line lower: into the gap.)
+        let under_subs = if deep.is_some() { LABEL_LINE_PX - 2.0 } else { 0.0 };
+        let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0 - DOTS_RAISE + under_subs;
         // A lone app's recents' pages: their dots where the section's would
         // be, under their line (the section itself has one page).
         if let Some((page, n)) = recent_pages.filter(|_| s == SECTION_APPS && sec.n_pages <= 1) {
@@ -4253,7 +4445,7 @@ pub fn scene(
     if !layout.control_bands.is_empty() && !layout.controls.is_empty() && !panel {
         // One title over the one row: "System" — the settings and the
         // modules together (Max, 2026-10-22).
-        if let Some(&(title, _)) = layout.control_bands.first() {
+        if let Some(&(title, _)) = layout.control_bands.first().filter(|_| deep.is_none()) {
             scene.labels.push(Label {
                 text: crate::i18n::tr("System").to_string(),
                 pos: (title.0, title.1 + TITLE_DROP),
@@ -4278,7 +4470,8 @@ pub fn scene(
             (LAYER_WASH_DARK[0], HOVER_WASH_DARK)
         };
         let sc = search_pill.scale;
-        let near = LAYER_SCALE[0];
+        // (The deep search's kind chips: the search pill's size.)
+        let near = LAYER_SCALE[if deep.is_some() { 1 } else { 0 }];
         let (font, line) = (crate::options::FONT_PX * sc * near, crate::options::LINE_PX * sc * near);
         let ink = [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3] * LAYER_INK[0]];
         let glow = if bright { 0.0 } else { 1.0 };
@@ -4291,6 +4484,8 @@ pub fn scene(
                 continue; // didn't fit its row
             }
             let lift = control_lift.get(i).copied().unwrap_or(0.0);
+            // (The deep search's kind chip in use: lit, as a choice in use is.)
+            let lit = deep.is_some_and(|d| d.lit == Some(i));
             let k = 1.0 + LIFT * lift;
             let (pw, ph) = (r.w * k, r.h * k);
             let rect = Rect::new(r.x + r.w / 2.0 - pw / 2.0, r.y + r.h / 2.0 - ph / 2.0, pw, ph);
@@ -4307,12 +4502,13 @@ pub fn scene(
             cgrid.rects.push(RectInst {
                 rect,
                 radius: ph / 2.0,
-                color: crate::options::wash(!bright, lerp(rest_a, hover_a, lift) * layout.controls_k),
+                color: crate::options::wash(!bright, lerp(rest_a, hover_a, if lit { 1.0 } else { lift }) * if lit { 2.2 } else { 1.0 } * layout.controls_k),
                 glass: 0.0,
                 border: 0.0,
             });
             cgrid.labels.push(Label {
-                text: label.to_string(),
+                // (The deep search's chips are words of the shell's.)
+                text: if deep.is_some() { crate::i18n::tr(label).to_string() } else { label.to_string() },
                 pos: (rect.x + pw / 2.0, rect.y + (ph - line * k) / 2.0),
                 max_w: pw,
                 font_px: font * k,

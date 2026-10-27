@@ -2438,7 +2438,7 @@ impl Filer {
             .map(|w| w.id)
     }
 
-    fn newest(&self) -> Option<u32> {
+    pub(crate) fn newest(&self) -> Option<u32> {
         self.wins.iter().map(|w| w.id).max()
     }
 
@@ -5309,7 +5309,7 @@ impl App {
 
     /// Search window `id`'s folder for `find` (`Some("")`: the field out and
     /// empty; `None`: put away, everything shown again).
-    fn filer_find(&mut self, id: u32, find: Option<String>) {
+    pub(crate) fn filer_find(&mut self, id: u32, find: Option<String>) {
         let Some(win) = self.filer.win_mut(id) else {
             return;
         };
