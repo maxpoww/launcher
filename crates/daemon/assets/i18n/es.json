@@ -1394,5 +1394,9 @@
  "Played {when}": "Escuchado {when}",
  "Watched {when}": "Visto {when}",
  "Visited {when}": "Visitado {when}",
- "{n} times": "{n} veces"
+ "{n} times": "{n} veces",
+ "Transparency": "Transparencia",
+ "Dock icons": "Íconos del dock",
+ "Solid": "Sólido",
+ "Transparency can make things feel slower. Solid is the lightest.": "La transparencia puede hacer que todo se sienta más lento. Sólido es lo más liviano."
 }

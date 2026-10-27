@@ -5196,6 +5196,14 @@ impl App {
                 self.schedule_autohide();
             }
         }
+        // A Transparency moved in this visit: what it costs is said once, as
+        // the box closes (Max, 2026-10-27).
+        if (label == "Wallpaper" || label == "Colours") && crate::palette::clear_touched() {
+            let (title, body) = (tr("Colours").to_owned(), tr("Transparency can make things feel slower. Solid is the lightest.").to_owned());
+            let _ = std::thread::Builder::new()
+                .name("clear-notice".into())
+                .spawn(move || crate::desktop_send_notify_open(&title, "preferences-desktop-color", &body, None));
+        }
         // (The wallpapers are on the Colours box's Wallpaper tab.)
         if label == "Wallpaper" || label == "Colours" {
             self.pictures_rest();

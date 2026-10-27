@@ -629,7 +629,13 @@ impl GolemSettings {
     /// recovery) wears them before the dock's live push, instead of
     /// hyprland.lua's peach (`App::push_window_border` sends the same).
     fn colours_lua(&self) -> String {
-        let theme = crate::palette::resolve(&self.colors.clone().unwrap_or_default(), self.dark.unwrap_or(true));
+        let colors = self.colors.clone().unwrap_or_default();
+        // (The windows' Transparency rides the same line.)
+        format!("{} {}", self.colours_lua_of(&colors), crate::palette::clear_rules_lua(&colors))
+    }
+
+    fn colours_lua_of(&self, colors: &crate::palette::ColorChoice) -> String {
+        let theme = crate::palette::resolve(colors, self.dark.unwrap_or(true));
         let ground = crate::palette::hex(theme.bg());
         let dim = crate::palette::dim_inactive_for(theme.apps_dark);
         if theme.dynamic {

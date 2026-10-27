@@ -442,6 +442,39 @@ fn colour_row(groups: &mut Vec<Group>, picked: &crate::palette::ColorChoice, s: 
     let tint = lv.tint.unwrap_or(MADE);
     groups.push(Group { row: true, mark: (!wall).then_some(0.5), caption: Some(format!("{} · {}", tr("Palette"), palette_text(tint))), ..slider(tint_key, tint) });
     groups.push(Group { row: true, mark: Some(0.5), caption: Some(format!("{} · {}", tr("Saturation"), sat_text(lv.sat))), ..slider(sat_key, lv.sat) });
+    // THE TRANSPARENCY (Max, 2026-10-27, the mockup's board A): a fourth slider,
+    // Solid … nearly invisible; in the Icons section it is the DOCK's icons —
+    // so it says so (the desktop's and the boxes' icons go with the Shell).
+    if !wall {
+        let (key, name) = clear_key(s);
+        let (v, made) = (picked.clear_of(s), crate::palette::clear_made(s));
+        groups.push(Group {
+            row: true,
+            mark: (made > 0).then_some(f32::from(made) / 100.0),
+            caption: Some(format!("{} · {}", tr(name), clear_text(v, made))),
+            ..slider(key, v)
+        });
+    }
+}
+
+/// A section's Transparency slider: its key and its name.
+fn clear_key(s: crate::palette::Surface) -> (&'static str, &'static str) {
+    use crate::palette::Surface;
+    match s {
+        Surface::Shell => ("colors-shell-clear", "Transparency"),
+        Surface::Apps => ("colors-apps-clear", "Transparency"),
+        Surface::Web => ("colors-web-clear", "Transparency"),
+        _ => ("colors-icons-clear", "Dock icons"),
+    }
+}
+
+/// What a Transparency reads: as made, Solid, or how much shows through.
+fn clear_text(v: u8, made: u8) -> String {
+    match v {
+        v if v == made => tr("as made").to_owned(),
+        0 => tr("Solid").to_owned(),
+        v => format!("{:.0}%", f32::from(v) * 0.95),
+    }
 }
 
 /// The palettes as cards: Dynamic first, every palette, and "+" to make one.
@@ -2713,23 +2746,35 @@ pub(crate) fn reassert() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_colours_row_is_three_sliders_or_two_under_ambient() {
+    fn the_colours_row_is_four_sliders_or_three_under_ambient() {
         use crate::palette::{ColorChoice, Surface};
         let manual = ColorChoice { apps_dark: Some(true), apps_light: Some(30), apps_tint: Some(70), apps_sat: Some(20), ..Default::default() };
         let mut g = Vec::new();
         colour_row(&mut g, &manual, Surface::Apps);
         let keys: Vec<&str> = g.iter().map(|g| g.key).collect();
-        assert_eq!(keys, ["colors-apps-line", "colors-ambient", "colors-apps", "colors-apps-sat"]);
-        assert!(g[0].row && g[0].split && g[1].beside && g[2].row && g[3].row);
+        assert_eq!(keys, ["colors-apps-line", "colors-ambient", "colors-apps", "colors-apps-sat", "colors-apps-clear"]);
+        assert!(g[0].row && g[0].split && g[1].beside && g[2].row && g[3].row && g[4].row);
         assert_eq!((g[2].mark, g[3].mark), (Some(0.5), Some(0.5)));
         assert_eq!(g[0].caption.as_deref(), Some("Lighting · Dark −20"));
         assert_eq!(g[2].caption.as_deref(), Some("Palette · 70%"));
         assert_eq!(g[3].caption.as_deref(), Some("Saturation · 20%"));
-        // Under Ambient the light is the sun's: no Lighting at all, the two left.
+        // The Transparency: as made is solid for the apps (no notch); 50 shows 48% through.
+        assert_eq!((g[4].caption.as_deref(), g[4].mark), (Some("Transparency · as made"), None));
+        let mut g = Vec::new();
+        colour_row(&mut g, &ColorChoice { apps_clear: Some(50), ..manual.clone() }, Surface::Apps);
+        assert_eq!(g[4].caption.as_deref(), Some("Transparency · 48%"));
+        // The Shell's as made is its glass today, marked; the Icons' slider is the dock's icons.
+        let mut g = Vec::new();
+        colour_row(&mut g, &manual, Surface::Shell);
+        assert_eq!((g[4].key, g[4].mark), ("colors-shell-clear", Some(0.35)));
+        let mut g = Vec::new();
+        colour_row(&mut g, &ColorChoice { dock_clear: Some(0), ..manual.clone() }, Surface::Icons);
+        assert_eq!((g[4].key, g[4].caption.as_deref()), ("colors-icons-clear", Some("Dock icons · as made")));
+        // Under Ambient the light is the sun's: no Lighting at all, the three left.
         let amb = ColorChoice { ambient: Some(true), ..manual.clone() };
         let mut g = Vec::new();
         colour_row(&mut g, &amb, Surface::Apps);
-        assert_eq!(g.iter().map(|g| g.key).collect::<Vec<_>>(), ["colors-apps", "colors-apps-sat"]);
+        assert_eq!(g.iter().map(|g| g.key).collect::<Vec<_>>(), ["colors-apps", "colors-apps-sat", "colors-apps-clear"]);
         // The wallpaper: its own keys, and no notch on its Palette (its 0 is a picture as it is).
         let mut g = Vec::new();
         colour_row(&mut g, &ColorChoice::default(), Surface::Wall);

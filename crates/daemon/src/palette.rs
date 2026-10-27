@@ -174,6 +174,17 @@ pub(crate) struct ColorChoice {
     /// Set once the general Lighting was carried into the surfaces' own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<bool>,
+    /// THE TRANSPARENCY, a slider each (Max, 2026-10-27): 0 solid … 100
+    /// nearly invisible; None = as made. The Shell's glass, the apps' and
+    /// Seam's windows, and the dock's icons (the Icons section's "Dock icons").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_clear: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_clear: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_clear: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dock_clear: Option<u8>,
     /// Before 2026-10-16 the apps and the web were switches; read once.
     #[serde(default, skip_serializing)]
     pub apps: Option<bool>,
@@ -189,9 +200,68 @@ fn web_off() -> Option<u8> {
     Some(0)
 }
 
+// ------------------------------------------------------- the transparency
+
+/// Where the Shell's slider stands as made: its glass as it is today.
+pub(crate) const SHELL_CLEAR_MADE: u8 = 35;
+
+/// A Transparency slider's as-made place: the Shell's glass, else solid.
+pub(crate) fn clear_made(s: Surface) -> u8 {
+    if s == Surface::Shell {
+        SHELL_CLEAR_MADE
+    } else {
+        0
+    }
+}
+
+impl ColorChoice {
+    /// A section's Transparency (0 solid … 100 nearly invisible); the Icons
+    /// section's is the dock's icons'.
+    pub(crate) fn clear_of(&self, s: Surface) -> u8 {
+        let v = match s {
+            Surface::Shell => self.shell_clear,
+            Surface::Apps => self.apps_clear,
+            Surface::Web => self.web_clear,
+            Surface::Icons => self.dock_clear,
+            Surface::Wall => None,
+        };
+        v.unwrap_or_else(|| clear_made(s)).min(100)
+    }
+}
+
+/// A Transparency as the opacity of what it covers whole (a window, the
+/// dock's icons): 1 solid, 0.05 at the far end — never 0: a window no one
+/// sees still takes the clicks.
+pub(crate) fn clear_alpha(v: u8) -> f32 {
+    1.0 - 0.95 * f32::from(v.min(100)) / 100.0
+}
+
+/// A Transparency was moved since the Colours box last said what it costs.
+static CLEAR_TOUCHED: AtomicBool = AtomicBool::new(false);
+
+/// Whether to say it now (once a visit of the box: it is said as it closes).
+pub(crate) fn clear_touched() -> bool {
+    CLEAR_TOUCHED.swap(false, Ordering::Relaxed)
+}
+
+/// The compositor's rules for the windows: every window wears the Apps'
+/// opacity, Seam's own windows the Web's (a webapp is an app: its class is
+/// `webapp-…`), and a window in full screen is always solid (the third
+/// value). The later rule wins for Seam, so it is always there while the
+/// first is. Off (both solid): both rules are turned off.
+pub(crate) fn clear_rules_lua(c: &ColorChoice) -> String {
+    let (apps, web) = (clear_alpha(c.clear_of(Surface::Apps)), clear_alpha(c.clear_of(Surface::Web)));
+    let any = apps < 1.0 || web < 1.0;
+    format!(
+        "hl.window_rule({{ name = \"golem-clear-apps\", match = {{ class = \".*\" }}, opacity = \"{apps:.2} {apps:.2} 1.0\", enabled = {} }}) \
+         hl.window_rule({{ name = \"golem-clear-web\", match = {{ class = \"^(seam|firefox)$\" }}, opacity = \"{web:.2} {web:.2} 1.0\", enabled = {any} }})",
+        apps < 1.0
+    )
+}
+
 impl Default for ColorChoice {
     fn default() -> Self {
-        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, wallpaper_tint: None, shell_light: None, apps_light: None, icons_light: None, web_light: None, wall_light: None, shell_sat: None, apps_sat: None, icons_sat: None, web_sat: None, wall_sat: None, wall_dark: None, auto: None, wall_auto: None, ambient: None, wall_ambient: None, app_look: Default::default(), lines: None, apps: None, web: None, dynamic: None }
+        Self { palette: None, apps_tint: None, web_tint: Some(0), icons_tint: 0, shell_tint: None, shell_dark: None, apps_dark: None, web_dark: None, icons_dark: None, skip: Vec::new(), lighting: None, lighting_auto: None, lighting_veil: None, wallpaper_tint: None, shell_light: None, apps_light: None, icons_light: None, web_light: None, wall_light: None, shell_sat: None, apps_sat: None, icons_sat: None, web_sat: None, wall_sat: None, wall_dark: None, auto: None, wall_auto: None, ambient: None, wall_ambient: None, app_look: Default::default(), lines: None, shell_clear: None, apps_clear: None, web_clear: None, dock_clear: None, apps: None, web: None, dynamic: None }
     }
 }
 
@@ -3393,6 +3463,26 @@ impl crate::App {
                     }
                     Err(_) => return,
                 },
+                // A surface's Transparency (the Icons section's is the dock's icons').
+                "colors-shell-clear" | "colors-apps-clear" | "colors-web-clear" | "colors-icons-clear" => match value.parse::<u8>() {
+                    Ok(n) => {
+                        let s = match key {
+                            "colors-shell-clear" => Surface::Shell,
+                            "colors-apps-clear" => Surface::Apps,
+                            "colors-web-clear" => Surface::Web,
+                            _ => Surface::Icons,
+                        };
+                        let v = (n.min(100) != clear_made(s)).then_some(n.min(100));
+                        match s {
+                            Surface::Shell => c.shell_clear = v,
+                            Surface::Apps => c.apps_clear = v,
+                            Surface::Web => c.web_clear = v,
+                            _ => c.dock_clear = v,
+                        }
+                        CLEAR_TOUCHED.store(true, Ordering::Relaxed);
+                    }
+                    Err(_) => return,
+                },
                 // A surface's Saturation.
                 "colors-shell-sat" | "colors-apps-sat" | "colors-icons-sat" | "colors-web-sat" | "colors-wall-sat" => match value.parse::<u8>() {
                     Ok(n) => {
@@ -3504,6 +3594,9 @@ impl crate::App {
                 self.colors_apply(false);
                 publish(current(), false);
             }
+            // The windows' opacity is the compositor's: told at once (and in
+            // settings.lua, written with the choice, for its next start).
+            "colors-apps-clear" | "colors-web-clear" => crate::hypr::eval(&clear_rules_lua(&c)),
             _ => self.colors_apply(false),
         }
     }
