@@ -73,6 +73,7 @@ mod peek_pdf;
 mod peek_slides;
 mod peek_syntax;
 mod peek_web;
+mod peek_page;
 mod peek_zoom;
 mod apps_icon;
 mod thumb_more;
@@ -7922,6 +7923,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         }
         if app.pointer_surface == options::PointerSurface::Options {
             app.options_pointer(event);
+            return;
+        }
+        // QUICK LOOK up from one of the box's recents: the box holds the
+        // keyboard exclusively, and Hyprland then pins the POINTER to its
+        // layer too — so what is meant for Quick Look over it comes here (a
+        // click on its Open, its ×, Copy link landed on the box under it).
+        if app.pointer_surface == options::PointerSurface::Dock && app.box_peeking() {
+            let event = app.box_point_on_screen(event);
+            app.peek_pointer(&event);
             return;
         }
         // (Shift held through a click or a scroll on the box is not a tap.)

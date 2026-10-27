@@ -1381,5 +1381,18 @@
  "Clear recents": "Borrar recientes",
  "Recents cleared": "Recientes borrados",
  "Open copied link": "Abrir enlace copiado",
- "Open in {app}": "Abrir en {app}"
+ "Open in {app}": "Abrir en {app}",
+ "Copy link": "Copiar enlace",
+ "Link copied": "Enlace copiado",
+ "just now": "recién",
+ "{n} min ago": "hace {n} min",
+ "today at {time}": "hoy a las {time}",
+ "yesterday at {time}": "ayer a las {time}",
+ "{n} days ago": "hace {n} días",
+ "{n} weeks ago": "hace {n} semanas",
+ "{n} months ago": "hace {n} meses",
+ "Played {when}": "Escuchado {when}",
+ "Watched {when}": "Visto {when}",
+ "Visited {when}": "Visitado {when}",
+ "{n} times": "{n} veces"
 }

@@ -781,6 +781,10 @@ pub(crate) struct Visit {
     pub score: f64,
     /// Its picture as Seam kept it, when it is one Seam heard play.
     pub pic: Option<String>,
+    /// How many times it was opened in the last weeks (a play: played).
+    pub times: u32,
+    /// Something Seam heard PLAY (a song, a video), not a page looked at.
+    pub played: bool,
 }
 
 /// A short, steady name for some bytes (a cache file's).
@@ -909,12 +913,14 @@ fn history(browser: &Browser, max: usize) -> Vec<Visit> {
     let now = crate::usage::now_secs();
     // The visits of the last weeks, each worth what is left of it (older
     // ones are worth next to nothing); a history without them: none.
-    let mut score: HashMap<i64, f64> = HashMap::new();
+    let mut score: HashMap<i64, (f64, u32)> = HashMap::new();
     let since = ((now - 30.0 * 24.0 * 3600.0 + epoch) * 1e6) as i64;
     if let Ok(mut stmt) = conn.prepare(visits) {
         if let Ok(rows) = stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))) {
             for (id, at) in rows.flatten() {
-                *score.entry(id).or_default() += crate::usage::decayed(now - secs(at));
+                let s = score.entry(id).or_default();
+                s.0 += crate::usage::decayed(now - secs(at));
+                s.1 += 1;
             }
         }
     }
@@ -923,12 +929,15 @@ fn history(browser: &Browser, max: usize) -> Vec<Visit> {
     };
     let rows = stmt.query_map([max as i64], |r| {
         let id: i64 = r.get(0)?;
+        let (score, times) = score.get(&id).copied().unwrap_or((0.0, 0));
         Ok(Visit {
             url: r.get(1)?,
             title: r.get(2)?,
             last: secs(r.get::<_, Option<i64>>(3)?.unwrap_or(0)),
-            score: score.get(&id).copied().unwrap_or(0.0),
+            score,
             pic: None,
+            times,
+            played: false,
         })
     });
     rows.map(|rows| rows.flatten().collect()).unwrap_or_default()
@@ -1200,6 +1209,103 @@ fn fitted(bytes: &[u8], path: &Path) -> Option<PathBuf> {
     Some(path.to_owned())
 }
 
+/// A recent's picture AS BIG AS IT WAS FOUND, for Quick Look (Max,
+/// 2026-10-27: "the quick look is small"): the kitchen's own file, or a
+/// video's from Seam's cache written out once — only when it is bigger than
+/// the box's (`PICTURE_SIDE`), within `decode`'s bounds, and not a 4:3 one
+/// with black bands (the box's cut is the better one); else none.
+pub(crate) fn big_picture(src: &Path, body: u64) -> Option<PathBuf> {
+    let path = if body == 0 {
+        src.to_owned()
+    } else {
+        let bytes = std::fs::read(src).ok()?;
+        let bytes = bytes.get(..usize::try_from(body).ok()?)?;
+        let ext = match bytes {
+            [0xff, 0xd8, ..] => "jpg",
+            [0x89, b'P', b'N', b'G', ..] => "png",
+            [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "webp",
+            _ => return None,
+        };
+        let out = cache("web-pictures")?.join(format!("big-{}.{ext}", hash_of(src.to_string_lossy().as_bytes())));
+        if !out.exists() {
+            let tmp = out.with_extension("part");
+            std::fs::write(&tmp, bytes).ok()?;
+            std::fs::rename(&tmp, &out).ok()?;
+        }
+        out
+    };
+    let (w, h) = image::image_dimensions(&path).ok()?;
+    let banded = w * 3 == h * 4 && video_id_of_cache(src);
+    (w.max(h) > PICTURE_SIDE && w <= 4096 && h <= 4096 && !banded).then_some(path)
+}
+
+/// Whether a picture came out of Seam's cache (a video's: YouTube's 4:3
+/// ones carry black bands).
+fn video_id_of_cache(src: &Path) -> bool {
+    src.components().any(|c| c.as_os_str() == "cache2")
+}
+
+/// When a recent was seen, as said under its title in Quick Look: "just
+/// now", "12 min ago", "today at 13:02", "yesterday at 21:04", "3 days
+/// ago", "2 weeks ago", "4 months ago".
+pub(crate) fn seen_when(at: f64, now: f64) -> String {
+    use crate::i18n::{fill, tr};
+    if at <= 0.0 {
+        return String::new();
+    }
+    let ago = (now - at).max(0.0);
+    if ago < 90.0 {
+        return tr("just now").to_owned();
+    }
+    if ago < 3600.0 {
+        return fill(tr("{n} min ago"), &[("n", &((ago / 60.0).round() as u64))]);
+    }
+    let local = |secs: f64| -> Option<libc::tm> {
+        let secs = secs as libc::time_t;
+        // SAFETY: `localtime_r` fills a caller-owned `tm` from a valid `time_t`.
+        unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            (!libc::localtime_r(&secs, &mut tm).is_null()).then_some(tm)
+        }
+    };
+    let (Some(then), Some(today)) = (local(at), local(now)) else {
+        return String::new();
+    };
+    let hm = format!("{:02}:{:02}", then.tm_hour, then.tm_min);
+    let midnight = |secs: f64, tm: &libc::tm| secs - f64::from(tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec);
+    let days = ((midnight(now, &today) - midnight(at, &then)) / 86_400.0).round() as i64;
+    match days {
+        ..=0 => fill(tr("today at {time}"), &[("time", &hm)]),
+        1 => fill(tr("yesterday at {time}"), &[("time", &hm)]),
+        2..=13 => fill(tr("{n} days ago"), &[("n", &days)]),
+        14..=59 => fill(tr("{n} weeks ago"), &[("n", &(days / 7))]),
+        _ => fill(tr("{n} months ago"), &[("n", &(days / 30))]),
+    }
+}
+
+/// What Quick Look says of a recent under its title: how it was seen and
+/// when, and how often ("Watched today at 13:02 · 5 times").
+pub(crate) fn seen_line(r: &Recent, now: f64) -> String {
+    use crate::i18n::{fill, tr};
+    let when = seen_when(r.last, now);
+    // (A music site's page is a song played, as what Seam heard play.)
+    let music = origin(&r.url).and_then(|(_, h)| site_of_host(&h.to_lowercase())).is_some_and(|s| MUSIC.contains(&s.slug));
+    let mut line = if when.is_empty() {
+        String::new()
+    } else if r.played || music {
+        fill(tr("Played {when}"), &[("when", &when)])
+    } else if video_id(&r.url).is_some() {
+        fill(tr("Watched {when}"), &[("when", &when)])
+    } else {
+        fill(tr("Visited {when}"), &[("when", &when)])
+    };
+    if r.times > 1 {
+        let times = fill(tr("{n} times"), &[("n", &r.times)]);
+        line = if line.is_empty() { times } else { format!("{line} · {times}") };
+    }
+    line
+}
+
 /// Whether a 4:3 picture is a 16:9 one between two black bands (its top
 /// and bottom rows dark all across).
 fn banded(img: &image::DynamicImage) -> bool {
@@ -1359,7 +1465,15 @@ fn played(k: &Kitchen, site: Option<&Site>, start: &str, now: f64) -> Vec<(Visit
                 None => p.url.clone(),
             };
             let pic = p.pic.as_deref().and_then(|n| k.picture(n)).map(|p| p.to_string_lossy().into_owned());
-            let visit = Visit { url, title: title.clone(), last: p.at, score: f64::from(p.n.max(1)) * crate::usage::decayed(now - p.at), pic };
+            let visit = Visit {
+                url,
+                title: title.clone(),
+                last: p.at,
+                score: f64::from(p.n.max(1)) * crate::usage::decayed(now - p.at),
+                pic,
+                times: p.n.max(1),
+                played: true,
+            };
             (visit, title)
         })
         .collect()
@@ -1384,6 +1498,14 @@ pub(crate) struct Recent {
     /// When it was seen last (unix seconds; 0 unknown): one put away since
     /// is not shown (`Forgot`).
     pub last: f64,
+    /// How many times it was opened in the last weeks (played, a play).
+    pub times: u32,
+    /// Something heard PLAY (a song, a video), not a page looked at.
+    pub played: bool,
+    /// Where its picture is AS BIG AS IT WAS FOUND (Quick Look shows that,
+    /// `big_picture`): a file of Seam's kitchen, or a video's in Seam's
+    /// cache (the entry and its body's length; 0: the whole file).
+    pub big: Option<(PathBuf, u64)>,
 }
 
 /// `pages` made recents: each one's picture found.
@@ -1409,19 +1531,28 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
                 let bytes = std::fs::read(&src).ok()?;
                 fitted(&bytes, &out)
             };
-            let video = || {
-                video_id(&v.url)
-                    .and_then(|id| Some((id, videos.get(id)?)))
-                    .and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body))
+            let cached = video_id(&v.url).and_then(|id| Some((id, videos.get(id)?)));
+            let video = || cached.and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body));
+            let heard = v.pic.as_deref().map(PathBuf::from);
+            let page = || kitchen.page_picture(&v.url);
+            let played = heard.clone().and_then(cooked);
+            let (preview, big) = match played {
+                Some(p) => (Some(p), heard.map(|h| (h, 0))),
+                None => match video() {
+                    Some(p) => (Some(p), cached.map(|(_, (_, entry, body))| (entry.clone(), *body))),
+                    None => {
+                        let src = page();
+                        (src.clone().and_then(cooked), src.map(|s| (s, 0)))
+                    }
+                },
             };
-            let played = v.pic.as_deref().map(PathBuf::from).and_then(cooked);
-            let preview = played.or_else(video).or_else(|| kitchen.page_picture(&v.url).and_then(cooked));
+            let big = big.filter(|_| preview.is_some());
             let aspect = preview.as_deref().and_then(shape_of);
             let picture = preview.or_else(|| {
                 let data = favicon(browser, icons.as_deref()?, &v.url)?;
                 tile_in(tiles.as_deref()?, &data)
             });
-            Recent { url: v.url, title, picture, dir: false, aspect, last: v.last }
+            Recent { url: v.url, title, picture, dir: false, aspect, last: v.last, times: v.times, played: v.played, big }
         })
         .collect();
     // (Now and then: the picture caches kept under their bound.)
@@ -1861,7 +1992,7 @@ mod tests {
     }
 
     fn visit(url: &str, title: &str) -> Visit {
-        Visit { url: url.into(), title: title.into(), last: 0.0, score: 0.0, pic: None }
+        Visit { url: url.into(), title: title.into(), last: 0.0, score: 0.0, pic: None, times: 0, played: false }
     }
 
     #[test]
@@ -1882,8 +2013,8 @@ mod tests {
         );
         // A pick from the box counts more than a visit, and as the newest.
         let pages = vec![
-            (Visit { url: "a".into(), title: "A".into(), last: 50.0, score: 2.0, pic: None }, "A".to_string()),
-            (Visit { url: "b".into(), title: "B".into(), last: 40.0, score: 1.0, pic: None }, "B".to_string()),
+            (Visit { last: 50.0, score: 2.0, ..visit("a", "A") }, "A".to_string()),
+            (Visit { last: 40.0, score: 1.0, ..visit("b", "B") }, "B".to_string()),
         ];
         let picks: Picks = [("b".to_string(), (1.0, 99.0))].into();
         let got = ranked_pages(pages, &picks, 2);
@@ -1969,7 +2100,7 @@ mod tests {
         // YouTube Music played on its own page: that page; one with it in the history.
         let ym = played(&k, site("youtube-music"), "https://music.youtube.com", 20.0);
         assert_eq!(ym[0].0.url, "https://music.youtube.com/watch?v=9d9PQ1hrhBk");
-        let page = (Visit { url: "https://music.youtube.com/watch?v=9d9PQ1hrhBk".into(), title: "Robot Rock".into(), last: 5.0, score: 1.0, pic: None }, "Robot Rock".to_string());
+        let page = (Visit { last: 5.0, score: 1.0, ..visit("https://music.youtube.com/watch?v=9d9PQ1hrhBk", "Robot Rock") }, "Robot Rock".to_string());
         let both = with_plays(vec![page], ym);
         assert_eq!(both.len(), 1);
         assert_eq!(both[0].1, "Robot Rock • Daft Punk");

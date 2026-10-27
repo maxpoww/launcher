@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use calloop::timer::{TimeoutAction, Timer};
+use smithay_client_toolkit::reexports::client::protocol::wl_pointer;
 use smithay_client_toolkit::seat::keyboard::Keysym;
 use tracing::{error, info, warn};
 use waverunner_core::index::AppEntry;
@@ -469,6 +470,9 @@ fn files_recents(app: &AppEntry, shared: bool, wanted: &web_actions::Wanted) -> 
             picture: None,
             aspect: None,
             last,
+            times: 0,
+            played: false,
+            big: None,
         })
         .collect()
 }
@@ -1422,6 +1426,13 @@ impl App {
                     return true;
                 }
                 Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {}
+                // Ctrl+C: a page's address.
+                Keysym::c | Keysym::C if self.modifiers.ctrl => {
+                    if let Some(url) = self.peek.up.as_ref().and_then(|u| u.said.as_ref()).map(|s| s.url.clone()) {
+                        self.peek_copy_link(&url);
+                    }
+                    return true;
+                }
                 _ => return self.peek_key(crate::quicklook::BOX, keysym, None),
             }
         }
@@ -1565,21 +1576,33 @@ impl App {
         };
         let app = a.recents_of.as_deref().and_then(|id| self.entries.iter().find(|e| e.id == id)).map(|e| e.name.clone()).unwrap_or_default();
         let file = !a.web;
-        let (path, said) = if file {
-            (PathBuf::from(&item.url), None)
+        // (A page: its picture as big as it was found; the app's name in the
+        // head, the page's words under the picture — `peek_page.rs`.)
+        let (path, name, said) = if file {
+            (PathBuf::from(&item.url), item.title.clone(), None)
         } else {
             let Some(picture) = item.picture.clone() else {
                 return;
             };
+            let own = item.aspect.is_some();
+            let big = item.big.as_ref().filter(|_| own).and_then(|(src, body)| web_actions::big_picture(src, *body));
             let at = web_actions::origin(&item.url).map_or_else(|| item.url.clone(), |(_, h)| h.trim_start_matches("www.").to_owned());
-            (picture, Some(crate::quicklook::Said { meta: at, open: fill(tr("Open in {app}"), &[("app", &app)]) }))
+            let said = crate::quicklook::Said {
+                meta: at,
+                open: fill(tr("Open in {app}"), &[("app", &app)]),
+                title: item.title.clone(),
+                facts: web_actions::seen_line(item, crate::usage::now_secs()),
+                url: item.url.clone(),
+                picture: own,
+            };
+            (big.unwrap_or(picture), app.clone(), Some(said))
         };
         let Some(icon) = self.recent_icon_rect(entry) else {
             return;
         };
         info!("quick look of a recent: {}", item.url);
         self.search.peeked = Some(item.url.clone());
-        let thing = crate::quicklook::Thing { path, name: item.title.clone(), thumb: None, icon, of: None, said };
+        let thing = crate::quicklook::Thing { path, name, thumb: None, icon, of: None, said };
         self.peek_show(crate::quicklook::BOX, thing);
     }
 
@@ -1613,8 +1636,30 @@ impl App {
         }
     }
 
-    /// Where recent `entry`'s picture stands on the screen (logical px of
-    /// the output): Quick Look grows out of it and goes back into it.
+    /// How far down a point of the dock's surface is on Quick Look's: the
+    /// dock's stands on the screen's bottom edge as tall as the screen (under
+    /// the bar too), Quick Look's fills what the bar leaves (it begins under
+    /// it) — both end at the bottom.
+    fn box_to_peek_dy(&self) -> f32 {
+        self.desktop_top.size.1 as f32 - self.buffer_size.1 as f32
+    }
+
+    /// A pointer event on the dock's surface as a point of Quick Look's.
+    pub(crate) fn box_point_on_screen(&self, event: wl_pointer::Event) -> wl_pointer::Event {
+        let dy = f64::from(self.box_to_peek_dy());
+        match event {
+            wl_pointer::Event::Motion { time, surface_x, surface_y } => {
+                wl_pointer::Event::Motion { time, surface_x, surface_y: surface_y + dy }
+            }
+            wl_pointer::Event::Enter { serial, surface, surface_x, surface_y } => {
+                wl_pointer::Event::Enter { serial, surface, surface_x, surface_y: surface_y + dy }
+            }
+            other => other,
+        }
+    }
+
+    /// Where recent `entry`'s picture stands on Quick Look's surface: it
+    /// grows out of it and goes back into it.
     fn recent_icon_rect(&self, entry: usize) -> Option<content::Rect> {
         let s = content::SECTION_APPS;
         let cell = self.search.visible[s].iter().position(|&e| e == entry)?;
@@ -1631,8 +1676,7 @@ impl App {
         }
         let x = sec.viewport.x + sec.row_shift(row * cols) + col as f32 * cw;
         let side = cw.min(ch) * 0.62;
-        // (The dock's surface stands on the screen's bottom edge.)
-        let dy = self.dock_screen_h().map_or(0.0, |h| h - self.buffer_size.1 as f32);
+        let dy = self.box_to_peek_dy();
         Some(content::Rect::new(x + (cw - side) / 2.0, y + dy + (ch * 0.42 - side / 2.0).max(0.0), side, side))
     }
 

@@ -1532,7 +1532,15 @@ The big daemon files are cohesive but long — go straight to the function:
   SPACE on the SELECTED recent (the keys' or the pointer's — the box has one selection,
   `pointer_takes_selection`; typing puts it back on the app, so "youtube linux" still types)
   = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
-  a page as its picture with `Said` (its host under its name, "Open in <app>", no pencil); the
+  a PAGE as the page (`peek_page.rs`, Max: "the quick look is small and tells nothing"): its picture
+  as big as it was found (`web_actions::big_picture`: the kitchen's file, or a video's out of Seam's
+  cache, `Recent::big`) grown to `SHARE` of the screen, under it the WHOLE title (3 lines), "Watched
+  / Played / Visited <when> · N times" (`seen_line`, `Recent::times`/`played`), the address and Copy
+  link (Ctrl+C too; the pill says "Link copied"); a favicon-only page is a card, the tile beside the
+  words; the head is the app's name, its host, Open in <app>, no pencil. ⚠ the box holds the
+  keyboard EXCLUSIVELY, so Hyprland pins the POINTER to the dock's layer: while Quick Look is up from
+  the box the dock hands it its pointer events (`box_point_on_screen`, moved by `box_to_peek_dy` —
+  Quick Look's surface begins under the bar, the dock's at the screen's top); the
   arrows walk the recents with it following, Enter / Open opens the recent in its app
   (`box_peek_open` → `run_recent`), Space / Escape put it back, the box going closes it. OPEN
   COPIED LINK: the clipboard's newest clip, a link copied within `COPIED_FOR` (1 h), first beside

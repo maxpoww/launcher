@@ -267,7 +267,7 @@ pub(crate) struct Up {
     anim_ms: f32,
     anim_frame: Option<usize>,
     /// What the head says instead of the file's (`Thing::said`).
-    said: Option<Said>,
+    pub(crate) said: Option<Said>,
 }
 
 impl Up {
@@ -1108,13 +1108,21 @@ pub(crate) struct Thing {
     pub said: Option<Said>,
 }
 
-/// What the head says of a page shown by its picture (a recent of the dock
-/// box's, `app_actions.rs`): where it is, under its name, and Open in its
-/// app — for the file's kind and size and its app.
+/// A PAGE shown by its picture (a recent of the dock box's,
+/// `app_actions.rs`; drawn by `peek_page.rs`): the head says where it is and
+/// Open in its app — for the file's kind and size and its app —, and under
+/// the picture its whole title, how it was seen, its address.
 #[derive(Clone, Debug)]
 pub(crate) struct Said {
     pub meta: String,
     pub open: String,
+    pub title: String,
+    /// "Watched today at 13:02 · 5 times".
+    pub facts: String,
+    pub url: String,
+    /// It has a picture of its own (else the file is its favicon's tile:
+    /// small, beside the words).
+    pub picture: bool,
 }
 
 /// The picture a body shows in its tiles.
@@ -1413,6 +1421,16 @@ impl App {
         self.peek.slides = None;
         up.start = up.rect;
         up.t = 0.0;
+        self.request_desktop_top_draw();
+    }
+
+    /// A page's address on the clipboard, and a word for it.
+    pub(crate) fn peek_copy_link(&mut self, url: &str) {
+        info!("quick look: link copied");
+        self.copy_text(url);
+        if let Some(up) = self.peek.up.as_mut() {
+            up.notice = Some((tr("Link copied").to_owned(), Instant::now()));
+        }
         self.request_desktop_top_draw();
     }
 
@@ -1910,6 +1928,8 @@ impl App {
                     self.peek_close();
                 } else if parts.open.contains(at) {
                     self.peek_open_app();
+                } else if let Some(url) = self.page_copy_at(at) {
+                    self.peek_copy_link(&url);
                 } else if song && song_parts(self.song_area(up.rect)).play.contains(at) {
                     self.peek_play();
                 } else if !up.rect.contains(at) {
@@ -1961,6 +1981,20 @@ impl App {
             let (pw, ph) = (ew as f32 / scale, eh as f32 / scale);
             let k = (mw / pw).min(mh / ph).min(1.0);
             let (w, h) = ((pw * k).max(600.0).min(sw * 0.94), (ph * k).max(320.0));
+            return Rect::new(
+                ((sw - w) / 2.0).round(),
+                ((sh - h - HEAD) / 2.0).round(),
+                w.round(),
+                (h + HEAD).round(),
+            );
+        }
+        // A PAGE (`peek_page.rs`): its picture grown, its words under it.
+        if let Some(said) = self.peek.up.as_ref().and_then(|u| u.said.as_ref()) {
+            let pic = match self.peek_shown().map(|(_, p)| &p.body) {
+                Some(Body::Picture(p)) => Some((p.w as f32 / scale, p.h as f32 / scale)),
+                _ => None,
+            };
+            let (w, h) = self.page_size(said, pic, (mw, mh), sw);
             return Rect::new(
                 ((sw - w) / 2.0).round(),
                 ((sh - h - HEAD) / 2.0).round(),
@@ -2504,6 +2538,20 @@ impl App {
             }
         };
         match prepared.map(|p| &p.body) {
+            // A PAGE (`peek_page.rs`): its picture in its room (its tile
+            // beside the words), the words.
+            _ if up.said.is_some() => {
+                let said = up.said.as_ref().expect("checked");
+                let l = self.page_layout(r, said);
+                if let (Some(Body::Picture(pic)), true) = (prepared.map(|p| &p.body), tiles_up) {
+                    let a = if up.closing { open } else { up.sharp };
+                    if let Some(room) = l.pic.or(l.tile) {
+                        tiles_in(&mut g, pic, crate::peek_editor::pic_rect(room, pic.w, pic.h), a, 0);
+                    }
+                }
+                let copied = up.notice.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
+                self.page_words_push(&mut g, said, &l, (ink, dim, open), (up.ptr, copied));
+            }
             Some(Body::Picture(pic)) if tiles_up => {
                 soft_square(&mut g, soft);
                 // (Opaque: tiles overlap by a texel, and a see-through
@@ -3020,7 +3068,8 @@ impl App {
         });
         // A word for a moment ("Saved"), over the picture.
         let mut notice_grid = None;
-        if let Some((word, at)) = up.notice.as_ref() {
+        // (A page says it in its Copy link: `peek_page.rs`.)
+        if let Some((word, at)) = up.notice.as_ref().filter(|_| up.said.is_none()) {
             let age = at.elapsed().as_secs_f32();
             if age < NOTICE_SECS {
                 let fade = open * (1.0 - ((age - NOTICE_SECS + 0.6) / 0.6).clamp(0.0, 1.0));
