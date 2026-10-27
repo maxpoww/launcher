@@ -9,7 +9,9 @@
 //! "use the buttons we use on the card instead of the pills" — its quiet
 //! head: an icon alone, a round wash under the pointer): the BIN that takes
 //! the recent out of the box (Delete too), Copy link (a check a moment
-//! after), Open in its app, × (`head`, `page_head_push`). A page with no
+//! after), Open in its app, × (`head`, `page_head_push`) — in the order
+//! Open · Copy link · bin · ×, evenly, each icon's drawing in the middle of
+//! its button (Max: "change the order … and align those 4 buttons"). A page with no
 //! picture of its own (its favicon on a tile) has the tile small beside the
 //! words.
 //!
@@ -69,16 +71,28 @@ pub(crate) enum Button {
 const BUTTON: f32 = 28.0;
 const BUTTON_GAP: f32 = 4.0;
 
-/// A page's head buttons in a frame at `r`, from the right: ×, Open, Copy
-/// link, and — a little apart — the bin.
+/// A page's head buttons in a frame at `r`, left to right: Open, Copy
+/// link, the bin, × — evenly, ending at the head's right.
 pub(crate) fn head(r: Rect) -> [(Button, Rect); 4] {
     let y = r.y + ((HEAD - BUTTON) / 2.0).round();
-    let at = |right: f32| Rect::new(right - BUTTON, y, BUTTON, BUTTON);
-    let close = at(r.x + r.w - 10.0);
-    let open = at(close.x - BUTTON_GAP);
-    let copy = at(open.x - BUTTON_GAP);
-    let bin = at(copy.x - 3.0 * BUTTON_GAP);
-    [(Button::Bin, bin), (Button::Copy, copy), (Button::Open, open), (Button::Close, close)]
+    let right = (r.x + r.w - 10.0).round();
+    let at = |n: f32| Rect::new(right - BUTTON - n * (BUTTON + BUTTON_GAP), y, BUTTON, BUTTON);
+    [(Button::Open, at(3.0)), (Button::Copy, at(2.0)), (Button::Bin, at(1.0)), (Button::Close, at(0.0))]
+}
+
+/// Each button's icon (the Nerd font's), its size, and how far its drawing
+/// sits off the middle of its letter's cell (design px, right and down) —
+/// taken back out, so the DRAWING is in the middle of the button and the
+/// four are as big as each other to the eye. MEASURED on the nested rig
+/// with the host's fonts (2026-10-27), as the card's `Icon`s were.
+fn icon(b: Button, copied: bool) -> (&'static str, f32, (f32, f32)) {
+    match b {
+        Button::Open => ("\u{f08e}", 20.0, (0.0, 0.0)),           // fa-external-link
+        Button::Copy if copied => ("\u{f00c}", 20.0, (0.0, 0.0)), // fa-check
+        Button::Copy => ("\u{f0c1}", 21.5, (0.0, 0.0)),           // fa-link
+        Button::Bin => ("\u{f014}", 19.0, (0.0, 0.0)),            // fa-trash-o
+        Button::Close => ("\u{f00d}", 18.0, (0.0, 0.0)),          // fa-times (its strokes are heavier)
+    }
 }
 
 /// `text` on up to `lines` lines of `room`, broken between words (a word
@@ -217,20 +231,14 @@ impl App {
             }
             // (At the card's size: the Nerd font's icons fill a mono cell,
             // so their letter is big for their drawing — `card::view::Icon`.)
-            let (glyph, px) = match b {
-                Button::Bin => ("\u{f014}", 21.0),            // fa-trash-o
-                Button::Copy if copied => ("\u{f00c}", 20.0), // fa-check
-                Button::Copy => ("\u{f0c1}", 20.0),           // fa-link
-                Button::Open => ("\u{f08e}", 20.0),           // fa-external-link
-                Button::Close => ("\u{f00d}", 20.0),          // fa-times
-            };
+            let (glyph, px, (dx, dy)) = icon(b, copied);
             let line = (px * 1.3225f32).round();
             g.labels.push(Label {
                 centered: true,
                 family: Some(crate::options::NERD),
                 ..text_label(
                     glyph,
-                    (rect.x + rect.w / 2.0, rect.y + (rect.h - line) / 2.0),
+                    (rect.x + rect.w / 2.0 - dx, rect.y + (rect.h - line) / 2.0 - dy),
                     rect.w + 8.0,
                     px,
                     None,

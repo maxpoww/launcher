@@ -1540,8 +1540,10 @@ The big daemon files are cohesive but long — go straight to the function:
   `Recent::times`/`played`) and the address; a favicon-only page is a card, the tile beside the
   words; the head is the app's name, its host, and THE CARD'S BUTTONS (Max: "use the buttons we use
   on the card instead of the pills" — the quiet head: a Nerd icon alone at 72 % ink, a round wash
-  under the pointer; `peek_page::head`/`page_head_push`): bin · link · open · ×, a check on the link
-  a moment after a copy. The bin or Delete puts the recent away and closes it (`box_peek_bin`);
+  under the pointer; `peek_page::head`/`page_head_push`): open · link · bin · ×, evenly (Max: "change
+  the order … and align those 4 buttons"), each icon sized and placed so its DRAWING is ~12 px and in
+  the middle of its button (`peek_page::icon`, measured on the rig with `measure-head.py`-style ink
+  boxes), a check on the link a moment after a copy. The bin or Delete puts the recent away and closes it (`box_peek_bin`);
   Ctrl+C copies. ⚠ rig: Nerd icons are tofu unless the rig dock gets a fonts.conf that includes the
   HOST's conf.d (its store path; the host fonts.conf includes `/etc/fonts/conf.d` = the toolbox's). ⚠ the box holds the
   keyboard EXCLUSIVELY, so Hyprland pins the POINTER to the dock's layer: while Quick Look is up from
