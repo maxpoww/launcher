@@ -2736,6 +2736,7 @@ dependencies = [
  "md5",
  "memmap2 0.9.11",
  "naga",
+ "nucleo-matcher",
  "options-engine",
  "options-notify",
  "pollster",

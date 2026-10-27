@@ -21,6 +21,7 @@ options-engine = { workspace = true }
 # The notification OPTION talks to the options-notify daemon over session D-Bus;
 # we depend on it only for the shared wire type (`ActiveNotification`).
 options-notify = { workspace = true }
+nucleo-matcher = { workspace = true }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 futures-util = "0.3"

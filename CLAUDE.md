@@ -1559,5 +1559,33 @@ The big daemon files are cohesive but long — go straight to the function:
   COPIED LINK: the clipboard's newest clip, a link copied within `COPIED_FOR` (1 h), first beside
   a webapp when it is on its site's hosts (`web_actions::on_hosts`), beside a browser whatever it
   is (Seam's: not an installed webapp's) — `copied_link_exec`.
+- `file_search.rs` (+ `files.rs::file_results`, `app_actions.rs::add_file_row`) — THE BOX'S FILE SEARCH
+  (Max, 2026-10-27: "maybe improve file search?" … "do 1 to 7, also quick view on files"). The home walk
+  (`apps::scan_home_files`, off the loop at each rescan: hidden, links, `target`/`node_modules`/
+  `__pycache__` and any folder with a `CACHEDIR.TAG` left out — Cargo's `target-*` flooded results)
+  keeps each file's FOLDER below home folded (`FileEntry::dir`) and its MTIME. `Ranker::rank`: each
+  word of the query is a SUBSTRING of the name (nucleo `AtomKind::Substring` — scattered letters
+  brought "notification" for "notas") or begins a word of its folders' path (`word_start`: "playa
+  2024" → `Pictures/Playa 2024/IMG.jpg`, "factura junio" → `Documents/Facturas/junio.pdf`; one word
+  alone of 3+ letters brings a folder's things below what it names); a name saying every word ×1.5;
+  KIND WORDS (`KIND_WORDS`, es+en: pdf, fotos/photos, videos, música/music, documentos/docs,
+  carpetas/folders, comprimidos/zips) narrow to a kind and alone list it newest first; then THE
+  OWNER'S USE — opened lately (`recently-used.xbel`, `opened_from_record`, read with the walk;
+  `App::file_opened`) and changed lately (mtime), each `usage::decayed`. WATCHED: the tops of
+  Desktop/Documents/Downloads/Music/Pictures(+Screenshots)/Videos (`watched_dirs`, inotify →
+  `files_fresh_soon`, 300 ms, `list_top` off the loop, `merge_tops`): a download is found at once.
+  What the box opens is NOTED in the record as opened by the app that opens its kind
+  (`file_opened_from_box` → `quicklook::default_app`, else the first of `filer::apps_for` →
+  `filer::recent::note_as`), so Files' Recents and that app's "Recent in" have it. SPACE on a found
+  file the arrows or the pointer CHOSE (`SearchState::chosen`: never the best match typing landed on,
+  so "factura junio" types its space) = QUICK LOOK (`box_peek_file`, the arrows follow,
+  Enter/Open = `activate`). SHIFT on a found file (or one of the home row) = ITS ROW
+  (`SearchState::focus_file`, `add_file_row`): left Copy · Show in Files, the file, right Open with
+  <app> (`file_openers`, off the loop) · Quick Look · next openers · Copy path (`Does::QuickLook|
+  ShowInFiles|CopyFile|CopyPath`; `filer_show_item`), under it "In <folder>" — its folder's other
+  things, a folder's own contents (`Source::Folder`, `folder_recents`; never switched off or put away
+  as recents are); Escape / Shift again / typing go back. Real home: `cargo test -- --ignored
+  real_home_search --nocapture` (QUERIES=a,b,…). Rig: `HOME=<fake home>` for the rig dock, an
+  `xdg-open` stub on its PATH, and the host's `xdg-mime`/`gio` (the toolbox has neither).
 - `*_icon.rs` (whatsapp, youtube, ytmusic, discord, spotify, google, chrome, files, compass, gears, apps, bin) — the dock's MOVING ICONS, each directed by Max in the App Motion Lab. **`docs/icon-motion.md` is the spec**: parts and pivots, hover = held turn + one gesture, click = the event with a beat or counter-spin, the numbers, the vocabulary of moves, how to build and wire one, and how to generate the rest; **`docs/icon-list.md`** is the catalogue of 200 to animate, most used first, with dock ids and mark sources. Read both before touching or adding any.
 - Engine (separate crate): `options-engine/src/{collectors,mind}` — the headless "Brain".

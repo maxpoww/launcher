@@ -62,7 +62,7 @@ use crate::{launch, App};
 mod chrome;
 mod history;
 mod print;
-mod recent;
+pub(crate) mod recent;
 mod confirm;
 mod shortcuts;
 mod smart;
@@ -3457,6 +3457,20 @@ impl App {
         });
         if heard.is_ok() {
             serve_file_manager(tx);
+        }
+    }
+
+    /// A window on `path`'s folder with `path` selected (the dock box's
+    /// "Show in Files").
+    pub(crate) fn filer_show_item(&mut self, path: &Path) {
+        let Some(dir) = path.parent().filter(|d| d.is_dir()) else {
+            return;
+        };
+        self.filer_open(dir.to_path_buf());
+        if let Some(id) = self.filer.newest() {
+            if let Some(win) = self.filer.win_mut(id) {
+                win.reveal = Some(path.to_string_lossy().into_owned());
+            }
         }
     }
 

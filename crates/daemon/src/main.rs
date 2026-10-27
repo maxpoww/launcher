@@ -74,6 +74,7 @@ mod peek_slides;
 mod peek_syntax;
 mod peek_web;
 mod peek_page;
+mod file_search;
 mod peek_zoom;
 mod apps_icon;
 mod thumb_more;
@@ -929,6 +930,10 @@ fn main() -> anyhow::Result<()> {
         removable_ids: HashSet::new(),
         installed_app_ids: HashSet::new(),
         file_index: Vec::new(),
+        file_opened: Default::default(),
+        file_ranker: Default::default(),
+        file_watched: Vec::new(),
+        file_fresh_pending: false,
         groups: groups::GroupDb::load(),
         app_group: None,
         dock_stack: None,
@@ -1279,6 +1284,21 @@ fn main() -> anyhow::Result<()> {
                 })
         {
             warn!("cannot watch application dirs for live reload: {e}");
+        }
+    }
+
+    // FILE SEARCH's watched folders (`file_search.rs`): what lands at the top
+    // of Downloads, Desktop, Documents… is found at once, not at the next
+    // walk of home. Same level-triggered inotify on the one loop.
+    app.file_watched = file_search::watched_dirs();
+    if let Some(watch_fd) = apps::watch_dirs(&app.file_watched) {
+        let source = Generic::new(watch_fd, Interest::READ, Mode::Level);
+        if let Err(e) = event_loop.handle().insert_source(source, |_readiness, fd, app: &mut App| {
+            apps::drain_inotify(fd.as_fd());
+            app.files_fresh_soon();
+            Ok(PostAction::Continue)
+        }) {
+            warn!("cannot watch the owner's folders for file search: {e}");
         }
     }
 
@@ -2164,6 +2184,15 @@ pub struct App {
     installed_app_ids: HashSet<String>,
     /// Home-tree file index the search ranks against (fresh per rescan).
     file_index: Vec<apps::FileEntry>,
+    /// When each file was opened last (the system's record, and what the
+    /// box opened since): ranks file search (`file_search.rs`).
+    file_opened: file_search::Opened,
+    /// File search's matcher, made once.
+    file_ranker: file_search::Ranker,
+    /// The owner's watched folders (`file_search::watched_dirs`), and a
+    /// reading of their tops asked for.
+    file_watched: Vec<std::path::PathBuf>,
+    file_fresh_pending: bool,
     /// Persistent app groups ("boxes") shown in the Apps grid.
     groups: groups::GroupDb,
     /// Group the Apps section is navigated into (index into `groups`).
@@ -2743,6 +2772,10 @@ struct SearchState {
     peeked: Option<String>,
     /// A press on the box went to Quick Look: its release goes there too.
     peek_press: bool,
+    /// A found file Shift took to its row (`app_actions::add_file_row`).
+    focus_file: Option<app_actions::FocusFile>,
+    /// The apps that open a file, by its path, as asked last (`file_openers`).
+    openers: HashMap<String, Vec<String>>,
     /// What the owner picked from a lone app's recents (`web_actions::rank`).
     picks: usage::UsageDb,
     /// The recents' pager (the wheel over them turns their pages).
@@ -2761,6 +2794,10 @@ struct SearchState {
     /// takes the app it is on rather than the one under the pointer
     /// (`App::pointer_takes_selection`).
     keyed: bool,
+    /// The selection was CHOSEN — the arrows or the pointer put it there —,
+    /// not the best match typing landed on: Space shows a chosen file big
+    /// (Quick Look), and types a space on a found one.
+    chosen: bool,
 }
 
 impl Default for SearchState {
@@ -2780,12 +2817,15 @@ impl Default for SearchState {
             web: web_actions::Recents { forgot: web_actions::Forgot::load(), ..Default::default() },
             peeked: None,
             peek_press: false,
+            focus_file: None,
+            openers: HashMap::new(),
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
             focus: None,
             shifted: None,
             shift_tap: false,
             keyed: false,
+            chosen: false,
         }
     }
 }
@@ -4652,6 +4692,7 @@ impl App {
         if self.apps_fingerprint == Some(loaded.fingerprint) {
             debug!("app index unchanged; skipping rebuild");
             self.file_index = loaded.files;
+            self.file_opened_merge(loaded.opened);
             // An unchanged scan must STILL re-run pending-install
             // resolution: a scan can capture a fresh `.desktop` into the
             // fingerprint while its tile is still busy/held (the window
@@ -4712,6 +4753,7 @@ impl App {
         self.base_len = self.entries.len();
         self.icon_layers = (0..self.base_len as u32).collect();
         self.file_index = loaded.files;
+        self.file_opened_merge(loaded.opened);
         // Resolve every icon-carrier asset once per scan.
         self.assets = apps::ICON_ASSETS
             .iter()
@@ -4870,7 +4912,7 @@ impl App {
     /// though the query is still live for the Install list itself.
     fn grid_resting(&self) -> bool {
         // (An app Shift took to its row lays the box out as a search does.)
-        (self.search.query.is_empty() && self.search.focus.is_none()) || self.install_drag_reset
+        (self.search.query.is_empty() && self.search.focus.is_none() && self.search.focus_file.is_none()) || self.install_drag_reset
     }
 
     /// Whether entry `idx` is an app whose uninstall is in flight — hidden
@@ -5167,6 +5209,7 @@ impl App {
         }
         self.just_dropped = None;
         self.apps_slide = slide;
+        self.search.chosen = false;
         self.search.selected = if resting_grid || self.flat_len() == 0 {
             None
         } else {
@@ -5259,6 +5302,7 @@ impl App {
             return;
         }
         self.search.keyed = false;
+        self.search.chosen = true;
         if self.search.selected != Some(at) {
             self.search.selected = Some(at);
             self.actions_settle();
@@ -6209,6 +6253,11 @@ impl App {
         if let Err(e) = launch::launch(&exec, needs_terminal, &self.config.launch.terminal) {
             error!("launch failed for {id}: {e:#}");
         }
+        // (A file the box opened: in the system's record, first in file
+        // search — `file_search.rs`.)
+        if self.kinds.get(index) == Some(&apps::EntryKind::File) {
+            self.file_opened_from_box(&id);
+        }
         self.launched(index);
     }
 
@@ -6257,6 +6306,7 @@ impl App {
             // (An app Shift took to its row goes back to the box's own; Quick
             // Look of one of its recents goes with the box.)
             self.search.shifted = None;
+            self.search.focus_file = None;
             self.box_peek_close();
             if self.search.focus.take().is_some() {
                 self.refilter();
@@ -6949,6 +6999,7 @@ impl App {
                     // release the drag-from-Install grid hold.
                     self.install_drag_reset = false;
                     self.search.keyed = true;
+                    self.search.chosen = false;
                     if self.search.query.is_empty() {
                         self.search.open = false;
                     }
@@ -6986,6 +7037,9 @@ impl App {
                         self.scroll.per[s].target =
                             content::scroll_to_reveal(&layout.sections[s], at);
                     }
+                    self.search.chosen = true;
+                    // (Quick Look up from a file: it follows.)
+                    self.box_peek_follow();
                     self.schedule_frame();
                 }
             }
@@ -7007,6 +7061,7 @@ impl App {
                         self.install_drag_reset = false;
                         // (The best match it lands on is the keys'.)
                         self.search.keyed = true;
+                        self.search.chosen = false;
                         self.search.query.push_str(&printable);
                         self.refilter();
                     }

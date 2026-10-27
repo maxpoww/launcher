@@ -81,6 +81,11 @@ pub struct FileEntry {
     /// Absolute path.
     pub path: String,
     pub is_dir: bool,
+    /// Its folder below home, as searched (`file_search::dir_of`): a word
+    /// of the query may be found there.
+    pub dir: String,
+    /// When it changed last (unix seconds; 0 unknown).
+    pub mtime: f64,
 }
 
 /// The indexer thread's result: entries plus one RGBA8 (premultiplied)
@@ -105,6 +110,9 @@ pub struct LoadedApps {
     pub cli_ids: Vec<String>,
     /// Home-tree file index for search (fresh every rescan).
     pub files: Vec<FileEntry>,
+    /// When each file was opened last, as the system's record says
+    /// (`file_search::opened_from_record`; read with the walk).
+    pub opened: crate::file_search::Opened,
     /// Content fingerprint of everything *except* `files` (entries, kinds,
     /// icon bytes, placeholders, cli ids), computed on the indexer thread.
     /// Most rescans (every dock summon requests one) reproduce the identical
@@ -244,14 +252,17 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let (icons, placeholders): (Vec<_>, Vec<_>) =
                     entries.iter().map(|entry| loader.icon_for(entry)).unzip();
                 loader.resolutions.save();
+                let walk = std::time::Instant::now();
                 let files = scan_home_files();
+                let opened = crate::file_search::opened_from_record();
                 debug!(
-                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?})",
+                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}, files {:?})",
                     entries.len(),
                     files.len(),
                     started.elapsed(),
                     scanned - started,
-                    scanned.elapsed()
+                    scanned.elapsed(),
+                    walk.elapsed()
                 );
                 let fingerprint =
                     load_fingerprint(&entries, &kinds, &icons, &placeholders, &cli_ids);
@@ -263,6 +274,7 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                         placeholders,
                         cli_ids,
                         files,
+                        opened,
                         fingerprint,
                     })
                     .is_err()
@@ -714,22 +726,27 @@ fn cli_tiles_from(
 const FILE_INDEX_CAP: usize = 50_000;
 /// Directory depth limit of the home walk (home itself = depth 0).
 const FILE_WALK_DEPTH: usize = 6;
-/// Build/VCS trees indexed by no one on purpose.
-const FILE_WALK_SKIP: [&str; 2] = ["target", "node_modules"];
+/// Build/VCS trees indexed by no one on purpose — and any folder that says it
+/// is a cache (`CACHEDIR.TAG`: Cargo's `target-*` trees flooded file search
+/// with build output).
+const FILE_WALK_SKIP: [&str; 3] = ["target", "node_modules", "__pycache__"];
 
 /// Walk the home directory (breadth-first, hidden entries and symlinks
 /// skipped) into the search index. Runs on the indexer thread on every
 /// rescan, so results track the disk.
-fn scan_home_files() -> Vec<FileEntry> {
+pub(crate) fn scan_home_files() -> Vec<FileEntry> {
     let Ok(home) = std::env::var("HOME") else {
         return Vec::new();
     };
+    let home_path = PathBuf::from(&home);
     let mut out = Vec::new();
     let mut queue = std::collections::VecDeque::from([(PathBuf::from(&home), 0usize)]);
     while let Some((dir, depth)) = queue.pop_front() {
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
         };
+        // (Every file of a folder is in that folder: its words once.)
+        let folder = crate::file_search::dir_of(&dir.join("x"), &home_path);
         for e in read.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') || FILE_WALK_SKIP.contains(&name.as_str()) {
@@ -741,13 +758,19 @@ fn scan_home_files() -> Vec<FileEntry> {
             }
             let is_dir = ft.is_dir();
             let path = e.path();
+            if is_dir && path.join("CACHEDIR.TAG").exists() {
+                continue;
+            }
             if is_dir && depth + 1 < FILE_WALK_DEPTH {
                 queue.push_back((path.clone(), depth + 1));
             }
+            let mtime = e.metadata().map_or(0.0, |m| crate::file_search::mtime_of(&m));
             out.push(FileEntry {
                 name,
                 path: path.to_string_lossy().into_owned(),
                 is_dir,
+                dir: folder.clone(),
+                mtime,
             });
             if out.len() >= FILE_INDEX_CAP {
                 return out;

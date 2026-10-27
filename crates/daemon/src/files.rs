@@ -96,19 +96,97 @@ impl App {
         self.push_transient(entry, apps::EntryKind::File, placeholder, layer)
     }
 
-    /// Rank the home-tree file index against the query and append the
-    /// top matches as transient entries, returning their indices for
-    /// the Files section.
+    /// Rank the home-tree file index against the query (`file_search.rs`:
+    /// the name and, word by word, the path; kind words; the owner's use)
+    /// and append the top matches as transient entries, returning their
+    /// indices for the Files section.
     pub(crate) fn file_results(&mut self) -> Vec<usize> {
-        let names: Vec<&str> = self.file_index.iter().map(|f| f.name.as_str()).collect();
-        let ranked = self.search.matcher.rank(&self.search.query, &names);
+        let query = crate::file_search::parse(&self.search.query);
+        let now = crate::usage::now_secs();
+        let ranked = self.file_ranker.rank(&self.file_index, &query, &self.file_opened, now, FILE_RESULTS_MAX);
         let mut out = Vec::new();
-        for fi in ranked.into_iter().take(FILE_RESULTS_MAX) {
+        for fi in ranked {
             let f = self.file_index[fi].clone();
             let exec = format!("xdg-open {}", launch::shell_quote(&f.path));
             out.push(self.push_transient_file(&f.path, &f.name, exec, f.is_dir));
         }
         out
+    }
+
+    /// What the system's record says was opened when (read with the walk),
+    /// with what the box opened since kept where it is newer.
+    pub(crate) fn file_opened_merge(&mut self, mut opened: crate::file_search::Opened) {
+        for (path, at) in self.file_opened.drain() {
+            if opened.get(&path).is_none_or(|&t| t < at) {
+                opened.insert(path, at);
+            }
+        }
+        self.file_opened = opened;
+    }
+
+    /// Something happened in a watched folder's top (`file_search`): read
+    /// the tops again off the loop, a moment on (a download writes many
+    /// times), and take them into the index.
+    pub(crate) fn files_fresh_soon(&mut self) {
+        if self.file_fresh_pending {
+            return;
+        }
+        self.file_fresh_pending = true;
+        let timer = Timer::from_duration(std::time::Duration::from_millis(300));
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            let dirs = app.file_watched.clone();
+            app.desktop_off_loop(
+                move || {
+                    let home = crate::filer::home();
+                    let tops: Vec<apps::FileEntry> = dirs.iter().flat_map(|d| crate::file_search::list_top(d, &home)).collect();
+                    (dirs, tops)
+                },
+                |app, (dirs, tops)| {
+                    app.file_fresh_pending = false;
+                    info!("files: the watched folders read again ({} at their tops)", tops.len());
+                    crate::file_search::merge_tops(&mut app.file_index, &dirs, tops);
+                    // (A search on screen finds what came.)
+                    if !app.search.query.is_empty() && app.ui.target() == crate::state::Target::Open {
+                        app.refilter();
+                        app.schedule_frame();
+                    }
+                },
+            );
+            TimeoutAction::Drop
+        });
+        if armed.is_err() {
+            self.file_fresh_pending = false;
+        }
+    }
+
+    /// The box opened `path` (a file): it is noted where every app looks for
+    /// what was used lately — as opened by the app that opens its kind, so
+    /// that app's "Recent in" has it too — and it comes first in file
+    /// search from now on.
+    pub(crate) fn file_opened_from_box(&mut self, path: &str) {
+        let p = std::path::PathBuf::from(path);
+        if !p.is_file() {
+            return;
+        }
+        self.file_opened.insert(path.to_owned(), crate::usage::now_secs());
+        let lower = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let mime = crate::thumb_more::mime_of(&lower).unwrap_or("application/octet-stream").to_owned();
+        self.desktop_off_loop(
+            move || crate::quicklook::default_app(&mime),
+            move |app, id| {
+                // (The system's choice by its id, else the first of the apps
+                // that said they open it — one id the box may know by another.)
+                let key = p.to_string_lossy().into_owned();
+                let opener = id
+                    .iter()
+                    .chain(app.search.openers.get(&key).into_iter().flatten())
+                    .find_map(|id| app.entries.iter().find(|e| e.id == *id))
+                    .map(|e| (e.name.clone(), e.exec.clone()));
+                info!("files: {} opened from the box, by {:?} ({id:?})", p.display(), opener.as_ref().map(|o| &o.0));
+                let p = p.clone();
+                app.desktop_off_loop(move || crate::filer::recent::note_as(&p, opener.as_ref()), |_, ()| {});
+            },
+        );
     }
 
     /// Transient listing of `$HOME`'s visible children (everything but

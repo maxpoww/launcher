@@ -107,6 +107,11 @@ fn now() -> String {
 /// `text` with the entry for `href` used again at `when` — or with a new
 /// entry for it, as GTK writes one (its kind, Golem Files as the app).
 pub(crate) fn noted(text: &str, href: &str, mime: &str, when: &str) -> String {
+    noted_by(text, href, mime, when, ("Golem Files", "xdg-open %u"))
+}
+
+/// [`noted`], a new entry's app being `app` (its name and command).
+fn noted_by(text: &str, href: &str, mime: &str, when: &str, (app, exec): (&str, &str)) -> String {
     let key = format!("<bookmark href=\"{href}\"");
     if let Some(at) = text.find(&key) {
         let end = text[at..].find('>').map_or(text.len(), |e| at + e);
@@ -124,8 +129,9 @@ pub(crate) fn noted(text: &str, href: &str, mime: &str, when: &str) -> String {
         }
         return format!("{}{tag}{}", &text[..at], &text[end..]);
     }
+    let (app, exec) = (xml(app), xml(exec));
     let entry = format!(
-        "  <bookmark href=\"{href}\" added=\"{when}\" modified=\"{when}\" visited=\"{when}\">\n    <info>\n      <metadata owner=\"http://freedesktop.org\">\n        <mime:mime-type type=\"{mime}\"/>\n        <bookmark:applications>\n          <bookmark:application name=\"Golem Files\" exec=\"&apos;xdg-open %u&apos;\" modified=\"{when}\" count=\"1\"/>\n        </bookmark:applications>\n      </metadata>\n    </info>\n  </bookmark>\n"
+        "  <bookmark href=\"{href}\" added=\"{when}\" modified=\"{when}\" visited=\"{when}\">\n    <info>\n      <metadata owner=\"http://freedesktop.org\">\n        <mime:mime-type type=\"{mime}\"/>\n        <bookmark:applications>\n          <bookmark:application name=\"{app}\" exec=\"&apos;{exec}&apos;\" modified=\"{when}\" count=\"1\"/>\n        </bookmark:applications>\n      </metadata>\n    </info>\n  </bookmark>\n"
     );
     match text.rfind("</xbel>") {
         Some(end) => format!("{}{entry}{}", &text[..end], &text[end..]),
@@ -138,12 +144,25 @@ pub(crate) fn noted(text: &str, href: &str, mime: &str, when: &str) -> String {
 /// Golem Files opened `path`: it goes in the record (on the caller's
 /// thread — it reads and writes a file).
 pub(crate) fn note(path: &Path) {
+    note_as(path, None);
+}
+
+/// [`note`], as opened by `app` (its name and command) when it is known
+/// — the dock box notes what it opens as opened by the app that opens it,
+/// so that app's own recents have it too —, else by Golem Files.
+pub(crate) fn note_as(path: &Path, app: Option<&(String, String)>) {
     let file = xbel();
     let text = std::fs::read_to_string(&file).unwrap_or_default();
     let lower = file_name(path).to_ascii_lowercase();
     let mime = crate::thumb_more::mime_of(&lower).unwrap_or("application/octet-stream");
     let href = format!("file://{}", crate::trash::encode_path(path));
-    crate::persist::write_text("recently-used", &file, &noted(&text, &href, mime, &now()));
+    let by = app.map_or(("Golem Files", "xdg-open %u"), |(name, exec)| (name.as_str(), exec.as_str()));
+    crate::persist::write_text("recently-used", &file, &noted_by(&text, &href, mime, &now(), by));
+}
+
+/// Text as an XML attribute's value.
+fn xml(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
 impl App {
@@ -212,5 +231,16 @@ mod tests {
         );
         assert_eq!(two.matches("<bookmark ").count(), 2);
         assert_eq!(entries(&two)[0].0, PathBuf::from("/home/max/y.txt"));
+    }
+
+    #[test]
+    fn what_the_box_opens_is_noted_as_opened_by_its_app() {
+        let href = "file:///home/max/n.txt";
+        let by = noted_by("", href, "text/plain", "2026-10-27T00:00:00.000000Z", ("Neovim \"wrapper\"", "nvim %F"));
+        assert!(by.contains(r#"<bookmark:application name="Neovim &quot;wrapper&quot;" exec="&apos;nvim %F&apos;""#), "{by}");
+        // (Used again: its entry's time, its app kept.)
+        let again = noted(&by, href, "text/plain", "2026-10-28T00:00:00.000000Z");
+        assert!(again.contains("Neovim") && !again.contains("Golem Files"));
+        assert_eq!(entries(&again)[0].1, "2026-10-28T00:00:00.000000Z");
     }
 }
