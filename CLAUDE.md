@@ -1529,7 +1529,9 @@ The big daemon files are cohesive but long — go straight to the function:
   the app's recents that say every word (`web_actions::says`: title, or the address for words of
   3+), in place of the other apps found; read off the loop for the words (`found_recents`, the
   whole history, one reading at a time per app; meanwhile those read already that say them).
-  SPACE on a recent the keys are on = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
+  SPACE on the SELECTED recent (the keys' or the pointer's — the box has one selection,
+  `pointer_takes_selection`; typing puts it back on the app, so "youtube linux" still types)
+  = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
   a page as its picture with `Said` (its host under its name, "Open in <app>", no pencil); the
   arrows walk the recents with it following, Enter / Open opens the recent in its app
   (`box_peek_open` → `run_recent`), Space / Escape put it back, the box going closes it. OPEN

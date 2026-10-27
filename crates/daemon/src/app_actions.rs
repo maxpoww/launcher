@@ -1455,8 +1455,11 @@ impl App {
             return false;
         };
         let in_row = cur < row;
-        // On a recent the keys went to: Space shows it big (Quick Look).
-        if !in_row && self.search.keyed && keysym == Keysym::space {
+        // On the recent that is selected — the keys' or the pointer's (Max,
+        // 2026-10-27: "hover a recent and press Space"): Space shows it big
+        // (Quick Look). Typing puts the selection back on the app, so a
+        // space typed after letters still searches ("youtube linux").
+        if !in_row && keysym == Keysym::space {
             self.box_peek(cur - row);
             return true;
         }
@@ -1552,7 +1555,7 @@ impl App {
         self.peek.up.as_ref().is_some_and(|u| u.win == crate::quicklook::BOX && !u.closing)
     }
 
-    /// SPACE ON A RECENT (Max, 2026-10-27): it shows big — a file as Quick
+    /// SPACE ON THE SELECTED RECENT (Max, 2026-10-27): it shows big — a file as Quick
     /// Look shows any; a page as its picture, said as the page (its address,
     /// Open in its app).
     fn box_peek(&mut self, k: usize) {
