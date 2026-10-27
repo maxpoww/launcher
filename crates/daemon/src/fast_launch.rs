@@ -512,7 +512,7 @@ impl App {
     /// settings. Up already as that: closed; up as the launcher: it turns.
     pub(crate) fn toggle_fast_controls(&mut self) {
         if self.fast.open && self.fast.controls {
-            self.close_fast_launch();
+            self.quick_leave();
             return;
         }
         if self.fast.open {

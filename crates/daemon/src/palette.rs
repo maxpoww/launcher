@@ -1547,8 +1547,7 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
     // rewrote the apps' icons once a step.)
     let mine = ICONS_ASKED.fetch_add(1, Ordering::Relaxed) + 1;
     let spawned = std::thread::Builder::new().name("palette".into()).spawn(move || {
-        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
         // A newer change is waiting its turn: this one's files would be
         // written only to be written over (a drag of a slider is many
         // changes; each rewrote everything and reloaded every GTK app).
@@ -1575,9 +1574,11 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
             // Inkscape's fixed theme points at the new one.)
             crate::app_themes::write(&apps);
         }
-        // (The apps' icons once the slider rests: a drag is many changes.)
+        // (The apps' icons once the slider rests: a drag is many changes —
+        // and not for a palette being made: every click of the editor
+        // rewrote them, 78 s on the Acer's disk. Saved, it gets them.)
         std::thread::sleep(std::time::Duration::from_millis(400));
-        if ICONS_ASKED.load(Ordering::Relaxed) == mine {
+        if ICONS_ASKED.load(Ordering::Relaxed) == mine && !previewing() {
             publish_icons(mine);
         }
         info!("palette: {} ({}), accent {}", theme.name, if theme.dark { "dark" } else { "light" }, slot_name(theme.accent_slot));
@@ -1588,6 +1589,26 @@ pub(crate) fn publish(theme: Arc<Theme>, look_changed: bool) {
 }
 
 // ------------------------------------------------------- the apps' icons
+
+/// The one writer of the apps' files and icons (a change at a time).
+static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The apps' icon theme dconf names now (also in a test rig, where dconf
+/// is not told).
+static ICONS_IN_USE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// A tinted theme the apps were just moved off, taken away a little later —
+/// under the writer's lock, and only while it is still not the one named —
+/// so an app slow to follow the change still finds its icons meanwhile.
+fn remove_later(dir: PathBuf, name: &'static str) {
+    let _ = std::thread::Builder::new().name("icons-old".into()).spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        let _one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        if ICONS_IN_USE.lock().is_ok_and(|u| *u != name) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    });
+}
 
 /// THE ICONS IN EVERY APP (Max, 2026-10-17: "the icons on thunar are not
 /// tinted… we cant have this inconsistency in any app"). The dock tints its
@@ -1612,6 +1633,9 @@ fn publish_icons(mine: u64) {
     let icons = std::path::Path::new(&data).join("icons");
     let names = ["Golem-Tinted-a", "Golem-Tinted-b"];
     let dconf = |name: &str| {
+        if let Ok(mut u) = ICONS_IN_USE.lock() {
+            name.clone_into(&mut u);
+        }
         // (A nested test dock names no icon theme to the owner's session.)
         if rig() {
             return;
@@ -1639,7 +1663,7 @@ fn publish_icons(mine: u64) {
     if k <= 0.0 && !dim {
         dconf(base);
         for n in names {
-            let _ = std::fs::remove_dir_all(icons.join(n));
+            remove_later(icons.join(n), n);
         }
         return;
     }
@@ -1689,7 +1713,7 @@ fn publish_icons(mine: u64) {
     let _ = std::fs::write(dest.join(".golem-stamp"), &stamp);
     info!("palette: the apps' icons written in {} ms", started.elapsed().as_millis());
     dconf(next);
-    let _ = std::fs::remove_dir_all(icons.join(old));
+    remove_later(icons.join(old), old);
 }
 
 /// What the apps show SMALL that Golem does not draw — the menus' and the
@@ -3213,11 +3237,14 @@ fn foot_live(t: &Theme) {
     for pty in foot_ptys() {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        // A sequence at a time (each a few bytes): a terminal too busy to
+        // take them all stops between two — never cut inside one, which it
+        // would read on as a command, swallowing what its program writes.
         let wrote = std::fs::OpenOptions::new()
             .write(true)
             .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
             .open(&pty)
-            .and_then(|mut f| f.write_all(seq.as_bytes()));
+            .and_then(|mut f| seq.split_inclusive("\x1b\\").try_for_each(|s| f.write_all(s.as_bytes())));
         if let Err(e) = wrote {
             debug!("palette: {}: {e}", pty.display());
         }
@@ -3327,10 +3354,18 @@ impl crate::App {
         // Programs the compositor starts (keys, a terminal's children) get
         // Qt's palette route too, without a new login.
         let vars = launch_vars();
-        for (k, v) in &vars {
-            // (Quoted for Lua: a ' or a \ in a path must not end the string.)
-            let v = v.replace('\\', "\\\\").replace('\'', "\\'");
-            crate::hypr::eval(&format!("hl.env('{k}', '{v}')"));
+        // (Told again only when they change: every step of a slider ran
+        // here, an eval a variable each time.)
+        static ENV_TOLD: std::sync::Mutex<Vec<(&'static str, String)>> = std::sync::Mutex::new(Vec::new());
+        if ENV_TOLD.lock().is_ok_and(|told| *told != vars) {
+            for (k, v) in &vars {
+                // (Quoted for Lua: a ' or a \ in a path must not end the string.)
+                let v = v.replace('\\', "\\\\").replace('\'', "\\'");
+                crate::hypr::eval(&format!("hl.env('{k}', '{v}')"));
+            }
+            if let Ok(mut told) = ENV_TOLD.lock() {
+                *told = vars.clone();
+            }
         }
         // …and so do the apps systemd and D-Bus start (Easy Effects runs as
         // a user service; KDE Connect's daemon is D-Bus activated) — once a
@@ -3352,6 +3387,8 @@ impl crate::App {
         let mut picked = choice();
         if previewing() {
             picked.palette = Some(DRAFT_ID.to_owned());
+            // (An older file's `dynamic: true` would win over it.)
+            picked.dynamic = None;
         }
         // (A fade of the Lighting in progress is what is shown: whatever else
         // asks for a re-apply must not jump it back — `lighting.rs`.)

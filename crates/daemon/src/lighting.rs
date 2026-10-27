@@ -720,6 +720,7 @@ impl App {
         // (The editor's palette, while it is being made, is the one worn.)
         if palette::previewing() {
             picked.palette = Some(palette::DRAFT_ID.to_owned());
+            picked.dynamic = None;
         }
         let (colours, wall) = (picked.ambient_of(palette::Surface::Shell), picked.ambient_of(palette::Surface::Wall));
         if !colours && !wall {

@@ -4029,7 +4029,7 @@ impl Panel {
             for l in &content.lines {
                 rect(out, l.x, l.y, l.w, l.h, l.w.min(l.h) / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.95 * ca]);
             }
-            text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
+            text(out, crate::controls::closing_hint().to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             return;
         }
         text(out, crate::i18n::tr(p.label).to_owned(), cx, y, 30.0, 36.0, 1.0);
@@ -4142,7 +4142,7 @@ impl Panel {
                 text(out, t.to_string(), cx, r.y, 15.5, 20.0, if hot { 1.0 } else { 0.85 });
                 rect(out, cx - r.w / 2.0 + 4.0 * s, r.y + 19.0 * s, r.w - 8.0 * s, 1.0 * s, 0.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.5]);
             }
-            text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, l.hint_y, 12.0, 16.0, 0.4);
+            text(out, crate::controls::closing_hint().to_owned(), cx, l.hint_y, 12.0, 16.0, 0.4);
             return;
         }
         text(out, format!("Placeholder for the {} controls.", p.label.to_lowercase()), cx, y, 14.0, 18.0, 0.55);
@@ -4188,7 +4188,7 @@ impl Panel {
             }
             y += rh + 22.0 * s;
         }
-        text(out, tr("Esc or a click on the empty space closes").to_owned(), cx, y + 6.0 * s, 12.0, 16.0, 0.4);
+        text(out, crate::controls::closing_hint().to_owned(), cx, y + 6.0 * s, 12.0, 16.0, 0.4);
     }
 }
 
@@ -5314,9 +5314,22 @@ impl App {
     pub(crate) fn quick_key(&mut self, keysym: Keysym) {
         let keysym = if self.modifiers.ctrl { keysym } else { left_hand(keysym) };
         if !self.panel_keys(keysym, true) && keysym == Keysym::Escape {
-            self.close_fast_launch();
+            self.quick_leave();
         }
         self.schedule_frame();
+    }
+
+    /// Escape, a click on the empty space or outside, Super+H again: the
+    /// box goes — unless a palette being made has changes not saved, which
+    /// asks once (its foot says so; `controls::editor_may_leave`).
+    pub(crate) fn quick_leave(&mut self) {
+        if crate::controls::editor_may_leave() {
+            self.close_fast_launch();
+        } else {
+            let ui = self.ui_facts();
+            self.controls_send(ControlCommand::Read("Colours", ui));
+            self.schedule_frame();
+        }
     }
 
     /// The keys of an open setting — the control panel's (`quick` false) or
@@ -5355,7 +5368,7 @@ impl App {
     pub(crate) fn quick_click(&mut self, pos: (f32, f32)) {
         let rect = self.quick_rect();
         if !rect.contains(pos) {
-            self.close_fast_launch();
+            self.quick_leave();
             return;
         }
         let Some(label) = self.quick.open.as_ref().map(|o| self.quick.pills[o.pill].label) else {
@@ -5376,7 +5389,7 @@ impl App {
             // space closes it and it does not" — only a click OUTSIDE the
             // box did).
             _ => {
-                self.close_fast_launch();
+                self.quick_leave();
                 return;
             }
         }

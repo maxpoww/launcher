@@ -158,6 +158,10 @@ pub(crate) struct Editor {
     pub name: String,
     /// The owner's palette being changed (its id), or a new one.
     pub editing: Option<String>,
+    /// Changed since it was opened or saved.
+    pub dirty: bool,
+    /// Asked once whether to leave it unsaved (the foot says so).
+    pub armed: bool,
 }
 
 /// What a pick in the editor came to.
@@ -220,6 +224,8 @@ pub(crate) fn field_typed(key: &str, text: &str, done: bool) {
             let full = if t.len() == 3 { t.chars().flat_map(|c| [c, c]).collect::<String>() } else { t.to_owned() };
             if let (Ok(mut g), Some(c)) = (EDITOR.lock(), crate::palette::parse_hex(&format!("#{full}"))) {
                 if let Some(e) = g.as_mut() {
+                    e.dirty |= e.soul[e.cur] != c;
+                    e.armed = false;
                     e.soul[e.cur] = c;
                     e.hue = crate::palette::tint::lch(c).2;
                 }
@@ -229,7 +235,10 @@ pub(crate) fn field_typed(key: &str, text: &str, done: bool) {
         "colors-edit-name" if done => {
             if let Ok(mut g) = EDITOR.lock() {
                 if let Some(e) = g.as_mut() {
-                    e.name = text.trim().chars().take(40).collect();
+                    let name: String = text.trim().chars().take(40).collect();
+                    e.dirty |= e.name != name;
+                    e.armed = false;
+                    e.name = name;
                 }
             }
         }
@@ -284,7 +293,7 @@ fn editor_new() -> Editor {
         })
         .unwrap_or([[0xff, 0xbe, 0x98], [0x1d, 0x20, 0x26], [0x2a, 0x2e, 0x36], [0x1d, 0x20, 0x26], [0xe6, 0xe6, 0xe0], [0x44, 0x48, 0x50]]);
     let hue = crate::palette::tint::lch(soul[0]).2;
-    Editor { soul, cur: 0, hue, name: String::new(), editing: None }
+    Editor { soul, cur: 0, hue, name: String::new(), editing: None, dirty: false, armed: false }
 }
 
 /// One of the owner's own palettes, as the six they gave it and its name.
@@ -292,7 +301,30 @@ fn editor_of(id: &str) -> Option<Editor> {
     let p = crate::palette::all().into_iter().find(|p| p.id == id && p.family == "own")?;
     let soul: [[u8; 3]; 6] = p.soul.clone().try_into().unwrap_or([p.dark[p.accent], p.dark[1], p.dark[2], p.dark[1], p.dark[5], p.dark[3]]);
     let hue = crate::palette::tint::lch(soul[0]).2;
-    Some(Editor { soul, cur: 0, hue, name: p.name, editing: Some(p.id) })
+    Some(Editor { soul, cur: 0, hue, name: p.name, editing: Some(p.id), dirty: false, armed: false })
+}
+
+/// Whether the box may go now: a palette being made with changes not
+/// saved asks once — its foot says what once more does (the gear's way:
+/// what cannot be undone is asked once) — and goes at the second.
+pub(crate) fn editor_may_leave() -> bool {
+    let Ok(mut g) = EDITOR.lock() else { return true };
+    match g.as_mut() {
+        Some(e) if e.dirty && !e.armed => {
+            e.armed = true;
+            false
+        }
+        _ => true,
+    }
+}
+
+/// The box's last line: how it closes, or what once more does now.
+pub(crate) fn closing_hint() -> &'static str {
+    if EDITOR.lock().is_ok_and(|g| g.as_ref().is_some_and(|e| e.armed)) {
+        tr("Not saved — once more leaves it without saving.")
+    } else {
+        tr("Esc or a click on the empty space closes")
+    }
 }
 
 /// The owner's own palettes: (id, name), as the grid shows them.
@@ -310,9 +342,20 @@ pub(crate) fn editor_draft() -> Option<crate::palette::Palette> {
 /// changes the owner's own) and hands its id back; the Bin sends theirs away.
 pub(crate) fn editor_pick(key: &str, value: &str) -> EditorDone {
     let Ok(mut g) = EDITOR.lock() else { return EditorDone::Nothing };
+    // (Anything else done in it takes the question back.)
+    if key != "colors-edit-which" {
+        if let Some(e) = g.as_mut() {
+            e.armed = false;
+        }
+    }
     match key {
         // A new palette, or one of the owner's to change (the row at the top).
         "colors-edit-which" => {
+            // (Changes not saved: asked once, as when the box goes.)
+            if let Some(e) = g.as_mut().filter(|e| e.dirty && !e.armed) {
+                e.armed = true;
+                return EditorDone::Nothing;
+            }
             if let Some(e) = if value == "new" { Some(editor_new()) } else { editor_of(value) } {
                 *g = Some(e);
             }
@@ -330,6 +373,8 @@ pub(crate) fn editor_pick(key: &str, value: &str) -> EditorDone {
         }
         "colors-edit-colour" => {
             if let (Some(e), Some(c)) = (g.as_mut(), crate::palette::parse_hex(value)) {
+                e.dirty |= e.soul[e.cur] != c;
+                e.armed = false;
                 e.soul[e.cur] = c;
             }
         }
@@ -2081,7 +2126,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // the colours go, then the palettes — the Dynamic one (made from the
         // wallpaper; the shell keeps reading the screen place by place) first.
         "Colours" if EDITOR.lock().is_ok_and(|g| g.is_some()) => {
-            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0, name: String::new(), editing: None });
+            let e = EDITOR.lock().ok().and_then(|g| g.clone()).unwrap_or(Editor { soul: [[0; 3]; 6], cur: 0, hue: 0.0, name: String::new(), editing: None, dirty: false, armed: false });
             view.subtitle = tr("Pick a place, then its colour. Each goes exactly there.").to_owned();
             // A new one, or one of the owner's to change: words as the
             // sections' (only once there is one of theirs).
