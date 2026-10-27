@@ -3,19 +3,21 @@
 //! dock box's that is a web page (`app_actions::box_peek`) is shown AS THE
 //! PAGE — its picture as big as it was found (`web_actions::big_picture`),
 //! at most `GROW` its own pixels (Max: "es muy grande, los thumbnails se
-//! pixelan", then "un poco más grande"); under it its WHOLE title (up to
-//! `TITLE_LINES` lines), how it was seen and how often ("Watched today at
-//! 13:02 · 5 times") and its address. In the head, beside "Open in <app>",
-//! Copy link and a BIN that takes the recent out of the box (`head`; Delete
-//! too). A page with no picture of its own (its favicon on a tile) has the
-//! tile small beside the words.
+//! pixelan", then "un poco más grande", twice); under it its WHOLE title (up
+//! to `TITLE_LINES` lines), how it was seen and how often ("Watched today at
+//! 13:02 · 5 times") and its address. Its head's buttons are THE CARD'S (Max:
+//! "use the buttons we use on the card instead of the pills" — its quiet
+//! head: an icon alone, a round wash under the pointer): the BIN that takes
+//! the recent out of the box (Delete too), Copy link (a check a moment
+//! after), Open in its app, × (`head`, `page_head_push`). A page with no
+//! picture of its own (its favicon on a tile) has the tile small beside the
+//! words.
 //!
 //! One layout (`page_layout`) is what the frame's size (`page_size`) and the
 //! draw (`page_words_push`) read; `head` is what the head's draw and the
 //! pointer (`page_copy_at`) read.
 
-use crate::content::{GridContent, Rect, RectInst, FONT_BOLD};
-use crate::i18n::tr;
+use crate::content::{GridContent, Label, Rect, RectInst, FONT_BOLD};
 use crate::quicklook::{text_label, Said, HEAD};
 use crate::App;
 
@@ -35,8 +37,8 @@ const TILE_W: f32 = 640.0;
 const MIN_W: f32 = 560.0;
 /// How much of the screen's width a page's picture may take, at most, and
 /// how far past its own pixels it may grow (a little: more shows them).
-const SHARE: f32 = 0.55;
-const GROW: f32 = 1.3;
+const SHARE: f32 = 0.62;
+const GROW: f32 = 1.5;
 
 /// Where everything of a page stands in its frame.
 pub(crate) struct PageLayout {
@@ -53,38 +55,30 @@ pub(crate) struct PageLayout {
     url_y: f32,
 }
 
-/// A page's head buttons.
-pub(crate) struct Head {
-    pub open: Rect,
-    pub copy: Rect,
+/// A page's head buttons: round, as the card's head's.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Button {
     /// Out of the box's recents.
-    pub bin: Rect,
+    Bin,
+    Copy,
+    Open,
+    Close,
 }
 
-/// A page's head buttons in a frame at `r`: Open in <app> (`open_word`)
-/// where the pencil and Open stand for a file — no pencil here —, Copy
-/// link left of it, the bin left of that. `word_w` measures a button's word.
-pub(crate) fn head(r: Rect, open_word: &str, word_w: impl Fn(&str) -> f32) -> Head {
-    let close_x = r.x + r.w - 12.0 - 26.0;
-    let open_w = (r.w * 0.4).min(240.0).min(word_w(open_word) + 26.0);
-    let open = Rect::new(close_x - 8.0 - open_w, r.y + 10.0, open_w, 26.0);
-    let copy_w = word_w(tr("Copy link")).max(word_w(tr("Link copied"))) + 26.0;
-    let copy = Rect::new(open.x - 8.0 - copy_w, r.y + 10.0, copy_w, 26.0);
-    Head { open, copy, bin: Rect::new(copy.x - 8.0 - 32.0, r.y + 10.0, 32.0, 26.0) }
-}
+/// The card's round button's side, and the air between two.
+const BUTTON: f32 = 28.0;
+const BUTTON_GAP: f32 = 4.0;
 
-/// The bin's can, drawn in strokes in the middle of its button `b` (no
-/// font has to have it): the lid and its handle, the body open at the top.
-pub(crate) fn bin_can(b: Rect, ink: [f32; 4]) -> Vec<RectInst> {
-    let (cx, cy) = ((b.x + b.w / 2.0).round(), (b.y + b.h / 2.0).round());
-    let r = |rect: Rect, radius: f32, border: f32| RectInst { rect, radius, color: ink, glass: 0.0, border };
-    vec![
-        r(Rect::new(cx - 2.5, cy - 7.5, 5.0, 3.0), 1.0, 1.3),
-        r(Rect::new(cx - 6.5, cy - 5.0, 13.0, 1.5), 0.75, 0.0),
-        r(Rect::new(cx - 5.0, cy - 3.0, 10.0, 10.5), 2.0, 1.3),
-        r(Rect::new(cx - 1.95, cy - 0.5, 1.2, 5.5), 0.6, 0.0),
-        r(Rect::new(cx + 0.75, cy - 0.5, 1.2, 5.5), 0.6, 0.0),
-    ]
+/// A page's head buttons in a frame at `r`, from the right: ×, Open, Copy
+/// link, and — a little apart — the bin.
+pub(crate) fn head(r: Rect) -> [(Button, Rect); 4] {
+    let y = r.y + ((HEAD - BUTTON) / 2.0).round();
+    let at = |right: f32| Rect::new(right - BUTTON, y, BUTTON, BUTTON);
+    let close = at(r.x + r.w - 10.0);
+    let open = at(close.x - BUTTON_GAP);
+    let copy = at(open.x - BUTTON_GAP);
+    let bin = at(copy.x - 3.0 * BUTTON_GAP);
+    [(Button::Bin, bin), (Button::Copy, copy), (Button::Open, open), (Button::Close, close)]
 }
 
 /// `text` on up to `lines` lines of `room`, broken between words (a word
@@ -193,27 +187,57 @@ impl App {
         g.labels.push(text_label(&url, (l.text_x, l.url_y), l.text_w, URL_PX, None, dim));
     }
 
-    /// Whether a click at `at` is on a page's Open in <app>.
-    pub(crate) fn page_open_at(&self, at: (f32, f32)) -> bool {
-        let Some((up, said)) = self.peek.up.as_ref().and_then(|u| Some((u, u.said.as_ref()?))) else {
-            return false;
-        };
-        head(up.rect, &said.open, |w| self.peek_word_w(w)).open.contains(at)
+    /// The page's head button a click at `at` is on.
+    pub(crate) fn page_button_at(&self, at: (f32, f32)) -> Option<Button> {
+        let up = self.peek.up.as_ref().filter(|u| u.said.is_some())?;
+        head(up.rect).into_iter().find(|(_, r)| r.contains(at)).map(|(b, _)| b)
     }
 
-    /// Whether a click at `at` is on a page's bin.
-    pub(crate) fn page_bin_at(&self, at: (f32, f32)) -> bool {
-        let Some((up, said)) = self.peek.up.as_ref().and_then(|u| Some((u, u.said.as_ref()?))) else {
-            return false;
-        };
-        head(up.rect, &said.open, |w| self.peek_word_w(w)).bin.contains(at)
-    }
-
-    /// The address to copy when a click at `at` is on Copy link.
-    pub(crate) fn page_copy_at(&self, at: (f32, f32)) -> Option<String> {
-        let up = self.peek.up.as_ref()?;
-        let said = up.said.as_ref()?;
-        head(up.rect, &said.open, |w| self.peek_word_w(w)).copy.contains(at).then(|| said.url.clone())
+    /// THE HEAD'S BUTTONS, the card's way: each its icon alone (the Nerd
+    /// font's, at 72 % of the ink, all of it under the pointer), a round wash
+    /// under the pointer `ptr`; Copy link a check for a moment after a copy
+    /// (`copied`).
+    pub(crate) fn page_head_push(
+        &self,
+        g: &mut GridContent,
+        r: Rect,
+        (ink, open): ([f32; 4], f32),
+        (ptr, copied): (Option<(f32, f32)>, bool),
+    ) {
+        for (b, rect) in head(r) {
+            let hot = ptr.is_some_and(|p| rect.contains(p));
+            if hot {
+                g.rects.push(RectInst {
+                    rect,
+                    radius: rect.h / 2.0,
+                    color: [ink[0], ink[1], ink[2], 0.09 * open],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            // (At the card's size: the Nerd font's icons fill a mono cell,
+            // so their letter is big for their drawing — `card::view::Icon`.)
+            let (glyph, px) = match b {
+                Button::Bin => ("\u{f014}", 21.0),            // fa-trash-o
+                Button::Copy if copied => ("\u{f00c}", 20.0), // fa-check
+                Button::Copy => ("\u{f0c1}", 20.0),           // fa-link
+                Button::Open => ("\u{f08e}", 20.0),           // fa-external-link
+                Button::Close => ("\u{f00d}", 20.0),          // fa-times
+            };
+            let line = (px * 1.3225f32).round();
+            g.labels.push(Label {
+                centered: true,
+                family: Some(crate::options::NERD),
+                ..text_label(
+                    glyph,
+                    (rect.x + rect.w / 2.0, rect.y + (rect.h - line) / 2.0),
+                    rect.w + 8.0,
+                    px,
+                    None,
+                    [ink[0], ink[1], ink[2], ink[3] * if hot || (copied && b == Button::Copy) { 0.95 } else { 0.72 }],
+                )
+            });
+        }
     }
 }
 

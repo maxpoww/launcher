@@ -1922,12 +1922,18 @@ impl App {
                     // (A click on the line: from there.)
                     let k = ((at.0 - bar.track.x) / bar.track.w).clamp(0.0, 1.0);
                     self.peek_play_from(k * secs);
-                } else if let Some(url) = self.page_copy_at(at) {
-                    self.peek_copy_link(&url);
-                } else if self.page_open_at(at) {
-                    self.peek_open_app();
-                } else if self.page_bin_at(at) {
-                    self.box_peek_bin();
+                } else if let Some(b) = self.page_button_at(at) {
+                    use crate::peek_page::Button;
+                    match b {
+                        Button::Bin => self.box_peek_bin(),
+                        Button::Copy => {
+                            if let Some(url) = self.peek.up.as_ref().and_then(|u| u.said.as_ref()).map(|s| s.url.clone()) {
+                                self.peek_copy_link(&url);
+                            }
+                        }
+                        Button::Open => self.peek_open_app(),
+                        Button::Close => self.peek_close(),
+                    }
                 } else if parts.pencil.contains(at) && self.peek_editable() {
                     self.edit_begin();
                 } else if parts.close.contains(at) {
@@ -2967,14 +2973,10 @@ impl App {
                 ),
         };
         let open_w = parts.open.w.min(self.peek_word_w(&open_word) + 26.0);
-        // (A page: Open where the pencil would be, Copy link and the bin
-        // beside it.)
-        let page_head = up.said.as_ref().map(|_| crate::peek_page::head(r, &open_word, |w| self.peek_word_w(w)));
-        let open_rect = match &page_head {
-            Some(h) => h.open,
-            None => Rect::new(parts.open.x + parts.open.w - open_w, parts.open.y, open_w, parts.open.h),
-        };
-        let text_w = (page_head.as_ref().map_or(open_rect.x, |h| h.bin.x) - (r.x + 46.0) - 12.0).max(20.0);
+        let open_rect = Rect::new(parts.open.x + parts.open.w - open_w, parts.open.y, open_w, parts.open.h);
+        // (A page: the card's round buttons — `peek_page.rs`.)
+        let page_left = up.said.as_ref().map(|_| crate::peek_page::head(r)[0].1.x);
+        let text_w = (page_left.unwrap_or(open_rect.x) - (r.x + 46.0) - 12.0).max(20.0);
         // (Cut in the middle, as names are: `desktop::fit_name`.)
         let name = self.desktop_top.renderer.as_ref().map_or_else(
             || up.name.clone(),
@@ -3031,6 +3033,11 @@ impl App {
             glass: 0.0,
             border: 0.0,
         };
+        // A PAGE: the card's round buttons, and nothing more (`peek_page.rs`).
+        if page_left.is_some() {
+            let copied = up.notice.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
+            self.page_head_push(&mut g, r, (ink, open), (up.ptr, copied));
+        } else {
         g.rects.push(pill(open_rect, wash(open_rect)));
         g.labels.push(Label {
             centered: true,
@@ -3043,25 +3050,6 @@ impl App {
                 ink,
             )
         });
-        // COPY LINK (a page's), "Link copied" a moment after; the BIN.
-        if let Some(h) = &page_head {
-            let c = h.copy;
-            let copied = up.notice.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS);
-            g.rects.push(pill(c, wash(c)));
-            g.labels.push(Label {
-                centered: true,
-                ..text_label(
-                    tr(if copied { "Link copied" } else { "Copy link" }),
-                    (c.x + c.w / 2.0, c.y + 5.0),
-                    c.w - 8.0,
-                    12.0,
-                    Some(FONT_BOLD),
-                    ink,
-                )
-            });
-            g.rects.push(pill(h.bin, wash(h.bin)));
-            g.rects.extend(crate::peek_page::bin_can(h.bin, ink));
-        }
         if self.peek_editable() {
             g.rects.push(pill(parts.pencil, wash(parts.pencil)));
             g.labels.push(Label {
@@ -3089,6 +3077,7 @@ impl App {
                 ink,
             )
         });
+        }
         // A word for a moment ("Saved"), over the picture.
         let mut notice_grid = None;
         // (A page says it in its Copy link: `peek_page.rs`.)

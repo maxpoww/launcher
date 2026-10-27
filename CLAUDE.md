@@ -1534,13 +1534,16 @@ The big daemon files are cohesive but long — go straight to the function:
   = QUICK LOOK (`box_peek`, `quicklook::BOX`): a file as any;
   a PAGE as the page (`peek_page.rs`, Max: "the quick look is small and tells nothing"): its picture
   as big as it was found (`web_actions::big_picture`: the kitchen's file, or a video's out of Seam's
-  cache, `Recent::big`) at most `SHARE` (55 %) of the screen's width and `GROW` (1.3×) its own pixels
-  (Max: "es muy grande, los thumbnails se pixelan", then "un poco más grande"), under it the WHOLE
-  title (3 lines), "Watched / Played / Visited <when> · N times" (`seen_line`, `Recent::times`/
-  `played`) and the address; a favicon-only page is a card, the tile beside the words; the head is
-  the app's name, its host, and BIN · Copy link · Open in <app> · × (`peek_page::head`; no pencil;
-  the bin — drawn in strokes, `bin_can`, no font needed — or Delete puts the recent away and closes
-  it, `box_peek_bin`; Ctrl+C copies; "Link copied"). ⚠ the box holds the
+  cache, `Recent::big`) at most `SHARE` (62 %) of the screen's width and `GROW` (1.5×) its own pixels
+  (Max: "es muy grande, los thumbnails se pixelan", then "un poco más grande" twice), under it the
+  WHOLE title (3 lines), "Watched / Played / Visited <when> · N times" (`seen_line`,
+  `Recent::times`/`played`) and the address; a favicon-only page is a card, the tile beside the
+  words; the head is the app's name, its host, and THE CARD'S BUTTONS (Max: "use the buttons we use
+  on the card instead of the pills" — the quiet head: a Nerd icon alone at 72 % ink, a round wash
+  under the pointer; `peek_page::head`/`page_head_push`): bin · link · open · ×, a check on the link
+  a moment after a copy. The bin or Delete puts the recent away and closes it (`box_peek_bin`);
+  Ctrl+C copies. ⚠ rig: Nerd icons are tofu unless the rig dock gets a fonts.conf that includes the
+  HOST's conf.d (its store path; the host fonts.conf includes `/etc/fonts/conf.d` = the toolbox's). ⚠ the box holds the
   keyboard EXCLUSIVELY, so Hyprland pins the POINTER to the dock's layer: while Quick Look is up from
   the box the dock hands it its pointer events (`box_point_on_screen`, moved by `box_to_peek_dy` —
   Quick Look's surface begins under the bar, the dock's at the screen's top); the
