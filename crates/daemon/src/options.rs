@@ -1230,7 +1230,8 @@ impl crate::App {
         // its words: the ink, and the accent and the red the boxes write in.
         let (fill, ink) = self.options_box_surface();
         let words = [ink, crate::palette::accent_srgb(), crate::palette::danger_srgb()];
-        words.iter().fold(a, |a, w| dense_enough(fill, *w, worst_behind(*w), a))
+        // (The Shell's Transparency takes it from there: the owner's choice.)
+        shell_glass(words.iter().fold(a, |a, w| dense_enough(fill, *w, worst_behind(*w), a)))
     }
 }
 /// An open box's fill: the backdrop it floats on with the pill's wash
@@ -7684,6 +7685,77 @@ pub(crate) fn worst_behind(ink: [f32; 4]) -> [f32; 4] {
     if srgb_luminance(ink) > 0.179 { [1.0, 1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0, 1.0] }
 }
 
+// ------------------------------------------------- the Shell's transparency
+
+/// THE SHELL'S TRANSPARENCY (Max, 2026-10-27, the mockup "Transparency"): the
+/// Colours box's slider, kept here for every frame (`palette::colors_apply`
+/// sets it; the choice itself is a file read). 0 solid … 100 nearly invisible.
+static SHELL_CLEAR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(crate::palette::SHELL_CLEAR_MADE);
+/// The Icons section's "Dock icons" (0 = as made: whole).
+static DOCK_CLEAR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Take the Shell's and the dock icons' Transparency; whether either moved.
+pub(crate) fn set_clear(shell: u8, dock: u8) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    (SHELL_CLEAR.swap(shell.min(100), Relaxed) != shell.min(100)) | (DOCK_CLEAR.swap(dock.min(100), Relaxed) != dock.min(100))
+}
+
+/// How far past as made a Shell slider at `v` is: 0 at as made and below, 1
+/// at the far end.
+fn past_at(v: u8) -> f32 {
+    let (v, m) = (f32::from(v.min(100)), f32::from(crate::palette::SHELL_CLEAR_MADE));
+    ((v - m) / (100.0 - m)).clamp(0.0, 1.0)
+}
+
+/// What is ON the Shell's glass at `v` — words, symbols, icons, the controls —
+/// whole up to as made, then fading at half the glass's pace: at the far end
+/// 50 % (Max: "las letras… 3 veces menos… al máximo 50%").
+fn content_at(v: u8) -> f32 {
+    1.0 - 0.5 * past_at(v)
+}
+
+/// What a piece of glass whose own alpha (as made) is `made` is SEEN at with
+/// the Shell's slider at `v`: solid at 0, `made` at as made, 5 % at the far end.
+fn glass_seen_at(v: u8, made: f32) -> f32 {
+    let (vf, m) = (f32::from(v.min(100)), f32::from(crate::palette::SHELL_CLEAR_MADE));
+    if vf <= m {
+        1.0 - (1.0 - made) * vf / m
+    } else {
+        made - (made - 0.05).max(0.0) * past_at(v)
+    }
+}
+
+fn shell_now() -> u8 {
+    SHELL_CLEAR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What is ON the Shell's glass now ([`content_at`]): every shell surface's
+/// scene is drawn at it (`Scene::alpha`).
+pub(crate) fn shell_content() -> f32 {
+    content_at(shell_now())
+}
+
+/// The alpha a piece of the Shell's GLASS whose own alpha (as made) is `made`
+/// is PUSHED at: what it is seen at ([`glass_seen_at`]) over [`shell_content`],
+/// which the scene multiplies everything by. (Under 0.5 the compositor's frost
+/// leaves it: clear glass, as the resting dock has always been.)
+pub(crate) fn shell_glass(made: f32) -> f32 {
+    let v = shell_now();
+    (glass_seen_at(v, made) / content_at(v)).clamp(0.0, 1.0)
+}
+
+/// The Shell's shadows with its glass: whole up to as made, a tenth at the
+/// far end (a shadow under glass no one sees is a shadow alone).
+pub(crate) fn shell_shade() -> f32 {
+    1.0 - 0.9 * past_at(shell_now())
+}
+
+/// The dock's icons: the Icons section's "Dock icons" (on top of the
+/// Shell's [`shell_content`], which the dock's scene already wears).
+pub(crate) fn dock_icons() -> f32 {
+    crate::palette::clear_alpha(DOCK_CLEAR.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// THE GLASS DENSE ENOUGH TO READ ON (the legibility audit, 2026-10-23): the
 /// see-through fill's alpha from `a`, raised until its `ink` (sRGB words)
 /// reads 4.5:1 on what the screen shows — the fill over `back`. Over what
@@ -7732,10 +7804,24 @@ mod tests {
         }
     }
 
-    /// An open box takes the bar it stands on: every pill under it leaves, its
-    /// own parts stay, and the pills clear of it are untouched — including
-    /// their POSITIONS, since a re-flow under the pointer is exactly what
-    /// `OptionUXRules.md` §2 forbids.
+    #[test]
+    fn the_shells_transparency_as_made_solid_and_nearly_invisible() {
+        // (Max, 2026-10-27: Solid … nearly invisible, as made = today's; the
+        // words at half the glass's pace — at the far end glass 5 %, words 50 %.)
+        let m = crate::palette::SHELL_CLEAR_MADE;
+        for made in [0.33_f32, 0.62, 0.8, 1.0] {
+            assert!((glass_seen_at(m, made) - made).abs() < 1e-6, "as made is today's glass ({made})");
+            assert!((glass_seen_at(0, made) - 1.0).abs() < 1e-6, "Solid is solid ({made})");
+            assert!((glass_seen_at(100, made) - 0.05).abs() < 1e-6, "the far end is 5% ({made})");
+            for v in 0..=100u8 {
+                let pushed = glass_seen_at(v, made) / content_at(v);
+                assert!(pushed <= 1.0 + 1e-6, "what is pushed is an alpha ({made} at {v})");
+            }
+        }
+        assert_eq!((content_at(0), content_at(m)), (1.0, 1.0), "the words whole up to as made");
+        assert!((content_at(100) - 0.5).abs() < 1e-6, "the words at 50% at the far end");
+    }
+
     #[test]
     fn the_toned_glass_only_on_a_near_white_backdrop() {
         let lin = |c: [u8; 3]| [0, 1, 2].map(|i| srgb_to_linear(f32::from(c[i]) / 255.0)).into_iter().chain([1.0]).collect::<Vec<_>>();
@@ -7756,6 +7842,10 @@ mod tests {
         }
     }
 
+    /// An open box takes the bar it stands on: every pill under it leaves, its
+    /// own parts stay, and the pills clear of it are untouched — including
+    /// their POSITIONS, since a re-flow under the pointer is exactly what
+    /// `OptionUXRules.md` §2 forbids.
     #[test]
     fn an_open_box_clears_the_pills_it_covers() {
         let mut pills = vec![

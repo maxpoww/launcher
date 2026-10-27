@@ -209,6 +209,9 @@ pub struct Scene {
     /// Turns (radians) of `icons`, by index; missing = none (the bin's lid
     /// and can, `bin_motion`).
     pub icon_rot: Vec<f32>,
+    /// Opacity of `icons`, by index; missing = whole (the dock's icons wear
+    /// the Icons section's "Dock icons").
+    pub icon_fade: Vec<f32>,
     /// Unclipped labels (search box text), clipped per-label.
     pub labels: Vec<Label>,
     /// Section grids (Apps / Install / Files), each clipped to its own
@@ -2808,7 +2811,7 @@ pub fn scene(
             rect: card_rect,
             radius: card_radius,
             blur: DOCK_SHADOW_BLUR,
-            color: [0.0, 0.0, 0.0, card_shadow.clamp(0.0, 1.0)],
+            color: [0.0, 0.0, 0.0, card_shadow.clamp(0.0, 1.0) * crate::options::shell_shade()],
             edges: [
                 DOCK_SHADOW_ALPHA_TOP * (1.0 - DOCK_SHADOW_TONED_CUT * dock_tone),
                 DOCK_SHADOW_ALPHA_BOTTOM,
@@ -2831,6 +2834,8 @@ pub fn scene(
         // (The toned glass rests as dense as it opens.)
         let rest = lerp(DOCK_REST_FILL, 1.0, dock_tone);
         card_fill[3] = lerp(card_fill[3] * rest, open_a.max(card_fill[3] * dock_tone), card_open);
+        // (The Shell's Transparency, the owner's, from there.)
+        card_fill[3] = crate::options::shell_glass(card_fill[3]);
     }
     scene.rects.push(RectInst {
         rect: card_rect,
@@ -3055,7 +3060,9 @@ pub fn scene(
             // Its states (`bin_motion`): orange while something is in hand,
             // red and swollen over it, a rim while a file window is in it.
             let rect = grow_from_edge(icon_rect, bin.swell, side);
-            let tile = bin_tile_color(plate, bin.orange, bin.red);
+            // (The bin's tile is its plate: it fades with the dock's icons.)
+            let mut tile = bin_tile_color(plate, bin.orange, bin.red);
+            tile[3] *= crate::options::dock_icons();
             scene.rects.push(RectInst {
                 rect,
                 radius: rect.h * 0.22,
@@ -3075,7 +3082,7 @@ pub fn scene(
                 scene.rects.push(RectInst {
                     rect,
                     radius: rect.h * 0.22,
-                    color: [1.0, 1.0, 1.0, 0.35 * bin.open],
+                    color: [1.0, 1.0, 1.0, 0.35 * bin.open * crate::options::dock_icons()],
                     glass: 0.0,
                     border: 2.0,
                 });
@@ -3090,7 +3097,8 @@ pub fn scene(
             scene.rects.push(RectInst {
                 rect: icon_rect,
                 radius: size * 0.22,
-                color: [hl[0], hl[1], hl[2], (hl[3] * 4.0).min(0.72)],
+                // (A tile of the dock's: it fades with the dock's icons.)
+                color: [hl[0], hl[1], hl[2], (hl[3] * 4.0).min(0.72) * crate::options::dock_icons()],
                 glass: 0.5,
                 border: 0.0,
             });
@@ -3351,7 +3359,7 @@ pub fn scene(
                         Side::Right => (slot.x + slot.w - DOCK_BASELINE_PAD * icon_scale - size - dock_lift(entry_idx) - 6.0 - pill_w / 2.0, vcx - pill_h / 2.0),
                     };
                     let mut bg = dock_bg;
-                    bg[3] = bg[3].max(0.92);
+                    bg[3] = crate::options::shell_glass(bg[3].max(0.92));
                     scene.rects.push(RectInst {
                         rect: Rect::new(pill_cx - pill_w / 2.0, pill_y, pill_w, pill_h),
                         radius: pill_h / 2.0,
@@ -4399,7 +4407,7 @@ pub fn scene(
         // not a darker, more opaque panel.
         let mut panel = dock_bg;
         if !config.accessibility.reduce_transparency {
-            panel[3] = config.theme.open_alpha(panel[3]).max(dock_open_alpha);
+            panel[3] = crate::options::shell_glass(config.theme.open_alpha(panel[3]).max(dock_open_alpha));
         }
         panel[3] *= t;
         let (bjl, bjr, bjt, bjb) = box_push;
@@ -4423,7 +4431,7 @@ pub fn scene(
                 rect: box_draw,
                 radius,
                 blur: DOCK_SHADOW_BLUR,
-                color: [0.0, 0.0, 0.0, t],
+                color: [0.0, 0.0, 0.0, t * crate::options::shell_shade()],
                 edges: [
                     DOCK_SHADOW_ALPHA_TOP,
                     DOCK_SHADOW_ALPHA_BOTTOM,
@@ -4584,7 +4592,7 @@ pub fn scene(
         // 2026-10-02: "more transparent" → "i want that".)
         let mut fill = dock_bg;
         if !config.accessibility.reduce_transparency {
-            fill[3] *= FAST_FILL;
+            fill[3] = crate::options::shell_glass(fill[3] * FAST_FILL);
         }
         fill[3] *= a;
         scene.rects.push(RectInst { rect: f.card, radius: f.radius, color: fill, glass: 1.0, border: 0.0 });
@@ -4712,7 +4720,7 @@ pub fn scene(
         let dock_bg = q.bg;
         let mut fill = dock_bg;
         if !config.accessibility.reduce_transparency {
-            fill[3] = config.theme.open_alpha(fill[3]);
+            fill[3] = crate::options::shell_glass(config.theme.open_alpha(fill[3]));
         }
         fill[3] *= q.a;
         // Everything about the box's centre, at the size it is this frame.
@@ -4803,6 +4811,13 @@ pub fn scene(
             ring: -1.0,
             plate: plate_of(entry),
         });
+    }
+
+    // THE DOCK'S ICONS at the Icons section's "Dock icons" (Max, 2026-10-27:
+    // "mis iconos en el dock un poco más transparentes" — the Shell as it is).
+    let dock = crate::options::dock_icons();
+    if dock < 1.0 {
+        scene.icon_fade = vec![dock; scene.icons.len()];
     }
 
     scene

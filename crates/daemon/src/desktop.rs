@@ -4937,7 +4937,7 @@ impl App {
         let all_group = !self.desktop.hidden || shown > 0.004;
         let only: Option<HashSet<String>> = (!all_group).then(|| self.desktop.solo.clone());
         let group_alpha = if all_group { shown } else { solo_t };
-        let panel_paint = |rect: Option<Rect>| rect.filter(|_| !on_top).map(|r| self.desktop_panel_paint(r));
+        let panel_paint = |rect: Option<Rect>| rect.filter(|_| !on_top).map(|r| self.shell_panel_paint(r));
         let menu_paint = panel_paint(self.desktop.menu.as_ref().map(|m| m.rect));
         let props_paint = panel_paint(self.desktop.props.as_ref().map(|p| p.rect));
         // Names are written, and so measured, at the desktop's zoom.
@@ -4998,7 +4998,8 @@ impl App {
                 ink: ink_now.as_deref().map(|m| (m, veil)),
             },
         );
-        scene.alpha = if lit { 1.0 } else { group_alpha };
+        // (The desktop's icons and names are on the Shell: its Transparency.)
+        scene.alpha = if lit { 1.0 } else { group_alpha } * crate::options::shell_content();
         let (layer, qh, pending) = (
             self.desktop_layer.as_ref(),
             &self.qh,

@@ -155,6 +155,7 @@ struct Instance {
     @location(4) ring: f32,            // >=0 = draw a progress ring, that filled
     @location(5) plate: vec4<f32>,     // squircle plate under the glyph; a <= 0 = none
     @location(6) rot: f32,             // the quad turned this many radians about its middle
+    @location(7) fade: f32,            // the icon's own opacity (the dock's icons: "Dock icons")
 };
 
 struct VsOut {
@@ -165,6 +166,7 @@ struct VsOut {
     @location(3) @interpolate(flat) ring: f32,
     @location(4) @interpolate(flat) plate: vec4<f32>,
     @location(5) spot: vec2<f32>,      // where on the surface, logical pixels
+    @location(6) @interpolate(flat) fade: f32,
 };
 
 @vertex
@@ -185,6 +187,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     out.ring = inst.ring;
     out.plate = inst.plate;
     out.spot = px;
+    out.fade = inst.fade;
     return out;
 }
 
@@ -222,8 +225,13 @@ fn plate_px(uv: vec2<f32>, plate: vec4<f32>, px: f32) -> vec4<f32> {
     return vec4<f32>(prgb, pa);
 }
 
+// Every icon at its own opacity (premultiplied: the whole pixel scales).
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return fs_icon(in) * in.fade;
+}
+
+fn fs_icon(in: VsOut) -> vec4<f32> {
     // (The top bit marks a PICTURE — `content::PICTURE` — the next a
     // WALLPAPER's tile, graded below — `content::WALL` — the rest is the layer.)
     let layer = in.layer & 0x3fffffffu;

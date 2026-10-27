@@ -3315,6 +3315,8 @@ impl crate::App {
         let c = choice();
         set_skipped_programs(&self.entries, c.skip_in_force());
         set_looked_programs(&self.entries, c.looks_in_force());
+        // The Shell's and the dock icons' Transparency, for every frame.
+        let clear_moved = crate::options::set_clear(c.clear_of(Surface::Shell), c.clear_of(Surface::Icons));
         let changed = set(theme);
         // A move of the Lighting alone leaves the theme as it was, yet the
         // shell, the apps and the web all wear it.
@@ -3333,6 +3335,13 @@ impl crate::App {
             // (The desktop's icons wear the same filter: Max, 2026-10-17,
             // "the icons on the desktop don't change live".)
             self.request_desktop_draw();
+        }
+        // The Shell's Transparency: every surface of the shell drawn again.
+        if clear_moved {
+            self.draw_options();
+            self.draw();
+            self.request_desktop_draw();
+            self.request_desktop_top_draw();
         }
     }
 

@@ -100,8 +100,11 @@ struct IconInstance {
     // Offset 40.
     plate: [f32; 4],
     // The quad turned by this many radians about its middle (the dock's bin:
-    // its lid and its can). Offset 56 → 60 bytes, Pod-clean.
+    // its lid and its can). Offset 56.
     rot: f32,
+    // The icon's own opacity (1 = whole): the dock's icons wear "Dock icons"
+    // (`Scene::icon_fade`). Offset 60 → 64 bytes, Pod-clean.
+    fade: f32,
 }
 
 /// Per-instance data for the open box's frosted backdrop quad.
@@ -1164,7 +1167,7 @@ impl Renderer {
                             step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &wgpu::vertex_attr_array![
                                 0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
-                                5 => Float32x4, 6 => Float32
+                                5 => Float32x4, 6 => Float32, 7 => Float32
                             ],
                         }],
                     },
@@ -2013,7 +2016,11 @@ impl Renderer {
             .icons
             .iter()
             .enumerate()
-            .map(|(n, i)| IconInstance { rot: scene.icon_rot.get(n).copied().unwrap_or(0.0), ..icon_instance(i) })
+            .map(|(n, i)| IconInstance {
+                rot: scene.icon_rot.get(n).copied().unwrap_or(0.0),
+                fade: scene.icon_fade.get(n).copied().unwrap_or(1.0),
+                ..icon_instance(i)
+            })
             .collect();
         let n_icons_unclipped = icons.len() as u32;
         // Per grid: (clip, rect range, icon range) into the shared buffers.
@@ -3140,6 +3147,7 @@ fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
         ring: i.ring,
         plate: i.plate,
         rot: 0.0,
+        fade: 1.0,
     }
 }
 

@@ -173,6 +173,16 @@ impl App {
         }
     }
 
+    /// The desktop's own panels (its menu, the Properties box, a phone's
+    /// Configure box): the panel's paint through the Shell's Transparency.
+    /// (Files' menus are its window's, not the Shell's: they keep
+    /// [`Self::desktop_panel_paint`].)
+    pub(crate) fn shell_panel_paint(&self, rect: crate::content::Rect) -> MenuPaint {
+        let mut paint = self.desktop_panel_paint(rect);
+        paint.fill[3] = crate::options::shell_glass(paint.fill[3]);
+        paint
+    }
+
     /// Ease the menu's and the box's entrance by `dt`; whether either still
     /// moves.
     pub(crate) fn desktop_ease_panels(&mut self, dt: f32) -> bool {
@@ -204,13 +214,13 @@ impl App {
                 let key = if name.contains(':') { name.to_owned() } else { crate::glyphs::key(name) };
                 layers.iter().position(|k| *k == key).map(|l| l as u32)
             };
-            menu.push(scene, &self.desktop_panel_paint(menu.rect), &glyph);
+            menu.push(scene, &self.shell_panel_paint(menu.rect), &glyph);
         }
         if let Some(props) = self.desktop.props.as_ref() {
-            props.push(scene, &self.desktop_panel_paint(props.rect));
+            props.push(scene, &self.shell_panel_paint(props.rect));
         }
         if let Some(config) = self.desktop.config.as_ref().filter(|c| !c.hosted) {
-            config.push(scene, &self.desktop_panel_paint(config.rect));
+            config.push(scene, &self.shell_panel_paint(config.rect));
         }
     }
 
@@ -308,8 +318,10 @@ impl App {
         // back to the windows with it — else every click stayed the desktop's.)
         self.sync_desktop_top_input();
         self.desktop_top.last_frame = moving.then_some(now);
+        // (The menus are the Shell's: its Transparency. Quick Look shows what
+        // was asked for whole.)
         let mut scene = Scene {
-            alpha: 1.0,
+            alpha: if self.peek.is_up() { 1.0 } else { crate::options::shell_content() },
             ..Default::default()
         };
         // (Quick Look and a menu are never up together: each has the first

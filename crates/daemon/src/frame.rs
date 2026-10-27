@@ -1740,7 +1740,8 @@ impl App {
                 } else {
                     None
                 },
-                alpha: self.ui.alpha(),
+                // (Everything on the Shell's glass: its Transparency past as made.)
+                alpha: self.ui.alpha() * crate::options::shell_content(),
                 pointer: mag_pointer,
                 mag_amount: self.mag_amount,
                 dock_mag: &dock_mag,
@@ -2077,6 +2078,10 @@ impl App {
         // surface arrives and leaves on the same tempo its pills move at,
         // instead of being the one thing up here that snaps.
         color[3] *= self.options_show.t;
+        // THE BANNER stays as it is (Max, 2026-10-15) whatever the Shell's
+        // Transparency: the scene is drawn at `shell_content` for the pills and
+        // boxes on it, so the strip is put the other way round.
+        color[3] /= crate::options::shell_content();
         let strip = |x: f32, y: f32, w: f32, h: f32| content::RectInst {
             rect: content::Rect::new(x, y, w, h),
             radius: 0.0,
@@ -2098,7 +2103,7 @@ impl App {
             None => vec![strip(-2.0, -2.0, w + 4.0, bottom + 2.0)],
         };
         let mut scene = content::Scene {
-            alpha: 1.0,
+            alpha: crate::options::shell_content(),
             rects,
             ..Default::default()
         };
