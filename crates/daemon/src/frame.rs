@@ -42,6 +42,8 @@ const DEEP_LIFT: f32 = 14.0;
 /// the tabs and their dots together.
 const DEEP_FIELD_DOWN: f32 = 4.0;
 const DEEP_DOWN: f32 = 4.0;
+/// …and the tabs (their dots with them) this much lower again.
+const DEEP_TABS_DOWN: f32 = 4.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
@@ -369,7 +371,10 @@ impl App {
             // (Max: "move search slightly down and then both search and the
             // tabs slightly down"), the tabs' dots with them.
             let both = DEEP_DOWN * self.options_scale();
-            let (field_mid, text_y, dots_y) = (field_mid + DEEP_FIELD_DOWN * self.options_scale() + both, text_y + both, dots_y + both);
+            // (And the tabs alone a little lower still: "now just the tabs
+            // slightly lower".)
+            let tabs = DEEP_TABS_DOWN * self.options_scale();
+            let (field_mid, text_y, dots_y) = (field_mid + DEEP_FIELD_DOWN * self.options_scale() + both, text_y + both + tabs, dots_y + both + tabs);
             layout.search_box.y = field_mid - was.h / 2.0;
             layout.search_btn.y = field_mid - was.h / 2.0;
             // (The words take the pointer a little round them.)
