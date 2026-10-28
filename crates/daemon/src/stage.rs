@@ -1094,9 +1094,9 @@ fn write_breadcrumb(
         "parked": parked,
         "gaps": gaps,
     });
-    if let Err(e) = std::fs::write(&path, body.to_string()) {
-        warn!("stage: could not write breadcrumb: {e}");
-    }
+    // (Whole or not at all: a breadcrumb cut by a crash is the one that has
+    // to be read after it.)
+    crate::persist::write_text("stage: breadcrumb", &path, &body.to_string());
 }
 
 /// Hand every window back the fullscreen state it was found in, and drop the
