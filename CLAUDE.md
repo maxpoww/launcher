@@ -1631,7 +1631,7 @@ The big daemon files are cohesive but long — go straight to the function:
   page dots a line lower). THE TABS (Max, 2026-10-27: "no pills… letters as we use on the boxes… under
   the searchbox… 9, then two, three pages more… the ones the user uses start being closer… if i search
   '.html' the tag should be there"): WORDS under the search field (in the boxes' word style — the text font, the lit one(s) underlined — the field moves up into the band
-  the System row has — `deep_band`, `controls_layer` —, both `DEEP_LIFT` (14 px) higher than the band's middle and the field's place, the tabs taking that place: `Layout::tabs_row`,
+  the System row has — `deep_band`, `controls_layer` —, the tabs `DEEP_LIFT` (14 px) over the field's own place, the field CENTRED between the last shelf's dots and the tabs' words (`deep_dots_bottom`, `deep_tab_top`): `Layout::tabs_row`,
   their rects `Layout::controls`; `TAB_FONT_PX` 16.5, one size on every page — smaller only when a box is
   too narrow for its widest page —; the pages SLIDE as the box's do, `Deep::slide` eased toward
   `slide_to` at the pager's rate, round the end the nearer way, `Layout::tabs_at`/`tabs_slide`; dots

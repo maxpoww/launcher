@@ -386,6 +386,21 @@ pub struct DeepDraw<'a> {
 /// How far the chip in the search pill stands from the words typed after it.
 const PILL_CHIP_GAP: f32 = 8.0;
 
+/// How far under a deep search shelf's dots sit (a line lower than a
+/// section's: under the lines of when).
+const DEEP_DOTS_LOWER: f32 = LABEL_LINE_PX - 2.0;
+
+/// Where a deep search shelf's page dots end, its viewport ending at
+/// `vp_bottom` (the field is centred between them and the tabs).
+pub fn deep_dots_bottom(vp_bottom: f32) -> f32 {
+    vp_bottom + DOT_ROOM / 2.0 - DOTS_RAISE + DEEP_DOTS_LOWER + 3.0
+}
+
+/// Where the deep search's tab words begin in their row, at `scale`.
+pub fn deep_tab_top(row: Rect, scale: f32) -> f32 {
+    row.y + (row.h - crate::deep_search::TAB_LINE_PX * scale) / 2.0 - 9.0
+}
+
 /// How much the content ride trails the opening card (1.0 = glued to
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
 const RIDE_PARALLAX: f32 = 1.18;
@@ -4419,7 +4434,7 @@ pub fn scene(
             continue;
         }
         // (Under the deep search's lines of when, a line lower: into the gap.)
-        let under_subs = if deep.is_some() { LABEL_LINE_PX - 2.0 } else { 0.0 };
+        let under_subs = if deep.is_some() { DEEP_DOTS_LOWER } else { 0.0 };
         let dot_y = sec.viewport.y + sec.viewport.h + DOT_ROOM / 2.0 - DOTS_RAISE + under_subs;
         // A lone app's recents' pages: their dots where the section's would
         // be, under their line (the section itself has one page).
@@ -4506,7 +4521,7 @@ pub fn scene(
             };
             let ink = if a >= 1.0 { [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3]] } else { faded_on(dock_ink, dock_seen, a, 2.5) };
             // (A little up from the row's middle: the dots under them.)
-            let top = r.y + (r.h - line) / 2.0 - 9.0;
+            let top = deep_tab_top(r, s);
             tgrid.labels.push(Label {
                 text: word.clone(),
                 pos: (r.x + r.w / 2.0, top),

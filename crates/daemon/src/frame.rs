@@ -314,9 +314,6 @@ impl App {
             // (Both a little higher than the band's middle and the field's
             // place — Max: "move the tabs and the search a little higher".)
             let lift = DEEP_LIFT * self.options_scale();
-            let up = band.y + band.h / 2.0 - (was.y + was.h / 2.0) - lift;
-            layout.search_box.y += up;
-            layout.search_btn.y += up;
             let row = content::Rect::new(band.x, was.y - lift, band.w, was.h);
             layout.tabs_row = Some(row);
             let pages = d.tags.len().div_ceil(deep_search::TABS_PAGE).max(1);
@@ -353,6 +350,16 @@ impl App {
             layout.tabs_scales = scales;
             layout.tabs_page = (page, pages);
             layout.tabs_slide = d.slide;
+            // The field CENTRED between the last shelf's page dots and the
+            // tabs' words (Max: "center the search pill between the tabs and
+            // the dots").
+            let first = layout.sections[content::SECTION_APPS].viewport;
+            let shelf_bottom =
+                layout.sections.iter().filter(|s| s.viewport.h > 0.0).map(|s| s.viewport.y + s.viewport.h).fold(first.y + first.h, f32::max);
+            let (above, below) = (content::deep_dots_bottom(shelf_bottom), content::deep_tab_top(row, scale));
+            let y = (above + below) / 2.0 - was.h / 2.0;
+            layout.search_box.y = y;
+            layout.search_btn.y = y;
         }
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
