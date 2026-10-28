@@ -44,6 +44,9 @@ const DEEP_FIELD_DOWN: f32 = 4.0;
 const DEEP_DOWN: f32 = 4.0;
 /// …and the tabs (their dots with them) this much lower again.
 const DEEP_TABS_DOWN: f32 = 4.0;
+/// How much taller the deep search's field is than the bar's pills (Max:
+/// "make the pill little fatter").
+const DEEP_PILL_FAT: f32 = 4.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
@@ -177,6 +180,13 @@ impl App {
     }
 
     /// The Controls row's pill height: the control panel's near layer.
+    /// The search field's height: a bar pill's — the deep search's a little
+    /// taller.
+    pub(crate) fn search_pill_h(&self) -> f32 {
+        let fat = if self.deep_band() { DEEP_PILL_FAT * self.options_scale() } else { 0.0 };
+        self.options_pill_h() + fat
+    }
+
     pub(crate) fn controls_pill_h(&self) -> f32 {
         self.options_pill_h() * self.controls_layer()
     }
@@ -362,7 +372,7 @@ impl App {
             let shelf_bottom =
                 layout.sections.iter().filter(|s| s.viewport.h > 0.0).map(|s| s.viewport.y + s.viewport.h).fold(first.y + first.h, f32::max);
             let a = content::deep_dots_bottom(shelf_bottom);
-            let ph = self.options_pill_h();
+            let ph = self.search_pill_h();
             let b = content::deep_tab_h(scale);
             let e = dots_y - 2.5;
             let text_y = (a + ph + 2.0 * e - 2.0 * b) / 3.0;
@@ -878,7 +888,7 @@ impl App {
         };
         let search_pill = content::SearchPill {
             scale: pill_scale,
-            h: self.options_pill_h(),
+            h: self.search_pill_h(),
             label_px: search_label_px,
             lift: self.search.lift,
         };
