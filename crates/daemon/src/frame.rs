@@ -38,6 +38,10 @@ const TAB_GAP: f32 = 16.0;
 /// How much higher the deep search's field and tabs stand than the band's
 /// middle and the field's own place.
 const DEEP_LIFT: f32 = 14.0;
+/// How much lower than the even air the field stands, and then the field,
+/// the tabs and their dots together.
+const DEEP_FIELD_DOWN: f32 = 4.0;
+const DEEP_DOWN: f32 = 4.0;
 /// How soon to look again when the GPU is still on the previous frame (GL
 /// pacing, see `Renderer::gpu_ready`).
 const GPU_BUSY_RETRY: Duration = Duration::from_millis(4);
@@ -361,6 +365,11 @@ impl App {
             let e = dots_y - 2.5;
             let text_y = (a + ph + 2.0 * e - 2.0 * b) / 3.0;
             let field_mid = (a + text_y) / 2.0;
+            // Then the field a little down, and everything a little down
+            // (Max: "move search slightly down and then both search and the
+            // tabs slightly down"), the tabs' dots with them.
+            let both = DEEP_DOWN * self.options_scale();
+            let (field_mid, text_y, dots_y) = (field_mid + DEEP_FIELD_DOWN * self.options_scale() + both, text_y + both, dots_y + both);
             layout.search_box.y = field_mid - was.h / 2.0;
             layout.search_btn.y = field_mid - was.h / 2.0;
             // (The words take the pointer a little round them.)
