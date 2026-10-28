@@ -734,6 +734,11 @@ const FILE_WALK_DEPTH: usize = 6;
 /// is a cache (`CACHEDIR.TAG`: Cargo's `target-*` trees flooded file search
 /// with build output).
 const FILE_WALK_SKIP: [&str; 3] = ["target", "node_modules", "__pycache__"];
+/// Golem's own folders at the home's top — the system's checkout and where
+/// the nightly update sets an owner's edits to it aside — are not what one
+/// looks for (the lab laptops: "golem", "home", "system", "power" brought
+/// two hundred of their files); Files still shows them.
+const GOLEM_OWN: [&str; 2] = ["Golem", "Golem-local-edits"];
 
 /// Whether a thing the home walk meets is left out of file search: hidden,
 /// a build tree, a folder that says it is a cache (`file_search::list_top`
@@ -766,7 +771,7 @@ pub(crate) fn scan_home_files() -> Vec<FileEntry> {
             }
             let is_dir = ft.is_dir();
             let path = e.path();
-            if walk_skips(&name, &path, is_dir) {
+            if walk_skips(&name, &path, is_dir) || (depth == 0 && is_dir && GOLEM_OWN.contains(&name.as_str())) {
                 continue;
             }
             if is_dir && depth + 1 < FILE_WALK_DEPTH {

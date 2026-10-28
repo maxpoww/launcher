@@ -1562,7 +1562,9 @@ The big daemon files are cohesive but long — go straight to the function:
 - `file_search.rs` (+ `files.rs::file_results`, `app_actions.rs::add_file_row`) — THE BOX'S FILE SEARCH
   (Max, 2026-10-27: "maybe improve file search?" … "do 1 to 7, also quick view on files"). The home walk
   (`apps::scan_home_files`, off the loop at each rescan: hidden, links, `target`/`node_modules`/
-  `__pycache__` and any folder with a `CACHEDIR.TAG` left out — Cargo's `target-*` flooded results)
+  `__pycache__`, any folder with a `CACHEDIR.TAG` — Cargo's `target-*` flooded results — and Golem's own
+  `~/Golem` and `~/Golem-local-edits` (`apps::GOLEM_OWN`: on the lab laptops "golem", "home", "system"
+  brought two hundred of the checkout's files) left out)
   keeps each file's FOLDER below home folded (`FileEntry::dir`) and its MTIME. `Ranker::rank`: each
   word of the query is a SUBSTRING of the name (nucleo `AtomKind::Substring` — scattered letters
   brought "notification" for "notas") or begins a word of its folders' path (`word_start`: "playa

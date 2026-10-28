@@ -283,9 +283,10 @@ fn kind_title(kind: Option<Kind>) -> &'static str {
     }
 }
 
-/// A shelf's title (in the shell's words) with how many it holds: "PDF · 4".
+/// A shelf's title (in the shell's words) with how many it holds: "PDF · 4"
+/// ("· 400+" when the search stopped counting there).
 fn counted(title: &str, n: usize) -> String {
-    format!("{title} · {n}")
+    if n >= DEEP_MAX { format!("{title} · {DEEP_MAX}+") } else { format!("{title} · {n}") }
 }
 
 /// When something was used, short: "now", "5 min", "3 h", "yesterday",
@@ -1089,6 +1090,7 @@ mod tests {
     fn every_shelf_has_its_words() {
         assert_eq!(kind_title(Some(Kind::Pdf)), "PDF");
         assert_eq!(counted("PDF", 4), "PDF · 4");
+        assert_eq!(counted(".png", DEEP_MAX), format!(".png · {DEEP_MAX}+"));
         for k in [None, Some(Kind::Pdf), Some(Kind::Picture), Some(Kind::Video), Some(Kind::Music), Some(Kind::Document), Some(Kind::Archive), Some(Kind::Folder)] {
             assert!(!kind_title(k).is_empty());
         }
