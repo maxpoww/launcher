@@ -1354,11 +1354,15 @@ impl App {
             info!("quick look: no top surface");
             return;
         }
+        // (Already up: nothing to do. A web page is told by its address, not
+        // its picture — a site's pages with none of their own share its tile;
+        // Max, 2026-10-28: "on youtube music … arrows … only once".)
+        let page = thing.said.as_ref().map(|s| &s.url);
         if self
             .peek
             .up
             .as_ref()
-            .is_some_and(|u| u.path == thing.path && !u.closing)
+            .is_some_and(|u| u.path == thing.path && u.said.as_ref().map(|s| &s.url) == page && !u.closing)
         {
             return;
         }

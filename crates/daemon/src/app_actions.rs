@@ -1849,7 +1849,9 @@ impl App {
         let (path, name, said) = if file {
             (PathBuf::from(&item.url), item.title.clone(), None)
         } else {
+            // (Nothing to show it by: Quick Look goes, not left on the one before.)
             let Some(picture) = item.picture.clone() else {
+                self.box_peek_close();
                 return;
             };
             let own = item.aspect.is_some();
