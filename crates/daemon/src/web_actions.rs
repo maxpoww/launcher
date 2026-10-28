@@ -1390,7 +1390,8 @@ pub(crate) struct Kitchen {
     #[serde(skip)]
     dir: PathBuf,
     /// Pictures more than one page wears: a site's logo, or the first
-    /// page's of an app that changes page without loading — no page's own.
+    /// page's of an app that changes page without loading — no page's own
+    /// (one video at several addresses, with a list or without, is one page).
     #[serde(skip)]
     shared: HashSet<String>,
 }
@@ -1444,10 +1445,20 @@ fn kitchen_in(dir: &Path) -> Kitchen {
     match read.and_then(|b| serde_json::from_slice::<Kitchen>(&b).ok()).filter(|k| k.v == 1) {
         Some(mut k) => {
             k.dir = dir.to_owned();
-            let mut seen = HashSet::new();
-            for pic in k.pages.values().filter_map(|p| p.pic.clone()) {
-                if !seen.insert(pic.clone()) {
-                    k.shared.insert(pic);
+            let mut seen: HashMap<String, String> = HashMap::new();
+            for (url, page) in &k.pages {
+                let Some(pic) = page.pic.clone() else {
+                    continue;
+                };
+                let page = video_id(url).map_or_else(|| url.clone(), str::to_owned);
+                match seen.get(&pic) {
+                    Some(other) if *other != page => {
+                        k.shared.insert(pic);
+                    }
+                    Some(_) => {}
+                    None => {
+                        seen.insert(pic, page);
+                    }
                 }
             }
             k
@@ -1964,6 +1975,30 @@ mod tests {
     }
 
     #[test]
+    fn a_videos_picture_at_two_addresses_is_still_its_own() {
+        let dir = std::env::temp_dir().join(format!("wa-kitchen-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("pics")).unwrap();
+        for f in ["00000000000000a1.jpg", "00000000000000b2.jpg"] {
+            std::fs::write(dir.join("pics").join(f), b"x").unwrap();
+        }
+        let mu = "https://music.youtube.com/watch?v=";
+        let json = serde_json::json!({"v": 1, "plays": [], "pages": {
+            // A song at two addresses, Seam's cover for both (COVERS FROM BEFORE).
+            format!("{mu}sFZjqVnWBhc"): {"pic": "00000000000000a1.jpg"},
+            format!("{mu}sFZjqVnWBhc&list=RDAMVMsFZjqVnWBhc"): {"pic": "00000000000000a1.jpg"},
+            // A site's logo on two of its pages.
+            "https://example.com/a": {"pic": "00000000000000b2.jpg"},
+            "https://example.com/b": {"pic": "00000000000000b2.jpg"},
+        }});
+        std::fs::write(dir.join("recents.json"), json.to_string()).unwrap();
+        let k = kitchen_in(&dir);
+        assert!(k.page_picture(&format!("{mu}sFZjqVnWBhc")).is_some());
+        assert!(k.page_picture(&format!("{mu}sFZjqVnWBhc&list=RDAMVMsFZjqVnWBhc")).is_some());
+        assert!(k.page_picture("https://example.com/a").is_none(), "a logo is no page's own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_cut_cover_is_kept_whole_for_quick_look() {
         let dir = std::env::temp_dir().join(format!("wa-fitted-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2438,6 +2473,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
 
 
 
