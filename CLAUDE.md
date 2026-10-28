@@ -1509,7 +1509,7 @@ The big daemon files are cohesive but long — go straight to the function:
   site for them — Spotify plays from a search page; with their covers); `with_plays` makes a song and
   its page one. Pictures: what played > the page's preview > YouTube's from Seam's cache > the
   favicon, each kept WHOLE in its own shape (`fitted`; Max: "forma libre" — a video's a rectangle, a
-  cover square; only what YouTube padded it with cut — a 4:3 picture's black bands, and on a video's page the bars of one colour round a song's cover, `unbanded`, its whole cut kept for Quick Look, `big_of`; Seam fetches the covers of songs heard before the kitchen, COVERS FROM BEFORE) and drawn so (`content::RecentsDraw`,
+  cover square; only what YouTube padded it with cut — a 4:3 picture's black bands (looked for a JPEG block away from the picture: its edge rings), and on a video's page or a list's (`list_id`: its picture is its first video's) the bars of one colour round a song's cover, `unbanded`, its whole cut kept for Quick Look, `big_of`; on a video's page the bigger of what played and the page's own, `heard_or_page`; Seam fetches the covers and names of songs and lists heard before the kitchen, COVERS FROM BEFORE) and drawn so (`content::RecentsDraw`,
   `preview_rect`: its bottom on the icons' line, `PREVIEW_H` an icon high at most, a cell wide), the
   recents' pages SLIDING as the box's do (a `Pager`, `recents_turn` / `recents_slide`: the page that
   went is kept as `Leaving` and slides out the other way; every picture a page had a hand in decoded within bounds —
