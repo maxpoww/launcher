@@ -1370,6 +1370,22 @@ fn shape_of(path: &Path) -> Option<f32> {
     (w > 0 && h > 0).then(|| w as f32 / h as f32)
 }
 
+/// How many pixels a picture file has, read from its header (0: unreadable).
+fn pixels(path: &Path) -> u64 {
+    image::image_dimensions(path).map_or(0, |(w, h)| u64::from(w) * u64::from(h))
+}
+
+/// Of the picture Seam heard a recent play with and the one its video's page
+/// kept (`page`, a video's page only), the one to show: what played — unless
+/// the page's is bigger; it is the same video (YouTube Music's player says a
+/// video by a 400×225 still, its page kept it at 1280×720).
+fn heard_or_page(heard: Option<PathBuf>, page: Option<PathBuf>) -> Option<PathBuf> {
+    match (heard, page) {
+        (Some(h), Some(p)) if pixels(&p) > pixels(&h) => Some(p),
+        (h, _) => h,
+    }
+}
+
 // ---- Seam's kitchen ---------------------------------------------------------------
 
 /// WHAT SEAM COOKED (Max, 2026-10-22: "can we make Seam leave the files 'cooked' and pick
@@ -1595,8 +1611,8 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
             };
             let cached = video_id(&v.url).and_then(|id| Some((id, videos.get(id)?)));
             let video = || cached.and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body));
-            let heard = v.pic.as_deref().map(PathBuf::from);
             let page = || kitchen.page_picture(&v.url);
+            let heard = heard_or_page(v.pic.as_deref().map(PathBuf::from), video_page.then(page).flatten());
             let played = heard.clone().and_then(cooked);
             let (preview, big) = match played {
                 Some(p) => (Some(p), heard.map(|h| (h, 0))),
@@ -1995,6 +2011,25 @@ mod tests {
         assert!(k.page_picture(&format!("{mu}sFZjqVnWBhc")).is_some());
         assert!(k.page_picture(&format!("{mu}sFZjqVnWBhc&list=RDAMVMsFZjqVnWBhc")).is_some());
         assert!(k.page_picture("https://example.com/a").is_none(), "a logo is no page's own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_videos_bigger_picture_beats_the_players_still() {
+        let dir = std::env::temp_dir().join(format!("wa-heard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, w: u32, h: u32| {
+            let path = dir.join(name);
+            image::RgbaImage::new(w, h).save_with_format(&path, image::ImageFormat::Png).unwrap();
+            path
+        };
+        let (still, page, small) = (file("still.png", 400, 225), file("page.png", 1280, 720), file("small.png", 120, 90));
+        assert_eq!(heard_or_page(Some(still.clone()), Some(page.clone())), Some(page.clone()));
+        // (What played stays when it is the bigger, or the page has none of its own.)
+        assert_eq!(heard_or_page(Some(still.clone()), Some(small)), Some(still.clone()));
+        assert_eq!(heard_or_page(Some(still.clone()), None), Some(still));
+        // (Nothing heard: the page's is found further on, as before.)
+        assert_eq!(heard_or_page(None, Some(page)), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
