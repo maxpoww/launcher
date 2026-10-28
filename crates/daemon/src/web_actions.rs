@@ -1183,7 +1183,7 @@ fn video_pictures(cache2: &Path) -> Pictures {
 /// A video's picture from a cache entry (`body` bytes long), as a file of
 /// ours, in its own shape (`fitted`).
 fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBuf> {
-    let path = dir.join(format!("{id}-f2.png"));
+    let path = dir.join(format!("{id}-f4.png"));
     if path.exists() {
         return Some(path);
     }
@@ -1367,14 +1367,15 @@ fn big_of(small: &Path) -> PathBuf {
     small.with_file_name(format!("{stem}-big.png"))
 }
 
-/// Whether a 4:3 picture is a 16:9 one between two black bands (its top
-/// and bottom rows dark all across).
+/// Whether a 4:3 picture is a 16:9 one between two black bands (rows of
+/// both dark all across — looked at a JPEG block away from the picture:
+/// its edge rings into the bands' nearest rows, 2026-10-28).
 fn banded(img: &image::DynamicImage) -> bool {
     let (w, h) = (img.width(), img.height());
     let band = (h - w * 9 / 16) / 2;
     let rgb = img.to_rgb8();
     let dark = |y: u32| (0..w).step_by(4).all(|x| rgb.get_pixel(x, y).0.iter().all(|&c| c < 24));
-    band > 2 && dark(1) && dark(band.saturating_sub(2)) && dark(h - 2)
+    band > 10 && dark(1) && dark(band - 8) && dark(h - band + 8) && dark(h - 2)
 }
 
 /// A picture file's shape (width / height), read from its header.
@@ -1620,7 +1621,7 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
             let video_page = video_id(&v.url).is_some();
             let square = video_page || list_id(&v.url).is_some();
             let cooked = |src: PathBuf| {
-                let cut = if square { "f2" } else { "f1" };
+                let cut = if square { "f4" } else { "f3" };
                 let out = shots.as_deref()?.join(format!("k-{}-{cut}.png", src.file_stem()?.to_string_lossy()));
                 if out.exists() {
                     return Some(out);
@@ -2007,6 +2008,16 @@ mod tests {
         assert!(unbanded(&padded(1280, 720, olive, (280, 0, 720, 720)), false).is_none());
         let banded43 = padded(480, 360, [0, 0, 0], (0, 45, 480, 270));
         assert_eq!(unbanded(&banded43, false).map(|c| (c.width(), c.height())), Some((480, 270)));
+        // (A JPEG's: the picture's edge rings into the bands' nearest rows.)
+        let mut rung = banded43.to_rgb8();
+        for x in 0..480 {
+            for y in [43, 44, 315, 316] {
+                rung.put_pixel(x, y, image::Rgb([40, 40, 40]));
+            }
+        }
+        assert_eq!(unbanded(&image::DynamicImage::ImageRgb8(rung), false).map(|c| (c.width(), c.height())), Some((480, 270)));
+        // A 4:3 video dark only at its very top and bottom: not banded.
+        assert!(unbanded(&padded(480, 360, [0, 0, 0], (0, 30, 480, 300)), false).is_none());
     }
 
     #[test]
