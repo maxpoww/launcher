@@ -396,10 +396,14 @@ pub fn deep_dots_bottom(vp_bottom: f32) -> f32 {
     vp_bottom + DOT_ROOM / 2.0 - DOTS_RAISE + DEEP_DOTS_LOWER + 3.0
 }
 
-/// Where the deep search's tab words begin in their row, at `scale`.
-pub fn deep_tab_top(row: Rect, scale: f32) -> f32 {
-    row.y + (row.h - crate::deep_search::TAB_LINE_PX * scale) / 2.0 - 9.0
+/// How tall the deep search's tab words stand at `scale`, their underline
+/// with them.
+pub fn deep_tab_h(scale: f32) -> f32 {
+    crate::deep_search::TAB_LINE_PX * scale + DEEP_UNDERLINE_GAP + 1.5
 }
+
+/// The underline's air under a tab's word.
+const DEEP_UNDERLINE_GAP: f32 = 1.0;
 
 /// How much the content ride trails the opening card (1.0 = glued to
 /// it): the parallax depth of the rise-from-the-bottom-edge animation.
@@ -996,6 +1000,9 @@ pub struct Layout {
     /// much smaller their words are drawn, and the page shown of how many
     /// (`App::layout_stretched`; their rects are `controls`).
     pub tabs_row: Option<Rect>,
+    /// Where their words begin and their page dots stand (centre).
+    pub tabs_text_y: f32,
+    pub tabs_dots_y: f32,
     pub tabs_page: (usize, usize),
     /// Every tab where it stands when its page is shown, each page's size,
     /// and where the pages stand now (in pages: `Deep::slide`).
@@ -1473,6 +1480,8 @@ pub fn layout(
         apps_none: false,
         shelf_room: 0.0,
         tabs_row: None,
+        tabs_text_y: 0.0,
+        tabs_dots_y: 0.0,
         tabs_page: (0, 1),
         tabs_at: Vec::new(),
         tabs_words: Vec::new(),
@@ -1883,6 +1892,8 @@ fn layout_side(
         apps_none: false,
         shelf_room: 0.0,
         tabs_row: None,
+        tabs_text_y: 0.0,
+        tabs_dots_y: 0.0,
         tabs_page: (0, 1),
         tabs_at: Vec::new(),
         tabs_words: Vec::new(),
@@ -4497,7 +4508,9 @@ pub fn scene(
             let r = x.rem_euclid(n);
             if r > n / 2.0 { r - n } else { r }
         };
-        let in_row = reveal_clip(row);
+        // (Only the sides: the slide stays inside the row; the words' tops
+        // and the underline are never cut.)
+        let in_row = reveal_clip(Rect::new(row.x, row.y - 40.0, row.w, row.h + 80.0));
         let mut tgrid = GridContent { clip: reveal_rect, ..Default::default() };
         for (i, rest) in layout.tabs_at.iter().enumerate() {
             let p = i / crate::deep_search::TABS_PAGE;
@@ -4520,8 +4533,7 @@ pub fn scene(
                 0.55
             };
             let ink = if a >= 1.0 { [dock_ink[0], dock_ink[1], dock_ink[2], dock_ink[3]] } else { faded_on(dock_ink, dock_seen, a, 2.5) };
-            // (A little up from the row's middle: the dots under them.)
-            let top = deep_tab_top(r, s);
+            let top = layout.tabs_text_y;
             tgrid.labels.push(Label {
                 text: word.clone(),
                 pos: (r.x + r.w / 2.0, top),
@@ -4540,7 +4552,7 @@ pub fn scene(
             if lit {
                 let uw = layout.tabs_words.get(i).copied().unwrap_or(r.w);
                 let ux = r.x + (r.w - uw) / 2.0;
-                let line_rect = Rect::new(ux, top + line + 1.0, uw, 1.5 * s.max(0.7));
+                let line_rect = Rect::new(ux, top + line + DEEP_UNDERLINE_GAP, uw, 1.5 * s.max(0.7));
                 let u = line_rect.intersect(&in_row);
                 if u.w > 0.0 && u.h > 0.0 {
                     tgrid.rects.push(RectInst { rect: u, radius: 0.0, color: ink, glass: 0.0, border: 0.0 });
@@ -4550,7 +4562,7 @@ pub fn scene(
         if pages > 1 {
             let (dot_r, spacing) = (2.5, 9.0);
             let total = pages as f32 * spacing - (spacing - dot_r * 2.0);
-            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h - 4.5);
+            let (cx, cy) = (row.x + row.w / 2.0, layout.tabs_dots_y);
             let hl = dock_highlight;
             for p in 0..pages {
                 let x = cx - total / 2.0 + p as f32 * spacing + dot_r;

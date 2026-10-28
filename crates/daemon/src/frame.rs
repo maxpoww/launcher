@@ -314,8 +314,9 @@ impl App {
             // (Both a little higher than the band's middle and the field's
             // place — Max: "move the tabs and the search a little higher".)
             let lift = DEEP_LIFT * self.options_scale();
+            // (Where the tabs stood: their page dots stay at its foot.)
             let row = content::Rect::new(band.x, was.y - lift, band.w, was.h);
-            layout.tabs_row = Some(row);
+            let dots_y = row.y + row.h - 4.5;
             let pages = d.tags.len().div_ceil(deep_search::TABS_PAGE).max(1);
             let page = d.page.min(pages - 1);
             let gap = TAB_GAP * self.options_scale();
@@ -339,10 +340,37 @@ impl App {
                 let mut x = row.x + (row.w - width_of(p) * scale) / 2.0;
                 for i in page_of(p) {
                     let w = d.tab_w.get(i).copied().unwrap_or(40.0);
-                    at[i] = content::Rect::new(x - gap * scale / 2.0, row.y, (w + gap) * scale, row.h);
+                    at[i] = content::Rect::new(x - gap * scale / 2.0, 0.0, (w + gap) * scale, 0.0);
                     x += (w + gap) * scale;
                 }
             }
+            // EQUAL AIR from the last shelf's page dots to the field, the field
+            // to the tabs' words, the words to their own dots (Max: "center
+            // the search pill between the tabs and the dots", then "center
+            // the tabs between the tabs' dots and the search box"): with `a`
+            // where the shelf's dots end, `ph` the field's height, `b` the
+            // words' (underline with them) and `e` where the tabs' dots
+            // begin, the words begin at (a + ph + 2e - 2b) / 3 and the field
+            // is centred between `a` and them.
+            let first = layout.sections[content::SECTION_APPS].viewport;
+            let shelf_bottom =
+                layout.sections.iter().filter(|s| s.viewport.h > 0.0).map(|s| s.viewport.y + s.viewport.h).fold(first.y + first.h, f32::max);
+            let a = content::deep_dots_bottom(shelf_bottom);
+            let ph = self.options_pill_h();
+            let b = content::deep_tab_h(scale);
+            let e = dots_y - 2.5;
+            let text_y = (a + ph + 2.0 * e - 2.0 * b) / 3.0;
+            let field_mid = (a + text_y) / 2.0;
+            layout.search_box.y = field_mid - was.h / 2.0;
+            layout.search_btn.y = field_mid - was.h / 2.0;
+            // (The words take the pointer a little round them.)
+            for r in &mut at {
+                r.y = text_y - 4.0;
+                r.h = b + 8.0;
+            }
+            layout.tabs_row = Some(content::Rect::new(row.x, text_y - 4.0, row.w, dots_y + 4.0 - (text_y - 4.0)));
+            layout.tabs_text_y = text_y;
+            layout.tabs_dots_y = dots_y;
             let shown = page * deep_search::TABS_PAGE..((page + 1) * deep_search::TABS_PAGE).min(d.tags.len());
             layout.controls = (0..d.tags.len()).map(|i| if shown.contains(&i) { at[i] } else { content::Rect::new(0.0, 0.0, 0.0, 0.0) }).collect();
             layout.tabs_at = at;
@@ -350,16 +378,6 @@ impl App {
             layout.tabs_scales = scales;
             layout.tabs_page = (page, pages);
             layout.tabs_slide = d.slide;
-            // The field CENTRED between the last shelf's page dots and the
-            // tabs' words (Max: "center the search pill between the tabs and
-            // the dots").
-            let first = layout.sections[content::SECTION_APPS].viewport;
-            let shelf_bottom =
-                layout.sections.iter().filter(|s| s.viewport.h > 0.0).map(|s| s.viewport.y + s.viewport.h).fold(first.y + first.h, f32::max);
-            let (above, below) = (content::deep_dots_bottom(shelf_bottom), content::deep_tab_top(row, scale));
-            let y = (above + below) / 2.0 - was.h / 2.0;
-            layout.search_box.y = y;
-            layout.search_btn.y = y;
         }
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
