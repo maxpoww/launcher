@@ -2220,7 +2220,7 @@ impl App {
         // Concealed in fullscreen: render an empty (transparent) frame so the
         // bar disappears until a deliberate top-edge hold reveals it.
         //
-        // Unless a sticky OPTION is standing (`OptionUXRules.md` §4) — then the
+        // Unless a sticky OPTION is standing (`UXRules.md` §4) — then the
         // frame carries exactly two pills, the control that took the bar away
         // and its doorway, and falls through to the ordinary draw below so they
         // get the surface's real styling rather than a special-case painting.
@@ -2249,7 +2249,7 @@ impl App {
         // The Leader's displacement is derived from the layout, so it is
         // refreshed here — before anything consumes the pills — and this is
         // where a leader that has left the layout is released
-        // (`OptionUXRules.md` §1).
+        // (`UXRules.md` §1).
         self.sync_lead();
         let w = w as f32;
         let bar_h = self.options_bar_h();
@@ -2274,7 +2274,7 @@ impl App {
         // When matched, draw the fill hard-edged (`glass = -1.0`) so its bottom
         // edge — which meets the window's identical colour — is a crisp cut
         // rather than a gamma-lifted AA seam. See `rounded_rect.wgsl`.
-        // The strip itself fades with the bar (`OptionUXRules.md` §3): the
+        // The strip itself fades with the bar (`UXRules.md` §3): the
         // surface arrives and leaves on the same tempo its pills move at,
         // instead of being the one thing up here that snaps.
         color[3] *= self.options_show.t;

@@ -202,7 +202,7 @@ const MODULE_REST_ALPHA_BOOST: f32 = 10.0;
 /// title metamorphosis (`become-more`, one shape growing).
 ///
 /// **One at a time** — the pill is one object, so it can only be one thing
-/// (`OptionUXRules.md` §5, one kills the other). [`App::module_wanted`] picks by
+/// (`UXRules.md` §5, one kills the other). [`App::module_wanted`] picks by
 /// precedence rather than stacking two sentences into one pill.
 ///
 /// An **empty-space** module lived here on 2026-09-13 — the plain sentence "This
@@ -443,7 +443,7 @@ fn action_command_line(action: &options_engine::AffordanceAction) -> Option<Stri
 // progress value per button drives both position and opacity, the same
 // metamorphosis feel as the copy-link pill and the bell peek. All dt-based.
 // The stagger is CHOREOGRAPHY, not tempo: One Material shares the rate, never
-// the moment (`OptionUXRules.md` §3).
+// the moment (`UXRules.md` §3).
 const CTRL_STAGGER: f32 = 0.06; // s between stagger stages
 /// How many toggles ride the reveal chain.
 const CTRL_N: usize = 5;
@@ -502,7 +502,7 @@ const SIZE_POLL_FAST: Duration = Duration::from_millis(40);
 // the same transition backwards. All dt-based.
 //
 // That beat is the surface's shared `animation::LEAVE_HOLD`, not the clock's own
-// idea of one (`OptionUXRules.md` §3). It used to be 1500ms, which left the date
+// idea of one (`UXRules.md` §3). It used to be 1500ms, which left the date
 // standing long after the hand that asked for it had gone: if you want to keep
 // reading it, keep the pointer on it.
 /// Crossfade split: the clock fades out by `t = OUT_END`, the date fades in
@@ -523,7 +523,7 @@ pub(crate) struct ClockMeta {
     hold_deadline: Option<std::time::Instant>,
 }
 
-// --- The Leader (OptionUXRules.md §1) ---------------------------------------
+// --- The Leader (UXRules.md §1) ---------------------------------------
 // "Using an OPTION must never cost you the OPTION." A CLICK chooses the LEADER:
 // the pill you clicked is pinned to the place on the bar where you clicked it,
 // and its group is laid out from that anchor instead of from its resting one.
@@ -688,7 +688,7 @@ fn clamp_shift(
     raw.clamp(lo, hi.max(lo))
 }
 
-// --- Sticky OPTIONS (OptionUXRules.md §4) ------------------------------------
+// --- Sticky OPTIONS (UXRules.md §4) ------------------------------------
 // "Undoing must cost what doing cost." §1 keeps an OPTION from MOVING when you
 // use it; this keeps one from DISAPPEARING when you use it. Clicking
 // [fullscreen] conceals the bar — so the control you need in four seconds, to
@@ -703,7 +703,7 @@ fn clamp_shift(
 // It is a grace, not a mode: nothing to dismiss, no timer. Move off the pair
 // and it goes, and the bar is back to its ordinary rules.
 
-/// The bar's own coming and going — One Material (`OptionUXRules.md` §3)
+/// The bar's own coming and going — One Material (`UXRules.md` §3)
 /// applied to the surface itself, not just to the pills on it.
 ///
 /// The bar used to appear and vanish instantly, which made it the one thing up
@@ -1035,7 +1035,7 @@ pub(crate) enum PillId {
     /// Out of the layout, free-floating — the fourth window mode.
     Float,
     Fullscreen,
-    /// The doorway of a sticky OPTION (`OptionUXRules.md` §4): an empty pill
+    /// The doorway of a sticky OPTION (`UXRules.md` §4): an empty pill
     /// standing in the slot its successor will occupy. Not an action — hovering
     /// it brings the whole bar back, and the real OPTION appears in this exact
     /// place, so it reads as that pill arriving rather than as a swap.
@@ -1841,7 +1841,7 @@ impl App {
         if w == 0.0 {
             return Vec::new();
         }
-        // A sticky OPTION IS the layout while it stands (`OptionUXRules.md`
+        // A sticky OPTION IS the layout while it stands (`UXRules.md`
         // §4): the bar is concealed, and all that remains is the control that
         // took it away plus its doorway. Returning them here rather than
         // painting them specially means they get the surface's real drawing,
@@ -2477,7 +2477,7 @@ impl App {
     }
 
     /// The pills as DRAWN: the resting layout with the Leader's displacement
-    /// applied to its group (`OptionUXRules.md` §1). Draw, hit-test, hover and
+    /// applied to its group (`UXRules.md` §1). Draw, hit-test, hover and
     /// click all read this, so a displaced `[X]` is still hit-tested as `[X]`.
     /// With no leader held and nothing easing home this is bit-identical to
     /// [`Self::options_pills_resting`] — at rest, nothing changed.
@@ -2699,7 +2699,7 @@ impl App {
     /// grows OVER it, and the bell steps off the bar for as long as it is
     /// covered (Max, 2026-09-13: *"clock should cover notis when growing"*).
     /// The old live anchor meant a hover on the clock re-flowed the whole right
-    /// end of the bar — ~180px of it — which is the re-flow `OptionUXRules.md`
+    /// end of the bar — ~180px of it — which is the re-flow `UXRules.md`
     /// §2 exists to forbid, and is why the date's collapse needed a hold timer
     /// to keep it from happening under a travelling pointer.
     pub(crate) fn options_clock_rest_left(&self) -> f32 {
@@ -2897,7 +2897,7 @@ impl App {
     /// [`crate::task_title`] grooms most of that away at the source; this
     /// catches what grooming cannot see.
     ///
-    /// The test is `OptionUXRules.md` §2's, applied to time instead of layout:
+    /// The test is `UXRules.md` §2's, applied to time instead of layout:
     /// a change **you** asked for always plays. So focus moving to another
     /// window is never churn, a module arriving or leaving is never churn, and an
     /// overview title is never churn (it follows your pointer, one hover at a
@@ -3449,7 +3449,7 @@ impl App {
 
     /// Where the cava cluster's reveal is heading.
     ///
-    /// **`OptionUXRules.md` §2 — "hover growth is reversible only on leave".**
+    /// **`UXRules.md` §2 — "hover growth is reversible only on leave".**
     /// An OPTION that grew because you looked at it stays grown *for the rest
     /// of the visit*, and "the visit ends at the surface, not at the pill:
     /// leaving the clock is not leaving, leaving the bar is."
@@ -4111,7 +4111,7 @@ impl App {
             // fading in; the glyph is clipped to the emerge side so it reads as
             // coming out from under the parent rather than through it.
             // A sticky control is not riding the reveal chain — it is standing
-            // on its own on a concealed bar (`OptionUXRules.md` §4), so it
+            // on its own on a concealed bar (`UXRules.md` §4), so it
             // draws at full presence instead of tucking back behind a parent
             // that is no longer there.
             let (rect, a, clip, shadow_a) = match ctrl_index(pill.id) {
@@ -4189,7 +4189,7 @@ impl App {
             // Unified hover lift: a hovered pill grows a touch (drawn geometry
             // only) so hover reads as a tactile rise, not a shrink.
             // The bar's own fade, applied per pill so the sticky pair can be
-            // exempt from it (`OptionUXRules.md` §3 for the tempo, §4 for who
+            // exempt from it (`UXRules.md` §3 for the tempo, §4 for who
             // is allowed to stay).
             let fade = self.options_pill_fade(pill.id, pill.rect);
             if fade <= 0.001 {
@@ -4202,7 +4202,7 @@ impl App {
             // the baseline. A sticky pair has no baseline — two circles alone
             // on a concealed bar — so the lifted one just makes its partner
             // look shrunken, and the doorway stops reading as a full OPTION
-            // (`OptionUXRules.md` §4: it is an OPTION, identical to the others,
+            // (`UXRules.md` §4: it is an OPTION, identical to the others,
             // only empty). There, hover speaks with colour alone.
             // The asking sunset module holds still under the pointer — its
             // size step is a statement, not the hover lift, and lifting it
@@ -4300,7 +4300,7 @@ impl App {
             // clock. Each label keeps its own natural width so neither wraps
             // mid-morph; the scissor clip does the reveal. Under the Leader the
             // pill's leader-facing edge is pinned, so this plays out entirely
-            // on its far side (`OptionUXRules.md` §1).
+            // on its far side (`UXRules.md` §1).
             let tt = self.options_title_meta.t;
             // The window pill while a MODULE is on it (arriving, standing, or
             // leaving). A module with nested controls lays its sentence out
@@ -4592,7 +4592,7 @@ impl App {
         if self.options_active_addr != addr {
             // Focus moved, so a sticky OPTION's way back is stale: it offers to
             // undo something you are no longer looking at, which is worse than
-            // offering nothing (`OptionUXRules.md` §4).
+            // offering nothing (`UXRules.md` §4).
             self.clear_sticky();
             // Focus moved — re-derive the copy-link affordance from the new app's
             // class (only browsers expose a copyable page URL).
@@ -4715,7 +4715,7 @@ impl App {
             self.set_options_hidden(fs && !self.overview_active);
             if fs {
                 // The bar is being taken away. If the user's own click is what
-                // took it, leave that control standing (`OptionUXRules.md` §4)
+                // took it, leave that control standing (`UXRules.md` §4)
                 // — otherwise the hover is dropped as before.
                 if !self.arm_sticky() {
                     self.options_hover = None;
@@ -4776,7 +4776,7 @@ impl App {
     }
 
     /// Leave the acted-on control standing on the concealed bar, with its
-    /// doorway — Sticky OPTIONS (`OptionUXRules.md` §4). Returns whether
+    /// doorway — Sticky OPTIONS (`UXRules.md` §4). Returns whether
     /// anything stuck.
     ///
     /// The trigger is a condition, not a list: the bar is concealing, the user
@@ -4994,7 +4994,7 @@ impl App {
 
     /// Let the state pill catch up with the window — but not under the hand.
     ///
-    /// "The Still Bar" (`OptionUXRules.md` §2). The mode the cluster is laid out
+    /// "The Still Bar" (`UXRules.md` §2). The mode the cluster is laid out
     /// from decides which toggle is missing from the row, so adopting a change
     /// immediately re-flows the buttons **at the moment of the click that caused
     /// it**: press [float] and float leaves the row, the state pill takes its
@@ -5074,7 +5074,7 @@ impl App {
     /// Show or conceal the bar. The one door every path goes through — the
     /// top-edge dwell, a fullscreen taking the screen, the pointer leaving, a
     /// doorway opening — so the surface has exactly one entrance and one exit,
-    /// both on the shared tempo (`OptionUXRules.md` §3).
+    /// both on the shared tempo (`UXRules.md` §3).
     ///
     /// The flag is the intent and flips at once; `options_show` is the drawn
     /// presence and catches up. Input follows the intent, so a bar on its way
@@ -5119,7 +5119,7 @@ impl App {
             self.options_show.last = None;
             // The bar is all the way back, so the pair it came back around has
             // finished handing over: the doorway's slot is an ordinary OPTION
-            // again (`OptionUXRules.md` §4).
+            // again (`UXRules.md` §4).
             if t >= 1.0 && self.options_sticky.is_some() {
                 self.options_sticky = None;
                 self.options_update_hover();
@@ -5133,7 +5133,7 @@ impl App {
     /// The bar fades as one, except for the sticky pair: the whole point of
     /// those two is that they do NOT go, so the rest fades around them — out
     /// when the bar is taken away, and back in when a doorway brings it back
-    /// (`OptionUXRules.md` §4).
+    /// (`UXRules.md` §4).
     fn options_pill_fade(&self, id: PillId, rect: Rect) -> f32 {
         if let Some(st) = self.options_sticky.as_ref() {
             let in_doorway = rect.x < st.door.x + st.door.w && st.door.x < rect.x + rect.w;
@@ -5177,7 +5177,7 @@ impl App {
         // Hover is RE-DERIVED from where the pointer actually is, never
         // dropped. The hand did not move — the world did — so whatever now
         // sits under it is hovered, and a toggle can be repeated as many times
-        // as wanted without re-aiming between presses (`OptionUXRules.md` §1's
+        // as wanted without re-aiming between presses (`UXRules.md` §1's
         // repeatability, carried across the bar going away and coming back).
         // If the pointer really has left, this resolves to nothing anyway.
         //
@@ -5191,7 +5191,7 @@ impl App {
 
     /// The doorway was hovered: bring the whole bar back, here and now. No
     /// dwell — the pointer is on it deliberately, and the bar was never really
-    /// left (`OptionUXRules.md` §4). The real OPTION lands in the doorway's
+    /// left (`UXRules.md` §4). The real OPTION lands in the doorway's
     /// exact slot, so it reads as that pill arriving, not as a swap.
     fn open_doorway(&mut self) {
         let Some(st) = self.options_sticky.take() else {
@@ -5290,7 +5290,7 @@ impl App {
         };
         // A sticky pair sits on an otherwise-concealed bar: the pointer has to
         // reach the pair, and the top-edge reveal strip has to keep working
-        // underneath it, so both are input (`OptionUXRules.md` §4).
+        // underneath it, so both are input (`UXRules.md` §4).
         if self.options_hidden {
             if let Some(st) = self.options_sticky.as_ref() {
                 let l = st.rect.x.min(st.door.x);
@@ -5466,7 +5466,7 @@ impl App {
             }
             wl_pointer::Event::Leave { .. } => {
                 // Pointer off the bar: the Leader is released and its group
-                // eases home to its resting position (`OptionUXRules.md` §1).
+                // eases home to its resting position (`UXRules.md` §1).
                 // Nothing is permanently displaced.
                 self.release_leader();
                 self.bar_zoom_keys(false);
@@ -5475,7 +5475,7 @@ impl App {
                 self.options_reveal_deadline = None;
                 // A sticky pair lives on a CONCEALED bar, so the cleanup below
                 // (guarded on the bar being up) never runs for it. Walking away
-                // is one of its three endings (`OptionUXRules.md` §4), so it is
+                // is one of its three endings (`UXRules.md` §4), so it is
                 // handled here: hover goes, and the pair goes after the shared
                 // transit grace unless the hand comes back.
                 if self.options_sticky.is_some() {
@@ -5521,7 +5521,7 @@ impl App {
                     && state == WEnum::Value(wl_pointer::ButtonState::Pressed)
                     && self.options_interactive() =>
             {
-                // The Leader (`OptionUXRules.md` §1): the click pins the pill it
+                // The Leader (`UXRules.md` §1): the click pins the pill it
                 // lands on, so the re-flow the click causes happens around it.
                 // On PRESS — the anchor is the layout that was aimed at.
                 self.capture_leader();
@@ -5739,7 +5739,7 @@ impl App {
     fn options_on_motion(&mut self, y: f32) {
         if self.options_hidden {
             // A sticky pair is live on the concealed bar: it hovers and clicks
-            // like any other pill (`OptionUXRules.md` §4). The top-edge dwell
+            // like any other pill (`UXRules.md` §4). The top-edge dwell
             // still runs underneath, so the ordinary way back keeps working.
             if self.options_sticky.is_some() {
                 self.options_update_hover();
@@ -5797,7 +5797,7 @@ impl App {
         });
         let changed = hover != self.options_hover;
         self.options_hover = hover;
-        // Sticky OPTIONS (`OptionUXRules.md` §4). Hovering the doorway brings
+        // Sticky OPTIONS (`UXRules.md` §4). Hovering the doorway brings
         // the bar back at once; leaving the pair takes it down after the shared
         // transit grace, so crossing the gap between the two is not leaving.
         if self.options_sticky.is_some() {
@@ -5809,7 +5809,7 @@ impl App {
                 self.schedule_sticky_drop();
             }
         }
-        // The Leader (`OptionUXRules.md` §1) is chosen by the click, not by the
+        // The Leader (`UXRules.md` §1) is chosen by the click, not by the
         // hover — travelling across the bar must not move anything. The anchor
         // holds until the pointer leaves the bar strip, which includes going
         // down into an open box.
@@ -5838,7 +5838,7 @@ impl App {
     fn ctrl_pill_visible(&self, id: PillId) -> bool {
         // A sticky pair is the whole layout: both its pills are up by
         // definition, whatever the reveal chain's progress happens to be
-        // (`OptionUXRules.md` §4).
+        // (`UXRules.md` §4).
         if self.options_sticky.is_some() {
             return true;
         }
@@ -5935,7 +5935,7 @@ impl App {
 
     /// Whether the surface takes clicks right now: the bar is up, or it is
     /// concealed but a sticky OPTION is standing on it, which is the whole
-    /// point of it standing there (`OptionUXRules.md` §4).
+    /// point of it standing there (`UXRules.md` §4).
     fn options_interactive(&self) -> bool {
         !self.options_hidden || self.options_sticky.is_some()
     }
@@ -6109,7 +6109,7 @@ impl App {
                 continue;
             }
             // Already a real distance in logical px, so it settles straight on
-            // the shared threshold (`OptionUXRules.md` §3).
+            // the shared threshold (`UXRules.md` §3).
             let (n, moving) = ease_toward(
                 self.options_lead.off[slot],
                 0.0,
@@ -6158,7 +6158,7 @@ impl App {
             .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
         self.options_title_meta.last = Some(now);
         // The progress carries the width change between the two titles, so the
-        // settle is measured against that span (`OptionUXRules.md` §3).
+        // settle is measured against that span (`UXRules.md` §3).
         let (t, moving) = ease_toward(
             self.options_title_meta.t,
             1.0,
@@ -6179,7 +6179,7 @@ impl App {
 
     fn update_ctrl_reveal(&mut self) {
         // While a sticky OPTION stands, the chain is FROZEN at the state the
-        // bar went away in (`OptionUXRules.md` §4). Otherwise moving onto the
+        // bar went away in (`UXRules.md` §4). Otherwise moving onto the
         // doorway — which is outside the cluster span, the cluster being one
         // pill wide now — would retract the whole chain, and the bar the
         // doorway brings back would be a bar mid-rebuild instead of the one
@@ -6288,7 +6288,7 @@ impl App {
             let target = if out { 1.0 } else { 0.0 };
             // The progress carries a slide of one pill plus the gap it emerges
             // across (`origin` → rest in `draw_options`), so that is the span
-            // its settle is measured in (`OptionUXRules.md` §3).
+            // its settle is measured in (`UXRules.md` §3).
             let (nt, moving) = ease_toward(
                 self.options_ctrl.t[i],
                 target,
@@ -6317,7 +6317,7 @@ impl App {
     /// back ([`clear_under`]): a pill the user may be travelling toward would
     /// otherwise reappear under them, on a timer, for a reason they did not ask
     /// for — and a change nobody requested waits until the visit is over
-    /// (`OptionUXRules.md` §2, "The Still Bar"). It used to be worse: the
+    /// (`UXRules.md` §2, "The Still Bar"). It used to be worse: the
     /// notification cluster was pinned to the clock's LIVE edge, so growing the
     /// date shoved the whole right end of the bar sideways. It now grows over
     /// it instead (see [`Self::options_clock_rest_left`]), and this hold
@@ -6400,7 +6400,7 @@ impl App {
             0.0
         };
         // The progress carries the whole clock→date width change, so the settle
-        // is measured against that span (`OptionUXRules.md` §3).
+        // is measured against that span (`UXRules.md` §3).
         let (nt, moving) = ease_toward(
             self.options_clock_meta.t,
             target,
@@ -6458,7 +6458,7 @@ impl App {
     /// **asks something that expires** outranks one that will still be there in
     /// a minute. With a single module today it decides nothing, and it is kept
     /// because the pill is one object: the moment there are two, one of them has
-    /// to lose (`OptionUXRules.md` §5).
+    /// to lose (`UXRules.md` §5).
     fn module_wanted(&self) -> Option<Module> {
         // A debug-forced module outranks the order: it exists to be looked at,
         // and a demo that loses the pill to a real offer is no demo.
@@ -6519,7 +6519,7 @@ impl App {
     /// called on every Mind republish, on the debug toggle, and when the pointer
     /// leaves the bar.
     ///
-    /// The Still Bar (`OptionUXRules.md` §2): a module arriving, withdrawing or
+    /// The Still Bar (`UXRules.md` §2): a module arriving, withdrawing or
     /// *handing over* is nobody's request, so while the pointer is on the bar
     /// strip it WAITS — the morph plays once you leave. The user's own answer
     /// goes through [`Self::resolve_sunset_prompt`] instead, which reflows at
@@ -6821,7 +6821,7 @@ impl App {
         }
         // Remember what was acted on and where it was drawn, so that a
         // concealment arriving right behind this click can be blamed on it and
-        // leave the control standing (`OptionUXRules.md` §4).
+        // leave the control standing (`UXRules.md` §4).
         if let Some(id) = self.options_hover {
             if let Some(r) = self.options_pills().iter().find(|p| p.id == id) {
                 self.options_acted = Some((id, r.rect, Instant::now()));
@@ -7905,7 +7905,7 @@ mod tests {
     /// An open box takes the bar it stands on: every pill under it leaves, its
     /// own parts stay, and the pills clear of it are untouched — including
     /// their POSITIONS, since a re-flow under the pointer is exactly what
-    /// `OptionUXRules.md` §2 forbids.
+    /// `UXRules.md` §2 forbids.
     #[test]
     fn an_open_box_clears_the_pills_it_covers() {
         let mut pills = vec![
@@ -8086,7 +8086,7 @@ mod tests {
         assert!(est_text_w("日本語", 17.0) >= 3.0 * 17.0);
     }
 
-    // --- The Leader (OptionUXRules.md §1) -----------------------------------
+    // --- The Leader (UXRules.md §1) -----------------------------------
 
     /// The resting x of `[X]`, straight from the layout in
     /// [`App::options_pills_resting`]: the name pill is centred alone and the
@@ -8290,7 +8290,7 @@ mod tests {
         assert!(!clock_may_collapse(true, true, false));
     }
 
-    // --- Sticky OPTIONS (OptionUXRules.md §4) -------------------------------
+    // --- Sticky OPTIONS (UXRules.md §4) -------------------------------
 
     #[test]
     fn the_doorway_stands_where_its_successor_will() {

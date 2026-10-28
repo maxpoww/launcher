@@ -47,7 +47,7 @@ pub fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     ]
 }
 
-// --- One Material (OptionUXRules.md §3) --------------------------------------
+// --- One Material (UXRules.md §3) --------------------------------------
 // The OPTIONS surface moves at ONE tempo: every morph is an exponential approach
 // sharing the time constant below, so a long travel and a short one have the
 // same acceleration profile and read as the same stuff. Modules import this

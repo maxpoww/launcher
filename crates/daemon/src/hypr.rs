@@ -530,7 +530,7 @@ pub fn set_window_mode(target: WindowMode) -> bool {
             // the window last happened to hold, wherever its tile happened to
             // be. Centred after the resize so it centres the final size, and
             // all in the same chunk as the toggle, so the window arrives
-            // floated, sized and placed in one motion (`OptionUXRules.md` §6).
+            // floated, sized and placed in one motion (`UXRules.md` §6).
             //
             // `center` respects the reserved area, so a centred float sits in
             // the usable region rather than half under the bar.

@@ -1712,7 +1712,7 @@ pub struct App {
     pseudo_sweep_pending: bool,
     /// The mode the bar is currently laid out from. Catches up with
     /// `options_mode` only once the pointer leaves the surface, so the buttons
-    /// never move under the hand that pressed them — `OptionUXRules.md` §2, via
+    /// never move under the hand that pressed them — `UXRules.md` §2, via
     /// `sync_window_state`.
     options_mode_shown: hypr::WindowMode,
     overview_hover: Option<String>,
@@ -1894,24 +1894,24 @@ pub struct App {
     options_clock_meta: options::ClockMeta,
     /// Title "metamorphosis": the window pill eases between two title widths
     /// and crossfades the two names, instead of jumping — the visible half of
-    /// the Leader rule (`OptionUXRules.md` §1).
+    /// the Leader rule (`UXRules.md` §1).
     options_title_meta: options::TitleMeta,
     /// The Leader: the pill the pointer has hold of, if any. Its group is
     /// laid out from it rather than from its resting anchor, so it holds
-    /// still while everything else re-flows (`OptionUXRules.md` §1).
+    /// still while everything else re-flows (`UXRules.md` §1).
     options_leader: Option<options::Leader>,
     /// Per-group displacement from the resting layout, and the ease home that
     /// runs after the leader is released.
     options_lead: options::LeadAnim,
     /// The last control acted on from the bar, where it was drawn, and when —
     /// so that a concealment arriving straight afterwards can be blamed on it
-    /// and leave that control behind (`OptionUXRules.md` §4).
+    /// and leave that control behind (`UXRules.md` §4).
     options_acted: Option<(options::PillId, content::Rect, Instant)>,
     /// The sticky OPTION currently standing on a concealed bar, if any: the
     /// control that took the bar away, plus the doorway back to the rest.
     options_sticky: Option<options::Sticky>,
     /// The bar's own fade in/out, on the surface's shared tempo
-    /// (`OptionUXRules.md` §3).
+    /// (`UXRules.md` §3).
     options_show: options::ShowAnim,
     /// Which window was last focused on each workspace, so a space entered by
     /// swipe hands back the window you left there (see [`crate::focus_cycle`]).
@@ -2471,7 +2471,7 @@ pub struct App {
     /// is the ordinary bar: the pill shows the task.
     ///
     /// One field rather than a flag per module, because the pill is one object
-    /// and can only wear one sentence (`OptionUXRules.md` §5).
+    /// and can only wear one sentence (`UXRules.md` §5).
     module_shown: Option<options::Module>,
     /// A module forced onto the pill for demos and screenshots (the
     /// `debug-sunset` ctl verb), as if the Mind had offered it.

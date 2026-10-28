@@ -4,7 +4,7 @@
 //! **the clipboard's peek, mirrored** (Max, 2026-09-13: *"on hover, a child opens
 //! and show CPU/RAM/DISK/BATTERY, same animation of clipboard"*). Same geometry
 //! (`left + (ph + BOND_GAP) * t`, width easing `ph → STATS_W`), the same
-//! `MORPH_RATE` and `settle_t` the whole surface shares (`OptionUXRules.md` §3),
+//! `MORPH_RATE` and `settle_t` the whole surface shares (`UXRules.md` §3),
 //! and the same leave-hold before it retracts, so the two edges of the bar
 //! behave identically.
 //!

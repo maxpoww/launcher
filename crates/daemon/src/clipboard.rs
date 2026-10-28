@@ -34,7 +34,7 @@ use smithay_client_toolkit::seat::keyboard::Keysym;
 use tracing::{debug, warn};
 
 // The tempo comes from the surface, not from this module — One Material
-// (`OptionUXRules.md` §3). This import is the only place the clipboard's speed
+// (`UXRules.md` §3). This import is the only place the clipboard's speed
 // is decided; there is deliberately no rate constant below.
 use crate::animation::{
     ease_toward, lerp, lerp4, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
@@ -4773,7 +4773,7 @@ impl App {
         self.clip.last = Some(now);
         // Each progress settles against the span it actually carries — the peek
         // widens to `PEEK_W`, the link pill slides one pill plus its bond gap,
-        // the drawer grows to `BOX_DRAWER_H` (`OptionUXRules.md` §3).
+        // the drawer grows to `BOX_DRAWER_H` (`UXRules.md` §3).
         let target = if self.clip.peek_reveal { 1.0 } else { 0.0 };
         let (pt, moving) = ease_toward(self.clip.peek_t, target, dt, MORPH_RATE, settle_t(PEEK_W));
         self.clip.peek_t = pt;
