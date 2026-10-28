@@ -1088,6 +1088,19 @@ fn video_id(url: &str) -> Option<&str> {
     (id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).then_some(id)
 }
 
+/// A YouTube list's id, read from the list's own page (`/playlist?list=<id>`;
+/// a video played from a list is the video's page).
+fn list_id(url: &str) -> Option<&str> {
+    let (_, host) = origin(url)?;
+    if !host.ends_with("youtube.com") || video_id(url).is_some() {
+        return None;
+    }
+    let rest = url.split_once("://")?.1;
+    let query = rest.get(rest.find('/')?..)?.strip_prefix("/playlist?")?;
+    let id = query.split(['&', '#']).find_map(|kv| kv.strip_prefix("list="))?;
+    (!id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).then_some(id)
+}
+
 /// A cache entry's key — its address. Firefox's cache file is the body,
 /// then its metadata, whose place is the file's last four bytes; the key
 /// follows a few numbers there (`a,:https://…`, maybe after a partition).
@@ -1466,7 +1479,11 @@ fn kitchen_in(dir: &Path) -> Kitchen {
                 let Some(pic) = page.pic.clone() else {
                     continue;
                 };
-                let page = video_id(url).map_or_else(|| url.clone(), str::to_owned);
+                let page = match (video_id(url), list_id(url)) {
+                    (Some(id), _) => id.to_owned(),
+                    (None, Some(list)) => format!("list:{list}"),
+                    (None, None) => url.clone(),
+                };
                 match seen.get(&pic) {
                     Some(other) if *other != page => {
                         k.shared.insert(pic);
@@ -1598,16 +1615,18 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
             // What Seam heard it play, then the video's own from Seam's cache
             // (by its id: it cannot be another's), then the preview Seam kept,
             // then the favicon.
-            // (A video's page: what padded its picture cut — `unbanded`.)
+            // (A video's page, or a list's — its picture is its first video's:
+            // what padded its picture cut — `unbanded`.)
             let video_page = video_id(&v.url).is_some();
+            let square = video_page || list_id(&v.url).is_some();
             let cooked = |src: PathBuf| {
-                let cut = if video_page { "f2" } else { "f1" };
+                let cut = if square { "f2" } else { "f1" };
                 let out = shots.as_deref()?.join(format!("k-{}-{cut}.png", src.file_stem()?.to_string_lossy()));
                 if out.exists() {
                     return Some(out);
                 }
                 let bytes = std::fs::read(&src).ok()?;
-                fitted(&bytes, &out, video_page)
+                fitted(&bytes, &out, square)
             };
             let cached = video_id(&v.url).and_then(|id| Some((id, videos.get(id)?)));
             let video = || cached.and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body));
@@ -1994,7 +2013,7 @@ mod tests {
     fn a_videos_picture_at_two_addresses_is_still_its_own() {
         let dir = std::env::temp_dir().join(format!("wa-kitchen-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("pics")).unwrap();
-        for f in ["00000000000000a1.jpg", "00000000000000b2.jpg"] {
+        for f in ["00000000000000a1.jpg", "00000000000000b2.jpg", "00000000000000c3.jpg"] {
             std::fs::write(dir.join("pics").join(f), b"x").unwrap();
         }
         let mu = "https://music.youtube.com/watch?v=";
@@ -2002,6 +2021,9 @@ mod tests {
             // A song at two addresses, Seam's cover for both (COVERS FROM BEFORE).
             format!("{mu}sFZjqVnWBhc"): {"pic": "00000000000000a1.jpg"},
             format!("{mu}sFZjqVnWBhc&list=RDAMVMsFZjqVnWBhc"): {"pic": "00000000000000a1.jpg"},
+            // A list at two addresses (COVERS FROM BEFORE: its own file).
+            "https://music.youtube.com/playlist?list=UU_x5": {"pic": "00000000000000c3.jpg"},
+            "https://music.youtube.com/playlist?list=UU_x5&feature=share": {"pic": "00000000000000c3.jpg"},
             // A site's logo on two of its pages.
             "https://example.com/a": {"pic": "00000000000000b2.jpg"},
             "https://example.com/b": {"pic": "00000000000000b2.jpg"},
@@ -2010,6 +2032,7 @@ mod tests {
         let k = kitchen_in(&dir);
         assert!(k.page_picture(&format!("{mu}sFZjqVnWBhc")).is_some());
         assert!(k.page_picture(&format!("{mu}sFZjqVnWBhc&list=RDAMVMsFZjqVnWBhc")).is_some());
+        assert!(k.page_picture("https://music.youtube.com/playlist?list=UU_x5&feature=share").is_some());
         assert!(k.page_picture("https://example.com/a").is_none(), "a logo is no page's own");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2170,6 +2193,13 @@ mod tests {
         assert_eq!(video_id("https://music.youtube.com/watch?v=9d9PQ1hrhBk&list=x"), Some("9d9PQ1hrhBk"));
         assert_eq!(video_id("https://example.com/watch?v=9d9PQ1hrhBk"), None);
         assert_eq!(video_id("https://www.youtube.com/watch?v=short"), None);
+        let pl = "https://music.youtube.com/playlist?list=";
+        assert_eq!(list_id(&format!("{pl}PLOAQmvgSqKxbVm_3IfLjkI44Ab5-1_Fsa")), Some("PLOAQmvgSqKxbVm_3IfLjkI44Ab5-1_Fsa"));
+        assert_eq!(list_id("https://www.youtube.com/playlist?feature=x&list=OLAK5uy_abc#t"), Some("OLAK5uy_abc"));
+        assert_eq!(list_id("https://music.youtube.com/watch?v=9d9PQ1hrhBk&list=RDAMVM9d9PQ1hrhBk"), None, "a video played from a list");
+        assert_eq!(list_id("https://music.youtube.com/browse/playlist?list=x"), None);
+        assert_eq!(list_id(pl), None);
+        assert_eq!(list_id("https://example.com/playlist?list=PL1"), None);
         assert_eq!(picture_rank("hq720_custom_3.jpg?sqp=x"), 4);
         assert_eq!(picture_rank("mqdefault.jpg"), 3);
         assert_eq!(picture_rank("maxresdefault.jpg"), 0);
