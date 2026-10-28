@@ -1170,12 +1170,12 @@ fn video_pictures(cache2: &Path) -> Pictures {
 /// A video's picture from a cache entry (`body` bytes long), as a file of
 /// ours, in its own shape (`fitted`).
 fn video_picture(dir: &Path, id: &str, entry: &Path, body: u64) -> Option<PathBuf> {
-    let path = dir.join(format!("{id}-f1.png"));
+    let path = dir.join(format!("{id}-f2.png"));
     if path.exists() {
         return Some(path);
     }
     let bytes = std::fs::read(entry).ok()?;
-    fitted(bytes.get(..body as usize)?, &path)
+    fitted(bytes.get(..body as usize)?, &path, true)
 }
 
 /// The longest side a recent's picture is kept at.
@@ -1184,19 +1184,27 @@ const PICTURE_SIDE: u32 = 512;
 /// A picture WHOLE, in its own shape (Max, 2026-10-23: "más rectangulares,
 /// la miniatura entera, forma libre — las de YouTube Music son cuadradas,
 /// las de YouTube rectángulos"), at most `PICTURE_SIDE`, written to `path`
-/// (a PNG) — only a video picture's black bands cut away (YouTube's 4:3
-/// ones hold a 16:9 picture between two).
-fn fitted(bytes: &[u8], path: &Path) -> Option<PathBuf> {
+/// (a PNG) — only what padded it cut away (`unbanded`; a `video`'s also
+/// the bars round a song's cover, and that cut WHOLE beside it for Quick
+/// Look when it is bigger than the box's — `big_of`).
+fn fitted(bytes: &[u8], path: &Path, video: bool) -> Option<PathBuf> {
     let img = decode(bytes)?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return None;
     }
-    let img = if w * 3 == h * 4 && banded(&img) {
-        let band = (h - w * 9 / 16) / 2;
-        img.crop_imm(0, band, w, h - 2 * band)
-    } else {
-        img
+    let img = match unbanded(&img, video) {
+        Some(cut) => {
+            if video && cut.width().max(cut.height()) > PICTURE_SIDE {
+                let big = big_of(path);
+                let tmp = big.with_extension("part");
+                if cut.to_rgba8().save_with_format(&tmp, image::ImageFormat::Png).is_ok() {
+                    let _ = std::fs::rename(&tmp, &big);
+                }
+            }
+            cut
+        }
+        None => img,
     };
     let img = if img.width().max(img.height()) > PICTURE_SIDE {
         img.resize(PICTURE_SIDE, PICTURE_SIDE, image::imageops::FilterType::Triangle)
@@ -1304,6 +1312,46 @@ pub(crate) fn seen_line(r: &Recent, now: f64) -> String {
         line = if line.is_empty() { times } else { format!("{line} · {times}") };
     }
     line
+}
+
+/// A picture without what YouTube padded it with: a 16:9 one between two
+/// black bands in a 4:3, and — `square`, a video's (Max, 2026-10-28: "fix
+/// the covers too") — a song's square cover between two bars of one colour
+/// (the cover's own: black, olive…) in a 16:9; cut only where the bands
+/// are, never into the picture. None when nothing is cut.
+fn unbanded(img: &image::DynamicImage, square: bool) -> Option<image::DynamicImage> {
+    let (w, h) = (img.width(), img.height());
+    let (mut y, mut ch) = (0, h);
+    if w * 3 == h * 4 && banded(img) {
+        y = (h - w * 9 / 16) / 2;
+        ch = h - 2 * y;
+    }
+    let (mut x, mut cw) = (0, w);
+    let bars = (w * 9).abs_diff(ch * 16) <= w / 64 && w > ch;
+    if square && bars && (w - ch) / 2 > 16 {
+        let rgb = img.to_rgb8();
+        // (A bar: one colour all over, give or take what the JPEG did to it;
+        // its edges by the cover and the bands left out — a JPEG block
+        // smears them.)
+        let bar = |x0: u32, x1: u32| -> Option<[u8; 3]> {
+            let first = rgb.get_pixel(x0, y + ch / 2).0;
+            let near = |p: [u8; 3]| p.iter().zip(first).all(|(&a, b)| a.abs_diff(b) <= 12);
+            (x0..x1).step_by(3).all(|bx| (y + 8..y + ch - 8).step_by(3).all(|by| near(rgb.get_pixel(bx, by).0))).then_some(first)
+        };
+        let p = (w - ch) / 2;
+        if let (Some(l), Some(r)) = (bar(0, p - 8), bar(w - p + 8, w)) {
+            if l.iter().zip(r).all(|(&a, b)| a.abs_diff(b) <= 16) {
+                (x, cw) = (p, w - 2 * p);
+            }
+        }
+    }
+    (x > 0 || y > 0).then(|| img.crop_imm(x, y, cw, ch))
+}
+
+/// Where `fitted` keeps the whole cut of the picture it wrote at `small`.
+fn big_of(small: &Path) -> PathBuf {
+    let stem = small.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    small.with_file_name(format!("{stem}-big.png"))
 }
 
 /// Whether a 4:3 picture is a 16:9 one between two black bands (its top
@@ -1523,13 +1571,16 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
             // What Seam heard it play, then the video's own from Seam's cache
             // (by its id: it cannot be another's), then the preview Seam kept,
             // then the favicon.
+            // (A video's page: what padded its picture cut — `unbanded`.)
+            let video_page = video_id(&v.url).is_some();
             let cooked = |src: PathBuf| {
-                let out = shots.as_deref()?.join(format!("k-{}-f1.png", src.file_stem()?.to_string_lossy()));
+                let cut = if video_page { "f2" } else { "f1" };
+                let out = shots.as_deref()?.join(format!("k-{}-{cut}.png", src.file_stem()?.to_string_lossy()));
                 if out.exists() {
                     return Some(out);
                 }
                 let bytes = std::fs::read(&src).ok()?;
-                fitted(&bytes, &out)
+                fitted(&bytes, &out, video_page)
             };
             let cached = video_id(&v.url).and_then(|id| Some((id, videos.get(id)?)));
             let video = || cached.and_then(|(id, (_, entry, body))| video_picture(shots.as_deref()?, id, entry, *body));
@@ -1547,6 +1598,11 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
                 },
             };
             let big = big.filter(|_| preview.is_some());
+            // (Cut, Quick Look shows the cut too.)
+            let big = match preview.as_deref().map(big_of).filter(|b| b.exists()) {
+                Some(cut) => Some((cut, 0)),
+                None => big,
+            };
             let aspect = preview.as_deref().and_then(shape_of);
             let picture = preview.or_else(|| {
                 let data = favicon(browser, icons.as_deref()?, &v.url)?;
@@ -1866,6 +1922,64 @@ pub(crate) const FRESH: Duration = Duration::from_secs(60);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picture `w`×`h` of `pad`, with a busy one (`inner`) in the middle.
+    fn padded(w: u32, h: u32, pad: [u8; 3], inner: (u32, u32, u32, u32)) -> image::DynamicImage {
+        let (x0, y0, iw, ih) = inner;
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+            if x >= x0 && x < x0 + iw && y >= y0 && y < y0 + ih {
+                image::Rgb([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x + y) % 256) as u8])
+            } else {
+                image::Rgb(pad)
+            }
+        }))
+    }
+
+    #[test]
+    fn a_songs_cover_comes_out_of_youtubes_padding() {
+        // YouTube's big picture of a song with no video: the square cover
+        // between two bars of a colour of its own (olive, Los Charros').
+        let olive = [60, 62, 18];
+        let cut = unbanded(&padded(1280, 720, olive, (280, 0, 720, 720)), true).expect("cut");
+        assert_eq!((cut.width(), cut.height()), (720, 720));
+        assert_eq!(cut.to_rgb8().get_pixel(0, 0).0, [(280 * 7 % 256) as u8, 0, (280 % 256) as u8], "the cover's own first pixel");
+        // Its 4:3 one: black bands over and under, then the bars.
+        let mut small = padded(480, 360, olive, (105, 45, 270, 270)).to_rgb8();
+        for x in 0..480 {
+            for y in (0..45).chain(315..360) {
+                small.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let cut = unbanded(&image::DynamicImage::ImageRgb8(small), true).expect("cut");
+        assert_eq!((cut.width(), cut.height()), (270, 270));
+        // A video's own picture stays whole: nothing even at its sides.
+        assert!(unbanded(&padded(1280, 720, olive, (0, 0, 1280, 720)), true).is_none());
+        // A 4:3 video in 16:9 (black bars a narrower one): the bars are not
+        // the square's, so nothing is cut into it.
+        assert!(unbanded(&padded(1280, 720, [0, 0, 0], (160, 0, 960, 720)), true).is_none());
+        // Not a video's picture: only the 4:3 bands are YouTube's, never bars.
+        assert!(unbanded(&padded(1280, 720, olive, (280, 0, 720, 720)), false).is_none());
+        let banded43 = padded(480, 360, [0, 0, 0], (0, 45, 480, 270));
+        assert_eq!(unbanded(&banded43, false).map(|c| (c.width(), c.height())), Some((480, 270)));
+    }
+
+    #[test]
+    fn a_cut_cover_is_kept_whole_for_quick_look() {
+        let dir = std::env::temp_dir().join(format!("wa-fitted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = Vec::new();
+        padded(1280, 720, [60, 62, 18], (280, 0, 720, 720))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let small = fitted(&bytes, &dir.join("k-x-f2.png"), true).expect("fitted");
+        assert_eq!(image::image_dimensions(&small).unwrap(), (PICTURE_SIDE, PICTURE_SIDE));
+        assert_eq!(image::image_dimensions(big_of(&small)).unwrap(), (720, 720));
+        // (Not a video's: no bars cut, nothing beside it.)
+        let other = fitted(&bytes, &dir.join("k-y-f1.png"), false).expect("fitted");
+        assert_eq!(image::image_dimensions(&other).unwrap(), (512, 288));
+        assert!(!big_of(&other).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_recent_put_away_comes_back_only_when_seen_again() {
@@ -2324,3 +2438,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+
