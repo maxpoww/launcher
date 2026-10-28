@@ -40,7 +40,7 @@ const TAB_GAP: f32 = 16.0;
 const DEEP_LIFT: f32 = 14.0;
 /// How much lower than the even air the field stands, and then the field,
 /// the tabs and their dots together.
-const DEEP_FIELD_DOWN: f32 = 4.0;
+const DEEP_FIELD_DOWN: f32 = 6.0;
 const DEEP_DOWN: f32 = 4.0;
 /// …and the tabs (their dots with them) this much lower again.
 const DEEP_TABS_DOWN: f32 = 4.0;
