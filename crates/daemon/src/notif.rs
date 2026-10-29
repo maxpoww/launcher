@@ -1105,11 +1105,15 @@ impl App {
                     .map(|(key, source, w, h)| {
                         let (pixels, file) = match source {
                             PictureSource::Pixels(px) => {
-                                let file = image_file_of_key(&key);
-                                if let Some(file) = &file {
-                                    store_image_file(file, &px);
+                                if px.len() != (w as usize) * (h as usize) * 4 {
+                                    (None, None) // not a picture: nothing to keep
+                                } else {
+                                    let file = image_file_of_key(&key);
+                                    if let Some(file) = &file {
+                                        store_image_file(file, &px);
+                                    }
+                                    (Some(px), file)
                                 }
-                                (Some(px), file)
                             }
                             PictureSource::File(file) => match load_stored_image(&file, w, h) {
                                 Some(px) => (Some(px), Some(file)),
