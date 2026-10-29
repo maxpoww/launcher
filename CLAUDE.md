@@ -171,6 +171,40 @@ app indexer, and the nix index/rank, install/uninstall mutation, and try-it (`ni
 workers — kept separate so a slow build never blocks an install, or search.
 `tracing` for logs. Never `git push` or amend. Commits: conventional (`feat(daemon): …`).
 
+## Performance (2026-10-29: "Golem tiene que fluir", the dev box AND a 4 GB Haswell)
+The loop is one thread: anything over ~30 ms on it is a stall the owner feels. What tells:
+- `waverunner-ctl debug-perf` → the daemon log's `perf:` line (loop ticks, stalls >30 ms, worst; per-counter
+  counts/ms/max: dock, options, render, submit, present, icon-upload, notif-measure, files-cmd, off-loop-then,
+  hypr IPC…), a `memory map` line (top mappings) and a `memory:` line (rss, thumbs, desktop chains, clipboard
+  images, notification pictures on their way, bar icons layers, symbols, files windows' chains, minimized).
+- A stall of 100 ms or more logs `loop: stalled N ms (…): what +ms, …` — the `perf::mark("…")` steps the loop
+  did since the tick before (the renderers' making, surface configured/pipelines/fonts, bar text, notif
+  measure, desktop reload, apps landing). Mark a new slow step with `crate::perf::mark`.
+- The apps index logs `indexed N entries + M home files in … (scan, icons: read/rasterized, resolve, name,
+  read, placeholders, pack open/close, cli, folders, save, files)` — at info when over 1.5 s.
+- The rig: `~/.cache/golem-nested/host-rig.sh <tag> <bindir> [VAR=v…]` (nested headless Hyprland + the dock on
+  a private bus, ON the host via `hyprctl dispatch 'hl.dsp.exec_cmd("bash …")'`), `host-dock.sh` restarts the
+  dock alone, `~/.cache/golem-stress/shell-stress.sh <tag>` = 14 scenarios with three meters (ctl latency, the
+  compositor's frame cadence, the perf line). `VK_DRIVER_FILES=/dev/null` forces the GL path (the MacBook's).
+Design rules that came out of it (keep them):
+- A burst from a channel lands in ONE loop turn: inboxes only queue, a 0 ms timer drains in batches
+  (thumbnails, desktop pictures, notification events, app icons 32 now + 8 a frame).
+- Pictures are not kept in RAM for a re-upload: the bar's one icon array (`options_icons.rs`) is written a
+  layer at a time and its owners re-request on eviction; notification pictures live in their files
+  (`image_file`), the chain made off the loop; menu symbols are one map (`App::symbols`), from the 128²
+  mip on; the loader's RAM cache keeps twelve tiles.
+- The GPU (device + pipelines) and the fonts are opened on threads ahead of the first frame (`warm_gpu`,
+  `warm_fonts`); a surface whose renderer is not there yet keeps its configure and runs it again, one surface
+  a turn, when the GPU is in (`gpu_not_ready`/`gpu_waited`) — never a join on the loop.
+- On the GL backend the dock's icon array is made whole once and kept across landings (`grow_whole`): a
+  growth there is an allocation, a zero fill and a copy (400 ms–1 s on a Haswell).
+- The icon disk cache names a tile by the icon file's CONTENT (a new system moves store paths), remembers
+  store files' hashes by real path (`hashes.tsv`), keeps the index's tiles in one `pack.bin` read once a
+  start, and caches the unplated carriers and the fixed figures too. Measured notification rows are kept
+  between runs (`notif-measure.json`).
+Numbers to keep (2026-10-29): dev box rss 263 → 153 MB, first turn 384 → ~170 ms; MacBook (HD 5000, GL)
+boot-to-userspace 1m46 → 10 s, apps index 9.6 → ~2 s, first turn 1.6 s → three turns under 400 ms.
+
 ## Non-negotiables (don't revisit)
 Persistent daemon (no per-invocation spawn); fixed-size layer surface (animate content, never
 resize the surface); hotkeys are compositor-side (ctl writes the socket); pointer-reveal is a
