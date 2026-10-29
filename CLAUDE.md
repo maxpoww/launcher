@@ -1508,7 +1508,24 @@ The big daemon files are cohesive but long — go straight to the function:
   http(s) only, pictures only `<16 hex>.<jpg|png|webp>` plain files in its `pics/`). On a
   short screen the card GROWS for the recents (a negative trim,
   `apps_trim_target`). Keys: ←→ walk the row, ↓ the recent under, ↑ back (`app_actions_key`).
-  Real data: `cargo test -- --ignored real_recents --nocapture`. 2026-10-27 (Max: "do 1 2 3 and
+  Real data: `cargo test -- --ignored real_recents --nocapture`; THE AUDIT of every installed webapp's row
+  (`web_actions/audit.rs`, `XDG_CACHE_HOME=<scratch> cargo test -- --ignored real_every_webapp --nocapture`:
+  one line a finding, none the pass). 2026-10-28 (Max: "check all the apps… use all the bugs we found as clues
+  for a deep debug, we need no errors"): ONE PAGE ONCE (`page_key`: a video, a list, on a known site the thing
+  after its kind — `ID_MARKS`: a Reddit post's comment or picture open, an X post's photo —, else the address
+  without a "#lightbox" or a GitHub "?tab="); named by ITS OWN title (`once_per_page`: the newest one that is
+  not one the app's own pages wore — `chrome_titles`: its start, known pages, search, sign-in; `chrome_word`:
+  "Home", "Inbox", "Web Player", "<q> - Search" — nor denied by its address's words, `fits_address`), else
+  its address's words (`address_title`: "What to work on outside of work"), else not shown; a site's known
+  page is its row's action, not a recent (`is_link`); a sign-in's steps (`passing_path`: GitHub's "/sessions/",
+  "client_id="…) and a chat not kept yet (`placeholder`: ChatGPT's "/c/local-…") no place; titles without the
+  marks that show nothing nor runs of spaces (`INVISIBLE`), a site's last word stripped too (" : r/*"); a
+  music site's play with no artist is an advertisement; a page with no favicon wears a sheet (`SHEET`: Quick
+  Look shows it by it); Chromium's favicons fall back to the site's. NOTHING OF A PAGE WIPED KEPT: a reading
+  (`Reading`) says which of the owner's picks and put away the history has no more (`history_with`, `gone` —
+  the loop forgets them, `recents_tidy`) and when Seam's history was cleared whole (the kitchen's `cleared`:
+  every web key and the pictures go, once — `Forgot::seam_cleared`); the dock's copies of Seam's pictures
+  only while Seam keeps what they were made of (`sweep_unkept`). 2026-10-27 (Max: "do 1 2 3 and
   5"): PUT AWAY — Delete on a recent (the pointer's, or the keys' when they moved last:
   `box_delete`) hides it until it is SEEN AGAIN (`web_actions::Forgot`, `recents-forgot.json`: a
   key → when; one visited after comes back, as in a history) and forgets its picks; the Launcher

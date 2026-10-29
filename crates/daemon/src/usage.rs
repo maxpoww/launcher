@@ -142,6 +142,15 @@ impl UsageDb {
         }
     }
 
+    /// Forget each of `keys` (and those `also` says); persisted once.
+    pub fn forget_where(&mut self, keys: &[String], also: impl Fn(&str) -> bool) {
+        let n = self.marks.len();
+        self.marks.retain(|k, _| !keys.contains(k) && !also(k));
+        if self.marks.len() != n {
+            crate::persist::write_json("usage", &self.path, &self.marks);
+        }
+    }
+
     /// Forget every one; persisted.
     pub fn forget_all(&mut self) {
         self.marks.clear();

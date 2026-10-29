@@ -483,12 +483,13 @@ fn files_recents(app: &AppEntry, shared: bool, wanted: &web_actions::Wanted) -> 
 }
 
 /// The recents `source` has, as `wanted` wants them — read off the loop.
-fn read_recents(source: &Source, wanted: &web_actions::Wanted) -> Vec<web_actions::Recent> {
+fn read_recents(source: &Source, wanted: &web_actions::Wanted) -> web_actions::Reading {
+    let only = |recents| web_actions::Reading { recents, ..Default::default() };
     match source {
-        Source::Webapp { site, start, name, .. } => web_actions::webapp_recents(*site, start, name, wanted),
-        Source::Browser(browser, skip) => web_actions::browser_recents(browser, skip, wanted),
-        Source::Files { app, shared } => files_recents(app, *shared, wanted),
-        Source::Folder { dir, except } => folder_recents(dir, except, wanted),
+        Source::Webapp { site, start, name, .. } => web_actions::webapp_reading(*site, start, name, wanted),
+        Source::Browser(browser, skip) => web_actions::browser_reading(browser, skip, wanted),
+        Source::Files { app, shared } => only(files_recents(app, *shared, wanted)),
+        Source::Folder { dir, except } => only(folder_recents(dir, except, wanted)),
     }
 }
 
@@ -1338,8 +1339,9 @@ impl App {
             let (key, source, wanted) = (id.to_owned(), source.clone(), self.recents_wanted(Vec::new()));
             self.desktop_off_loop(
                 move || read_recents(&source, &wanted),
-                move |app, pages| {
+                move |app, reading| {
                     app.search.web.asking.remove(&key);
+                    let pages = app.recents_tidy(reading);
                     info!("web recents of {key}: {}", pages.len());
                     let new = app.search.web.got.get(&key).is_none_or(|(_, old)| *old != pages);
                     app.search.web.got.insert(key.clone(), (Instant::now(), pages));
@@ -1367,11 +1369,12 @@ impl App {
             let (key, source, wanted) = (id.to_owned(), source.clone(), self.recents_wanted(words.clone()));
             self.desktop_off_loop(
                 move || {
-                    let pages = read_recents(&source, &wanted);
-                    (wanted.words, pages)
+                    let reading = read_recents(&source, &wanted);
+                    (wanted.words, reading)
                 },
-                move |app, (words, pages)| {
+                move |app, (words, reading)| {
                     app.search.web.asking.remove(&asking);
+                    let pages = app.recents_tidy(reading);
                     info!("recents of {key} that say {words:?}: {}", pages.len());
                     app.search.web.found.insert(key.clone(), (Instant::now(), words, pages));
                     // (A search up: shown — and asked again when the words
@@ -1391,6 +1394,26 @@ impl App {
             .filter(|r| web_actions::says(&words, &r.url, &r.title) && seen.insert(r.url.clone()))
             .cloned()
             .collect()
+    }
+
+    /// What a reading found the history has no more, forgotten here too —
+    /// the picks and the put away of pages gone; Seam's history cleared
+    /// whole, every page's (its pictures went with the reading) —; its
+    /// recents.
+    fn recents_tidy(&mut self, reading: web_actions::Reading) -> Vec<web_actions::Recent> {
+        let whole = self.search.web.forgot.seam_cleared(reading.cleared);
+        if whole || !reading.gone.is_empty() {
+            info!("recents: {} gone from the history{}", reading.gone.len(), if whole { ", Seam's cleared whole" } else { "" });
+            let web = |k: &str| whole && (k.starts_with("https://") || k.starts_with("http://"));
+            self.search.picks.forget_where(&reading.gone, web);
+            self.search.web.forgot.drop_keys(&reading.gone);
+        }
+        if whole {
+            // (What other apps' readings kept was read before.)
+            self.search.web.got.clear();
+            self.search.web.found.clear();
+        }
+        reading.recents
     }
 
     /// What a reading of recents wants now: the owner's picks, none put

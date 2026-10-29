@@ -48,7 +48,8 @@ pub(crate) struct Site {
     /// What a page's path holds for it to be shown as recent (none: no
     /// recents; `"/"` alone: any page but the first).
     pub pages: &'static [&'static str],
-    /// What its titles carry at their ends that is not the page's own.
+    /// What its titles carry at their ends that is not the page's own (a
+    /// last `*`: any one word there — " : r/*" is " : r/linux").
     pub strip: &'static [&'static str],
     /// Its search's address, `{q}` the words (`{lang}` the shell's language).
     pub search: Option<&'static str>,
@@ -93,7 +94,7 @@ pub(crate) const SITES: &[Site] = &[
             link("Groups", "/groups/feed/", "list"),
             link("Notifications", "/notifications", "bell"),
         ],
-        pages: &["/groups/", "/marketplace/item/", "/events/"],
+        pages: &["/groups/", "/marketplace/item/", "/events/", "/posts/", "/videos/", "/reel/"],
         strip: &[" | Facebook"],
         search: Some("https://www.facebook.com/search/top?q={q}"),
         words: &["facebook", "fb"],
@@ -107,7 +108,7 @@ pub(crate) const SITES: &[Site] = &[
             link("Reels", "/reels/", "play"),
             link("Explore", "/explore/", "compass"),
         ],
-        pages: &["/p/", "/reel/"],
+        pages: &["/p/", "/reel/", "/reels/"],
         strip: &[" • Instagram photos and videos", " • Fotos y videos de Instagram", " • Instagram"],
         search: Some("https://www.instagram.com/explore/search/keyword/?q={q}"),
         words: &["instagram", "ig"],
@@ -160,7 +161,7 @@ pub(crate) const SITES: &[Site] = &[
             link("Saved", "/user/me/saved/", "bookmark"),
         ],
         pages: &["/comments/"],
-        strip: &[" : reddit", " - Reddit"],
+        strip: &[" : reddit", " - Reddit", " : r/*"],
         search: Some("https://www.reddit.com/search/?q={q}"),
         words: &["reddit"],
     },
@@ -679,6 +680,11 @@ fn is_page(site: &Site, url: &str) -> bool {
         return false;
     }
     let path = url.split_once("://").map_or("", |(_, r)| r.find('/').map_or("", |i| &r[i..]));
+    // (One of its known pages is an action of its row, not a recent: Discord's
+    // Direct messages, YouTube Music's Liked music.)
+    if site.links.iter().any(|l| is_link(l, path)) {
+        return false;
+    }
     if site.pages == ["/"] {
         // Any page but the first, and none of the site's own known pages.
         let bare = path.split(['?', '#']).next().unwrap_or("");
@@ -687,9 +693,22 @@ fn is_page(site: &Site, url: &str) -> bool {
     site.pages.iter().any(|p| path.contains(p))
 }
 
+/// Whether a page at `path` (from the site's address on) is `link`'s.
+fn is_link(link: &Link, path: &str) -> bool {
+    let own = match link.url.split_once("://") {
+        Some((_, rest)) => rest.find('/').map_or("", |i| &rest[i..]),
+        None => link.url,
+    };
+    let own = own.trim_end_matches('/');
+    !own.is_empty() && own == path.trim_end_matches('/')
+}
+
 /// A page's title, without what the site adds to every one.
 pub(crate) fn clean_title(site: Option<&Site>, title: &str) -> String {
-    let mut t = title.trim().to_owned();
+    // (Marks that show nothing — the left-to-right one before "Apple Music" —
+    // gone, and a run of spaces one.)
+    let shown: String = title.chars().filter(|c| !INVISIBLE.contains(c)).collect();
+    let mut t = shown.split_whitespace().collect::<Vec<_>>().join(" ");
     // A count of what is new, "(3) Inbox": not the page's.
     if t.starts_with('(') {
         if let Some(end) = t.find(") ") {
@@ -699,6 +718,15 @@ pub(crate) fn clean_title(site: Option<&Site>, title: &str) -> String {
         }
     }
     for s in site.map_or(&[][..], |s| s.strip) {
+        if let Some(head) = s.strip_suffix('*') {
+            if let Some(i) = t.rfind(head) {
+                let word = &t[i + head.len()..];
+                if !word.is_empty() && !word.contains(char::is_whitespace) {
+                    t = t[..i].trim().to_owned();
+                }
+            }
+            continue;
+        }
         if let Some(rest) = t.strip_suffix(s) {
             t = rest.trim().to_owned();
         }
@@ -708,6 +736,14 @@ pub(crate) fn clean_title(site: Option<&Site>, title: &str) -> String {
     }
     t
 }
+
+/// Marks a title can carry that show nothing (direction marks and
+/// embeddings, a zero-width space, a word joiner, a soft hyphen; not the
+/// joiner of an emoji's parts).
+const INVISIBLE: [char; 15] = [
+    '\u{200B}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2066}', '\u{2067}',
+    '\u{2068}', '\u{2069}', '\u{FEFF}', '\u{00AD}',
+];
 
 // ---- the browsers -------------------------------------------------------------
 
@@ -888,6 +924,13 @@ fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
 
 /// A browser's newest pages, newest first (`max` read).
 fn history(browser: &Browser, max: usize) -> Vec<Visit> {
+    history_with(browser, max, &[]).0
+}
+
+/// A browser's newest pages, newest first (`max` read), and which of
+/// `ask` (addresses) it has at all — in one reading (none: it could not
+/// be read).
+fn history_with(browser: &Browser, max: usize, ask: &[String]) -> (Vec<Visit>, Option<HashSet<String>>) {
     // Firefox keeps microseconds since 1970; Chromium since 1601.
     const CHROMIUM_EPOCH: f64 = 11_644_473_600.0;
     let (db, pages, visits, epoch) = match browser {
@@ -907,8 +950,23 @@ fn history(browser: &Browser, max: usize) -> Vec<Visit> {
         ),
     };
     let Some(conn) = copy_open(&db) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
+    let table = match browser {
+        Browser::Firefox(_) => "moz_places",
+        Browser::Chromium(_) => "urls",
+    };
+    let mut has = Some(HashSet::new());
+    for some in ask.chunks(400) {
+        let sql = format!("SELECT url FROM {table} WHERE url IN ({})", vec!["?"; some.len()].join(","));
+        let read = conn.prepare(&sql).and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params_from_iter(some), |r| r.get::<_, String>(0)).map(|rows| rows.collect::<Result<Vec<_>, _>>())?
+        });
+        match (read, has.as_mut()) {
+            (Ok(urls), Some(has)) => has.extend(urls),
+            _ => has = None,
+        }
+    }
     let secs = |t: i64| t as f64 / 1e6 - epoch;
     let now = crate::usage::now_secs();
     // The visits of the last weeks, each worth what is left of it (older
@@ -925,7 +983,7 @@ fn history(browser: &Browser, max: usize) -> Vec<Visit> {
         }
     }
     let Ok(mut stmt) = conn.prepare(pages) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let rows = stmt.query_map([max as i64], |r| {
         let id: i64 = r.get(0)?;
@@ -940,7 +998,7 @@ fn history(browser: &Browser, max: usize) -> Vec<Visit> {
             played: false,
         })
     });
-    rows.map(|rows| rows.flatten().collect()).unwrap_or_default()
+    (rows.map(|rows| rows.flatten().collect()).unwrap_or_default(), has)
 }
 
 /// What the owner picked lately from a lone app's recents, by its address
@@ -1009,16 +1067,23 @@ fn favicon(browser: &Browser, conn: &rusqlite::Connection, url: &str) -> Option<
                 )
             })
             .ok(),
-        Browser::Chromium(_) => conn
-            .query_row(
-                "SELECT b.image_data FROM icon_mapping m JOIN favicon_bitmaps b ON b.icon_id = m.icon_id \
-                 WHERE m.page_url = ?1 ORDER BY b.width DESC LIMIT 1",
-                [url],
-                |r| r.get(0),
-            )
-            .ok(),
+        Browser::Chromium(_) => {
+            // (Its own, else its site's: any page of its origin's.)
+            let of = |test: &str, page: String| {
+                let sql = format!(
+                    "SELECT b.image_data FROM icon_mapping m JOIN favicon_bitmaps b ON b.icon_id = m.icon_id \
+                     WHERE m.page_url {test} ORDER BY b.width DESC LIMIT 1"
+                );
+                conn.query_row(&sql, [page], |r| r.get(0)).ok()
+            };
+            let like = |s: &str| s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            of("= ?1", url.to_owned()).or_else(|| of("LIKE ?1 ESCAPE '\\'", format!("{}/%", like(&origin(url)?.0))))
+        }
     }
 }
+
+/// A page that has no favicon: a sheet with its corner turned.
+const SHEET: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="#8c8c8c" stroke-width="3" stroke-linejoin="round"><path d="M16 6h22l14 14v38H16z"/><path d="M38 6v14h14"/></svg>"##;
 
 /// How big a favicon stands on its tile, of the tile.
 const FAVICON_ON_TILE: f32 = 0.5;
@@ -1417,6 +1482,9 @@ pub(crate) struct Kitchen {
     pages: HashMap<String, KitchenPage>,
     #[serde(default)]
     plays: Vec<KitchenPlay>,
+    /// When Seam's history was last cleared whole (unix seconds; 0 never).
+    #[serde(default)]
+    cleared: f64,
     #[serde(skip)]
     dir: PathBuf,
     /// Pictures more than one page wears: a site's logo, or the first
@@ -1546,11 +1614,15 @@ fn played(k: &Kitchen, site: Option<&Site>, start: &str, now: f64) -> Vec<(Visit
     k.plays
         .iter()
         .filter(|p| host_is(&p.host, &hosts) && is_web(&p.url) && !p.title.trim().is_empty())
+        // (A music site's song has an artist; what plays without one is an
+        // advertisement: Spotify's "Advertisement".)
+        .filter(|p| !music || !p.artist.trim().is_empty())
         // (A YouTube play away from its video's page was heard in a mini player on
         // another page: it would open that page, not the video.)
         .filter(|p| !p.host.ends_with("youtube.com") || video_id(&p.url).is_some())
         .map(|p| {
-            let (song, artist): (String, String) = (p.title.trim().chars().take(200).collect(), p.artist.trim().chars().take(120).collect());
+            let (song, artist): (String, String) =
+                (clean_title(None, &p.title).chars().take(200).collect(), clean_title(None, &p.artist).chars().take(120).collect());
             let title = if music && !artist.is_empty() { format!("{song} • {artist}") } else { song.clone() };
             let own = site.is_some_and(|s| is_page(s, &p.url));
             let url = match site.filter(|_| !own).and_then(|s| search_url(s, &format!("{song} {artist}"))) {
@@ -1651,10 +1723,14 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
                 None => big,
             };
             let aspect = preview.as_deref().and_then(shape_of);
-            let picture = preview.or_else(|| {
-                let data = favicon(browser, icons.as_deref()?, &v.url)?;
-                tile_in(tiles.as_deref()?, &data)
-            });
+            // (A page with no favicon of its own or its site's — a file shown
+            // whole — wears a sheet: Quick Look has something to show it by.)
+            let picture = preview
+                .or_else(|| {
+                    let data = favicon(browser, icons.as_deref()?, &v.url)?;
+                    tile_in(tiles.as_deref()?, &data)
+                })
+                .or_else(|| tile_in(tiles.as_deref()?, SHEET.as_bytes()));
             Recent { url: v.url, title, picture, dir: false, aspect, last: v.last, times: v.times, played: v.played, big }
         })
         .collect();
@@ -1665,15 +1741,211 @@ fn pictured(browser: &Browser, kitchen: &Kitchen, pages: Vec<(Visit, String)>) -
         for dir in [&tiles, &shots].into_iter().flatten() {
             trim_dir(dir, PICTURES_KEPT);
         }
+        let cache2 = match browser {
+            Browser::Firefox(p) if p.join("cache2/entries").is_dir() => Some(&videos),
+            _ => None,
+        };
+        if let Some(shots) = &shots {
+            sweep_unkept(shots, kitchen, cache2);
+        }
     }
     out
 }
 
-/// A path that is not a place one went to (signing in or out, paying).
+/// The pictures made of Seam's that Seam keeps no more — a page or the
+/// history forgotten (its kitchen's), its cache cleared (a video's) —
+/// gone too: the dock keeps a copy only while Seam keeps what it was made
+/// of (`videos`: Seam's cache's index, when it was read).
+fn sweep_unkept(dir: &Path, kitchen: &Kitchen, videos: Option<&Pictures>) {
+    let seam_has = |stem: &str| ["jpg", "png", "webp"].iter().any(|x| kitchen.dir.join("pics").join(format!("{stem}.{x}")).exists());
+    let entries: Option<HashSet<String>> = videos.map(|v| v.values().map(|(_, e, _)| hash_of(e.to_string_lossy().as_bytes())).collect());
+    let hex = |s: &str| s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let kept = if let Some(stem) = name.strip_prefix("k-").and_then(|r| r.get(..16)).filter(|s| hex(s) && name.as_bytes().get(18) == Some(&b'-')) {
+            // (No kitchen read: nothing to tell by.)
+            kitchen.dir.as_os_str().is_empty() || seam_has(stem)
+        } else if let Some(hash) = name.strip_prefix("big-").and_then(|r| r.get(..16)).filter(|s| hex(s)) {
+            entries.as_ref().is_none_or(|e| e.contains(hash))
+        } else if name.len() > 12 && name.as_bytes()[11] == b'-' && name[..11].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            videos.is_none_or(|v| v.contains_key(&name[..11]))
+        } else {
+            true
+        };
+        if !kept {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// A path that is not a place one went to (signing in or out — GitHub's
+/// "/sessions/…", a sign-in's "client_id=…" —, paying).
 fn passing_path(url: &str) -> bool {
     let path = url.split_once("://").map_or("", |(_, r)| r.find('/').map_or("", |i| &r[i..])).to_lowercase();
-    const WORDS: [&str; 10] = ["login", "signin", "sign-in", "signup", "sign-up", "logout", "oauth", "auth", "register", "checkout"];
+    const WORDS: [&str; 24] = [
+        "login", "signin", "sign-in", "signup", "sign-up", "logout", "oauth", "oauth2", "auth", "oidc", "sso", "saml", "session",
+        "sessions", "2fa", "two-factor", "verify", "authorize", "consent", "register", "checkout", "client_id", "redirect_uri",
+        "user_code",
+    ];
     path.split(['/', '?', '#', '&', '=']).any(|seg| WORDS.iter().any(|w| seg == *w || seg.starts_with(&format!("{w}."))))
+}
+
+/// A page an app named before it kept it (ChatGPT's "/c/local-chatgpt:…"
+/// while a chat is new): it opens nothing.
+fn placeholder(url: &str) -> bool {
+    url.split(['/', '?', '#']).any(|seg| seg.strip_prefix("local-").is_some_and(|r| r.contains(':') || r.to_lowercase().contains("%3a")))
+}
+
+/// Where a site's pages say which thing they are, the thing's id next
+/// ("/comments/<id>" of a Reddit post, "/status/<id>" on X, "/dp/<id>" on
+/// Amazon, "/d/<id>" of a Google document).
+const ID_MARKS: [&str; 18] = [
+    "/comments/", "/status/", "/dp/", "/gp/product/", "/itm/", "/video/", "/questions/", "/pin/", "/rooms/", "/title/", "/p/", "/reel/",
+    "/reels/", "/c/", "/chat/", "/artifact/", "/d/", "/posts/",
+];
+
+/// What stands for ONE page whatever else its address says: a video, a
+/// list, on a site Golem knows the thing after its kind (a Reddit post's
+/// address, its comment's, its picture's open; a post on X with its photo
+/// open), else the address without what only moves within the page
+/// ("#lightbox"; a "#/route" or "#NOTE/…" is a page of its own).
+fn page_key(site: Option<&Site>, url: &str) -> String {
+    if let Some(id) = video_id(url) {
+        return format!("v:{id}");
+    }
+    if let Some(id) = list_id(url) {
+        return format!("list:{id}");
+    }
+    let Some((host, path)) = url.split_once("://").and_then(|(_, r)| r.find('/').map(|i| (&r[..i], &r[i..]))) else {
+        return url.to_owned();
+    };
+    let host = host.to_lowercase();
+    if site.is_some() {
+        let bare = path.split(['?', '#']).next().unwrap_or("");
+        for mark in ID_MARKS {
+            if let Some((_, rest)) = bare.split_once(mark) {
+                let id = rest.split('/').next().unwrap_or("");
+                if !id.is_empty() {
+                    return format!("{host}{mark}{id}");
+                }
+            }
+        }
+    }
+    let path = match path.split_once('#') {
+        Some((page, within)) if !within.contains('/') => page,
+        _ => path,
+    };
+    // (A tab of a page is that page: GitHub's "?tab=repositories".)
+    let path = match path.split_once('?') {
+        Some((page, query)) if site.is_some() => {
+            let kept: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("tab=") && !kv.is_empty()).collect();
+            if kept.is_empty() { page.to_owned() } else { format!("{page}?{}", kept.join("&")) }
+        }
+        _ => path.to_owned(),
+    };
+    format!("{host}{}", path.trim_end_matches('/'))
+}
+
+/// The words a page's address names it by — a Reddit post's
+/// ("/comments/<id>/<words>"), a question's on Stack Overflow — when it has
+/// some.
+fn slug_words(url: &str) -> Option<Vec<String>> {
+    let path = url.split_once("://")?.1.split(['?', '#']).next()?;
+    let rest = ["/comments/", "/questions/"].iter().find_map(|m| path.split_once(m).map(|(_, r)| r))?;
+    let words: Vec<String> = rest.split('/').nth(1)?.split(['_', '-']).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    (words.len() >= 2).then_some(words)
+}
+
+/// Whether `title` is the one of the page at `url` by the words its address
+/// names it by (a title the app kept from the page before — Reddit's "Inbox"
+/// over a post — says none of them).
+fn fits_address(url: &str, title: &str) -> bool {
+    let Some(words) = slug_words(url) else {
+        return true;
+    };
+    let said: String = title.to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let long: Vec<&String> = words.iter().filter(|w| w.chars().count() >= 4).collect();
+    long.is_empty() || long.iter().any(|w| said.contains(w.as_str()))
+}
+
+/// A page's name from its address's words ("What to work on outside of
+/// work"), when no title it wore was its own.
+fn address_title(url: &str) -> Option<String> {
+    let words = slug_words(url)?.join(" ");
+    let mut letters = words.chars();
+    let first = letters.next()?;
+    Some(first.to_uppercase().chain(letters).collect())
+}
+
+/// What every app calls its own pages — never a page's title of its own
+/// ("Home", "Inbox", "Web Player" once its name is gone; "omarchy - Search").
+fn chrome_word(title: &str) -> bool {
+    const WORDS: [&str; 17] = [
+        "home", "inicio", "inbox", "bandeja de entrada", "notifications", "notificaciones", "friends", "amigos", "explore", "explorar",
+        "search", "buscar", "web player", "dashboard", "loading", "cargando", "messages",
+    ];
+    let t = title.trim().to_lowercase();
+    WORDS.contains(&t.as_str()) || t.starts_with("redirecting") || t.ends_with(" - search") || t.ends_with(" - buscar")
+}
+
+/// The titles a webapp's OWN pages wore — its start, its known pages, its
+/// search's, its sign-in's (cleaned, lower case): a page of an app that
+/// changes page without loading may still wear the one of the page before
+/// (Cloudflare's "Cloudflare Dashboard | Manage Your Account" of its sign-in).
+fn chrome_titles(visits: &[Visit], site: Option<&Site>, start: &str, name: &str) -> HashSet<String> {
+    let start = start.trim_end_matches('/');
+    let path_of = |url: &str| url.split_once("://").map_or(String::new(), |(_, r)| r.find('/').map_or(String::new(), |i| r[i..].to_owned()));
+    let search = site.and_then(|s| s.search).map(|s| path_of(s.split('{').next().unwrap_or("")));
+    let host = origin(start).map(|(_, h)| h.to_lowercase()).unwrap_or_default();
+    visits
+        .iter()
+        .filter(|v| {
+            let on = match site {
+                Some(s) => origin(&v.url).is_some_and(|(_, h)| host_is(&h, s.hosts)) && !is_page(s, &v.url),
+                None => origin(&v.url).is_some_and(|(_, h)| h.to_lowercase() == host),
+            };
+            let path = path_of(&v.url);
+            on && (v.url.trim_end_matches('/') == start
+                || passing_path(&v.url)
+                || site.is_some_and(|s| s.links.iter().any(|l| is_link(l, &path)))
+                || search.as_deref().is_some_and(|q| !q.is_empty() && path.starts_with(q)))
+        })
+        .map(|v| without_name(&clean_title(site, &v.title), name).to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// `pages` once each by the page they are (`page_key`): the newest stands
+/// for it, with the whole group's use, named by the newest title that is
+/// the page's own (`own`), else by its address's words, else not shown.
+fn once_per_page(pages: Vec<(Visit, String)>, site: Option<&Site>, own: impl Fn(&Visit, &str) -> bool) -> Vec<(Visit, String)> {
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<(Visit, String, bool)> = Vec::new();
+    for (v, title) in pages {
+        let key = page_key(site, &v.url);
+        let fit = own(&v, &title);
+        match at.get(&key) {
+            Some(&i) => {
+                out[i].0.score += v.score;
+                if out[i].0.pic.is_none() {
+                    out[i].0.pic = v.pic;
+                }
+                if !out[i].2 && fit {
+                    (out[i].1, out[i].2) = (title, true);
+                }
+            }
+            None => {
+                at.insert(key, out.len());
+                out.push((v, title, fit));
+            }
+        }
+    }
+    out.into_iter()
+        .filter_map(|(v, title, fit)| match fit {
+            true => Some((v, title)),
+            false => address_title(&v.url).map(|t| (v, t)),
+        })
+        .collect()
 }
 
 /// `title` without the app's own name at either end ("R2 | Cloudflare").
@@ -1735,16 +2007,26 @@ fn webapp_pages(visits: Vec<Visit>, site: Option<&Site>, start: &str, name: &str
                 && path.trim_matches('/').split(['?', '#']).next().is_some_and(|p| !p.is_empty())
         }
     };
+    let chrome = chrome_titles(&visits, site, start, name);
     let names: Vec<String> = [Some(name), site.map(|s| s.name)].into_iter().flatten().map(str::to_lowercase).collect();
-    let pages = visits
+    // (A video's title is its own but the app's name; another page's not one
+    // its app's own pages wore — an app that changes page without loading
+    // leaves the one before's —, nor one its address's words deny.)
+    let own = |v: &Visit, title: &str| {
+        let t = title.to_lowercase();
+        let named = !t.is_empty() && !names.contains(&t) && !chrome_word(&t);
+        named && (video_id(&v.url).is_some() || (!chrome.contains(&t) && fits_address(&v.url, title)))
+    };
+    let pages: Vec<(Visit, String)> = visits
         .into_iter()
-        .filter(|v| worth(&v.url) && !passing_path(&v.url))
+        .filter(|v| worth(&v.url) && !passing_path(&v.url) && !placeholder(&v.url))
         .map(|v| {
             let title = without_name(&clean_title(site, &v.title), name);
             (v, title)
         })
-        .filter(|(_, title)| !title.is_empty() && !names.contains(&title.to_lowercase()));
-    let mut pages = once_each(pages, |v, title| video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned));
+        .collect();
+    let pages = once_per_page(pages, site, own);
+    let mut pages = once_each(pages.into_iter(), |v, title| video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned));
     pages.truncate(max);
     pages
 }
@@ -1752,24 +2034,57 @@ fn webapp_pages(visits: Vec<Visit>, site: Option<&Site>, start: &str, name: &str
 /// How many pages a lone app's recents are chosen from.
 const CANDIDATES: usize = 400;
 
+/// A reading of an app's recents: them, and what the owner keeps of pages
+/// the history has no more — their keys among the picks and those put away
+/// (`gone`: a page forgotten, the history cleared) — and when Seam last
+/// forgot the whole of it (`cleared`): the dock forgets them too (Max,
+/// 2026-10-28: "we need no errors" — nothing of a page wiped kept).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct Reading {
+    pub recents: Vec<Recent>,
+    pub gone: Vec<String>,
+    pub cleared: f64,
+}
+
 /// What a webapp (named `name`, opening at `start`; of `site` when Golem
 /// knows it) showed lately: from Seam's history, where every webapp lives —
 /// in THE ORDER (`rank`, the owner's `picks` counted in), at most `max`.
 pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, wanted: &Wanted) -> Vec<Recent> {
+    webapp_reading(site, start, name, wanted).recents
+}
+
+/// `webapp_recents`, and what of the owner's the history has no more.
+pub(crate) fn webapp_reading(site: Option<&Site>, start: &str, name: &str, wanted: &Wanted) -> Reading {
     let (browser, k) = (seam(), kitchen());
     // (Seam's title only when it says more than the app's name: an app that
     // keeps "YouTube Music" over a song must not hide the history's name of it.)
     let names: Vec<String> = [Some(name), site.map(|s| s.name)].into_iter().flatten().map(str::to_lowercase).collect();
+    // (The owner's keys of its pages: which the history still has.)
+    let hosts = webapp_hosts(site, start);
+    let mut ask: Vec<String> = wanted.picks.keys().chain(wanted.forgot.hidden.keys()).filter(|key| on_hosts(key, &hosts)).cloned().collect();
+    ask.sort();
+    ask.dedup();
+    let (visits, has) = history_with(&browser, 4000, &ask);
+    let chrome = chrome_titles(&visits, site, start, name);
     let says = |t: &str| {
         let t = without_name(&clean_title(site, t), name).to_lowercase();
-        !t.is_empty() && !names.contains(&t)
+        !t.is_empty() && !names.contains(&t) && !chrome_word(&t) && !chrome.contains(&t)
     };
-    // (A search in it: the whole history read looked through for its words.)
-    let visits = retitled(history(&browser, 4000), &k, says).into_iter().filter(|v| wanted.says(&v.url, &v.title)).collect();
-    let pages = webapp_pages(visits, site, start, name, CANDIDATES);
-    let mut pages = with_plays(pages, played(&k, site, start, crate::usage::now_secs()));
+    // (A search in it: the whole history looked through for its words, as
+    // the titles it shows say them.)
+    let mut pages = webapp_pages(retitled(visits, &k, says), site, start, name, usize::MAX);
+    pages.retain(|(v, title)| wanted.says(&v.url, title));
+    pages.truncate(CANDIDATES);
+    let plays = played(&k, site, start, crate::usage::now_secs());
+    // (A song is kept by the kitchen, not the history: Spotify's opens a search.)
+    let gone = match has {
+        Some(has) => ask.into_iter().filter(|key| !has.contains(key) && !plays.iter().any(|(v, _)| v.url == *key)).collect(),
+        None => Vec::new(),
+    };
+    let mut pages = with_plays(pages, plays);
     pages.retain(|(v, title)| wanted.keeps(&v.url, title, v.last));
-    pictured(&browser, &k, ranked_pages(pages, &wanted.picks, wanted.max))
+    seam_cleared_since(&k, wanted);
+    Reading { recents: pictured(&browser, &k, ranked_pages(pages, &wanted.picks, wanted.max)), gone, cleared: k.cleared }
 }
 
 /// A history with each page's title as Seam saw it last, where it kept one
@@ -1816,6 +2131,12 @@ fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit,
 /// What a browser showed lately: a page a site but those in `skip`, in THE
 /// ORDER (`rank`, the owner's `picks` counted in), at most `max`.
 pub(crate) fn browser_recents(browser: &Browser, skip: &[String], wanted: &Wanted) -> Vec<Recent> {
+    browser_reading(browser, skip, wanted).recents
+}
+
+/// `browser_recents`, and — Seam's — when its history was cleared whole
+/// (what one page of it had is not told apart from another browser's).
+pub(crate) fn browser_reading(browser: &Browser, skip: &[String], wanted: &Wanted) -> Reading {
     // (Seam's: as Seam saw its pages; another browser's as it wrote them.)
     let k = if *browser == seam() { kitchen() } else { Kitchen::default() };
     // (Each page looked at before a site's newest is kept: one put away
@@ -1825,7 +2146,8 @@ pub(crate) fn browser_recents(browser: &Browser, skip: &[String], wanted: &Wante
         .filter(|v| wanted.keeps(&v.url, &v.title, v.last))
         .collect();
     let pages = browser_pages(visits, skip, CANDIDATES);
-    pictured(browser, &k, ranked_pages(pages, &wanted.picks, wanted.max))
+    seam_cleared_since(&k, wanted);
+    Reading { recents: pictured(browser, &k, ranked_pages(pages, &wanted.picks, wanted.max)), gone: Vec::new(), cleared: k.cleared }
 }
 
 /// Whether `url` is a page on one of `hosts` (patterns as a site's).
@@ -1907,6 +2229,9 @@ pub(crate) struct Forgot {
     pub since: f64,
     #[serde(default)]
     pub hidden: HashMap<String, f64>,
+    /// When Seam's history was cleared whole, as last seen (`Reading::cleared`).
+    #[serde(default)]
+    pub seam_cleared: f64,
 }
 
 /// Where it is kept, in the data dir.
@@ -1941,11 +2266,54 @@ impl Forgot {
         self.save();
     }
 
+    /// `keys` (pages the history has no more) not kept put away: there is
+    /// nothing of them to hide.
+    pub(crate) fn drop_keys(&mut self, keys: &[String]) {
+        if self.without(keys) {
+            self.save();
+        }
+    }
+
+    /// `drop_keys`, unsaved: whether any went.
+    fn without(&mut self, keys: &[String]) -> bool {
+        let n = self.hidden.len();
+        self.hidden.retain(|k, _| !keys.contains(k));
+        self.hidden.len() != n
+    }
+
+    /// Seam's history cleared whole at `at`: no address put away kept, once.
+    /// Whether it was news.
+    pub(crate) fn seam_cleared(&mut self, at: f64) -> bool {
+        let news = self.cleared_at(at);
+        if news {
+            self.save();
+        }
+        news
+    }
+
+    /// `seam_cleared`, unsaved.
+    fn cleared_at(&mut self, at: f64) -> bool {
+        if at <= self.seam_cleared {
+            return false;
+        }
+        self.seam_cleared = at;
+        self.hidden.retain(|k, _| !is_web(k));
+        true
+    }
+
     /// Put away everything seen before `now`.
     pub(crate) fn clear(&mut self, now: f64) {
         self.since = now;
         self.hidden.clear();
         self.save();
+    }
+}
+
+/// Seam's history cleared whole since the owner's were last told it: the
+/// pictures read for its pages gone first (the loop forgets their keys).
+fn seam_cleared_since(k: &Kitchen, wanted: &Wanted) {
+    if k.cleared > wanted.forgot.seam_cleared {
+        clear_pictures();
     }
 }
 
@@ -1965,6 +2333,9 @@ pub(crate) fn clear_pictures() {
 
 /// How long recents read stay good.
 pub(crate) const FRESH: Duration = Duration::from_secs(60);
+
+#[cfg(test)]
+mod audit;
 
 #[cfg(test)]
 mod tests {
@@ -2087,7 +2458,7 @@ mod tests {
 
     #[test]
     fn a_recent_put_away_comes_back_only_when_seen_again() {
-        let mut f = Forgot { since: 0.0, hidden: HashMap::new() };
+        let mut f = Forgot::default();
         // (Never cleared: one whose time is unknown is shown.)
         assert!(f.keeps("/music/a.mp3", 0.0));
         f.hidden.insert("https://www.youtube.com/watch?v=a".into(), 1000.0);
@@ -2269,6 +2640,157 @@ mod tests {
         // A site Golem knows with no kind of page worth it: none, on purpose.
         let mail = vec![visit("https://mail.google.com/mail/u/0/#inbox/abc", "Hello - Gmail")];
         assert!(webapp_pages(mail, site("gmail"), "https://mail.google.com", "Gmail", 8).is_empty());
+    }
+
+    /// Each site's own kind of page as it is named in a history, and the
+    /// name its recent wears.
+    const EVERY_SITE: &[(&str, &str, &str, &str)] = &[
+        ("youtube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "(2) Rick Astley - Never Gonna Give You Up - YouTube", "Rick Astley - Never Gonna Give You Up"),
+        ("google", "https://www.google.com/search?q=gatos&client=firefox-b-d", "gatos - Buscar con Google", "gatos"),
+        ("facebook", "https://www.facebook.com/groups/123456/", "(5) Linux Argentina | Facebook", "Linux Argentina"),
+        ("instagram", "https://www.instagram.com/p/C1a2b3d/", "Leo Messi on Instagram: \"Campeones\"", "Leo Messi on Instagram: \"Campeones\""),
+        ("tiktok", "https://www.tiktok.com/@cats/video/7300000000000000000", "Funny cat | TikTok", "Funny cat"),
+        ("x", "https://x.com/dhh/status/2101337058362999065", "(1) DHH on X: \"Hello\" / X", "DHH on X: \"Hello\""),
+        ("reddit", "https://www.reddit.com/r/linux/comments/1xgyafd/my_new_setup/", "My new setup : r/linux", "My new setup"),
+        ("wikipedia", "https://es.wikipedia.org/wiki/Bauhaus", "Bauhaus - Wikipedia, la enciclopedia libre", "Bauhaus"),
+        ("amazon", "https://www.amazon.com/Running-Shoes/dp/B0C1234567?th=1", "Amazon.com: Running Shoes : Clothing", "Running Shoes : Clothing"),
+        ("chatgpt", "https://chatgpt.com/c/6adfe8d0-c2a8-83e8-a693-146184afd397", "ChatGPT - Recipe ideas", "Recipe ideas"),
+        ("netflix", "https://www.netflix.com/title/80057281", "Stranger Things | Netflix Official Site", "Stranger Things"),
+        ("linkedin", "https://www.linkedin.com/in/jane-doe/", "(3) Jane Doe | LinkedIn", "Jane Doe"),
+        ("spotify", "https://open.spotify.com/album/6l8tOdUItDC01Qmb91Lo8W", "The Game - Album by Queen | Spotify", "The Game - Album by Queen"),
+        ("twitch", "https://www.twitch.tv/videos/2200000000", "Speedrun - Twitch", "Speedrun"),
+        ("pinterest", "https://www.pinterest.com/pin/123456789/", "Cozy room | Pinterest", "Cozy room"),
+        ("discord", "https://discord.com/channels/1234/5678", "Discord | #general | Golem", "#general | Golem"),
+        ("google-maps", "https://www.google.com/maps/place/Obelisco/@-34.6,-58.38,17z", "Obelisco - Google Maps", "Obelisco"),
+        ("google-drive", "https://drive.google.com/file/d/1abcDEF/view", "report.pdf - Google Drive", "report.pdf"),
+        ("google-docs", "https://docs.google.com/document/d/1abcDEF/edit?tab=t.0", "Plan - Google Docs", "Plan"),
+        ("claude", "https://claude.ai/chat/47efddb8-9924-4ccf-b1b5-14f1108e0a21", "Greeting - Claude", "Greeting"),
+        ("gemini", "https://gemini.google.com/app/1a2b3c4d5e", "Trip ideas - Gemini", "Trip ideas"),
+        ("ebay", "https://www.ebay.com/itm/276936012392?_trksid=p2332490", "Google Pixel 9 | eBay", "Google Pixel 9"),
+        ("github", "https://github.com/maxpoww/waveview", "maxpoww/waveview · GitHub", "maxpoww/waveview"),
+        ("canva", "https://www.canva.com/design/DAF1abc/edit", "Poster - Canva", "Poster"),
+        ("aliexpress", "https://www.aliexpress.com/item/1005001.html", "USB cable - AliExpress", "USB cable"),
+        ("booking", "https://www.booking.com/hotel/ar/alvear-palace.html", "Alvear Palace Hotel, Buenos Aires", "Alvear Palace Hotel, Buenos Aires"),
+        ("airbnb", "https://www.airbnb.com/rooms/12345", "Cabin in the woods - Airbnb", "Cabin in the woods"),
+        ("youtube-music", "https://music.youtube.com/watch?v=sFZjqVnWBhc", "Robot Rock - YouTube Music", "Robot Rock"),
+        ("steam", "https://store.steampowered.com/app/620/Portal_2/", "Portal 2 on Steam", "Portal 2"),
+        ("stackoverflow", "https://stackoverflow.com/questions/123/how-to-exit-vim", "How to exit Vim - Stack Overflow", "How to exit Vim"),
+        ("notion", "https://www.notion.so/Plan-1a2b3c", "Plan", "Plan"),
+        ("figma", "https://www.figma.com/design/abc123/Dock", "Dock – Figma", "Dock"),
+    ];
+
+    #[test]
+    fn every_site_shows_its_own_pages_as_they_are_named() {
+        let mut seen = HashSet::new();
+        for (slug, url, raw, named) in EVERY_SITE {
+            let s = site(slug).unwrap_or_else(|| panic!("{slug}: no site"));
+            assert!(seen.insert(*slug), "{slug} twice");
+            let start = format!("https://{}", s.hosts[0]);
+            // Newest first: the page again at another address of its own, its
+            // site's own pages (its start, its known pages, a search, a
+            // sign-in), then the page.
+            let mut history = vec![visit(&format!("{url}#top"), raw), visit(&start, s.name), visit(&format!("{start}/login"), s.name)];
+            for l in s.links {
+                history.push(visit(&link_url(l, &start), l.name));
+            }
+            let search = search_url(s, "zapatillas").filter(|q| !is_page(s, q));
+            if let Some(q) = &search {
+                history.push(visit(q, &format!("zapatillas - {}", s.name)));
+            }
+            history.push(visit(url, raw));
+            let got = webapp_pages(history, Some(s), &start, s.name, 8);
+            let titles: Vec<&str> = got.iter().map(|(_, t)| t.as_str()).collect();
+            assert_eq!(titles, [*named], "{slug}: {got:?}");
+        }
+        // Every site with kinds of page worth it is here; the rest show none.
+        for s in SITES.iter().filter(|s| !seen.contains(s.slug)) {
+            assert!(s.pages.is_empty(), "{}: a site with pages not tried", s.slug);
+            let start = format!("https://{}", s.hosts[0]);
+            assert!(webapp_pages(vec![visit(&format!("{start}/a/b"), "A page")], Some(s), &start, s.name, 8).is_empty(), "{}", s.slug);
+        }
+    }
+
+    #[test]
+    fn a_page_without_a_favicon_wears_a_sheet() {
+        let dir = scratch("sheet");
+        let tile = tile_in(&dir, SHEET.as_bytes()).expect("drawn");
+        let img = image::open(&tile).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (crate::apps::ICON_SIZE, crate::apps::ICON_SIZE));
+        // Its ground is the favicons' card; its lines darker, inside it.
+        assert_eq!(img.get_pixel(4, 4).0, TILE_GROUND);
+        let dark = img.pixels().filter(|p| p.0[0] < 200).count();
+        assert!(dark > 500, "{dark} dark pixels");
+        if std::env::var_os("WR_KEEP").is_some() {
+            println!("{}", tile.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_page_an_app_named_with_its_own_pages_title_is_not_shown_so() {
+        // X kept "Home" over a post with its photo open, and the search's
+        // title over another; the post itself came back named.
+        let x = site("x");
+        let history = vec![
+            visit("https://x.com/dhh/status/2107462374915523022/photo/1", "(1) Home / X"),
+            visit("https://x.com/dhh/status/2102366320369016915/photo/1", "omarchy - Search / X"),
+            visit("https://x.com/search?q=omarchy&src=typed_query", "omarchy - Search / X"),
+            visit("https://x.com/home", "(1) Home / X"),
+            visit("https://x.com/dhh/status/2107462374915523022", "DHH on X: \"Linux\" / X"),
+        ];
+        let got = webapp_pages(history, x, "https://x.com", "X", 8);
+        assert_eq!(got.iter().map(|(v, t)| (v.url.as_str(), t.as_str())).collect::<Vec<_>>(), [(
+            "https://x.com/dhh/status/2107462374915523022/photo/1",
+            "DHH on X: \"Linux\""
+        )]);
+        // Reddit's "Inbox" and its tagline over posts, and a picture of one
+        // open: one post each, by its own title, else its address's words;
+        // cross-posts once (their subreddit is not their title).
+        let reddit = site("reddit");
+        let history = vec![
+            visit("https://www.reddit.com/r/linux/comments/1xecwnz/ok_ill_make_it_shorter_why_omarchy/19rl/", "Inbox"),
+            visit("https://www.reddit.com/r/AskProgrammers/comments/1xdgn4g/what_to_work_on_outside_of_work/", "Reddit - The heart of the internet"),
+            visit("https://www.reddit.com/r/unixporn/comments/1x95tsq/xfce_its_just_mac_os_x/#lightbox", "r/unixporn - the home for *NIX customization!"),
+            visit("https://www.reddit.com/r/unixporn/", "r/unixporn - the home for *NIX customization!"),
+            visit("https://www.reddit.com/r/unixporn/comments/1x95tsq/xfce_its_just_mac_os_x/", "[XFCE] it's just Mac OS X : r/unixporn"),
+            visit("https://www.reddit.com/r/linux/comments/1xecwnz/comment/19rlbvf7me1b6/", "ok, I'll make it shorter: Why omarchy : r/linux"),
+            visit("https://www.reddit.com/r/NixOS/comments/1xf30to/hello_everybody/", "Hello everybody : r/NixOS"),
+            visit("https://www.reddit.com/r/DistroHopping/comments/1xdtgan/hello_everybody/", "Hello everybody : r/DistroHopping"),
+        ];
+        let got = webapp_pages(history, reddit, "https://www.reddit.com", "Reddit", 8);
+        assert_eq!(
+            got.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+            ["ok, I'll make it shorter: Why omarchy", "What to work on outside of work", "[XFCE] it's just Mac OS X", "Hello everybody"]
+        );
+        // A sign-in's title the app kept over a page of its own (Cloudflare).
+        let history = vec![
+            visit("https://dash.cloudflare.com/abc/r2/overview", "Cloudflare Dashboard | Manage Your Account"),
+            visit("https://dash.cloudflare.com/login", "Cloudflare Dashboard | Manage Your Account"),
+            visit("https://dash.cloudflare.com/abc/home", "Account home | Cloudflare"),
+        ];
+        let got = webapp_pages(history, None, "https://dash.cloudflare.com", "Cloudflare", 8);
+        assert_eq!(got.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["Account home"]);
+        // A known page of its own is its row's action, not a recent; a chat not
+        // kept yet opens nothing; a sign-in's steps are no place.
+        let pages = |slug: &str, history: Vec<Visit>| {
+            let s = site(slug).unwrap();
+            webapp_pages(history, Some(s), &format!("https://{}", s.hosts[0]), s.name, 8)
+        };
+        assert!(pages("discord", vec![visit("https://discord.com/channels/@me", "Discord | Friends")]).is_empty());
+        assert!(pages("youtube-music", vec![visit("https://music.youtube.com/playlist?list=LM", "Liked music - YouTube Music")]).is_empty());
+        assert!(pages("chatgpt", vec![visit("https://chatgpt.com/c/local-chatgpt%3A738e6c28", "what is the best tool")]).is_empty());
+        let github = vec![
+            visit("https://github.com/sessions/verified-device/mobile?auto=true", "Where software is built"),
+            visit("https://github.com/sessions/social/google/initiate?return_to=", "Redirecting to Google"),
+            visit("https://github.com/max-pow?tab=repositories", "max-pow / Repositories"),
+            visit("https://github.com/max-pow", "max-pow"),
+        ];
+        assert_eq!(pages("github", github).iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["max-pow / Repositories"]);
+        // What shows nothing in a title, and a run of spaces.
+        assert_eq!(clean_title(None, "\u{200e}Apple Music - Web Player"), "Apple Music - Web Player");
+        assert_eq!(clean_title(None, "Stromae   Alors on danse"), "Stromae Alors on danse");
+        assert!(webapp_pages(vec![visit("https://music.apple.com/us/new", "\u{200e}Apple Music - Web Player")], None, "https://music.apple.com", "Apple Music", 8).is_empty());
     }
 
     #[test]
@@ -2517,6 +3039,62 @@ mod tests {
                 println!("   {:60} {}", r.title.chars().take(60).collect::<String>(), r.url);
             }
         }
+    }
+
+    #[test]
+    fn what_the_history_has_no_more_is_kept_no_more() {
+        // Which of the owner's keys a history still has — none told when it
+        // cannot be read (nothing is then taken for gone).
+        let dir = scratch("gone");
+        let places = rusqlite::Connection::open(dir.join("places.sqlite")).unwrap();
+        places
+            .execute_batch(
+                "CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_date INTEGER);
+                 CREATE TABLE moz_historyvisits (place_id INTEGER, visit_date INTEGER);
+                 INSERT INTO moz_places VALUES (1, 'https://www.youtube.com/watch?v=a', 'A - YouTube', 10);",
+            )
+            .unwrap();
+        drop(places);
+        let ask = vec!["https://www.youtube.com/watch?v=a".to_string(), "https://www.youtube.com/watch?v=wiped".to_string()];
+        let (visits, has) = history_with(&Browser::Firefox(dir.clone()), 10, &ask);
+        assert_eq!(visits.len(), 1);
+        assert_eq!(has, Some(["https://www.youtube.com/watch?v=a".to_string()].into()));
+        assert_eq!(history_with(&Browser::Firefox(dir.join("none")), 10, &ask).1, None);
+        // The pictures made of Seam's: only while Seam keeps what they were
+        // made of (its kitchen's picture, its cache's entry).
+        let shots = dir.join("shots");
+        let pics = dir.join("kitchen/pics");
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::create_dir_all(&pics).unwrap();
+        std::fs::write(pics.join("00000000000000aa.jpg"), b"jpg").unwrap();
+        let entry = dir.join("ENTRY");
+        let videos: Pictures = [("dQw4w9WgXcQ".to_string(), (2u8, entry.clone(), 3u64))].into();
+        let big = format!("big-{}.jpg", hash_of(entry.to_string_lossy().as_bytes()));
+        let made = ["k-00000000000000aa-f4.png", "k-00000000000000aa-f4-big.png", "k-00000000000000bb-f3.png", "dQw4w9WgXcQ-f4.png", "k-abcdefghi-f4.png", &big, "big-00000000000000cc.jpg", "other.png"];
+        for name in made {
+            std::fs::write(shots.join(name), b"png").unwrap();
+        }
+        let kitchen = Kitchen { dir: dir.join("kitchen"), ..Default::default() };
+        sweep_unkept(&shots, &kitchen, Some(&videos));
+        let mut left: Vec<String> = std::fs::read_dir(&shots).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        let mut want = vec!["k-00000000000000aa-f4.png", "k-00000000000000aa-f4-big.png", "dQw4w9WgXcQ-f4.png", big.as_str(), "other.png"];
+        want.sort();
+        assert_eq!(left, want, "a page's picture Seam forgot, a video its cache let go");
+        // No kitchen read and no cache read: nothing to tell by, nothing goes.
+        sweep_unkept(&shots, &Kitchen::default(), None);
+        assert_eq!(std::fs::read_dir(&shots).unwrap().count(), want.len());
+        // The put away (unsaved here: the owner's file is not a test's): a
+        // key gone; all the web's once Seam's history is cleared, once.
+        let both = || Forgot { hidden: [("https://a.com/x".to_string(), 5.0), ("/home/me/file.txt".to_string(), 5.0)].into(), ..Default::default() };
+        let mut f = both();
+        assert!(f.without(&["https://a.com/x".to_string()]) && !f.without(&["https://a.com/x".to_string()]));
+        assert_eq!(f.hidden.keys().collect::<Vec<_>>(), ["/home/me/file.txt"]);
+        let mut f = both();
+        assert!(!f.cleared_at(0.0), "never cleared");
+        assert!(f.cleared_at(100.0) && !f.cleared_at(100.0) && !f.cleared_at(50.0));
+        assert_eq!(f.hidden.keys().collect::<Vec<_>>(), ["/home/me/file.txt"], "a file is not Seam's");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
