@@ -405,6 +405,9 @@ pub(crate) struct NotifState {
     /// body width they were measured for.
     measure_cache: HashMap<(u64, u32), MeasuredRow>,
     measure_params: (u32, u32),
+    /// What the rows were last measured from (`notif_measure_fingerprint`):
+    /// the same again is no measure.
+    measured_as: Option<u64>,
     /// The parts of a notification that never change — its formatted
     /// summary and body, and its picture's key (a hash of the pixels) —
     /// prepared once: before, every measure formatted all 480 rows and
@@ -528,6 +531,7 @@ impl NotifState {
             history,
             measure_cache: HashMap::new(),
             measure_params: (0, 0),
+            measured_as: None,
             prepared: HashMap::new(),
             seen: HashSet::new(),
             active_count: 0,
@@ -907,9 +911,41 @@ impl App {
         self.schedule_notif_collapse(hold);
     }
 
+    /// Everything the rows are made from: the cards (their words and
+    /// pictures), the apps the icons resolve against, the box's metrics,
+    /// whether there is a renderer to measure with.
+    fn notif_measure_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.notif.history.len().hash(&mut h);
+        for n in &self.notif.history {
+            n.timestamp_ms.hash(&mut h);
+            n.id.hash(&mut h);
+            n.app_name.hash(&mut h);
+            n.summary.hash(&mut h);
+            n.body.hash(&mut h);
+            n.app_icon.hash(&mut h);
+            n.desktop_entry.hash(&mut h);
+            n.image_width.hash(&mut h);
+            n.image_file.hash(&mut h);
+            n.image_rgba.len().hash(&mut h);
+        }
+        self.apps_fingerprint.hash(&mut h);
+        self.options_scale().to_bits().hash(&mut h);
+        self.options_renderer.is_some().hash(&mut h);
+        h.finish()
+    }
+
     /// Re-measure every history item into [`RowInfo`]s (one canonical layout for
     /// the band and the list). Cheap; only on data change.
     pub(crate) fn measure_notif(&mut self) {
+        // The same cards, apps, scale and renderer as the rows were made
+        // from: nothing to measure (a start measured five times, 2026-10-29).
+        let fingerprint = self.notif_measure_fingerprint();
+        if self.notif.measured_as == Some(fingerprint) {
+            return;
+        }
+        crate::perf::mark("notif measure");
         let _perf = crate::perf::NOTIF_MEASURE.time();
         let started = std::time::Instant::now();
         let mut marks: Vec<(&str, u32)> = Vec::new();
@@ -1047,6 +1083,7 @@ impl App {
             }
         }
         self.notif.rows = rows;
+        self.notif.measured_as = Some(fingerprint);
         mark("rows", &mut marks);
         self.ensure_notif_images();
         mark("images", &mut marks);

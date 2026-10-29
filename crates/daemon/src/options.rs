@@ -2774,6 +2774,7 @@ impl App {
     /// Re-measure the clock + window-title text widths (proportional font, so
     /// widths must be measured, not estimated). Cheap; only on data change.
     pub(crate) fn measure_options_text(&mut self) {
+        crate::perf::mark("bar text");
         let clock = self.options_clock.clone();
         let date = self.options_date.clone();
         let title = self.options_window_text();

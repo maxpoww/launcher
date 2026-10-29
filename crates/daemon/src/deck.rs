@@ -506,6 +506,7 @@ impl App {
                 let Some(layer) = self.deck_layer.as_ref() else {
                     return;
                 };
+                crate::perf::mark("deck renderer");
                 crate::renderer::Renderer::new(&self.conn, layer.wl_surface(), pw, ph, scale)
             };
             match built {
