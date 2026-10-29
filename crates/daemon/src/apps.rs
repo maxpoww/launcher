@@ -254,7 +254,9 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 // (in a terminal) and dragged out to uninstall like any
                 // app. Rebuilt on every rescan, so it tracks install/
                 // uninstall.
+                let t_cli = std::time::Instant::now();
                 let cli = managed_cli_tiles(&entries);
+                let t_cli = t_cli.elapsed();
                 let cli_ids: Vec<String> = cli.iter().map(|e| e.id.clone()).collect();
                 kinds.extend(std::iter::repeat_n(EntryKind::App, cli.len()));
                 entries.extend(cli);
@@ -264,25 +266,35 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 kinds.push(EntryKind::App);
                 entries.push(apps_grid_tile());
                 kinds.push(EntryKind::App);
+                let t_folders = std::time::Instant::now();
                 let folders = home_folders();
+                let t_folders = t_folders.elapsed();
                 kinds.extend(std::iter::repeat_n(EntryKind::File, folders.len()));
                 entries.extend(folders);
                 for asset in icon_assets() {
                     entries.push(asset);
                     kinds.push(EntryKind::Asset);
                 }
+                let t_open = std::time::Instant::now();
+                loader.disk.open_pack();
+                let t_open = t_open.elapsed();
                 let (icons, placeholders): (Vec<_>, Vec<_>) =
                     entries.iter().map(|entry| loader.icon_for(entry)).unzip();
+                let t_save = std::time::Instant::now();
                 loader.resolutions.save();
+                let t_save = t_save.elapsed();
+                let t_close = std::time::Instant::now();
+                loader.disk.close_pack();
+                let t_close = t_close.elapsed();
                 let walk = std::time::Instant::now();
                 let files = scan_home_files();
                 let opened = crate::file_search::opened_from_record();
                 // (Said at info when it took its time: on the 2013 MacBook Air
                 // the apps came 9.6 s after the dock, and nothing said why.)
                 let took = started.elapsed();
-                let (from_disk, rasterized) = loader.take_counts();
+                let (from_disk, rasterized, where_) = loader.take_counts();
                 let line = format!(
-                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}: {from_disk} read, {rasterized} rasterized, files {:?})",
+                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}: {from_disk} read, {rasterized} rasterized, {where_}, pack open {t_open:?} close {t_close:?}, cli {t_cli:?}, folders {t_folders:?}, save {t_save:?}, files {:?})",
                     entries.len(),
                     files.len(),
                     took,
@@ -428,12 +440,6 @@ pub(crate) fn bin_lid_figure() -> Option<Vec<u8>> {
     Some(with_mips(rasterize_svg(&crate::look::figure(include_bytes!("../assets/dock/bin-lid.svg")))?.take()))
 }
 
-/// The control panel's gears at rest (`gears_icon`); their turning frames
-/// are drawn meanwhile, off the loop.
-fn gears_figure() -> Option<Vec<u8>> {
-    crate::gears_icon::warm();
-    Some(with_mips(rasterize_svg(crate::gears_icon::svg(0.0).as_bytes())?.take()))
-}
 
 /// The control panel's gears turned by `angle`, ready to upload: the drawn
 /// frame nearest it, each pixel doubled to the icon size (the mips below
@@ -457,11 +463,6 @@ fn frame_chain(small: &[u8], frame: u32) -> Vec<u8> {
     with_mips(base)
 }
 
-/// The apps button at rest (`apps_icon`); its frames are drawn meanwhile.
-fn apps_figure() -> Option<Vec<u8>> {
-    crate::apps_icon::warm();
-    Some(with_mips(rasterize_svg(crate::apps_icon::svg(0.0, 0.0).as_bytes())?.take()))
-}
 
 /// Seam's compass with its needle and its plate where they are, ready to
 /// upload, once both are drawn.
@@ -601,50 +602,59 @@ pub(crate) fn take_figures() -> Option<Figures> {
     }
 }
 
-pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
+/// The SVG a fixed tile is drawn from (the control panel's gears, the apps
+/// grid's, the brand marks at rest, the dock's figures), or `None` for an
+/// ordinary app. The tile itself is [`dock_figure`]; the indexer keeps it
+/// in the disk cache by what the SVG holds (a dozen of these were drawn
+/// at every index: 300 ms on the dev box, over a second on the 2013
+/// MacBook Air, 2026-10-29).
+pub(crate) fn dock_figure_svg(id: &str) -> Option<Vec<u8>> {
+    // (The gears' turning frames and the apps button's are drawn meanwhile,
+    // off the loop.)
     if id == CONTROL_PANEL_ID {
-        return gears_figure();
+        crate::gears_icon::warm();
+        return Some(crate::gears_icon::svg(0.0).into_bytes());
     }
     if id == APPS_GRID_ID {
-        return apps_figure();
+        crate::apps_icon::warm();
+        return Some(crate::apps_icon::svg(0.0, 0.0).into_bytes());
     }
     // Seam wears the compass (`compass_icon`), its frames drawn meanwhile.
     if id == crate::compass_icon::SEAM_ID {
         crate::compass_icon::warm();
-        return Some(with_mips(rasterize_svg(crate::compass_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::compass_icon::rest_svg().into_bytes());
     }
     // WhatsApp wears its moving mark (`whatsapp_icon`), frames drawn meanwhile.
     if id == crate::whatsapp_icon::WHATSAPP_ID {
         crate::whatsapp_icon::warm();
-        return Some(with_mips(rasterize_svg(crate::whatsapp_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::whatsapp_icon::rest_svg().into_bytes());
     }
-    // YouTube wears its moving mark (`youtube_icon`).
     if id == crate::youtube_icon::YOUTUBE_ID {
-        return Some(with_mips(rasterize_svg(crate::youtube_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::youtube_icon::rest_svg().into_bytes());
     }
-    // YouTube Music wears its moving mark (`ytmusic_icon`).
     if id == crate::ytmusic_icon::YTMUSIC_ID {
-        return Some(with_mips(rasterize_svg(crate::ytmusic_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::ytmusic_icon::rest_svg().into_bytes());
     }
-    // Discord wears its moving mark (`discord_icon`).
     if id == crate::discord_icon::DISCORD_ID {
-        return Some(with_mips(rasterize_svg(crate::discord_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::discord_icon::rest_svg().into_bytes());
     }
-    // Spotify wears its moving mark (`spotify_icon`).
     if id == crate::spotify_icon::SPOTIFY_ID {
-        return Some(with_mips(rasterize_svg(crate::spotify_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::spotify_icon::rest_svg().into_bytes());
     }
-    // Google wears its moving mark (`google_icon`).
     if id == crate::google_icon::GOOGLE_ID {
-        return Some(with_mips(rasterize_svg(crate::google_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::google_icon::rest_svg().into_bytes());
     }
-    // Chrome wears its moving mark (`chrome_icon`).
     if id == crate::chrome_icon::CHROME_ID {
-        return Some(with_mips(rasterize_svg(crate::chrome_icon::rest_svg().as_bytes())?.take()));
+        return Some(crate::chrome_icon::rest_svg().into_bytes());
     }
     let &(_, svg) = DOCK_FIGURES.iter().find(|(fid, _)| *fid == id)?;
     // (Silver, or graphite in the dark: `look::figure`.)
-    Some(with_mips(rasterize_svg(&crate::look::figure(svg))?.take()))
+    Some(crate::look::figure(svg).into_owned())
+}
+
+pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
+    let svg = dock_figure_svg(id)?;
+    Some(with_mips(rasterize_svg(&svg)?.take()))
 }
 
 /// Whether `id` is one of the dock's fixed trio ([`DOCK_FIXED`]).
@@ -918,9 +928,16 @@ pub(crate) struct IconLoader {
     /// Theme fallback chain, best first (see [`theme_chain`]).
     themes: Vec<String>,
     rasters: HashMap<String, (Vec<u8>, bool)>,
-    /// Tiles read from the disk cache and rasterized since `take_counts`.
+    /// Tiles read from the disk cache and rasterized since `take_counts`,
+    /// and where the time went (resolving the name, naming the tile,
+    /// reading it).
     loaded: usize,
     rasterized: usize,
+    t_resolve: std::time::Duration,
+    t_key: std::time::Duration,
+    t_load: std::time::Duration,
+    t_placeholder: std::time::Duration,
+    placeholders: usize,
     disk: DiskCache,
     resolutions: ResolutionCache,
 }
@@ -934,6 +951,11 @@ impl IconLoader {
             rasters: HashMap::new(),
             loaded: 0,
             rasterized: 0,
+            t_resolve: std::time::Duration::ZERO,
+            t_key: std::time::Duration::ZERO,
+            t_load: std::time::Duration::ZERO,
+            t_placeholder: std::time::Duration::ZERO,
+            placeholders: 0,
             disk: DiskCache::new(),
             configured: theme,
             look,
@@ -967,15 +989,29 @@ impl IconLoader {
     /// The entry's icon as `(pixels, is_placeholder)`.
     pub(crate) fn icon_for(&mut self, entry: &AppEntry) -> (Vec<u8>, bool) {
         self.sync();
-        // The fixed trio wears its built-in figure, sized as designed (not
-        // re-fitted to the 80% every theme icon is normalized to).
-        if let Some(chain) = dock_figure(&entry.id) {
-            return (chain, false);
+        // The fixed tiles wear their built-in figure, sized as designed (not
+        // re-fitted to the 80% every theme icon is normalized to): kept on
+        // disk by what the SVG holds, like any tile.
+        if let Some(svg) = dock_figure_svg(&entry.id) {
+            let key = format!("figure|{:016x}|{}", fnv1a64_bytes(&svg), svg.len());
+            let file = self.disk.dir.join(format!("{:016x}", fnv1a64(&key)));
+            let t = std::time::Instant::now();
+            if let Some(chain) = self.disk.load(&file) {
+                self.loaded += 1;
+                self.t_load += t.elapsed();
+                return (chain, false);
+            }
+            if let Some(chain) = rasterize_svg(&svg).map(|p| with_mips(p.take())) {
+                self.rasterized += 1;
+                self.disk.store(&file, &chain);
+                return (chain, false);
+            }
         }
         // `asset-*` carriers are keyed by their id (not the resolved path):
         // they render unplated while an app using the same themed icon stays
         // plated, so the two must not share a cache slot.
         let is_asset = entry.id.starts_with("asset-");
+        let t0 = std::time::Instant::now();
         let (key, path) = match self.resolve(entry) {
             Some(path) if is_asset => (entry.id.clone(), Some(path)),
             Some(path) => (path.clone(), Some(path)),
@@ -989,7 +1025,11 @@ impl IconLoader {
         // carriers under a tag of their own (they skipped it as "cheap":
         // on the 2013 MacBook Air the assets were 2.7 s of every start's
         // index, 2026-10-29).
+        self.t_resolve += t0.elapsed();
+        let t1 = std::time::Instant::now();
         let cache_file = path.as_deref().and_then(|p| self.disk.file_for(p, if is_asset { "unplated" } else { "" }));
+        self.t_key += t1.elapsed();
+        let t2 = std::time::Instant::now();
         // `on_disk`: the persistent cache holds this tile, so a rescan reads
         // it back from there (one 349 KB file, usually still in the page
         // cache) and it is NOT kept in memory as well. Every tile used to
@@ -997,9 +1037,10 @@ impl IconLoader {
         // apps on the Acer, growing with every app and every package search
         // (night audit, 2026-10-04).
         let (pixels, is_placeholder, on_disk) =
-            match cache_file.as_deref().and_then(DiskCache::load) {
+            match cache_file.as_deref().and_then(|f| self.disk.load(f)) {
                 Some(pixels) => {
                     self.loaded += 1;
+                    self.t_load += t2.elapsed();
                     (pixels, false, true)
                 }
                 None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
@@ -1010,7 +1051,13 @@ impl IconLoader {
                             .is_some_and(|file| self.disk.store(file, &pixels));
                         (pixels, false, stored)
                     }
-                    None => (placeholder_icon(&entry.name), true, false),
+                    None => {
+                        let t3 = std::time::Instant::now();
+                        let tile = placeholder_icon(&entry.name);
+                        self.t_placeholder += t3.elapsed();
+                        self.placeholders += 1;
+                        (tile, true, false)
+                    }
                 },
             };
         if !on_disk {
@@ -1027,8 +1074,16 @@ impl IconLoader {
 
     /// How many tiles came from the disk cache and how many were rasterized
     /// since the last call.
-    pub(crate) fn take_counts(&mut self) -> (usize, usize) {
-        (std::mem::take(&mut self.loaded), std::mem::take(&mut self.rasterized))
+    pub(crate) fn take_counts(&mut self) -> (usize, usize, String) {
+        let where_ = format!(
+            "resolve {:?}, name {:?}, read {:?}, {} placeholders {:?}",
+            std::mem::take(&mut self.t_resolve),
+            std::mem::take(&mut self.t_key),
+            std::mem::take(&mut self.t_load),
+            std::mem::take(&mut self.placeholders),
+            std::mem::take(&mut self.t_placeholder)
+        );
+        (std::mem::take(&mut self.loaded), std::mem::take(&mut self.rasterized), where_)
     }
 
     /// Resolve an entry's icon name to a file path (absolute names pass
@@ -1050,6 +1105,62 @@ impl IconLoader {
 /// entries are tiny (`ICON_SIZE`² × 4 bytes) and simply linger.
 struct DiskCache {
     dir: PathBuf,
+    /// A store file's content hash and length as last read, by path
+    /// (`hashes.tsv`): a store path is immutable, so its bytes are not read
+    /// at every start to name its tile. Only paths under /nix/store.
+    hashes: HashMap<String, (u64, usize)>,
+    hashes_dirty: bool,
+    /// THE PACK (`pack.bin`): every tile of the last index in one file, read
+    /// once at a start — 115 tiles read one file each from a cold SSD were
+    /// 2.2 s on the 2013 MacBook Air (2026-10-29). Held only between
+    /// `open_pack` and `close_pack` (the indexer's pass), by tile name.
+    pack: Option<Pack>,
+    /// The tiles this pass served or stored, for the next pack.
+    used: Vec<PathBuf>,
+}
+
+/// The tiles of the last index in one file: a header of names and places,
+/// then the chains.
+struct Pack {
+    bytes: Vec<u8>,
+    at: HashMap<u64, (usize, usize)>,
+}
+
+const PACK_MAGIC: &[u8; 4] = b"GTP1";
+
+impl Pack {
+    fn open(file: &std::path::Path) -> Option<Self> {
+        let bytes = std::fs::read(file).ok()?;
+        if bytes.len() < 8 || &bytes[..4] != PACK_MAGIC {
+            return None;
+        }
+        let count = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
+        let head = 8 + count * 20;
+        if bytes.len() < head {
+            return None;
+        }
+        let mut at = HashMap::with_capacity(count);
+        for i in 0..count {
+            let e = 8 + i * 20;
+            let name = u64::from_le_bytes(bytes[e..e + 8].try_into().ok()?);
+            let offset = u64::from_le_bytes(bytes[e + 8..e + 16].try_into().ok()?) as usize;
+            let len = u32::from_le_bytes(bytes[e + 16..e + 20].try_into().ok()?) as usize;
+            if offset.checked_add(len).is_none_or(|end| end > bytes.len()) {
+                return None;
+            }
+            at.insert(name, (offset, len));
+        }
+        Some(Self { bytes, at })
+    }
+
+    fn get(&self, name: u64) -> Option<&[u8]> {
+        self.at.get(&name).map(|&(offset, len)| &self.bytes[offset..offset + len])
+    }
+}
+
+/// A tile file's name as a number (the hex of its key's hash).
+fn tile_name(file: &std::path::Path) -> Option<u64> {
+    u64::from_str_radix(file.file_name()?.to_str()?, 16).ok()
 }
 
 impl DiskCache {
@@ -1066,16 +1177,102 @@ impl DiskCache {
         } else {
             "raw".to_owned()
         };
-        Self {
-            dir: cache_base()
+        Self::at(
+            cache_base()
                 .join("waverunner")
                 .join(format!("icons-{ICON_SIZE}-{variant}")),
+        )
+    }
+
+    /// The cache in `dir`, its remembered hashes read.
+    fn at(dir: PathBuf) -> Self {
+        let mut hashes = HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(dir.join("hashes.tsv")) {
+            for line in text.lines() {
+                let mut parts = line.splitn(3, '\t');
+                if let (Some(h), Some(l), Some(path)) = (parts.next(), parts.next(), parts.next()) {
+                    if let (Ok(h), Ok(l)) = (u64::from_str_radix(h, 16), l.parse::<usize>()) {
+                        hashes.insert(path.to_owned(), (h, l));
+                    }
+                }
+            }
+        }
+        Self {
+            dir,
+            hashes,
+            hashes_dirty: false,
+            pack: None,
+            used: Vec::new(),
+        }
+    }
+
+    /// The index begins: the pack of the last one is read, once, to serve
+    /// its tiles from memory.
+    fn open_pack(&mut self) {
+        self.used.clear();
+        self.pack = Pack::open(&self.dir.join("pack.bin"));
+    }
+
+    /// The index is done: the tiles it used are written as the next pack
+    /// (read back from their files, in the page cache by now), the hashes
+    /// remembered, and the pack in memory let go.
+    fn close_pack(&mut self) {
+        self.pack = None;
+        let used = std::mem::take(&mut self.used);
+        if !used.is_empty() {
+            let mut names: Vec<(u64, PathBuf)> = used.iter().filter_map(|f| Some((tile_name(f)?, f.clone()))).collect();
+            names.sort_by_key(|(n, _)| *n);
+            names.dedup_by_key(|(n, _)| *n);
+            let mut head = Vec::with_capacity(8 + names.len() * 20);
+            let mut body: Vec<u8> = Vec::new();
+            let mut count = 0u32;
+            for (name, file) in &names {
+                let Ok(pixels) = std::fs::read(file) else { continue };
+                if pixels.len() != ICON_CHAIN_BYTES {
+                    continue;
+                }
+                still_used(file);
+                head.extend_from_slice(&name.to_le_bytes());
+                head.extend_from_slice(&(body.len() as u64).to_le_bytes());
+                head.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+                body.extend_from_slice(&pixels);
+                count += 1;
+            }
+            // (The places are from the body's start: moved past the header.)
+            let header_len = 8 + count as usize * 20;
+            for i in 0..count as usize {
+                let e = i * 20 + 8;
+                let offset = u64::from_le_bytes(head[e..e + 8].try_into().unwrap_or([0; 8])) + header_len as u64;
+                head[e..e + 8].copy_from_slice(&offset.to_le_bytes());
+            }
+            let mut out = Vec::with_capacity(header_len + body.len());
+            out.extend_from_slice(PACK_MAGIC);
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&head);
+            out.extend_from_slice(&body);
+            let file = self.dir.join("pack.bin");
+            let tmp = self.dir.join(format!("pack.tmp{}", std::process::id()));
+            if std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &file)).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+        if self.hashes_dirty {
+            self.hashes_dirty = false;
+            let mut text = String::new();
+            for (path, (h, l)) in &self.hashes {
+                text.push_str(&format!("{h:016x}\t{l}\t{path}\n"));
+            }
+            let file = self.dir.join("hashes.tsv");
+            let tmp = self.dir.join(format!("hashes.tmp{}", std::process::id()));
+            if std::fs::create_dir_all(&self.dir).and_then(|()| std::fs::write(&tmp, text)).and_then(|()| std::fs::rename(&tmp, &file)).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 
     /// Cache file for `icon_path`, or `None` if the icon file cannot be
     /// stat'ed (vanished between resolve and now).
-    fn file_for(&self, icon_path: &str, tag: &str) -> Option<PathBuf> {
+    fn file_for(&mut self, icon_path: &str, tag: &str) -> Option<PathBuf> {
         // Named by the file it REALLY is: a theme path through a profile
         // (`/etc/profiles/…/share/icons/…`) stays the same across rebuilds
         // while the store file behind it changes, and every store file has
@@ -1089,25 +1286,53 @@ impl DiskCache {
         // was drawn again at the first start after each update — 76 of 125
         // on the 2013 MacBook Air, 4.3 s (2026-10-29). The bytes of an icon
         // are small next to its tile; a PNG's are read once a start.
-        let bytes = std::fs::read(icon_path).ok()?;
+        // (A store file never changes: its hash is remembered by its real
+        // path — a theme path through a profile is a link into the store.)
+        let real = std::fs::canonicalize(icon_path).ok();
+        let real = real.as_deref().and_then(|p| p.to_str()).unwrap_or(icon_path);
+        let in_store = real.starts_with("/nix/store/");
+        let (hash, len) = match self.hashes.get(real).filter(|_| in_store) {
+            Some(&known) => known,
+            None => {
+                let bytes = std::fs::read(real).ok()?;
+                let known = (fnv1a64_bytes(&bytes), bytes.len());
+                if in_store {
+                    self.hashes.insert(real.to_owned(), known);
+                    self.hashes_dirty = true;
+                }
+                known
+            }
+        };
         // (`tag`: the same file drawn another way — an unplated carrier —
         // is another tile.)
-        let key = format!("{:016x}|{}|{tag}", fnv1a64_bytes(&bytes), bytes.len());
+        let key = format!("{hash:016x}|{len}|{tag}");
         Some(self.dir.join(format!("{:016x}", fnv1a64(&key))))
     }
 
     /// Read a cached mip chain back, rejecting files of the wrong size
     /// (truncated write or a stale format/`ICON_SIZE`).
-    fn load(file: &std::path::Path) -> Option<Vec<u8>> {
+    fn load(&mut self, file: &std::path::Path) -> Option<Vec<u8>> {
+        if let Some(pixels) = self.pack.as_ref().and_then(|p| p.get(tile_name(file)?)) {
+            if pixels.len() == ICON_CHAIN_BYTES {
+                self.used.push(file.to_path_buf());
+                return Some(pixels.to_vec());
+            }
+        }
         let pixels = std::fs::read(file).ok()?;
         still_used(file);
-        (pixels.len() == ICON_CHAIN_BYTES).then_some(pixels)
+        if pixels.len() == ICON_CHAIN_BYTES {
+            self.used.push(file.to_path_buf());
+            Some(pixels)
+        } else {
+            None
+        }
     }
 
     /// Persist a raster via write-to-temp + rename, so a concurrent
     /// reader never sees a half-written file. Failures only cost a
     /// re-rasterize next cold start. Returns whether the tile is on disk.
-    fn store(&self, file: &std::path::Path, pixels: &[u8]) -> bool {
+    fn store(&mut self, file: &std::path::Path, pixels: &[u8]) -> bool {
+        self.used.push(file.to_path_buf());
         if let Err(e) = std::fs::create_dir_all(&self.dir) {
             debug!("icon cache: cannot create {:?}: {e}", self.dir);
             return false;
@@ -1843,30 +2068,39 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let icon = dir.join("icon.svg");
         std::fs::write(&icon, b"<svg/>").unwrap();
-        (DiskCache { dir }, icon)
+        (DiskCache::at(dir), icon)
     }
 
     #[test]
     fn disk_cache_round_trips() {
-        let (cache, icon) = scratch("round-trip");
+        let (mut cache, icon) = scratch("round-trip");
         let icon = icon.to_string_lossy().into_owned();
         let file = cache.file_for(&icon, "").unwrap();
-        assert_eq!(DiskCache::load(&file), None, "cold cache misses");
+        assert_eq!(cache.load(&file), None, "cold cache misses");
 
         let pixels = vec![7u8; ICON_CHAIN_BYTES];
         cache.store(&file, &pixels);
-        assert_eq!(DiskCache::load(&file), Some(pixels));
+        assert_eq!(cache.load(&file), Some(pixels.clone()));
+
+        // The pack: the tiles used are written as one file, served from
+        // memory next time even with the tile's own file gone.
+        cache.close_pack();
+        assert!(cache.dir.join("pack.bin").exists());
+        std::fs::remove_file(&file).unwrap();
+        cache.open_pack();
+        assert_eq!(cache.load(&file), Some(pixels));
+        cache.close_pack();
 
         std::fs::remove_dir_all(&cache.dir).unwrap();
     }
 
     #[test]
     fn disk_cache_rejects_wrong_size_and_tracks_content() {
-        let (cache, icon) = scratch("reject");
+        let (mut cache, icon) = scratch("reject");
         let icon_str = icon.to_string_lossy().into_owned();
         let file = cache.file_for(&icon_str, "").unwrap();
         cache.store(&file, &[7u8; 3]);
-        assert_eq!(DiskCache::load(&file), None, "truncated raster rejected");
+        assert_eq!(cache.load(&file), None, "truncated raster rejected");
 
         // Growing the icon file changes its cache key.
         std::fs::write(&icon, b"<svg></svg>").unwrap();
