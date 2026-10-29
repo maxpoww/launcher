@@ -5674,7 +5674,7 @@ impl App {
         if crate::glyphs::is_key(&res.key) {
             self.symbols_asked.remove(&res.key);
             if let Some(chain) = res.chain.as_ref() {
-                self.symbols.insert(res.key.clone(), chain.clone());
+                self.symbols.insert(res.key.clone(), crate::apps::symbol_chain(chain.clone()));
             }
         }
         let mut redraw = Vec::new();

@@ -346,6 +346,8 @@ fn main() -> anyhow::Result<()> {
         info!("reduce-motion: animations snap to their end state");
     }
 
+    // The fonts, made ready on a thread while the rest starts.
+    renderer::warm_fonts();
     let conn = Connection::connect_to_env()
         .context("connecting to Wayland (is this a Wayland session?)")?;
     let (globals, event_queue) = registry_queue_init(&conn).context("wayland registry init")?;
@@ -379,6 +381,8 @@ fn main() -> anyhow::Result<()> {
         render_scale,
         None,
     );
+    // The GPU for it, opened meanwhile (`renderer::warm_gpu`).
+    let gpu_warm = renderer::warm_gpu(&conn, layer.wl_surface());
 
     // The OPTIONS topbar: a second top-anchored strip, created only when
     // enabled. Its renderer is built on its first configure (like the dock's).
@@ -697,6 +701,7 @@ fn main() -> anyhow::Result<()> {
         compositor,
         layer,
         renderer: None,
+        gpu_warm,
         options_layer,
         options_renderer: None,
         options_size: (0, 0),
@@ -1616,6 +1621,8 @@ pub struct App {
     compositor: CompositorState,
     layer: LayerSurface,
     renderer: Option<Renderer>,
+    /// The GPU opened ahead for the dock's surface, until its first frame.
+    gpu_warm: Option<std::thread::JoinHandle<anyhow::Result<renderer::WarmGpu>>>,
     /// Fractional-scale state per surface (see `fractional.rs`); `None` when
     /// the compositor lacks the protocols (integer `render_scale` path).
     dock_fscale: Option<fractional::SurfaceScale>,
@@ -7855,15 +7862,18 @@ impl App {
             fs.set_logical_size(width, height);
         }
 
-        if self.renderer.is_none() {
+        let warm = if self.renderer.is_none() {
             perf::mark("dock renderer");
-        }
+            self.gpu_warm_take()
+        } else {
+            None
+        };
         match self.renderer.as_mut() {
             Some(renderer) => {
                 renderer.set_scale(scale);
                 renderer.resize(pw, ph);
             }
-            None => match Renderer::new(&self.conn, self.layer.wl_surface(), pw, ph, scale) {
+            None => match Renderer::new_with(&self.conn, self.layer.wl_surface(), pw, ph, scale, warm) {
                 Ok(mut renderer) => {
                     if let Some(icons) = self.pending_icons.take() {
                         let tail_used = self.icon_tail_used();
@@ -9173,6 +9183,33 @@ fn veil_layer_new(
 }
 
 impl App {
+    /// The GPU opened ahead for the dock's surface, once it is: waited for
+    /// while still opening (work the first frame needs anyway); none for
+    /// another surface or after a failure (the renderer opens its own).
+    fn gpu_warm_take(&mut self) -> Option<renderer::WarmGpu> {
+        let handle = self.gpu_warm.take()?;
+        let waited = Instant::now();
+        let warm = match handle.join() {
+            Ok(Ok(warm)) => warm,
+            Ok(Err(e)) => {
+                warn!("renderer: the GPU could not be opened ahead: {e:#}");
+                return None;
+            }
+            Err(_) => {
+                warn!("renderer: opening the GPU ahead panicked");
+                return None;
+            }
+        };
+        if warm.surface_id != self.layer.wl_surface().id() {
+            return None;
+        }
+        let waited = waited.elapsed().as_millis();
+        if waited > 1 {
+            info!("renderer: waited {waited} ms for the GPU opened ahead");
+        }
+        Some(warm)
+    }
+
     /// Layers of the dock icon array's reserved tail in use (one past the
     /// highest written: the package hits, the installs' tiles, the Files
     /// thumbnails, the minimized windows' pictures), so a new app set's array

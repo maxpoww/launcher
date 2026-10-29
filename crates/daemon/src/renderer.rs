@@ -22,7 +22,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy};
 use wgpu::util::DeviceExt;
 
-use crate::apps::{ICON_CHAIN_BYTES, ICON_MIPS, ICON_SIZE};
+use crate::apps::{ICON_MIPS, ICON_SIZE};
 use crate::content::Scene;
 
 /// The largest texture side the device is asked for — and so the largest
@@ -202,10 +202,14 @@ fn shared_text() -> (SharedFonts, SharedSwash) {
     SHARED_TEXT.with(|t| {
         t.borrow_mut()
             .get_or_insert_with(|| {
-                let mut fonts = FontSystem::new_with_locale_and_db(
-                    crate::font_index::locale(),
-                    crate::font_index::database(),
-                );
+                // (Made ahead on a thread, when it was: `warm_fonts`.)
+                let ready = FONTS_AHEAD.lock().ok().and_then(|mut h| h.take()).and_then(|h| h.join().ok());
+                let mut fonts = ready.unwrap_or_else(|| {
+                    FontSystem::new_with_locale_and_db(
+                        crate::font_index::locale(),
+                        crate::font_index::database(),
+                    )
+                });
                 let _ = SANS_MEDIUM.set(sans_medium(&mut fonts));
                 (
                     std::rc::Rc::new(std::cell::RefCell::new(fonts)),
@@ -776,6 +780,19 @@ impl Renderer {
         height: u32,
         scale: f32,
     ) -> anyhow::Result<Self> {
+        Self::new_with(conn, wl_surface, width, height, scale, None)
+    }
+
+    /// [`Renderer::new`] on a GPU opened ahead (`warm_gpu`), when there is
+    /// one for this surface.
+    pub fn new_with(
+        conn: &Connection,
+        wl_surface: &WlSurface,
+        width: u32,
+        height: u32,
+        scale: f32,
+        warm: Option<WarmGpu>,
+    ) -> anyhow::Result<Self> {
         let t_start = Instant::now();
         // Held for the whole setup: the GL path initializes its EGL display
         // in create_surface, not Instance::new. See `NoVblankWait`.
@@ -793,7 +810,9 @@ impl Renderer {
         // ONE GPU device for every surface of the shell (see [`SharedGpu`]):
         // the first renderer walks the adapter ladder and opens the device,
         // the others draw on it.
-        let reuse = SHARED_GPU.with(|g| g.borrow().clone()).and_then(|g| {
+        let warm_pipes = warm.as_ref().and_then(|w| w.pipelines.clone());
+        // (One surface for the wl_surface: with a GPU opened ahead, its.)
+        let reuse = if warm.is_some() { None } else { SHARED_GPU.with(|g| g.borrow().clone()) }.and_then(|g| {
             let surface = unsafe {
                 g.instance
                     .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -817,135 +836,33 @@ impl Renderer {
             );
             Some((surface, g.adapter, g.device, g.queue))
         });
-        let (surface, adapter, device, queue, on_shared_gpu) = if let Some(reuse) = reuse {
+        let (surface, adapter, device, queue, on_shared_gpu) = if let Some(w) = warm {
+            tracing::info!("renderer: on the GPU opened ahead ({})", w.adapter.get_info().name);
+            let shared = SHARED_GPU.with(|g| {
+                let mut g = g.borrow_mut();
+                if g.is_none() {
+                    *g = Some(SharedGpu {
+                        instance: w.instance,
+                        adapter: w.adapter.clone(),
+                        device: w.device.clone(),
+                        queue: w.queue.clone(),
+                    });
+                    true
+                } else {
+                    false
+                }
+            });
+            (w.surface, w.adapter, w.device, w.queue, shared)
+        } else if let Some(reuse) = reuse {
             (reuse.0, reuse.1, reuse.2, reuse.3, true)
         } else {
-            const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
-                // What we want: a real GPU on Vulkan. Vulkan ALONE: asking for
-                // GL too made every start also bring up EGL, Mesa's GL driver
-                // (libgallium, 60 MB) and two GL contexts on machines that never
-                // draw through them — reads a spinning disk pays for at login
-                // (ThinkPad, 2026-10-01). LLVM still loads on most machines
-                // (RADV and lavapipe link it). A machine without a usable Vulkan
-                // GPU reaches GL on the next rung, as before.
-                (wgpu::Backends::VULKAN, false, "gpu"),
-                // Some stacks present fine on GL while their Vulkan surface path
-                // is broken; asking for GL alone changes which one is picked.
-                // MUST come before the software fallback: on pre-Skylake Intel
-                // (Haswell — "Vulkan support is incomplete") the only Vulkan
-                // adapter mesa offers is llvmpipe, so the attempt above yields a
-                // CPU rasterizer while a perfectly good REAL GPU sits on the GL
-                // path (crocus). Found live on a 2013 MacBook Air: the whole
-                // shell was software-rendered (menubox = 80% CPU) until GL was
-                // tried before accepting CPU (2026-09-02).
-                (wgpu::Backends::GL, false, "gl only"),
-                // Anything at all, including lavapipe/llvmpipe on the CPU. Slow
-                // (the F12 throttle exists for exactly this) but it is a desktop.
-                (
-                    wgpu::Backends::from_bits_truncate(
-                        wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
-                    ),
-                    true,
-                    "software fallback",
-                ),
-            ];
-
-            let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
-            // The instance must outlive the surface it created; hold the winning
-            // one until the device is built below.
-            let mut _live_instance: Option<wgpu::Instance> = None;
-            for (backends, force_fallback_adapter, label) in ATTEMPTS {
-                let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                    backends,
-                    ..Default::default()
-                });
-                // SAFETY: both handles point at live Wayland objects owned by
-                // App, which outlives the renderer and drops it first.
-                let surface = match unsafe {
-                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                            display,
-                        )),
-                        raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
-                            window,
-                        )),
-                    })
-                } {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("renderer: no surface via {label}: {e}");
-                        continue;
-                    }
-                };
-                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::LowPower,
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter,
-                })) {
-                    Some(adapter) => {
-                        // A CPU rasterizer only counts on the explicit software
-                        // attempt — a non-fallback attempt returning one (mesa's
-                        // llvmpipe posing as the Vulkan adapter on old Intel)
-                        // must keep looking so a real GPU on another backend
-                        // gets its turn.
-                        if !force_fallback_adapter
-                            && adapter.get_info().device_type == wgpu::DeviceType::Cpu
-                        {
-                            tracing::warn!(
-                                "renderer: {label} offered a CPU adapter ({}); trying next backend",
-                                adapter.get_info().name
-                            );
-                            continue;
-                        }
-                        tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
-                        chosen = Some((surface, adapter));
-                        _live_instance = Some(instance);
-                        break;
-                    }
-                    None => tracing::warn!("renderer: no adapter via {label}"),
-                }
-            }
-            let (surface, adapter) = chosen.ok_or_else(|| {
-                anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
-            })?;
-            let (device, queue) = pollster::block_on(adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("waverunner"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits {
-                        // Allow surface expansion to full screen height (>2048 on 4K displays).
-                        max_texture_dimension_2d: MAX_TEXTURE_SIDE,
-                        // The icon array is one texture layer per app icon plus a
-                        // reserved block (rank hits + pending installs + thumbs +
-                        // minimized = 113). downlevel_defaults() caps
-                        // texture_array_layers at
-                        // 256, so a machine with ~160+ .desktop entries overflowed
-                        // it — create_texture("waverunner.icons") panicked the
-                        // daemon on cold start (267 layers on a 170-app machine,
-                        // 2026-09-01). Request what the adapter actually offers
-                        // (2048 on any real GPU, incl. this Iris Xe / RTX 4050);
-                        // this never exceeds hardware, so device creation is safe.
-                        max_texture_array_layers: adapter.limits().max_texture_array_layers,
-                        ..wgpu::Limits::downlevel_defaults()
-                    },
-                    // Small device-memory blocks (8 MB, growing to 64): the
-                    // default hint, Performance, takes GPU memory 128 MB at a
-                    // time — sized for a game, and most of what the shell held
-                    // on the Acer (night audit, 2026-10-04).
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                },
-                None,
-            ))
-            .context("wgpu device request failed")?;
-            // wgpu's answer to an error nobody asked to catch is a panic, and
-            // a panic ends the shell. On 2026-10-20 the dev box lost its dock
-            // right after "swapchain acquire timed out; recreating it", as
-            // Hyprland's overview took the screen ("i have no shell now"),
-            // with the reason on a stderr nobody reads. Logged instead: that
-            // frame is lost, the next acquire recreates the swapchain.
-            device.on_uncaptured_error(Box::new(gpu_error));
-            let live_instance =
-                _live_instance.ok_or_else(|| anyhow!("the chosen adapter has no instance"))?;
+            let Opened {
+                instance: live_instance,
+                surface,
+                adapter,
+                device,
+                queue,
+            } = open_gpu(display, window)?;
             let shared = SHARED_GPU.with(|g| {
                 let mut g = g.borrow_mut();
                 // A renderer that could not use the shared device keeps its
@@ -1050,6 +967,7 @@ impl Renderer {
             }
         };
         surface.configure(&device, &config);
+        crate::perf::mark("surface configured");
 
         // Group 0: globals (screen size + animation alpha).
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1065,431 +983,20 @@ impl Renderer {
         let format = config.format;
         let cached = SHARED_PIPELINES
             .with(|p| p.borrow().clone())
-            .filter(|p| on_shared_gpu && p.format == format);
+            .filter(|p| on_shared_gpu && p.format == format)
+            .or_else(|| warm_pipes.filter(|p| p.format == format));
         let pipes = match cached {
             Some(pipes) => pipes,
-            None => {
-                let globals_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("waverunner.globals"),
-                        entries: &[wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        }],
-                    });
-                let blend = wgpu::BlendState {
-                    color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                };
-                let target = [Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })];
-
-                // Top-edge shadow pipeline (instanced gradient bands). Shares the
-                // globals bind group and premultiplied blend target with the rects.
-                let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("waverunner.edge_shadow"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        include_str!("shaders/edge_shadow.wgsl").into(),
-                    ),
-                });
-                let shadow_layout =
-                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("waverunner.shadow"),
-                        bind_group_layouts: &[&globals_layout],
-                        push_constant_ranges: &[],
-                    });
-                let shadow_pipeline =
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("waverunner.shadow"),
-                        layout: Some(&shadow_layout),
-                        vertex: wgpu::VertexState {
-                            module: &shadow_shader,
-                            entry_point: Some("vs_main"),
-                            compilation_options: Default::default(),
-                            buffers: &[wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<ShadowInstance>() as u64,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &wgpu::vertex_attr_array![
-                                    0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
-                                    3 => Float32, 4 => Float32, 5 => Float32x4
-                                ],
-                            }],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &shadow_shader,
-                            entry_point: Some("fs_main"),
-                            compilation_options: Default::default(),
-                            targets: &target,
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleStrip,
-                            ..Default::default()
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    });
-
-                // Rounded-rect pipeline (instanced SDF quads).
-                let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("waverunner.rounded_rect"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        include_str!("shaders/rounded_rect.wgsl").into(),
-                    ),
-                });
-                let rect_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("waverunner.rect"),
-                    bind_group_layouts: &[&globals_layout],
-                    push_constant_ranges: &[],
-                });
-                let rect_pipeline =
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("waverunner.rect"),
-                        layout: Some(&rect_layout),
-                        vertex: wgpu::VertexState {
-                            module: &rect_shader,
-                            entry_point: Some("vs_main"),
-                            compilation_options: Default::default(),
-                            buffers: &[wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<RectInstance>() as u64,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &wgpu::vertex_attr_array![
-                                    0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
-                                    4 => Float32, 5 => Float32
-                                ],
-                            }],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &rect_shader,
-                            entry_point: Some("fs_main"),
-                            compilation_options: Default::default(),
-                            targets: &target,
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleStrip,
-                            ..Default::default()
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    });
-
-                // Icon pipeline (instanced textured quads over a texture array).
-                let icon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("waverunner.icon"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/icon.wgsl").into()),
-                });
-                let icon_bind_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("waverunner.icons"),
-                        entries: &[
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Texture {
-                                    sample_type: wgpu::TextureSampleType::Float {
-                                        filterable: true,
-                                    },
-                                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                                    multisampled: false,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 1,
-                                visibility: wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                                count: None,
-                            },
-                        ],
-                    });
-                let icon_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("waverunner.icon"),
-                    bind_group_layouts: &[&globals_layout, &icon_bind_layout],
-                    push_constant_ranges: &[],
-                });
-                let icon_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("waverunner.icon"),
-                    layout: Some(&icon_layout),
-                    vertex: wgpu::VertexState {
-                        module: &icon_shader,
-                        entry_point: Some("vs_main"),
-                        compilation_options: Default::default(),
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<IconInstance>() as u64,
-                            step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &wgpu::vertex_attr_array![
-                                0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
-                                5 => Float32x4, 6 => Float32, 7 => Float32
-                            ],
-                        }],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &icon_shader,
-                        entry_point: Some("fs_main"),
-                        compilation_options: Default::default(),
-                        targets: &target,
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
-                    cache: None,
-                });
-                let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("waverunner.icons"),
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    // Trilinear across the mip chain so minified icons (the small
-                    // size level, and magnification transitions) stay clean.
-                    mipmap_filter: wgpu::FilterMode::Linear,
-                    ..Default::default()
-                });
-
-                // Blit pipeline: copies the offscreen scene texture to the screen
-                // (and, later, samples the blurred copy for the box backdrop).
-                let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("waverunner.blit"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
-                });
-                let blit_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("waverunner.blit"),
-                        entries: &[
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Texture {
-                                    sample_type: wgpu::TextureSampleType::Float {
-                                        filterable: true,
-                                    },
-                                    view_dimension: wgpu::TextureViewDimension::D2,
-                                    multisampled: false,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 1,
-                                visibility: wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                                count: None,
-                            },
-                        ],
-                    });
-                let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("waverunner.blit"),
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    ..Default::default()
-                });
-                let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("waverunner.blit"),
-                    bind_group_layouts: &[&blit_layout],
-                    push_constant_ranges: &[],
-                });
-                // Replace blend: write the (premultiplied) source pixels verbatim.
-                let blit_target = [Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })];
-                let blit_pipeline =
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("waverunner.blit"),
-                        layout: Some(&blit_pl),
-                        vertex: wgpu::VertexState {
-                            module: &blit_shader,
-                            entry_point: Some("vs_main"),
-                            compilation_options: Default::default(),
-                            buffers: &[],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &blit_shader,
-                            entry_point: Some("fs_main"),
-                            compilation_options: Default::default(),
-                            targets: &blit_target,
-                        }),
-                        primitive: wgpu::PrimitiveState::default(),
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    });
-                // Box frosted backdrop: samples/blurs the scene texture over the box
-                // region, premultiplied "over" blend (same as the scene pipelines).
-                let backdrop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("waverunner.box-backdrop"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        include_str!("shaders/box_backdrop.wgsl").into(),
-                    ),
-                });
-                let backdrop_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("waverunner.box-backdrop"),
-                    bind_group_layouts: &[&blit_layout],
-                    push_constant_ranges: &[],
-                });
-                let box_backdrop_pipeline =
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("waverunner.box-backdrop"),
-                        layout: Some(&backdrop_pl),
-                        vertex: wgpu::VertexState {
-                            module: &backdrop_shader,
-                            entry_point: Some("vs_main"),
-                            compilation_options: Default::default(),
-                            buffers: &[wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &wgpu::vertex_attr_array![
-                                    0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
-                                ],
-                            }],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &backdrop_shader,
-                            entry_point: Some("fs_main"),
-                            compilation_options: Default::default(),
-                            targets: &target,
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleStrip,
-                            ..Default::default()
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    });
-
-                // Box erase: multiplies the box region by (1 - coverage) so the
-                // backdrop fill replaces the sharp base rather than stacking on it.
-                let erase_blend = wgpu::BlendState {
-                    color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::Zero,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::Zero,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                };
-                let erase_target = [Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(erase_blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })];
-                let box_erase_pipeline =
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("waverunner.box-erase"),
-                        layout: Some(&backdrop_pl),
-                        vertex: wgpu::VertexState {
-                            module: &backdrop_shader,
-                            entry_point: Some("vs_main"),
-                            compilation_options: Default::default(),
-                            buffers: &[wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &wgpu::vertex_attr_array![
-                                    0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
-                                ],
-                            }],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &backdrop_shader,
-                            entry_point: Some("fs_erase"),
-                            compilation_options: Default::default(),
-                            targets: &erase_target,
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleStrip,
-                            ..Default::default()
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    });
-
-                let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("waverunner.blur"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
-                });
-                // Replace-blend (overwrite the target); both passes share the layout.
-                let blur_target = [Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })];
-                let make_blur_pipeline = |entry: &str| {
-                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("waverunner.blur"),
-                        layout: Some(&blit_pl),
-                        vertex: wgpu::VertexState {
-                            module: &blur_shader,
-                            entry_point: Some("vs_main"),
-                            compilation_options: Default::default(),
-                            buffers: &[],
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &blur_shader,
-                            entry_point: Some(entry),
-                            compilation_options: Default::default(),
-                            targets: &blur_target,
-                        }),
-                        primitive: wgpu::PrimitiveState::default(),
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    })
-                };
-                let blur_pipeline_h = make_blur_pipeline("fs_horizontal");
-                let blur_pipeline_v = make_blur_pipeline("fs_vertical");
-                let built = Pipelines {
-                    format,
-                    globals_layout,
-                    shadow_pipeline,
-                    rect_pipeline,
-                    icon_pipeline,
-                    icon_bind_layout,
-                    icon_sampler,
-                    blit_pipeline,
-                    blit_layout,
-                    blit_sampler,
-                    box_backdrop_pipeline,
-                    box_erase_pipeline,
-                    blur_pipeline_h,
-                    blur_pipeline_v,
-                };
-                if on_shared_gpu {
-                    SHARED_PIPELINES.with(|p| *p.borrow_mut() = Some(built.clone()));
-                }
-                built
-            }
+            None => build_pipelines(&device, format),
         };
+        if on_shared_gpu {
+            SHARED_PIPELINES.with(|p| {
+                let mut p = p.borrow_mut();
+                if p.is_none() {
+                    *p = Some(pipes.clone());
+                }
+            });
+        }
         let Pipelines {
             format: _,
             globals_layout,
@@ -1519,7 +1026,9 @@ impl Renderer {
         // One font database for every renderer, remembered between runs
         // (crate::font_index): the cold scan was the slowest part of a start
         // on a spinning disk.
+        crate::perf::mark("pipelines");
         let (font_system, swash) = shared_text();
+        crate::perf::mark("fonts");
         let text_cache = TextCache::new(&device);
         let text_viewport = Viewport::new(&device, &text_cache);
         let t_pipelines = Instant::now();
@@ -2033,7 +1542,12 @@ impl Renderer {
         if self.icon_texture.is_none() {
             return;
         }
-        if layer >= self.icon_layer_cap || pixels.len() != ICON_CHAIN_BYTES {
+        // A whole chain, or the tail of one from some level on (a menu
+        // symbol's, `apps::symbol_chain`): the length says which.
+        let Some(from) = (0..ICON_MIPS).find(|f| pixels.len() == crate::apps::icon_chain_bytes(ICON_SIZE >> f)) else {
+            return;
+        };
+        if layer >= self.icon_layer_cap {
             return;
         }
         if layer >= self.icon_layer_count {
@@ -2045,7 +1559,7 @@ impl Renderer {
         let Some(texture) = &self.icon_texture else {
             return;
         };
-        write_icon_chain(&self.queue, texture, layer, pixels);
+        write_icon_chain_from(&self.queue, texture, layer, pixels, from);
         // The layer shows something else: its draws must damage.
         let at = layer as usize;
         if self.icon_layer_gen.len() <= at {
@@ -3196,10 +2710,16 @@ fn icon_layers(count: usize) -> u32 {
 }
 
 fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8]) {
+    write_icon_chain_from(queue, texture, layer, chain, 0);
+}
+
+/// [`write_icon_chain`] from mip level `from` on: `chain` holds that level
+/// and every smaller one (the levels above it keep what they had).
+fn write_icon_chain_from(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8], from: u32) {
     let _perf = crate::perf::ICON_UPLOAD.time();
     let mut offset = 0usize;
-    let mut size = ICON_SIZE;
-    for mip in 0..ICON_MIPS {
+    let mut size = ICON_SIZE >> from;
+    for mip in from..ICON_MIPS {
         let len = (size * size * 4) as usize;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -3376,6 +2896,658 @@ fn label_key(label: &crate::content::Label) -> String {
         label.font_px,
         label.family.unwrap_or("")
     )
+}
+
+/// A GPU opened for a surface: the instance that made the surface, the
+/// adapter that can present to it, the device and its queue.
+struct Opened {
+    instance: wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+/// Walk the adapter ladder for `window` on `display` and open the device.
+fn open_gpu(
+    display: NonNull<std::ffi::c_void>,
+    window: NonNull<std::ffi::c_void>,
+) -> anyhow::Result<Opened> {
+    const ATTEMPTS: [(wgpu::Backends, bool, &str); 3] = [
+        // What we want: a real GPU on Vulkan. Vulkan ALONE: asking for
+        // GL too made every start also bring up EGL, Mesa's GL driver
+        // (libgallium, 60 MB) and two GL contexts on machines that never
+        // draw through them — reads a spinning disk pays for at login
+        // (ThinkPad, 2026-10-01). LLVM still loads on most machines
+        // (RADV and lavapipe link it). A machine without a usable Vulkan
+        // GPU reaches GL on the next rung, as before.
+        (wgpu::Backends::VULKAN, false, "gpu"),
+        // Some stacks present fine on GL while their Vulkan surface path
+        // is broken; asking for GL alone changes which one is picked.
+        // MUST come before the software fallback: on pre-Skylake Intel
+        // (Haswell — "Vulkan support is incomplete") the only Vulkan
+        // adapter mesa offers is llvmpipe, so the attempt above yields a
+        // CPU rasterizer while a perfectly good REAL GPU sits on the GL
+        // path (crocus). Found live on a 2013 MacBook Air: the whole
+        // shell was software-rendered (menubox = 80% CPU) until GL was
+        // tried before accepting CPU (2026-09-02).
+        (wgpu::Backends::GL, false, "gl only"),
+        // Anything at all, including lavapipe/llvmpipe on the CPU. Slow
+        // (the F12 throttle exists for exactly this) but it is a desktop.
+        (
+            wgpu::Backends::from_bits_truncate(
+                wgpu::Backends::VULKAN.bits() | wgpu::Backends::GL.bits(),
+            ),
+            true,
+            "software fallback",
+        ),
+    ];
+
+    let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
+    // The instance must outlive the surface it created; hold the winning
+    // one until the device is built below.
+    let mut _live_instance: Option<wgpu::Instance> = None;
+    for (backends, force_fallback_adapter, label) in ATTEMPTS {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            ..Default::default()
+        });
+        // SAFETY: both handles point at live Wayland objects owned by
+        // App, which outlives the renderer and drops it first.
+        let surface = match unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                    display,
+                )),
+                raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                    window,
+                )),
+            })
+        } {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("renderer: no surface via {label}: {e}");
+                continue;
+            }
+        };
+        match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter,
+        })) {
+            Some(adapter) => {
+                // A CPU rasterizer only counts on the explicit software
+                // attempt — a non-fallback attempt returning one (mesa's
+                // llvmpipe posing as the Vulkan adapter on old Intel)
+                // must keep looking so a real GPU on another backend
+                // gets its turn.
+                if !force_fallback_adapter
+                    && adapter.get_info().device_type == wgpu::DeviceType::Cpu
+                {
+                    tracing::warn!(
+                        "renderer: {label} offered a CPU adapter ({}); trying next backend",
+                        adapter.get_info().name
+                    );
+                    continue;
+                }
+                tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
+                chosen = Some((surface, adapter));
+                _live_instance = Some(instance);
+                break;
+            }
+            None => tracing::warn!("renderer: no adapter via {label}"),
+        }
+    }
+    let (surface, adapter) = chosen.ok_or_else(|| {
+        anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
+    })?;
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("waverunner"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                // Allow surface expansion to full screen height (>2048 on 4K displays).
+                max_texture_dimension_2d: MAX_TEXTURE_SIDE,
+                // The icon array is one texture layer per app icon plus a
+                // reserved block (rank hits + pending installs + thumbs +
+                // minimized = 113). downlevel_defaults() caps
+                // texture_array_layers at
+                // 256, so a machine with ~160+ .desktop entries overflowed
+                // it — create_texture("waverunner.icons") panicked the
+                // daemon on cold start (267 layers on a 170-app machine,
+                // 2026-09-01). Request what the adapter actually offers
+                // (2048 on any real GPU, incl. this Iris Xe / RTX 4050);
+                // this never exceeds hardware, so device creation is safe.
+                max_texture_array_layers: adapter.limits().max_texture_array_layers,
+                ..wgpu::Limits::downlevel_defaults()
+            },
+            // Small device-memory blocks (8 MB, growing to 64): the
+            // default hint, Performance, takes GPU memory 128 MB at a
+            // time — sized for a game, and most of what the shell held
+            // on the Acer (night audit, 2026-10-04).
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+        },
+        None,
+    ))
+    .context("wgpu device request failed")?;
+    // wgpu's answer to an error nobody asked to catch is a panic, and
+    // a panic ends the shell. On 2026-10-20 the dev box lost its dock
+    // right after "swapchain acquire timed out; recreating it", as
+    // Hyprland's overview took the screen ("i have no shell now"),
+    // with the reason on a stderr nobody reads. Logged instead: that
+    // frame is lost, the next acquire recreates the swapchain.
+    device.on_uncaptured_error(Box::new(gpu_error));
+    let live_instance =
+        _live_instance.ok_or_else(|| anyhow!("the chosen adapter has no instance"))?;
+    Ok(Opened { instance: live_instance, surface, adapter, device, queue })
+}
+
+/// The shaders, pipelines, layouts and samplers for `device` and the
+/// surface `format` (see [`Pipelines`]).
+fn build_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelines {
+    let globals_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("waverunner.globals"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+    let blend = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    let target = [Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(blend),
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+
+    // Top-edge shadow pipeline (instanced gradient bands). Shares the
+    // globals bind group and premultiplied blend target with the rects.
+    let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("waverunner.edge_shadow"),
+        source: wgpu::ShaderSource::Wgsl(
+            include_str!("shaders/edge_shadow.wgsl").into(),
+        ),
+    });
+    let shadow_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waverunner.shadow"),
+            bind_group_layouts: &[&globals_layout],
+            push_constant_ranges: &[],
+        });
+    let shadow_pipeline =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ShadowInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
+                        3 => Float32, 4 => Float32, 5 => Float32x4
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &target,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+    // Rounded-rect pipeline (instanced SDF quads).
+    let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("waverunner.rounded_rect"),
+        source: wgpu::ShaderSource::Wgsl(
+            include_str!("shaders/rounded_rect.wgsl").into(),
+        ),
+    });
+    let rect_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("waverunner.rect"),
+        bind_group_layouts: &[&globals_layout],
+        push_constant_ranges: &[],
+    });
+    let rect_pipeline =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.rect"),
+            layout: Some(&rect_layout),
+            vertex: wgpu::VertexState {
+                module: &rect_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RectInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+                        4 => Float32, 5 => Float32
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &target,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+    // Icon pipeline (instanced textured quads over a texture array).
+    let icon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("waverunner.icon"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/icon.wgsl").into()),
+    });
+    let icon_bind_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("waverunner.icons"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: true,
+                        },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+    let icon_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("waverunner.icon"),
+        bind_group_layouts: &[&globals_layout, &icon_bind_layout],
+        push_constant_ranges: &[],
+    });
+    let icon_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("waverunner.icon"),
+        layout: Some(&icon_layout),
+        vertex: wgpu::VertexState {
+            module: &icon_shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<IconInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Float32,
+                    5 => Float32x4, 6 => Float32, 7 => Float32
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &icon_shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &target,
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("waverunner.icons"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        // Trilinear across the mip chain so minified icons (the small
+        // size level, and magnification transitions) stay clean.
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    // Blit pipeline: copies the offscreen scene texture to the screen
+    // (and, later, samples the blurred copy for the box backdrop).
+    let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("waverunner.blit"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+    });
+    let blit_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("waverunner.blit"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: true,
+                        },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+    let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("waverunner.blit"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("waverunner.blit"),
+        bind_group_layouts: &[&blit_layout],
+        push_constant_ranges: &[],
+    });
+    // Replace blend: write the (premultiplied) source pixels verbatim.
+    let blit_target = [Some(wgpu::ColorTargetState {
+        format,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let blit_pipeline =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.blit"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &blit_target,
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+    // Box frosted backdrop: samples/blurs the scene texture over the box
+    // region, premultiplied "over" blend (same as the scene pipelines).
+    let backdrop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("waverunner.box-backdrop"),
+        source: wgpu::ShaderSource::Wgsl(
+            include_str!("shaders/box_backdrop.wgsl").into(),
+        ),
+    });
+    let backdrop_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("waverunner.box-backdrop"),
+        bind_group_layouts: &[&blit_layout],
+        push_constant_ranges: &[],
+    });
+    let box_backdrop_pipeline =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.box-backdrop"),
+            layout: Some(&backdrop_pl),
+            vertex: wgpu::VertexState {
+                module: &backdrop_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &backdrop_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &target,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+    // Box erase: multiplies the box region by (1 - coverage) so the
+    // backdrop fill replaces the sharp base rather than stacking on it.
+    let erase_blend = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    let erase_target = [Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(erase_blend),
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let box_erase_pipeline =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.box-erase"),
+            layout: Some(&backdrop_pl),
+            vertex: wgpu::VertexState {
+                module: &backdrop_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BoxBackdropInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &backdrop_shader,
+                entry_point: Some("fs_erase"),
+                compilation_options: Default::default(),
+                targets: &erase_target,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+    let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("waverunner.blur"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
+    });
+    // Replace-blend (overwrite the target); both passes share the layout.
+    let blur_target = [Some(wgpu::ColorTargetState {
+        format,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let make_blur_pipeline = |entry: &str| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waverunner.blur"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState {
+                module: &blur_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blur_shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                targets: &blur_target,
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+    let blur_pipeline_h = make_blur_pipeline("fs_horizontal");
+    let blur_pipeline_v = make_blur_pipeline("fs_vertical");
+    Pipelines {
+        format,
+        globals_layout,
+        shadow_pipeline,
+        rect_pipeline,
+        icon_pipeline,
+        icon_bind_layout,
+        icon_sampler,
+        blit_pipeline,
+        blit_layout,
+        blit_sampler,
+        box_backdrop_pipeline,
+        box_erase_pipeline,
+        blur_pipeline_h,
+        blur_pipeline_v,
+    }
+}
+
+/// The GPU opened AHEAD of the dock's first frame (`warm_gpu`): the device
+/// took 40 ms and the pipelines 30 on the dev box, all of it in the first
+/// turn (2026-10-29). Opened on a thread while the shell loads the rest,
+/// taken by the dock's first [`Renderer::new_with`].
+pub(crate) struct WarmGpu {
+    /// The surface it was opened for: another surface starts from nothing.
+    pub(crate) surface_id: wayland_client::backend::ObjectId,
+    instance: wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipelines: Option<Pipelines>,
+}
+
+/// The font system made ahead of the first renderer (`warm_fonts`), until
+/// `shared_text` takes it.
+static FONTS_AHEAD: std::sync::Mutex<Option<std::thread::JoinHandle<FontSystem>>> = std::sync::Mutex::new(None);
+
+/// Make the font system on a thread of its own, from the start of the
+/// process: the faces' index read and the matching tables made (19 ms on
+/// the loop otherwise), taken by the first renderer's `shared_text`.
+pub(crate) fn warm_fonts() {
+    let spawned = std::thread::Builder::new().name("fonts-warm".into()).spawn(|| {
+        let mut fonts = FontSystem::new_with_locale_and_db(
+            crate::font_index::locale(),
+            crate::font_index::database(),
+        );
+        let _ = SANS_MEDIUM.set(sans_medium(&mut fonts));
+        fonts
+    });
+    if let (Ok(handle), Ok(mut slot)) = (spawned, FONTS_AHEAD.lock()) {
+        *slot = Some(handle);
+    }
+}
+
+/// The two Wayland handles a surface is made from, carried to the thread.
+struct RawWl {
+    display: NonNull<std::ffi::c_void>,
+    window: NonNull<std::ffi::c_void>,
+}
+// SAFETY: libwayland-client is thread-safe and the Vulkan/EGL surface made
+// from these has a queue of its own; both objects outlive the thread (App
+// holds them and takes the result before the surface could go).
+unsafe impl Send for RawWl {}
+
+/// Open the GPU for `wl_surface` on a thread of its own (see [`WarmGpu`]);
+/// `None` when no thread could be made. Failing there is no failure of the
+/// shell: the renderer opens its own then.
+pub(crate) fn warm_gpu(
+    conn: &Connection,
+    wl_surface: &WlSurface,
+) -> Option<std::thread::JoinHandle<anyhow::Result<WarmGpu>>> {
+    let raw = RawWl {
+        display: NonNull::new(conn.backend().display_ptr().cast())?,
+        window: NonNull::new(wl_surface.id().as_ptr().cast())?,
+    };
+    let surface_id = wl_surface.id();
+    std::thread::Builder::new()
+        .name("gpu-warm".into())
+        .spawn(move || {
+            let started = Instant::now();
+            let _no_vblank_wait = NoVblankWait::arm();
+            let raw = raw;
+            let opened = open_gpu(raw.display, raw.window)?;
+            let t_device = started.elapsed();
+            let format = opened.surface.get_capabilities(&opened.adapter).formats.first().copied();
+            let pipelines = format.map(|f| build_pipelines(&opened.device, f));
+
+            tracing::info!(
+                "renderer: the GPU opened ahead in {} ms (device {}, pipelines {})",
+                started.elapsed().as_millis(),
+                t_device.as_millis(),
+                started.elapsed().saturating_sub(t_device).as_millis()
+            );
+            Ok(WarmGpu {
+                surface_id,
+                instance: opened.instance,
+                surface: opened.surface,
+                adapter: opened.adapter,
+                device: opened.device,
+                queue: opened.queue,
+                pipelines,
+            })
+        })
+        .ok()
 }
 
 /// Never wait on the compositor inside present.
