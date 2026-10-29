@@ -1027,7 +1027,24 @@ impl IconLoader {
         // index, 2026-10-29).
         self.t_resolve += t0.elapsed();
         let t1 = std::time::Instant::now();
-        let cache_file = path.as_deref().and_then(|p| self.disk.file_for(p, if is_asset { "unplated" } else { "" }));
+        let tag = if is_asset { "unplated" } else { "" };
+        let mut cache_file = path.as_deref().and_then(|p| self.disk.file_for(p, tag));
+        let (key, path) = if cache_file.is_none() && path.is_some() {
+            // The cached path is gone (a theme update): the name is walked
+            // again, once.
+            if let Some(name) = entry.icon.as_deref() {
+                self.resolutions.forget(name);
+            }
+            let again = match self.resolve(entry) {
+                Some(path) if is_asset => (entry.id.clone(), Some(path)),
+                Some(path) => (path.clone(), Some(path)),
+                None => (format!("placeholder:{}", entry.name), None),
+            };
+            cache_file = again.1.as_deref().and_then(|p| self.disk.file_for(p, tag));
+            again
+        } else {
+            (key, path)
+        };
         self.t_key += t1.elapsed();
         let t2 = std::time::Instant::now();
         // `on_disk`: the persistent cache holds this tile, so a rescan reads
@@ -1076,8 +1093,9 @@ impl IconLoader {
     /// since the last call.
     pub(crate) fn take_counts(&mut self) -> (usize, usize, String) {
         let where_ = format!(
-            "resolve {:?}, name {:?}, read {:?}, {} placeholders {:?}",
+            "resolve {:?} ({} walked), name {:?}, read {:?}, {} placeholders {:?}",
             std::mem::take(&mut self.t_resolve),
+            self.resolutions.take_walked(),
             std::mem::take(&mut self.t_key),
             std::mem::take(&mut self.t_load),
             std::mem::take(&mut self.placeholders),
@@ -1384,7 +1402,7 @@ fn fnv1a64_bytes(bytes: &[u8]) -> u64 {
 }
 
 /// Persistent icon-name → file-path resolution cache
-/// (`$XDG_CACHE_HOME/waverunner/icon-paths.json`). The theme-directory
+/// (`$XDG_CACHE_HOME/waverunner/icon-paths-<fence>.json`). The theme-directory
 /// walk costs ~15 ms per icon on a long NixOS `XDG_DATA_DIRS` — failed
 /// lookups are the worst, walking everything twice — so resolutions,
 /// including negative ones, are memoized across daemon runs.
@@ -1401,32 +1419,57 @@ struct ResolutionCache {
     /// Icon name → resolved path; `None` records a failed lookup.
     map: HashMap<String, Option<String>>,
     dirty: bool,
+    /// Names walked through the themes since `take_walked`.
+    walked: usize,
 }
 
 impl ResolutionCache {
-    /// Load from disk, dropping the map if the fence moved.
+    /// Load from disk. A file per fence: the loaders of both tones (the
+    /// dark's and the light's theme chains) live side by side and keep their
+    /// own — sharing one file, each dropped the other's and walked every
+    /// name again at every start (2026-10-29). A fence that moved starts a
+    /// new file; old ones go at the next save.
     fn load(theme: &str) -> Self {
-        let file = cache_base().join("waverunner").join("icon-paths.json");
         let fence = fence(theme);
-        let map = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|s| parse_resolutions(&s, &fence))
+        let file = cache_base().join("waverunner").join(format!("icon-paths-{fence}.json"));
+        let held = std::fs::read_to_string(&file).ok();
+        let map = held
+            .as_deref()
+            .and_then(|s| parse_resolutions(s, &fence))
             .unwrap_or_default();
+        debug!(
+            "icon paths: {} names for {theme} (fence {fence}{})",
+            map.len(),
+            match held.as_deref().and_then(stored_fence) {
+                Some(f) if f == fence => "".to_owned(),
+                Some(f) => format!(", the file held {f}: dropped"),
+                None => ", no file".to_owned(),
+            }
+        );
         Self {
             file,
             fence,
             map,
             dirty: false,
+            walked: 0,
         }
+    }
+
+    /// How many names were walked since the last call.
+    fn take_walked(&mut self) -> usize {
+        std::mem::take(&mut self.walked)
     }
 
     /// Resolve `name` via the cache, falling back to the theme walk.
     fn resolve(&mut self, name: &str, themes: &[String]) -> Option<String> {
+        // (A cached path is taken as it is — no stat: 125 of them on a cold
+        // disk were 215 ms of a start on the 2013 MacBook Air. One that
+        // vanished, a theme update, is found out as its tile is named and
+        // walked again then: `forget`.)
         match self.map.get(name) {
             Some(None) => return None,
-            Some(Some(path)) if std::path::Path::new(path).exists() => return Some(path.clone()),
-            // Cached path vanished (theme update): re-walk below.
-            _ => {}
+            Some(Some(path)) => return Some(path.clone()),
+            None => {}
         }
         let found = themes
             .iter()
@@ -1444,7 +1487,16 @@ impl ResolutionCache {
             .map(|p| p.to_string_lossy().into_owned());
         self.map.insert(name.to_owned(), found.clone());
         self.dirty = true;
+        self.walked += 1;
         found
+    }
+
+    /// Drop one name's entry: its cached path vanished (a theme update),
+    /// the next lookup walks the theme again.
+    fn forget(&mut self, name: &str) {
+        if self.map.remove(name).is_some() {
+            self.dirty = true;
+        }
     }
 
     /// Drop every cached "not found" entry so the next lookup re-walks
@@ -1480,7 +1532,43 @@ impl ResolutionCache {
             debug!("icon paths: cannot write {:?}: {e}", self.file);
             let _ = std::fs::remove_file(&tmp);
         }
+        self.sweep();
     }
+
+    /// Drop the files of fences gone by: any sibling not written for a
+    /// month, and the one file every fence once shared.
+    fn sweep(&self) {
+        let Some(dir) = self.file.parent() else { return };
+        let _ = std::fs::remove_file(dir.join("icon-paths.json"));
+        let Ok(read) = std::fs::read_dir(dir) else { return };
+        let month = std::time::Duration::from_secs(30 * 24 * 3600);
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path == self.file {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("icon-paths-") && name.ends_with(".json")) {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > month);
+            if old {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// The fence a resolution-cache file was written under.
+fn stored_fence(s: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    Some(v.get("fence")?.as_str()?.to_owned())
 }
 
 /// Parse the resolution-cache file, rejecting it wholesale on a fence
@@ -2152,21 +2240,32 @@ mod tests {
     #[test]
     fn resolution_cache_save_load_round_trips() {
         let (disk, _icon) = scratch("resolutions");
+        // The file every fence once shared, and a sibling of a fence gone by.
+        std::fs::write(disk.dir.join("icon-paths.json"), "{}").unwrap();
+        let stale = disk.dir.join("icon-paths-0.json");
+        std::fs::write(&stale, "{}").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        std::fs::File::open(&stale).unwrap().set_modified(long_ago).unwrap();
         let mut cache = ResolutionCache {
-            file: disk.dir.join("icon-paths.json"),
+            file: disk.dir.join("icon-paths-f.json"),
             fence: "f".to_owned(),
             map: HashMap::from([
                 ("firefox".to_owned(), Some("/p/firefox.svg".to_owned())),
                 ("gone".to_owned(), None),
             ]),
             dirty: true,
+            walked: 0,
         };
         cache.save();
 
         let written = std::fs::read_to_string(&cache.file).unwrap();
         assert_eq!(parse_resolutions(&written, "f").unwrap(), cache.map);
+        assert_eq!(stored_fence(&written).as_deref(), Some("f"));
         // A moved fence rejects the same file.
         assert_eq!(parse_resolutions(&written, "g"), None);
+        // The save swept the shared file and the stale sibling.
+        assert!(!disk.dir.join("icon-paths.json").exists());
+        assert!(!stale.exists());
 
         std::fs::remove_dir_all(&disk.dir).unwrap();
     }

@@ -562,6 +562,11 @@ fn main() -> anyhow::Result<()> {
     palette::settle_looks();
     palette::settle_lines();
     look::set_dark(palette::shell_dark());
+    // And the icons' tone: set only once the palette applied, every loader
+    // started in the built-in dark and a light machine indexed twice at each
+    // start (the second pass a full one: 1 s on the 2013 MacBook Air,
+    // 2026-10-29), each pass dropping the other tone's resolutions.
+    look::set_icons_dark(palette::icons_dark());
     let indexer = apps::spawn_indexer(config.theme.icon_theme.clone(), apps_tx);
 
     // The nix thread owns the nixpkgs package index (Install-section
