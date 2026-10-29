@@ -2174,6 +2174,11 @@ pub(crate) fn shell_dark() -> bool {
     choice().levels_now(Surface::Shell).dark
 }
 
+/// The Icons row's look now: what every icon loader is built in.
+pub(crate) fn icons_dark() -> bool {
+    choice().levels_now(Surface::Icons).dark
+}
+
 pub(crate) fn shell() -> Option<([f32; 4], [f32; 4])> {
     SHELL.lock().ok().and_then(|g| *g)
 }
