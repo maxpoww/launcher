@@ -22,7 +22,7 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Proxy};
 use wgpu::util::DeviceExt;
 
-use crate::apps::{ICON_CHAIN_BYTES, ICON_MIPS, ICON_SIZE};
+use crate::apps::{ICON_MIPS, ICON_SIZE};
 use crate::content::Scene;
 
 /// The largest texture side the device is asked for — and so the largest
@@ -1552,7 +1552,12 @@ impl Renderer {
         if self.icon_texture.is_none() {
             return;
         }
-        if layer >= self.icon_layer_cap || pixels.len() != ICON_CHAIN_BYTES {
+        // A whole chain, or the tail of one from some level on (a menu
+        // symbol's, `apps::symbol_chain`): the length says which.
+        let Some(from) = (0..ICON_MIPS).find(|f| pixels.len() == crate::apps::icon_chain_bytes(ICON_SIZE >> f)) else {
+            return;
+        };
+        if layer >= self.icon_layer_cap {
             return;
         }
         if layer >= self.icon_layer_count {
@@ -1564,7 +1569,7 @@ impl Renderer {
         let Some(texture) = &self.icon_texture else {
             return;
         };
-        write_icon_chain(&self.queue, texture, layer, pixels);
+        write_icon_chain_from(&self.queue, texture, layer, pixels, from);
         // The layer shows something else: its draws must damage.
         let at = layer as usize;
         if self.icon_layer_gen.len() <= at {
@@ -2720,10 +2725,16 @@ fn icon_layers(count: usize) -> u32 {
 }
 
 fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8]) {
+    write_icon_chain_from(queue, texture, layer, chain, 0);
+}
+
+/// [`write_icon_chain`] from mip level `from` on: `chain` holds that level
+/// and every smaller one (the levels above it keep what they had).
+fn write_icon_chain_from(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8], from: u32) {
     let _perf = crate::perf::ICON_UPLOAD.time();
     let mut offset = 0usize;
-    let mut size = ICON_SIZE;
-    for mip in 0..ICON_MIPS {
+    let mut size = ICON_SIZE >> from;
+    for mip in from..ICON_MIPS {
         let len = (size * size * 4) as usize;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {

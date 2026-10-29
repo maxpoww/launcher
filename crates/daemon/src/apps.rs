@@ -43,7 +43,25 @@ pub const ICON_MIPS: u32 = ICON_SIZE.trailing_zeros() + 1;
 /// uniformly and the on-disk cache stores them.
 pub const ICON_CHAIN_BYTES: usize = icon_chain_bytes(ICON_SIZE);
 
-const fn icon_chain_bytes(mut size: u32) -> usize {
+/// The mip level a menu SYMBOL's chain begins at: drawn at 12–14 logical
+/// px (28 physical at a 2× scale, 56 at the menus' 200 %), levels from
+/// 128² serve every size the eye meets, and the 256² base — 262 KB of a
+/// chain's 350 — was never sampled. Sixty symbols: 22 MB → 5.8 (2026-10-29).
+pub(crate) const SYMBOL_MIP: u32 = 1;
+
+/// A symbol's chain from [`SYMBOL_MIP`] on (a full chain's tail; a chain of
+/// any other length as it is). The renderer writes a tail into the levels
+/// it covers (`update_icon_layer` tells the length).
+pub(crate) fn symbol_chain(mut chain: Vec<u8>) -> Vec<u8> {
+    if chain.len() == ICON_CHAIN_BYTES {
+        let keep = icon_chain_bytes(ICON_SIZE >> SYMBOL_MIP);
+        chain.split_off(ICON_CHAIN_BYTES - keep)
+    } else {
+        chain
+    }
+}
+
+pub(crate) const fn icon_chain_bytes(mut size: u32) -> usize {
     let mut total = 0usize;
     loop {
         total += (size * size * 4) as usize;

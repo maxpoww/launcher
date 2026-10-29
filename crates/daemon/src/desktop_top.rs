@@ -293,7 +293,7 @@ impl App {
         self.symbols_asked.remove(&key);
         match chain {
             Some(chain) => {
-                self.symbols.insert(key, chain);
+                self.symbols.insert(key, crate::apps::symbol_chain(chain));
                 self.request_desktop_top_draw();
             }
             None => warn!("desktop: no picture for the symbol {key}"),
