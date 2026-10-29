@@ -50,10 +50,11 @@ impl App {
         if self.play_art_slot.contains_key(&art.key) {
             return; // a duplicate reply
         }
-        let slot = self.play_art_chains.len() as u32;
-        self.play_art_chains.push(chain);
-        self.play_art_slot.insert(art.key, slot);
-        self.upload_options_icons();
+        // (No renderer yet: the box asks again as it opens.)
+        let Some(layer) = self.options_icon_put(crate::options_icons::Owner::Art(art.key.clone()), &chain) else {
+            return;
+        };
+        self.play_art_slot.insert(art.key, layer);
         self.draw_options();
     }
 
@@ -74,15 +75,9 @@ impl App {
         }
     }
 
-    /// The texture layer holding a source's cover, if it has arrived.
-    ///
-    /// The art block sits after the notification and clipboard blocks in the
-    /// one OPTIONS icon array, so a slot is offset by both — see
-    /// `Renderer::set_options_icons`, which concatenates them in that order.
+    /// The bar's icon array layer holding a source's cover, if it has arrived.
     fn play_art_layer(&self, p: &options_engine::Playing) -> Option<u32> {
-        let slot = *self.play_art_slot.get(p.art_url.as_deref()?)?;
-        let base = self.notif_icon_chains.len() + self.clip.icon_chains.len();
-        Some(base as u32 + slot)
+        self.play_art_slot.get(p.art_url.as_deref()?).copied()
     }
 
     /// Sources worth a row: everything the engine can see making or holding

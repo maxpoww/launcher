@@ -2158,7 +2158,12 @@ impl App {
                 crate::renderer::Renderer::new(&self.conn, layer.wl_surface(), pw, ph, scale)
             };
             match built {
-                Ok(renderer) => self.options_renderer = Some(renderer),
+                Ok(mut renderer) => {
+                    // The bar's one icon array, grown as pictures are placed
+                    // (`options_icons`).
+                    renderer.alloc_icon_array_upto(crate::options_icons::OPTIONS_ICON_CAP as u32);
+                    self.options_renderer = Some(renderer);
+                }
                 Err(e) => {
                     error!("options renderer init failed: {e:#}");
                     return;
@@ -2173,10 +2178,9 @@ impl App {
         self.sync_options_zone();
         self.measure_options_text();
         self.task_pill_remeasure();
+        // (The measure asked again for the pictures that arrived before this
+        // renderer existed; the boxes ask for theirs as they draw.)
         self.measure_notif();
-        // Any icons resolved before this renderer existed haven't been uploaded
-        // to it yet (their resolve found no renderer); push them now.
-        self.upload_options_icons();
         self.sync_options_input();
         self.draw_options();
     }

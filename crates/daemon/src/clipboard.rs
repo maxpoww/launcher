@@ -160,9 +160,6 @@ const GLYPH_BACK: &str = "\u{f053}";
 const GLYPH_MORE: &str = "\u{f141}";
 /// fa-external-link, the link "open in browser" pill (links only).
 const GLYPH_OPEN: &str = "\u{f08e}";
-/// Texture-array slots kept for clipboard thumbnails (recycled round-robin),
-/// appended after the notif card avatars on the OPTIONS renderer.
-const THUMB_CAP: usize = 32;
 /// How long the loaded dictionary stays resident after its panel was last
 /// used: the word lists are ~37 MB of JSON and much more once parsed, too
 /// much to keep forever on a 4 GB machine. Reopening reloads them (a
@@ -1191,16 +1188,10 @@ pub(crate) struct ClipState {
     /// Background thumbnailer (reuses the Files-section worker). `None` when the
     /// topbar is off.
     pub(crate) thumbs: Option<crate::thumbs::Thumbs>,
-    /// Resolved thumbnail mip chains, appended to the OPTIONS icon array after
-    /// the notif avatars; `icon_chains[slot]` is at renderer layer
-    /// `notif_icon_chains.len() + slot`. Capped at [`THUMB_CAP`], recycled.
-    pub(crate) icon_chains: Vec<Vec<u8>>,
-    /// Thumbnail source path (hashed) → slot in `icon_chains`.
-    icon_slot: HashMap<u64, u32>,
-    /// slot → the key currently in it, for eviction on recycle.
-    icon_key_at: Vec<u64>,
-    /// Round-robin cursor for slot recycling once `icon_chains` is full.
-    icon_next: usize,
+    /// Thumbnail source path (hashed) → its layer in the bar's icon array
+    /// (`options_icons`; a thumbnail evicted from it is asked for again by
+    /// the next draw that wants it).
+    pub(crate) icon_slot: HashMap<u64, u32>,
     /// Source keys with a thumbnail request in flight (dedup).
     icon_pending: HashSet<u64>,
 }
@@ -1295,10 +1286,7 @@ impl ClipState {
             hit: ClipHit::None,
             row_heights,
             thumbs,
-            icon_chains: Vec::new(),
             icon_slot: HashMap::new(),
-            icon_key_at: Vec::new(),
-            icon_next: 0,
             icon_pending: HashSet::new(),
         }
     }
@@ -4295,17 +4283,13 @@ impl App {
         self.schedule_clip_frame();
     }
 
-    /// The OPTIONS renderer layer of a resolved clip thumbnail (clipboard
-    /// thumbnails follow the notif avatars in the shared array), or `None`.
+    /// The OPTIONS renderer layer of a resolved clip thumbnail, or `None`.
     fn clip_thumb_layer(&self, key: u64) -> Option<u32> {
-        self.clip
-            .icon_slot
-            .get(&key)
-            .map(|s| self.notif_icon_chains.len() as u32 + s)
+        self.clip.icon_slot.get(&key).copied()
     }
 
-    /// A thumbnail arrived from the worker: cache it in a (recycling) slot and
-    /// re-upload the shared OPTIONS icon array.
+    /// A thumbnail arrived from the worker: put it in the bar's icon array
+    /// (one layer written, nothing else re-sent).
     pub(crate) fn on_clip_thumb(&mut self, ev: crate::thumbs::Event) {
         let crate::thumbs::Event::Thumb { path, pixels } = ev else {
             return; // AudioOnly etc. — no thumbnail
@@ -4315,22 +4299,11 @@ impl App {
         if self.clip.icon_slot.contains_key(&key) {
             return;
         }
-        let slot = if self.clip.icon_chains.len() < THUMB_CAP {
-            let s = self.clip.icon_chains.len();
-            self.clip.icon_chains.push(pixels);
-            self.clip.icon_key_at.push(key);
-            s
-        } else {
-            let s = self.clip.icon_next % THUMB_CAP;
-            self.clip.icon_next = self.clip.icon_next.wrapping_add(1);
-            let old = self.clip.icon_key_at[s];
-            self.clip.icon_slot.remove(&old);
-            self.clip.icon_chains[s] = pixels;
-            self.clip.icon_key_at[s] = key;
-            s
+        // (No renderer yet: the next draw asks again.)
+        let Some(layer) = self.options_icon_put(crate::options_icons::Owner::Clip(key), &pixels) else {
+            return;
         };
-        self.clip.icon_slot.insert(key, slot as u32);
-        self.upload_options_icons();
+        self.clip.icon_slot.insert(key, layer);
         self.draw_options();
     }
 

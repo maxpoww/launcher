@@ -373,7 +373,8 @@ pub(crate) struct PhonePill {
     /// Its symbols in the bar's icon array (after the notifications', the
     /// clipboard's and the covers'): their keys and pixels.
     glyph_keys: Vec<String>,
-    pub(crate) glyph_chains: Vec<Vec<u8>>,
+    /// Glyph key → its layer in the bar's icon array.
+    pub(crate) glyph_layer: std::collections::HashMap<String, u32>,
     /// The box holds the keyboard (its menu's keys; ← and Escape on a page).
     keyboard_held: bool,
 }
@@ -774,12 +775,24 @@ impl App {
         let keys: Vec<String> = self.phone_pill.menu.as_ref().map_or_else(Vec::new, |m| {
             m.glyphs().into_iter().map(crate::glyphs::key).filter(|k| self.desktop_top.glyphs.contains_key(k)).collect()
         });
-        if keys == self.phone_pill.glyph_keys {
+        if keys == self.phone_pill.glyph_keys && keys.iter().all(|k| self.phone_pill.glyph_layer.contains_key(k)) {
             return;
         }
-        self.phone_pill.glyph_chains = keys.iter().filter_map(|k| self.desktop_top.glyphs.get(k).cloned()).collect();
+        if self.options_renderer.is_none() {
+            return; // (the next sync, with the bar's renderer, places them)
+        }
+        for key in &keys {
+            if self.phone_pill.glyph_layer.contains_key(key) {
+                continue;
+            }
+            let Some(chain) = self.desktop_top.glyphs.get(key).cloned() else {
+                continue;
+            };
+            if let Some(layer) = self.options_icon_put(crate::options_icons::Owner::Glyph(key.clone()), &chain) {
+                self.phone_pill.glyph_layer.insert(key.clone(), layer);
+            }
+        }
         self.phone_pill.glyph_keys = keys;
-        self.upload_options_icons();
     }
 
     /// Take or give back the keyboard (the bar's surface is shared: the
@@ -1545,12 +1558,7 @@ impl App {
                     glass: 0.0,
                     accent: MenuPaint::accent_now(),
                 };
-                let base = (self.notif_icon_chains.len() + self.clip.icon_chains.len() + self.play_art_chains.len()) as u32;
-                let keys = &p.glyph_keys;
-                let glyph = |name: &str| {
-                    let key = crate::glyphs::key(name);
-                    keys.iter().position(|k| *k == key).map(|i| base + i as u32)
-                };
+                let glyph = |name: &str| p.glyph_layer.get(&crate::glyphs::key(name)).copied();
                 menu.push_rows(scene, &paint, &glyph);
             } else if e > 0.01 {
                 let hover = self.options_hover_wash();

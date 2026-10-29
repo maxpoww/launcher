@@ -1656,8 +1656,12 @@ impl Renderer {
     /// `MIN_THUMB_CAP` extra layers are reserved past the end, in that
     /// order: dynamic package-search icons, packages installing in the
     /// grid, file thumbnails, and minimized-window thumbnails
-    /// ([`Renderer::update_icon_layer`]).
-    pub fn set_icons(&mut self, icons: Vec<Vec<u8>>) {
+    /// ([`Renderer::update_icon_layer`]). `tail_used` layers of that tail
+    /// are in use already (the caller's thumbnails, installs, …): the array
+    /// is made with them, and never smaller than it was — grown for them
+    /// after, it was a copy of the whole array (183 apps, 64 MB) right at
+    /// landing (2026-10-29).
+    pub fn set_icons(&mut self, icons: Vec<Vec<u8>>, tail_used: u32) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
         self.label_fit.clear();
@@ -1673,8 +1677,9 @@ impl Renderer {
         // (`drain_icon_backlog`), before the grid can be opened.
         const ICON_UPLOAD_NOW: usize = 32;
         let count = icons.len();
-        let layers = icon_layers(count);
         self.icon_layer_cap = icon_layers(count + reserved);
+        let had = self.icon_layer_count.min(self.icon_layer_cap);
+        let layers = icon_layers(count + tail_used as usize).min(self.icon_layer_cap).max(had);
         self.icon_epoch += 1;
         self.icon_layer_gen.clear();
         self.icon_backlog.clear();
@@ -1716,25 +1721,6 @@ impl Renderer {
     /// Chains of the app set still to be written.
     pub fn icon_backlog_pending(&self) -> bool {
         !self.icon_backlog.is_empty()
-    }
-
-    /// Populate the OPTIONS surface's icon array. The topbar renderer is a
-    /// separate instance from the dock's, so this array is entirely its own:
-    /// the notification card avatars occupy layers `[0, notif.len())` and the
-    /// clipboard thumbnails follow at `[notif.len(), notif.len() + clip.len())`,
-    /// each addressed by [`IconInst::layer`]. Re-uploaded wholesale whenever
-    /// either set changes (see `App::upload_options_icons`).
-    /// The OPTIONS surface's icon array: notification avatars, then clipboard
-    /// thumbnails, then the playing box's cover art, then the symbols of the
-    /// phone pill box's menu. Order is the layer numbering, so every caller
-    /// offsets by the lengths of the arrays before its own — see
-    /// `App::play_art_slot`.
-    pub fn set_options_icons(&mut self, notif: &[Vec<u8>], clip: &[Vec<u8>], art: &[Vec<u8>], glyphs: &[Vec<u8>]) {
-        self.upload_icon_array(
-            notif.len() + clip.len() + art.len() + glyphs.len(),
-            0,
-            notif.iter().chain(clip.iter()).chain(art.iter()).chain(glyphs.iter()),
-        );
     }
 
     /// Allocate an **empty** icon array of exactly `layers` layers, each to be

@@ -118,6 +118,8 @@ mod notif;
 // Off-thread resolver: a notification's app icon → premultiplied mip chain.
 mod notif_icons;
 mod options;
+// The OPTIONS bar's one icon array, shared by what its boxes show in pictures.
+mod options_icons;
 mod other_apps;
 mod order;
 // Golem's control panel: the main card, opened empty.
@@ -856,9 +858,12 @@ fn main() -> anyhow::Result<()> {
         emoji: emoji::EmojiState::default(),
         dict_tx,
         notif_icons_handle,
-        notif_icon_chains: Vec::new(),
         notif_icon_slot: HashMap::new(),
         notif_icon_pending: HashSet::new(),
+        notif_image_pending: HashSet::new(),
+        notif_inbox: Vec::new(),
+        notif_inbox_timer: false,
+        options_icons: options_icons::OptionsIcons::default(),
         ui: UiState::new(
             config.animation.clone(),
             // Docked, the card is a floating bar: dock height plus the
@@ -1082,7 +1087,6 @@ fn main() -> anyhow::Result<()> {
         cava_vol_assume: None,
         play_box_open: false,
         play_box_e: 0.0,
-        play_art_chains: Vec::new(),
         play_art_slot: std::collections::HashMap::new(),
         play_art_pending: std::collections::HashSet::new(),
         play_art: Some(play_art_loader),
@@ -1229,7 +1233,9 @@ fn main() -> anyhow::Result<()> {
             .handle()
             .insert_source(notif_rx, |event, _, app| {
                 if let channel::Event::Msg(ev) = event {
-                    app.on_notif_event(ev);
+                    // (Queued, folded once per turn: a burst comes in one.)
+                    app.notif_inbox.push(ev);
+                    app.notif_inbox_arm();
                 }
             })
             .map_err(|e| anyhow::anyhow!("registering notif channel: {e}"))?;
@@ -2005,15 +2011,21 @@ pub struct App {
     /// Off-thread resolver turning a notification's icon hint into a card-tile
     /// mip chain (`None` when the topbar is disabled).
     notif_icons_handle: Option<notif_icons::NotifIcons>,
-    /// Resolved notif-icon layers uploaded to the OPTIONS renderer's own icon
-    /// array; `chains[i]` is texture layer `i`. Re-uploaded wholesale as new
-    /// icons resolve (the set is small — one per distinct notifying app).
-    notif_icon_chains: Vec<Vec<u8>>,
-    /// Icon-hint key → its layer index in `notif_icon_chains`.
+    /// Icon-hint / picture key → its layer in the bar's icon array
+    /// (`options_icons`).
     notif_icon_slot: HashMap<String, u32>,
     /// Icon hints already requested from the resolver, so a redraw before the
     /// reply lands doesn't re-queue them.
     notif_icon_pending: HashSet<String>,
+    /// Picture keys whose chain is being made off the loop.
+    notif_image_pending: HashSet<String>,
+    /// The notify daemon's events of this turn, folded together once
+    /// (`on_notif_events`): twenty arrivals at once were twenty measures and
+    /// twenty writes of the history in one turn, 116 ms (2026-10-29).
+    notif_inbox: Vec<notifications::NotifEvent>,
+    notif_inbox_timer: bool,
+    /// The bar's one icon array: who holds which layer.
+    options_icons: options_icons::OptionsIcons,
 
     ui: UiState,
     config: Config,
@@ -2633,11 +2645,7 @@ pub struct App {
     play_box_open: bool,
     /// Its opening, 0…1.
     play_box_e: f32,
-    /// Decoded cover art, in the order it arrived. These are the LAST block of
-    /// the OPTIONS icon array — notif avatars, then clipboard, then these — so
-    /// a row's layer is `notif.len() + clip.len() + slot`.
-    play_art_chains: Vec<Vec<u8>>,
-    /// `art_url` → its slot in `play_art_chains`.
+    /// `art_url` → the cover's layer in the bar's icon array (`options_icons`).
     play_art_slot: std::collections::HashMap<String, u32>,
     /// Art already asked for, so a url is decoded once rather than once per
     /// frame while the loader is still working.
@@ -3429,9 +3437,7 @@ impl App {
                 };
                 let thumbs: usize = self.thumb_recent.iter().map(|(_, p)| p.len()).sum();
                 let chains: usize = self.desktop.chains.values().map(Vec::len).sum();
-                let clip_images: usize = self.clip.icon_chains.iter().map(Vec::len).sum();
-                let notif_images: usize = self.notif.history.iter().map(|n| n.image_rgba.len()).sum::<usize>()
-                    + self.notif_icon_chains.iter().map(Vec::len).sum::<usize>();
+                let notif_images: usize = self.notif.history.iter().map(|n| n.image_rgba.len()).sum::<usize>();
                 // The biggest mappings, by what they hold in RAM (the heap,
                 // the GPU driver's, the loaded files) — the process's own
                 // /proc/self/smaps, read only here.
@@ -3456,7 +3462,7 @@ impl App {
                 let top: Vec<String> = top.iter().take(8).filter(|(_, kb)| *kb >= 2048).map(|(n, kb)| format!("{n} {} MB", kb / 1024)).collect();
                 info!("memory map: {}", top.join(", "));
                 info!(
-                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, clipboard {} images {} MB, notifications {} ({} MB of pictures), inboxes {}+{}",
+                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, clipboard {} images, notifications {} ({} KB of pictures on their way), bar icons {} layers, inboxes {}+{}",
                     kb("VmRSS:") / 1024,
                     kb("RssAnon:") / 1024,
                     kb("RssFile:") / 1024,
@@ -3464,10 +3470,10 @@ impl App {
                     thumbs / (1024 * 1024),
                     self.desktop.chains.len(),
                     chains / (1024 * 1024),
-                    self.clip.icon_chains.len(),
-                    clip_images / (1024 * 1024),
+                    self.clip.icon_slot.len(),
                     self.notif.history.len(),
-                    notif_images / (1024 * 1024),
+                    notif_images / 1024,
+                    self.options_icons.len(),
                     self.thumb_inbox.len(),
                     self.desktop.inbox.len()
                 );
@@ -4133,7 +4139,8 @@ impl App {
                 match Renderer::new(&app.conn, app.layer.wl_surface(), pw, ph, scale) {
                     Ok(mut renderer) => {
                         if let Some(icons) = app.pending_icons.take() {
-                            renderer.set_icons(icons);
+                            let tail_used = app.icon_tail_used();
+                            renderer.set_icons(icons, tail_used);
                         }
                         app.renderer = Some(renderer);
                         app.upload_pkg_icons();
@@ -4987,9 +4994,10 @@ impl App {
             first
         });
         self.pkg_layer_base = icons.len() as u32;
+        let tail_used = self.icon_tail_used();
         match self.renderer.as_mut() {
             Some(renderer) => {
-                renderer.set_icons(icons);
+                renderer.set_icons(icons, tail_used);
                 mark("set-icons", &mut marks);
                 // set_icons rebuilt the array: restore the package-hit
                 // icons into its reserved tail, then the still-pending
@@ -4997,8 +5005,11 @@ impl App {
                 self.upload_pkg_icons();
                 mark("pkg-icons", &mut marks);
                 self.reupload_pending_icons();
+                mark("pending-icons", &mut marks);
                 self.reupload_thumb_icons();
+                mark("thumbs", &mut marks);
                 self.reupload_min_thumbs();
+                mark("min-thumbs", &mut marks);
             }
             None => self.pending_icons = Some(icons),
         }
@@ -7834,7 +7845,8 @@ impl App {
             None => match Renderer::new(&self.conn, self.layer.wl_surface(), pw, ph, scale) {
                 Ok(mut renderer) => {
                     if let Some(icons) = self.pending_icons.take() {
-                        renderer.set_icons(icons);
+                        let tail_used = self.icon_tail_used();
+                        renderer.set_icons(icons, tail_used);
                     }
                     self.renderer = Some(renderer);
                     self.upload_pkg_icons();
@@ -9127,6 +9139,37 @@ fn veil_layer_new(
 ) -> Option<veil::VeilLayer> {
     let viewporter = globals.bind::<wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter, App, _>(qh, 1..=1, ()).ok()?;
     Some(veil::create(compositor, layer_shell, qh, &viewporter, None))
+}
+
+impl App {
+    /// Layers of the dock icon array's reserved tail in use (one past the
+    /// highest written: the package hits, the installs' tiles, the Files
+    /// thumbnails, the minimized windows' pictures), so a new app set's array
+    /// is made with them — see [`renderer::Renderer::set_icons`].
+    fn icon_tail_used(&self) -> u32 {
+        let pkg = self.pkg_hit_icons.len();
+        let pending = self
+            .pending_installs
+            .iter()
+            .filter(|p| !p.icon_pixels.is_empty())
+            .map(|p| nix::RANK_HITS_MAX + p.icon_slot + 1)
+            .max()
+            .unwrap_or(0);
+        let thumbs = self
+            .thumb_map
+            .values()
+            .map(|(slot, _)| nix::RANK_HITS_MAX + nix::PENDING_INSTALL_CAP + slot + 1)
+            .max()
+            .unwrap_or(0);
+        let mins = self
+            .minimized
+            .iter()
+            .filter_map(|w| w.slot)
+            .map(|slot| nix::RANK_HITS_MAX + nix::PENDING_INSTALL_CAP + thumbs::THUMB_CAP + slot + 1)
+            .max()
+            .unwrap_or(0);
+        pkg.max(pending).max(thumbs).max(mins) as u32
+    }
 }
 
 #[cfg(test)]
