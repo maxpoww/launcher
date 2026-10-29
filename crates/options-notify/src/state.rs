@@ -106,6 +106,13 @@ pub struct ActiveNotification {
     /// always `width * height * 4`.
     pub image_width: u32,
     pub image_height: u32,
+    /// The file (in the shell's own picture store) holding this card's
+    /// picture once the shell has put the pixels on the GPU and let
+    /// `image_rgba` go: a picture is in RAM only on its way in, and a card
+    /// loaded from the history never loads it at all (443 cards carried a copy
+    /// each of 37 pictures, 27 MB, 2026-10-29). The notify daemon never sets
+    /// it; `Option` for the wire, like `transient`.
+    pub image_file: Option<String>,
     /// The `transient` hint — the notification should be shown but not kept in
     /// the durable history. `Option` (not bare `bool`) so this stays wire-
     /// compatible with an older daemon that predates the field: a dict missing
@@ -134,6 +141,7 @@ impl From<&NotificationEvent> for ActiveNotification {
             image_rgba: e.image_data.clone().unwrap_or_default(),
             image_width: e.image_dims.map_or(0, |(w, _)| w),
             image_height: e.image_dims.map_or(0, |(_, h)| h),
+            image_file: None,
             transient: Some(e.transient),
         }
     }

@@ -320,12 +320,13 @@ impl From<StoredNotification> for ActiveNotification {
             actions: n.actions,
             urgency: n.urgency,
             timestamp_ms: n.timestamp_ms,
-            // Image pixels aren't persisted (they'd bloat the JSON); a reloaded
-            // notification falls back to its resolved app icon. Live and
-            // still-active notifications keep their real image.
+            // The picture stays in its file: the card carries the name, and
+            // the chain is made from the file when the card first shows
+            // (`ensure_notif_images`).
             image_rgba: Vec::new(),
-            image_width: 0,
-            image_height: 0,
+            image_width: n.image_width,
+            image_height: n.image_height,
+            image_file: n.image_file.filter(|_| n.image_width > 0 && n.image_height > 0),
             // A persisted notification is by definition not transient — transient
             // ones are never written to disk (see `save_notif_history`).
             transient: None,
@@ -495,22 +496,8 @@ impl NotifState {
             // older (uncapped) daemon shrinks on first use instead of
             // carrying years of cards forever.
             .take(HISTORY_CAP)
-            .map(|s| {
-                // Rehydrate the image from the on-disk cache before converting,
-                // so a reloaded card shows its real avatar (not the fallback).
-                let img = s
-                    .image_file
-                    .as_deref()
-                    .and_then(|f| load_stored_image(f, s.image_width, s.image_height))
-                    .map(|px| (px, s.image_width, s.image_height));
-                let mut n: ActiveNotification = s.into();
-                if let Some((px, w, h)) = img {
-                    n.image_rgba = px;
-                    n.image_width = w;
-                    n.image_height = h;
-                }
-                n
-            })
+            // (The pictures stay on disk; see `From<StoredNotification>`.)
+            .map(ActiveNotification::from)
             .collect();
         // Clean up a stack that predates the conversation-collapse: newest-first,
         // then one card per conversation.
@@ -639,14 +626,37 @@ impl App {
         BoxMetrics::at(self.options_scale())
     }
 
-    /// Fold a worker update into notification state (called from the loop).
-    pub(crate) fn on_notif_event(&mut self, ev: NotifEvent) {
+    /// Fold the worker's events of this turn (see `notif_inbox`) once they
+    /// are all in: the next turn, so a burst is one measure, one sort, one
+    /// save and one announcement.
+    pub(crate) fn notif_inbox_arm(&mut self) {
+        if self.notif_inbox_timer {
+            return;
+        }
+        self.notif_inbox_timer = true;
+        let timer = calloop::timer::Timer::immediate();
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.notif_inbox_timer = false;
+            let events = std::mem::take(&mut app.notif_inbox);
+            app.on_notif_events(events);
+            calloop::timer::TimeoutAction::Drop
+        });
+        if armed.is_err() {
+            self.notif_inbox_timer = false;
+            let events = std::mem::take(&mut self.notif_inbox);
+            self.on_notif_events(events);
+        }
+    }
+
+    /// Fold worker updates into notification state (called from the loop).
+    pub(crate) fn on_notif_events(&mut self, events: Vec<NotifEvent>) {
         let mut arrived = false;
         let mut changed = false;
         let mut new_rows = 0usize;
         // Whether at least one arrival should pop the preview (a genuinely new
         // message, not a cross-source echo of one just shown).
         let mut fresh_pop = false;
+        for ev in events {
         match ev {
             NotifEvent::Active(list) => {
                 for n in list.iter().rev() {
@@ -735,6 +745,7 @@ impl App {
             NotifEvent::Disconnected => {
                 self.notif.active_count = 0;
             }
+        }
         }
         if changed {
             // The one ordering invariant: strictly newest-first by timestamp,
@@ -853,9 +864,14 @@ impl App {
             .map(|n| {
                 let mut s = StoredNotification::from(n);
                 // Spill the image to the content-addressed cache and link it, so
-                // the avatar survives a restart without inflating the JSON.
-                if !n.image_rgba.is_empty() && n.image_width > 0 {
-                    s.image_file = Some(store_image(image_hash(n), &n.image_rgba));
+                // the avatar survives a restart without inflating the JSON. (A
+                // card whose pixels have gone to the GPU names its file already.)
+                if has_image(n) {
+                    s.image_file = if n.image_rgba.is_empty() {
+                        n.image_file.clone()
+                    } else {
+                        Some(store_image(image_hash(n), &n.image_rgba))
+                    };
                     s.image_width = n.image_width;
                     s.image_height = n.image_height;
                 }
@@ -909,7 +925,7 @@ impl App {
             for n in history {
                 prepared.entry((n.timestamp_ms, n.id)).or_insert_with(|| {
                     let (summary, body) = web_format(n);
-                    let key = (!n.image_rgba.is_empty() && n.image_width > 0).then(|| image_key(n));
+                    let key = has_image(n).then(|| image_key(n));
                     (summary, body, key)
                 });
             }
@@ -1043,43 +1059,116 @@ impl App {
         }
     }
 
-    /// Build + upload the icon chain for every history notification that ships
-    /// its own image and isn't in the icon array yet. Unlike app icons (resolved
-    /// off-thread from a name), these pixels are already in hand, so the chain is
-    /// built inline; it's guarded by the slot map, so repeat calls are cheap.
+    /// Put the picture of every history card that ships one in the bar's icon
+    /// array, once per distinct picture. The chain is made OFF the loop (37
+    /// avatars took 97 ms of the first turn, 2026-10-29), from the card's own
+    /// pixels or from the picture's file, and the pixels leave RAM once the
+    /// chain is placed: the card keeps the file's name instead (443 of 480
+    /// cards each carried a copy of one of 37 pictures: 27 MB).
     fn ensure_notif_images(&mut self) {
-        let pending: Vec<(String, Vec<u8>, u32, u32)> = self
-            .notif
-            .history
-            .iter()
-            .filter(|n| !n.image_rgba.is_empty() && n.image_width > 0)
-            .filter_map(|n| {
-                let key = self
-                    .notif
-                    .prepared
-                    .get(&(n.timestamp_ms, n.id))
-                    .and_then(|p| p.2.clone())
-                    .unwrap_or_else(|| image_key(n));
-                // (The pixels are cloned only for a picture not up yet.)
-                (!self.notif_icon_slot.contains_key(&key))
-                    .then(|| (key, n.image_rgba.clone(), n.image_width, n.image_height))
-            })
-            .collect();
-        let mut added = false;
-        for (key, rgba, w, h) in pending {
-            if self.notif_icon_slot.contains_key(&key) {
-                continue; // a duplicate image within this batch
-            }
-            let Some(chain) = crate::apps::rasterize_rgba(&rgba, w, h) else {
-                continue;
-            };
-            let slot = self.notif_icon_chains.len() as u32;
-            self.notif_icon_chains.push(chain);
-            self.notif_icon_slot.insert(key, slot);
-            added = true;
+        if self.options_renderer.is_none() {
+            return; // (the measure that comes with the renderer asks again)
         }
-        if added {
-            self.upload_options_icons();
+        let mut jobs: Vec<(String, PictureSource, u32, u32)> = Vec::new();
+        for n in &self.notif.history {
+            if !has_image(n) {
+                continue;
+            }
+            let key = self
+                .notif
+                .prepared
+                .get(&(n.timestamp_ms, n.id))
+                .and_then(|p| p.2.clone())
+                .unwrap_or_else(|| image_key(n));
+            if self.notif_icon_slot.contains_key(&key)
+                || self.notif_image_pending.contains(&key)
+                || jobs.iter().any(|(k, ..)| *k == key)
+            {
+                continue;
+            }
+            let source = if n.image_rgba.is_empty() {
+                PictureSource::File(n.image_file.clone().unwrap_or_default())
+            } else {
+                // (A copy: the card keeps its pixels until the chain is placed,
+                // so a save meanwhile still writes the picture.)
+                PictureSource::Pixels(n.image_rgba.clone())
+            };
+            self.notif_image_pending.insert(key.clone());
+            jobs.push((key, source, n.image_width, n.image_height));
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        self.desktop_off_loop(
+            move || {
+                jobs.into_iter()
+                    .map(|(key, source, w, h)| {
+                        let (pixels, file) = match source {
+                            PictureSource::Pixels(px) => {
+                                let file = image_file_of_key(&key);
+                                if let Some(file) = &file {
+                                    store_image_file(file, &px);
+                                }
+                                (Some(px), file)
+                            }
+                            PictureSource::File(file) => match load_stored_image(&file, w, h) {
+                                Some(px) => (Some(px), Some(file)),
+                                None => (None, None), // the file is gone: no picture
+                            },
+                        };
+                        let chain = pixels.and_then(|px| crate::apps::rasterize_rgba(&px, w, h));
+                        MadePicture { key, chain, file }
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |app, made| app.notif_pictures_made(made),
+        );
+    }
+
+    /// The chains made off the loop land: each in the bar's icon array, and
+    /// the cards that still hold their picture's pixels let them go.
+    fn notif_pictures_made(&mut self, made: Vec<MadePicture>) {
+        let mut files: HashMap<String, Option<String>> = HashMap::new();
+        let mut placed = false;
+        for m in made {
+            self.notif_image_pending.remove(&m.key);
+            if let Some(chain) = m.chain.filter(|_| !self.notif_icon_slot.contains_key(&m.key)) {
+                if let Some(layer) = self.options_icon_put(crate::options_icons::Owner::Notif(m.key.clone()), &chain) {
+                    self.notif_icon_slot.insert(m.key.clone(), layer);
+                    placed = true;
+                }
+            }
+            files.insert(m.key, m.file);
+        }
+        let (history, prepared) = (&mut self.notif.history, &self.notif.prepared);
+        for n in history.iter_mut() {
+            if !has_image(n) {
+                continue;
+            }
+            let key = prepared
+                .get(&(n.timestamp_ms, n.id))
+                .and_then(|p| p.2.clone())
+                .unwrap_or_else(|| image_key(n));
+            match files.get(&key) {
+                Some(Some(file)) => {
+                    if !n.image_rgba.is_empty() {
+                        n.image_rgba = Vec::new();
+                        n.image_file = Some(file.clone());
+                    }
+                }
+                // Not a picture (its file is gone, or the pixels did not
+                // match their size): the card shows its monogram.
+                Some(None) => {
+                    n.image_rgba = Vec::new();
+                    n.image_file = None;
+                    n.image_width = 0;
+                    n.image_height = 0;
+                }
+                None => {} // not of this batch
+            }
+        }
+        if placed {
+            self.draw_options();
         }
     }
 
@@ -1220,28 +1309,12 @@ impl App {
         if self.notif_icon_slot.contains_key(&res.key) {
             return; // already have it (a duplicate reply)
         }
-        let slot = self.notif_icon_chains.len() as u32;
-        self.notif_icon_chains.push(chain);
-        self.notif_icon_slot.insert(res.key, slot);
-        self.upload_options_icons();
+        // (No renderer yet: the measure that comes with it asks again.)
+        let Some(layer) = self.options_icon_put(crate::options_icons::Owner::Notif(res.key.clone()), &chain) else {
+            return;
+        };
+        self.notif_icon_slot.insert(res.key, layer);
         self.draw_options();
-    }
-
-    /// Push the OPTIONS renderer's icon array: the notif card avatars first, then
-    /// the clipboard thumbnails. A no-op until that renderer exists — so it must
-    /// also be called once the renderer is created (see `frame.rs`), since a
-    /// resolve can land first and its chain would otherwise never reach the GPU.
-    /// Shared by both the notif icon resolver and the clipboard thumbnailer.
-    pub(crate) fn upload_options_icons(&mut self) {
-        if let Some(r) = self.options_renderer.as_mut() {
-            r.set_options_icons(
-                &self.notif_icon_chains,
-                &self.clip.icon_chains,
-                &self.play_art_chains,
-                // (Last: the phone pill box's menu's symbols.)
-                &self.phone_pill.glyph_chains,
-            );
-        }
     }
 
     /// Cumulative Y of card `idx`'s top from the box's content top (sum of the
@@ -2613,6 +2686,7 @@ impl App {
                 image_rgba: Vec::new(),
                 image_width: 0,
                 image_height: 0,
+                image_file: None,
                 transient: Some(false),
             },
         );
@@ -3086,6 +3160,16 @@ fn usable_app_icon(app_icon: &str) -> Option<String> {
 /// filename and the in-memory dedup key.
 fn image_hash(n: &ActiveNotification) -> u64 {
     use std::hash::{Hash, Hasher};
+    // Pixels gone to the GPU: the file is named by the hash.
+    if n.image_rgba.is_empty() {
+        if let Some(h) = n
+            .image_file
+            .as_deref()
+            .and_then(|f| u64::from_str_radix(f.strip_suffix(".raw").unwrap_or(f), 16).ok())
+        {
+            return h;
+        }
+    }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     n.image_rgba.hash(&mut h);
     n.image_width.hash(&mut h);
@@ -3099,6 +3183,30 @@ fn image_key(n: &ActiveNotification) -> String {
     format!("img:{:016x}", image_hash(n))
 }
 
+/// The picture store's file for a slot key (`img:<hash>` → `<hash>.raw`).
+fn image_file_of_key(key: &str) -> Option<String> {
+    key.strip_prefix("img:").map(|h| format!("{h}.raw"))
+}
+
+/// Whether the card has a picture: pixels in hand, or a file to read them from.
+fn has_image(n: &ActiveNotification) -> bool {
+    n.image_width > 0 && n.image_height > 0 && (!n.image_rgba.is_empty() || n.image_file.is_some())
+}
+
+/// Where a card's picture comes from, for the chain made off the loop.
+enum PictureSource {
+    Pixels(Vec<u8>),
+    File(String),
+}
+
+/// A picture's chain made off the loop, with the file now holding its pixels
+/// (`None`: not a picture after all).
+struct MadePicture {
+    key: String,
+    chain: Option<Vec<u8>>,
+    file: Option<String>,
+}
+
 /// Directory (under the daemon's XDG data dir) holding the persisted
 /// notification images — one raw premultiplied-*straight* RGBA file per unique
 /// image, named by its content hash, so avatars survive a waverunner restart
@@ -3110,11 +3218,16 @@ const IMAGE_DIR: &str = "notif-images";
 /// are immutable by content, so an existing file is already correct.
 fn store_image(hash: u64, rgba: &[u8]) -> String {
     let file = format!("{hash:016x}.raw");
-    let path = crate::persist::data_path(IMAGE_DIR).join(&file);
+    store_image_file(&file, rgba);
+    file
+}
+
+/// Write `rgba` as the store's `file`, unless it is there already.
+fn store_image_file(file: &str, rgba: &[u8]) {
+    let path = crate::persist::data_path(IMAGE_DIR).join(file);
     if !path.exists() {
         crate::persist::write_bytes("notif-image", &path, rgba);
     }
-    file
 }
 
 /// Remove cache files no stored card references (#50): before this sweep
@@ -3706,6 +3819,7 @@ mod tests {
             image_rgba: Vec::new(),
             image_width: 0,
             image_height: 0,
+            image_file: None,
             transient: None,
         }
     }
