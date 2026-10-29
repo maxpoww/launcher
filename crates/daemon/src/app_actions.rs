@@ -182,6 +182,11 @@ pub(crate) fn has_symbol(name: &str) -> bool {
 
 /// The symbols' tiles, one texture layer each in `SYMBOLS`' order (put
 /// after the entries' icons as the dock's other figures are).
+/// How many symbols have a figure (the layers `figures` will fill).
+pub(crate) fn figure_count() -> usize {
+    SYMBOLS.iter().filter(|(_, s)| s.svg().is_some()).count()
+}
+
 pub(crate) fn figures() -> Option<Vec<Vec<u8>>> {
     SYMBOLS.iter().map(|(_, s)| apps::svg_figure(&s.svg()?)).collect()
 }

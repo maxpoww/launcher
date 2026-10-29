@@ -129,6 +129,7 @@ fn request(cmd: &str) -> anyhow::Result<String> {
         snapshot_reset();
     }
     let _perf = crate::perf::HYPR_REQUEST.time();
+    let asked = std::time::Instant::now();
     let mut stream = UnixStream::connect(instance_dir()?.join(".socket.sock"))
         .context("connecting to Hyprland control socket")?;
     stream.write_all(cmd.as_bytes())?;
@@ -136,6 +137,12 @@ fn request(cmd: &str) -> anyhow::Result<String> {
     // time (50 reads for one monitor list).
     let mut out = String::with_capacity(16 * 1024);
     stream.read_to_string(&mut out)?;
+    // (A slow answer is the compositor busy; the shell waited for it here.
+    // `RUST_LOG=waverunner::hypr=debug` says which request and how long.)
+    let waited = asked.elapsed();
+    if waited > std::time::Duration::from_millis(8) {
+        debug!("Hyprland took {} ms to answer {} ({} bytes)", waited.as_millis(), cmd.trim(), out.len());
+    }
     if read_only {
         SNAPSHOT.with(|s| {
             if let Some(map) = s.borrow_mut().as_mut() {
