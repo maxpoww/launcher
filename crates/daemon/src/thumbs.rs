@@ -374,6 +374,13 @@ fn older_tools(path: &str, kind: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// A file's picture when one is made already (another app's, or ours kept),
+/// as the box shows it: no program runs and nothing big is read — a file
+/// lifted out of the box wears it (`App::box_file_lift`).
+pub(crate) fn made(path: &str) -> Option<Vec<u8>> {
+    from_xdg_cache(path).or_else(|| kept_preview(path)).map(rounded)
+}
+
 /// The freedesktop thumbnail cache: `$XDG_CACHE_HOME/thumbnails/
 /// {large,normal}/<md5 of the file URI>.png`. Free coverage for
 /// anything another application already thumbnailed.

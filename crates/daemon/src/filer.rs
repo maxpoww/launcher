@@ -6874,6 +6874,93 @@ impl App {
         self.schedule_frame();
     }
 
+    /// A FILE OF THE BOX carried out of its card (Max, 2026-10-29: "dragging a
+    /// file out of the box into an app"): from there it is a Wayland drag of
+    /// ours, as a file window's is — another app, the desktop, a file window,
+    /// the dock's bin take it. The box closes to the dock for it: the box
+    /// holds the keyboard, and Hyprland pins the POINTER to a layer that
+    /// does, so the drag would never reach the windows under it. Inside the
+    /// card (and over the dock: pinned there, or the bin) it stays the box's
+    /// own drag.
+    pub(crate) fn box_file_carried_out(&mut self) {
+        let Some((i, at)) = self.gesture.dragging.as_ref().map(|d| (d.entry_idx, d.pos)) else {
+            return;
+        };
+        if self.kinds.get(i) != Some(&crate::apps::EntryKind::File) {
+            return;
+        }
+        let layout = self.current_layout();
+        if !self.outside_card(&layout, at) || layout.on_dock(at) {
+            return;
+        }
+        if !self.box_file_lift(i, self.gesture.press_serial) {
+            return;
+        }
+        self.gesture.dragging = None;
+        self.gesture.pressed = None;
+        self.gesture.press_pos = None;
+        self.reorder_slot = None;
+        self.grid_drag_page_at = None;
+        if self.interactive {
+            self.begin_keyboard_handback(crate::KbSurface::Launcher, None);
+            crate::surface::set_interactive(&self.layer, false);
+            self.interactive = false;
+        }
+        self.dock_stack = None;
+        self.dir_stack = None;
+        self.handle_command(waverunner_proto::Command::Collapse);
+        self.schedule_frame();
+    }
+
+    /// Entry `i` of the box (a file or a folder, by its path) in hand as a
+    /// Wayland drag from the dock's surface, wearing its picture.
+    fn box_file_lift(&mut self, i: usize, serial: u32) -> bool {
+        let Some(entry) = self.entries.get(i) else {
+            return false;
+        };
+        let path = entry.id.clone();
+        let is_dir = Path::new(&path).is_dir();
+        if !is_dir && !Path::new(&path).is_file() {
+            return false;
+        }
+        let key = if is_dir {
+            crate::desktop::folder_icon(Path::new(&path))
+        } else {
+            crate::desktop::asset_key(crate::files::file_asset_name(&entry.name))
+        };
+        let icon_scale = self.icon_scale();
+        let half = crate::apps::ICON_SIZE as f32 * icon_scale / 2.0;
+        let chain = (!is_dir)
+            .then(|| crate::thumbs::made(&path))
+            .flatten()
+            .or_else(|| self.desktop.chains.get(&key).cloned())
+            .or_else(|| crate::desktop::icon_request(&key).and_then(|req| crate::notif_icons::resolve_now(&self.config.theme.icon_theme, &req)));
+        let (Some(manager), Some(device)) = (self.data_device_manager.as_ref(), self.data_device.as_ref()) else {
+            warn!("box: no data device; nothing can be carried out of it");
+            return false;
+        };
+        let source = manager.create_drag_and_drop_source(&self.qh, [URI_LIST, PLAIN_TEXT], DndAction::Move | DndAction::Copy);
+        let image = chain.and_then(|chain| self.drag_image(&chain, (half, half), icon_scale));
+        source.start_drag(device, self.layer.wl_surface(), image.as_ref().map(|d| d.surface()), serial);
+        // (Hyprland maps the image on the first commit that has a texture.)
+        if let Some(image) = image.as_ref() {
+            image.surface().commit();
+        }
+        info!("box: {path} carried out of the box");
+        // (`dock_raised`: the dock stays up for its bin while it is in hand,
+        // and goes as the box would have once it is let go.)
+        self.filer.drag = Some(Lifted {
+            win: crate::quicklook::BOX,
+            paths: vec![path],
+            source,
+            _icon: image,
+            action: DndAction::empty(),
+            dropped: false,
+            dock_raised: true,
+        });
+        true
+    }
+
     /// Our drag was let go somewhere (its target may read the files for a
     /// long while yet): nothing is in hand any more — every thing is drawn
     /// where it is, so a click lands on what is seen.
@@ -6930,7 +7017,13 @@ impl App {
     fn filer_dock_back(&mut self) {
         if let Some(drag) = self.filer.drag.as_mut().filter(|d| d.dock_raised) {
             drag.dock_raised = false;
-            self.handle_command(waverunner_proto::Command::Hide);
+            // (Out of the box: the dock goes as a closed box's does — or
+            // stays, where it parks.)
+            if drag.win == crate::quicklook::BOX {
+                self.dismiss();
+            } else {
+                self.handle_command(waverunner_proto::Command::Hide);
+            }
         }
     }
 

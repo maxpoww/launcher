@@ -2831,6 +2831,9 @@ struct GestureState {
     press_pos: Option<(f32, f32)>,
     /// Active drag-and-drop, if any.
     dragging: Option<DragState>,
+    /// The serial of the last left-button press: a Wayland drag of ours
+    /// starts on it (a file carried out of the box, `box_file_lift`).
+    press_serial: u32,
 }
 
 /// Search box and query state.
@@ -8493,6 +8496,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 } else if let Some(ref mut drag) = app.gesture.dragging {
                     drag.pos = pos;
                 }
+                // A found file carried out of the box: into an app (`box_file_lift`).
+                if app.gesture.dragging.as_ref().is_some_and(|d| !d.from_dock) {
+                    app.box_file_carried_out();
+                }
                 if app.ui.target() != Target::Hidden {
                     if app.gesture.dragging.is_none() {
                         app.update_hover();
@@ -8579,12 +8586,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     }
                 }
             }
-            wl_pointer::Event::Button { button, state, .. } if button == BTN_LEFT => {
+            wl_pointer::Event::Button { button, state, serial, .. } if button == BTN_LEFT => {
                 match state {
                     WEnum::Value(wl_pointer::ButtonState::Pressed) => {
                         app.update_hover();
                         app.gesture.pressed = app.hover;
                         app.gesture.press_pos = app.pointer_pos;
+                        app.gesture.press_serial = serial;
                         // (A press on a screen of the Monitors page takes it in the hand.)
                         if let Some(p) = app.pointer_pos.filter(|_| app.control_panel) {
                             app.panel.screen_press(p);

@@ -82,6 +82,12 @@ pub fn spawn(thread_name: &str, icon_theme: String, results: Sender<Resolved>) -
     NotifIcons { requests }
 }
 
+/// One request resolved here, now — for a picture wanted at once and seldom
+/// (a file lifted out of the box): the themed icons' rasters are on disk.
+pub(crate) fn resolve_now(icon_theme: &str, req: &Request) -> Option<Vec<u8>> {
+    resolve(&mut IconLoader::new(icon_theme.to_owned()), req)
+}
+
 /// Resolve one request to a mip chain, or `None` if only a placeholder tile is
 /// available (unresolvable icon name / missing file).
 fn resolve(loader: &mut IconLoader, req: &Request) -> Option<Vec<u8>> {
