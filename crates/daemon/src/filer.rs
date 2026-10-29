@@ -805,6 +805,9 @@ pub(crate) struct Lifted {
     /// The dock was hidden and came up for this drag (its bin takes
     /// things): it goes again when they are let go.
     dock_raised: bool,
+    /// They are web addresses, not files (a page of the box's recents):
+    /// another app takes them, no place of ours that keeps files does.
+    links: bool,
 }
 
 /// A drag hovering a file window (anyone's: another app's, the desktop's,
@@ -2412,6 +2415,12 @@ impl Filer {
     /// Files of a window are in hand.
     pub fn dragging(&self) -> bool {
         self.drag.as_ref().is_some_and(|d| !d.dropped)
+    }
+
+    /// What is in hand is a link, which the desktop, a file window and the
+    /// bin do not take.
+    pub fn carries_links(&self) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.links)
     }
 
     /// The files in hand.
@@ -6901,6 +6910,7 @@ impl App {
             action: DndAction::empty(),
             dropped: false,
             dock_raised,
+            links: false,
         });
         if let Some(win) = self.filer.win_mut(id) {
             win.gap = hole;
@@ -6929,9 +6939,44 @@ impl App {
         if !self.outside_card(&layout, at) || layout.on_dock(at) {
             return;
         }
-        if !self.box_file_lift(i, self.gesture.press_serial) {
+        let Some(entry) = self.entries.get(i) else {
             return;
+        };
+        let (path, name) = (entry.id.clone(), entry.name.clone());
+        if self.box_file_lift(path, &name, self.gesture.press_serial) {
+            self.box_let_go();
         }
+    }
+
+    /// A RECENT of the box's lone app carried off its cell (Max, same day:
+    /// "drag more things out… i dont want apps to move out of the dock or
+    /// box"): a recent file as that file, a recent page as its LINK — into
+    /// another app; the desktop, a file window and the bin keep files, not
+    /// links, and refuse it. Nothing in the box takes a recent, so the box
+    /// goes at once (a little farther than a drag's start: a slip of the
+    /// hand on a cell is no carry).
+    pub(crate) fn box_recent_lift(&mut self, i: usize) -> bool {
+        let a = &self.search.actions;
+        let Some(item) = a.recents.iter().position(|&r| r == i).and_then(|k| a.recent_items.get(k)).cloned() else {
+            return false;
+        };
+        let serial = self.gesture.press_serial;
+        let lifted = if item.url.starts_with('/') {
+            self.box_file_lift(item.url.clone(), &item.title, serial)
+        } else if item.url.starts_with("https://") || item.url.starts_with("http://") {
+            self.box_link_lift(item.url.clone(), item.picture.as_deref(), serial)
+        } else {
+            false
+        };
+        if lifted {
+            self.box_let_go();
+        }
+        lifted
+    }
+
+    /// The box out of a drag's way: the keyboard handed back (Hyprland pins
+    /// the pointer to a layer holding it), the card down to the dock.
+    fn box_let_go(&mut self) {
         self.gesture.dragging = None;
         self.gesture.pressed = None;
         self.gesture.press_pos = None;
@@ -6948,13 +6993,9 @@ impl App {
         self.schedule_frame();
     }
 
-    /// Entry `i` of the box (a file or a folder, by its path) in hand as a
-    /// Wayland drag from the dock's surface, wearing its picture.
-    fn box_file_lift(&mut self, i: usize, serial: u32) -> bool {
-        let Some(entry) = self.entries.get(i) else {
-            return false;
-        };
-        let path = entry.id.clone();
+    /// A file or folder of the box (`name`: as shown) in hand as a Wayland
+    /// drag from the dock's surface, wearing its picture.
+    fn box_file_lift(&mut self, path: String, name: &str, serial: u32) -> bool {
         let is_dir = Path::new(&path).is_dir();
         if !is_dir && !Path::new(&path).is_file() {
             return false;
@@ -6962,7 +7003,7 @@ impl App {
         let key = if is_dir {
             crate::desktop::folder_icon(Path::new(&path))
         } else {
-            crate::desktop::asset_key(crate::files::file_asset_name(&entry.name))
+            crate::desktop::asset_key(crate::files::file_asset_name(name))
         };
         let icon_scale = self.icon_scale();
         let half = crate::apps::ICON_SIZE as f32 * icon_scale / 2.0;
@@ -6993,8 +7034,59 @@ impl App {
             action: DndAction::empty(),
             dropped: false,
             dock_raised: true,
+            links: false,
         });
         true
+    }
+
+    /// A page's address in hand as a Wayland drag (a link: `text/uri-list`
+    /// and the address as text — a browser opens it, a chat writes it),
+    /// wearing the page's picture as the row shows it.
+    fn box_link_lift(&mut self, url: String, picture: Option<&Path>, serial: u32) -> bool {
+        let image = picture.and_then(|p| self.link_picture(p));
+        let (Some(manager), Some(device)) = (self.data_device_manager.as_ref(), self.data_device.as_ref()) else {
+            warn!("box: no data device; nothing can be carried out of it");
+            return false;
+        };
+        let source = manager.create_drag_and_drop_source(&self.qh, [URI_LIST, PLAIN_TEXT], DndAction::Copy);
+        source.start_drag(device, self.layer.wl_surface(), image.as_ref().map(|d| d.surface()), serial);
+        if let Some(image) = image.as_ref() {
+            image.surface().commit();
+        }
+        info!("box: a link carried out of the box: {url}");
+        self.filer.drag = Some(Lifted {
+            win: crate::quicklook::BOX,
+            paths: vec![url],
+            source,
+            _icon: image,
+            action: DndAction::empty(),
+            dropped: false,
+            dock_raised: true,
+            links: true,
+        });
+        true
+    }
+
+    /// A page's picture (a preview, or its site's tile) as a drag image: its
+    /// whole shape, 96 px on its longest side, held by its middle.
+    fn link_picture(&self, path: &Path) -> Option<crate::desktop::DragIcon> {
+        const SIDE: u32 = 96;
+        const SCALE: u32 = 2;
+        let img = image::open(path).ok()?.into_rgba8();
+        let (w, h) = (img.width().max(1), img.height().max(1));
+        let k = (SIDE * SCALE) as f32 / w.max(h) as f32;
+        let (nw, nh) = (((w as f32 * k).round() as u32).max(SCALE), ((h as f32 * k).round() as u32).max(SCALE));
+        let (nw, nh) = (nw - nw % SCALE, nh - nh % SCALE);
+        let mut px = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle).into_raw();
+        // (Premultiplied, as a drag image's pixels are.)
+        for p in px.chunks_exact_mut(4) {
+            let a = p[3] as u16;
+            for c in &mut p[..3] {
+                *c = ((*c as u16 * a + 127) / 255) as u8;
+            }
+        }
+        let grip = ((nw / SCALE) as f32 / 2.0, (nh / SCALE) as f32 / 2.0);
+        self.drag_picture(&px, nw as usize, nh as usize, SCALE as i32, grip)
     }
 
     /// Our drag was let go somewhere (its target may read the files for a
@@ -7026,7 +7118,13 @@ impl App {
             return;
         };
         let paths: Vec<&str> = drag.paths.iter().map(String::as_str).collect();
-        let Some(payload) = crate::desktop::drag_payload(&paths, mime) else {
+        let payload = match (drag.links, mime) {
+            (true, URI_LIST) => Some(paths.iter().map(|u| format!("{u}\r\n")).collect()),
+            (true, PLAIN_TEXT) => Some(paths.join("\n")),
+            (true, _) => None,
+            (false, _) => crate::desktop::drag_payload(&paths, mime),
+        };
+        let Some(payload) = payload else {
             warn!("files: {mime} asked of a drag that never offered it");
             return;
         };
@@ -7099,7 +7197,8 @@ impl App {
     /// (or a copy, where a move is not possible).
     pub(crate) fn filer_dnd_enter(&mut self, id: u32, offer: DragOffer) {
         let has_files = offer.with_mime_types(|m| m.iter().any(|t| t == URI_LIST));
-        if !has_files {
+        // (A link of ours is not a file: a folder does not take it.)
+        if !has_files || self.filer.carries_links() {
             offer.accept_mime_type(offer.serial, None);
             return;
         }

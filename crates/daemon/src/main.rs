@@ -8476,7 +8476,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     if let (Some(pp), Some(hit)) = (app.gesture.press_pos, app.gesture.pressed) {
                         let dx = pos.0 - pp.0;
                         let dy = pos.1 - pp.1;
-                        if dx * dx + dy * dy > 6.0 * 6.0 {
+                        // A recent of the lone app's row: carried OUT, or nothing
+                        // (`box_recent_lift`; a little farther than a drag).
+                        let recent = match hit {
+                            Hit::GridCell(s, cell) => app.search.visible[s].get(cell).copied().filter(|i| app.search.actions.recents.contains(i)),
+                            _ => None,
+                        };
+                        if let Some(i) = recent {
+                            if dx * dx + dy * dy > 14.0 * 14.0 && app.box_recent_lift(i) {
+                                app.gesture.pressed = None;
+                            }
+                        } else if dx * dx + dy * dy > 6.0 * 6.0 {
                             if let Hit::OpenBoxCell(k) = hit {
                                 // Reorder the member within the box (drag it
                                 // out to pull it into the grid instead).

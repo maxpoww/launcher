@@ -5711,9 +5711,9 @@ impl App {
                     .is_some_and(|it| it.kind != Kind::Volume && !crate::trash::protected(Path::new(&it.path)))
             })
         });
-        // (Nor a file window's drag of only the system's folders.)
+        // (Nor a file window's drag of only the system's folders; nor a link.)
         let files = !self.filer.dragging()
-            || self.filer.drag_paths().iter().any(|p| !crate::trash::protected(Path::new(p)));
+            || !self.filer.carries_links() && self.filer.drag_paths().iter().any(|p| !crate::trash::protected(Path::new(p)));
         desk && files
     }
 
@@ -5836,7 +5836,7 @@ impl App {
         // (A file window's drag, still in hand, over the dock: noted here,
         // so the drop knows it whichever of the two "let go" events of
         // ours comes first.)
-        self.filer.over_dock = on_dock && self.filer.dragging();
+        self.filer.over_dock = on_dock && self.filer.dragging() && !self.filer.carries_links();
         let mimes = offer.with_mime_types(|m| m.to_vec());
         let has_files = mimes.iter().any(|t| t == URI_LIST);
         if !own {
@@ -5854,8 +5854,10 @@ impl App {
             self.dock_spring_enter(own);
         }
         // (On the dock only our own files are taken — the desktop's, or a
-        // file manager window's: the bin is there for them.)
-        if !has_files || (on_dock && !own && !self.filer.dragging()) {
+        // file manager window's: the bin is there for them. A link of ours
+        // — a page out of the box — is taken by neither: the desktop is for
+        // files.)
+        if !has_files || (on_dock && !own && !self.filer.dragging()) || self.filer.carries_links() {
             offer.accept_mime_type(offer.serial, None);
             return;
         }
