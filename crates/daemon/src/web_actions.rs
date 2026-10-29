@@ -2049,6 +2049,8 @@ pub(crate) struct Reading {
 /// What a webapp (named `name`, opening at `start`; of `site` when Golem
 /// knows it) showed lately: from Seam's history, where every webapp lives —
 /// in THE ORDER (`rank`, the owner's `picks` counted in), at most `max`.
+/// (The tests' and the audit's: the box reads a `Reading`.)
+#[cfg(test)]
 pub(crate) fn webapp_recents(site: Option<&Site>, start: &str, name: &str, wanted: &Wanted) -> Vec<Recent> {
     webapp_reading(site, start, name, wanted).recents
 }
@@ -2130,6 +2132,8 @@ fn browser_pages(visits: Vec<Visit>, skip: &[String], max: usize) -> Vec<(Visit,
 
 /// What a browser showed lately: a page a site but those in `skip`, in THE
 /// ORDER (`rank`, the owner's `picks` counted in), at most `max`.
+/// (The tests' and the audit's: the box reads a `Reading`.)
+#[cfg(test)]
 pub(crate) fn browser_recents(browser: &Browser, skip: &[String], wanted: &Wanted) -> Vec<Recent> {
     browser_reading(browser, skip, wanted).recents
 }
