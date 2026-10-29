@@ -5256,6 +5256,18 @@ impl App {
         };
         let width = pick(configure.new_size.0, win.size.0, DEFAULT_SIZE.0);
         let height = pick(configure.new_size.1, win.size.1, DEFAULT_SIZE.1);
+        let no_renderer = win.renderer.is_none();
+        if no_renderer && self.gpu_not_ready(crate::GpuWaiter::Files(id, width, height)) {
+            return;
+        }
+        self.filer_configure_sized(id, width, height);
+    }
+
+    /// (With the size settled; run again once the GPU opening ahead is in.)
+    pub(crate) fn filer_configure_sized(&mut self, id: u32, width: u32, height: u32) {
+        let Some(win) = self.filer.win_mut(id) else {
+            return;
+        };
         win.size = (width, height);
         let scale = self.surface_scale(SurfaceKind::Files(id));
         let (pw, ph) = (

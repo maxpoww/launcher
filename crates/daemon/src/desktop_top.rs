@@ -78,6 +78,14 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
+        self.configure_desktop_top_sized(width, height);
+    }
+
+    /// (With the size settled; run again once the GPU opening ahead is in.)
+    pub(crate) fn configure_desktop_top_sized(&mut self, width: u32, height: u32) {
+        if self.desktop_top.renderer.is_none() && self.gpu_not_ready(crate::GpuWaiter::DesktopTop(width, height)) {
+            return;
+        }
         self.desktop_top.size = (width, height);
         let scale = self.surface_scale(crate::fractional::SurfaceKind::DesktopTop);
         let (pw, ph) = (

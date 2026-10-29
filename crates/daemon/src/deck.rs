@@ -480,6 +480,14 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
+        self.configure_deck_sized(width, height);
+    }
+
+    /// (With the size settled; run again once the GPU opening ahead is in.)
+    pub(crate) fn configure_deck_sized(&mut self, width: u32, height: u32) {
+        if self.deck_renderer.is_none() && self.gpu_not_ready(crate::GpuWaiter::Deck(width, height)) {
+            return;
+        }
         self.deck_size = (width, height);
         // The deck spans the output, so its own width IS the screen width; the
         // height comes from the compositor so a tile can carry the screen's
