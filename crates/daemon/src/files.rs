@@ -245,8 +245,8 @@ impl App {
     /// is scheduled when it lands). For pictures shown outside the Files
     /// section — the wallpapers in their setting.
     pub(crate) fn picture_layer(&mut self, path: &str) -> Option<(u32, f32)> {
-        if let Some((slot, pixels)) = self.thumb_map.get(path) {
-            return Some((self.thumb_layer_base() + *slot as u32, thumb_aspect(pixels)));
+        if let Some(&(slot, aspect)) = self.thumb_map.get(path) {
+            return Some((self.thumb_layer_base() + slot as u32, aspect));
         }
         if self.thumb_pending.insert(path.to_owned()) {
             self.thumbs.request(path);
@@ -343,8 +343,14 @@ impl App {
         self.moving_pending.clear();
         let base = self.thumb_layer_base();
         for (path, _) in std::mem::take(&mut self.moving) {
-            if let (Some((slot, pixels)), Some(renderer)) = (self.thumb_map.get(&path), self.renderer.as_mut()) {
-                renderer.update_icon_layer(base + *slot as u32, pixels);
+            // The still back in the layer: from the recent pixels, else
+            // asked for again (the layer keeps the last frame meanwhile).
+            let slot = self.thumb_map.get(&path).map(|&(slot, _)| slot);
+            let recent = self.thumb_recent.iter().find(|(p, _)| *p == path).map(|(_, px)| px.clone());
+            match (slot, recent, self.renderer.as_mut()) {
+                (Some(slot), Some(pixels), Some(renderer)) => renderer.update_icon_layer(base + slot as u32, &pixels),
+                (Some(_), None, _) if self.thumb_pending.insert(path.clone()) => self.thumbs.request(&path),
+                _ => {}
             }
         }
     }
@@ -450,19 +456,39 @@ impl App {
         self.filer_on_thumb(&path, &pixels);
         // And the card, where the file is on it.
         self.card_on_thumb(&path, &pixels);
-        self.thumb_map.insert(path, (slot, pixels));
+        self.thumb_map.insert(path.clone(), (slot, thumb_aspect(&pixels)));
+        self.thumb_remember(path, pixels);
         self.schedule_frame();
     }
 
-    /// Re-upload every retained thumbnail after a rescan rebuilt the
-    /// icon texture array.
+    /// The last few thumbnails' pixels, for the readers that want them at
+    /// once (the wallpaper's preview colour, a moving preview's still, a
+    /// desktop or file window reload); everything else asks the thumbnailer
+    /// again, which has them on disk.
+    const THUMB_RECENT: usize = 8;
+
+    fn thumb_remember(&mut self, path: String, pixels: Vec<u8>) {
+        self.thumb_recent.retain(|(p, _)| *p != path);
+        self.thumb_recent.push_back((path, pixels));
+        while self.thumb_recent.len() > Self::THUMB_RECENT {
+            self.thumb_recent.pop_front();
+        }
+    }
+
+    /// A thumbnail's pixels, if they are among the recent ones.
+    pub(crate) fn thumb_recent(&self, path: &str) -> Option<&Vec<u8>> {
+        self.thumb_recent.iter().find(|(p, _)| p == path).map(|(_, px)| px)
+    }
+
+    /// A new app set (the icon array made anew): every thumbnail is asked
+    /// for again — the thumbnailer has them on disk — and lands through
+    /// the inbox a few per turn, into the slot it already has.
     pub(crate) fn reupload_thumb_icons(&mut self) {
-        let base = self.thumb_layer_base();
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        for (slot, pixels) in self.thumb_map.values() {
-            renderer.update_icon_layer(base + *slot as u32, pixels);
+        let paths: Vec<String> = self.thumb_map.keys().cloned().collect();
+        for path in paths {
+            if self.thumb_pending.insert(path.clone()) {
+                self.thumbs.request(&path);
+            }
         }
     }
 

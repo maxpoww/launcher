@@ -499,6 +499,81 @@ pub(crate) fn files_figures() -> Option<Vec<Vec<u8>>> {
 }
 
 /// The ready-to-upload tile of a fixed-tail figure, by entry id.
+/// The dock's own figures — the bin and its lid, the apps button's stencil,
+/// Golem Files' folders, the actions' symbols — rasterised from SVG. Made
+/// as the index landed, they held the loop 145 ms (2026-10-29, the shell
+/// stress: the index lands right as the shell comes up). Now a set is made
+/// on a thread at start for the look of that moment; the landing takes it
+/// if the look is still that one, and otherwise reserves blank layers and
+/// has the set made off the loop, filling the layers when it comes
+/// (`App::figures_fill`) — the icons' tone is settled by the palette a
+/// little after the shell starts, so the set made ahead is not always the
+/// right one.
+pub(crate) struct Figures {
+    pub dark: bool,
+    pub icons_dark: bool,
+    pub bin: Option<(Vec<u8>, Vec<u8>)>,
+    pub stencil: Option<Vec<u8>>,
+    pub files: Option<Vec<Vec<u8>>>,
+    pub actions: Option<Vec<Vec<u8>>>,
+}
+
+impl Figures {
+    /// Blank chains, one per figure the real set will have (its layers).
+    pub(crate) fn blank() -> Self {
+        let blank = || vec![0u8; ICON_CHAIN_BYTES];
+        Self {
+            dark: crate::look::dark(),
+            icons_dark: crate::look::icons_dark(),
+            bin: Some((blank(), blank())),
+            stencil: Some(blank()),
+            files: Some((0..crate::files_icon::figures().len()).map(|_| blank()).collect()),
+            actions: Some((0..crate::app_actions::figure_count()).map(|_| blank()).collect()),
+        }
+    }
+}
+
+static PREWARMED_FIGURES: std::sync::Mutex<Option<Figures>> = std::sync::Mutex::new(None);
+
+/// The set for the present look, rasterised now (off the loop, please).
+pub(crate) fn make_figures() -> Figures {
+    Figures {
+        dark: crate::look::dark(),
+        icons_dark: crate::look::icons_dark(),
+        bin: dock_figure("group:trash").zip(bin_lid_figure()),
+        stencil: apps_stencil(),
+        files: files_figures(),
+        actions: crate::app_actions::figures(),
+    }
+}
+
+/// Make the figures off the loop, ahead of the index.
+pub(crate) fn prewarm_figures() {
+    // (`WAVERUNNER_NO_FIGURES_AHEAD=1`: the way to measure what it costs.)
+    if std::env::var_os("WAVERUNNER_NO_FIGURES_AHEAD").is_some() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("figures".into()).spawn(|| {
+        let made = make_figures();
+        if let Ok(mut slot) = PREWARMED_FIGURES.lock() {
+            *slot = Some(made);
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("apps: no thread for the dock's figures ({e})");
+    }
+}
+
+/// The figures made ahead, if they are for the present look.
+pub(crate) fn take_figures() -> Option<Figures> {
+    let (dark, icons_dark) = (crate::look::dark(), crate::look::icons_dark());
+    let mut slot = PREWARMED_FIGURES.lock().ok()?;
+    match slot.take() {
+        Some(f) if f.dark == dark && f.icons_dark == icons_dark => Some(f),
+        _ => None,
+    }
+}
+
 pub(crate) fn dock_figure(id: &str) -> Option<Vec<u8>> {
     if id == CONTROL_PANEL_ID {
         return gears_figure();

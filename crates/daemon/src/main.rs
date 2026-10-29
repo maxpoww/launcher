@@ -931,6 +931,7 @@ fn main() -> anyhow::Result<()> {
         assets: HashMap::new(),
         thumbs,
         thumb_map: HashMap::new(),
+        thumb_recent: std::collections::VecDeque::new(),
         thumb_next: 0,
         thumb_pending: HashSet::new(),
         moving: HashMap::new(),
@@ -1565,6 +1566,17 @@ fn main() -> anyhow::Result<()> {
             },
         );
     }
+    // The dock's own figures, rasterised ahead of the index (see
+    // `apps::Figures`) — a moment on, past the GPU's and the surfaces' first
+    // frames: made alongside them they slowed those (contention; the first
+    // turn went from 0.35 s to 0.8 s, 2026-10-29), and the index lands later.
+    let _ = event_loop.handle().insert_source(
+        Timer::from_duration(Duration::from_millis(150)),
+        |_, _, _app: &mut App| {
+            apps::prewarm_figures();
+            TimeoutAction::Drop
+        },
+    );
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
     hypr::snapshot_enable();
     while !app.exit {
@@ -2169,7 +2181,13 @@ pub struct App {
     thumbs: thumbs::Thumbs,
     /// Finished thumbnails by path: reserved-slot index + pixels (kept
     /// for re-upload after a rescan rebuilds the texture array).
-    thumb_map: HashMap<String, (usize, Vec<u8>)>,
+    /// Each thumbnailed path's layer slot and its picture's aspect. The
+    /// pixels themselves live on the GPU (and in the thumbnail cache on
+    /// disk): kept here too they were 350 KB each, 53 MB for 160 — a tenth
+    /// of a 4 GB machine's free memory (2026-10-29). The last few are kept
+    /// in `thumb_recent` for the readers that need the pixels right away.
+    thumb_map: HashMap<String, (usize, f32)>,
+    thumb_recent: std::collections::VecDeque<(String, Vec<u8>)>,
     /// Round-robin cursor over the reserved thumbnail slots.
     thumb_next: usize,
     /// Paths with a thumbnail job in flight (request deduplication).
@@ -3396,6 +3414,53 @@ impl App {
             }
             Command::DebugPerf => {
                 info!("perf: {}", perf::report());
+                // What the shell holds (the 4 GB machines): the process, and
+                // the pixel sets kept on the CPU for re-uploads.
+                let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+                let kb = |key: &str| {
+                    status
+                        .lines()
+                        .find_map(|l| l.strip_prefix(key))
+                        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                let thumbs: usize = self.thumb_recent.iter().map(|(_, p)| p.len()).sum();
+                let chains: usize = self.desktop.chains.values().map(Vec::len).sum();
+                // The biggest mappings, by what they hold in RAM (the heap,
+                // the GPU driver's, the loaded files) — the process's own
+                // /proc/self/smaps, read only here.
+                let mut by_name: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                let mut name = String::new();
+                for line in std::fs::read_to_string("/proc/self/smaps").unwrap_or_default().lines() {
+                    if let Some(rss) = line.strip_prefix("Rss:") {
+                        let kb = rss.trim().trim_end_matches("kB").trim().parse::<u64>().unwrap_or(0);
+                        *by_name.entry(name.clone()).or_default() += kb;
+                    } else if line
+                        .split_once(' ')
+                        .is_some_and(|(range, _)| range.split_once('-').is_some_and(|(a, b)| !a.is_empty() && a.chars().all(|c| c.is_ascii_hexdigit()) && b.chars().all(|c| c.is_ascii_hexdigit())))
+                    {
+                        name = line.split_whitespace().nth(5).unwrap_or("[anon]").to_owned();
+                        if name.starts_with("/nix/store/") {
+                            name = name.rsplit('/').next().unwrap_or(&name).to_owned();
+                        }
+                    }
+                }
+                let mut top: Vec<(String, u64)> = by_name.into_iter().collect();
+                top.sort_by_key(|(_, kb)| std::cmp::Reverse(*kb));
+                let top: Vec<String> = top.iter().take(8).filter(|(_, kb)| *kb >= 2048).map(|(n, kb)| format!("{n} {} MB", kb / 1024)).collect();
+                info!("memory map: {}", top.join(", "));
+                info!(
+                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, inboxes {}+{}",
+                    kb("VmRSS:") / 1024,
+                    kb("RssAnon:") / 1024,
+                    kb("RssFile:") / 1024,
+                    self.thumb_map.len(),
+                    thumbs / (1024 * 1024),
+                    self.desktop.chains.len(),
+                    chains / (1024 * 1024),
+                    self.thumb_inbox.len(),
+                    self.desktop.inbox.len()
+                );
                 return;
             }
             Command::OverviewOn => {
@@ -4753,6 +4818,15 @@ impl App {
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
         let _perf = perf::APPS_LOADED.time();
         info!("app index ready: {} entries", loaded.entries.len());
+        // Where the landing's time goes, step by step (logged when it is felt).
+        let landed = Instant::now();
+        let mut marks: Vec<(&str, u32)> = Vec::new();
+        let mut last = landed;
+        let mut mark = |what: &'static str, marks: &mut Vec<(&str, u32)>| {
+            let now = Instant::now();
+            marks.push((what, now.duration_since(last).as_millis() as u32));
+            last = now;
+        };
 
         // Self-heal: every live box must own a grid slot. A box's slot can
         // only be created at fold time, so one lost to a transient (the
@@ -4833,6 +4907,7 @@ impl App {
         // entries: at a start the colours were applied before the apps were in,
         // and an app opened after a restart had lost its own look (the pass of
         // 2026-10-27).
+        mark("sort", &mut marks);
         crate::palette::exceptions_follow(&self.entries);
         // …and what an exception can reach in each app (`app_caps`).
         crate::app_caps::learn(&self.entries);
@@ -4869,29 +4944,34 @@ impl App {
         // its tile's slot and retire the tile (before the refilter below
         // reads the order).
         self.resolve_pending_installs();
+        mark("side", &mut marks);
 
         // The Recycle Bin is a box entry (no icon of its own): its metal
         // can and its lid ride two extra layers past the entries, the lid
         // right after the can (`content` draws it at `layer + 1`).
-        if let (Some(can), Some(lid)) = (apps::dock_figure("group:trash"), apps::bin_lid_figure()) {
+        let figures = apps::take_figures();
+        let figures_later = figures.is_none();
+        let figures = figures.unwrap_or_else(apps::Figures::blank);
+        mark("figures", &mut marks);
+        if let Some((can, lid)) = figures.bin {
             self.bin_layer = icons.len() as u32;
             icons.push(can);
             icons.push(lid);
         }
         // The apps button's stencil: its plate cut by its squares while it
         // holds pins (`apps_icon`).
-        self.apps_stencil = apps::apps_stencil().map(|chain| {
+        self.apps_stencil = figures.stencil.map(|chain| {
             icons.push(chain);
             icons.len() as u32 - 1
         });
         // Golem Files' launcher: its folders, one layer each, for the hover.
-        self.files_layer = apps::files_figures().map(|figs| {
+        self.files_layer = figures.files.map(|figs| {
             let first = icons.len() as u32;
             icons.extend(figs);
             first
         });
         // The symbols of a lone app's actions (`app_actions.rs`).
-        self.act_symbol_layer = app_actions::figures().map(|figs| {
+        self.act_symbol_layer = figures.actions.map(|figs| {
             let first = icons.len() as u32;
             icons.extend(figs);
             first
@@ -4910,20 +4990,34 @@ impl App {
             }
             None => self.pending_icons = Some(icons),
         }
+        mark("icons", &mut marks);
+        if figures_later {
+            // The figures' layers are blank until the set is made off the loop.
+            let fingerprint = self.apps_fingerprint;
+            self.desktop_off_loop(apps::make_figures, move |app, made| {
+                if app.apps_fingerprint == fingerprint {
+                    app.figures_fill(made);
+                } // (else: a newer set landed and brought its own)
+            });
+        }
         // Windows minimized before this daemon started (a restart, a crash)
         // were stranded with no tile to click: give them their tiles back.
         if !self.min_adopted {
             self.min_adopted = true;
             self.adopt_minimized();
         }
+        mark("minimized", &mut marks);
         // Indices may have shifted: drop any armed click or in-flight drag,
         // rebuild the dock order, re-rank the query, re-resolve hover.
         self.gesture.pressed = None;
         self.gesture.dragging = None;
         self.recompute_dock_order();
+        mark("order", &mut marks);
         // Entry indices just changed — re-match live windows to them.
         self.refresh_running();
+        mark("running", &mut marks);
         self.recompute_removable();
+        mark("removable", &mut marks);
         // A finished uninstall was held hidden until its `.desktop` left the
         // index; now that the rescan reflects the removal, drop the hold for
         // any id no longer present (a still-pending uninstall keeps its).
@@ -4954,13 +5048,16 @@ impl App {
                 .collect();
             self.order.forget_dead_boxes(&live);
         }
+        mark("groups", &mut marks);
         self.refilter();
+        mark("refilter", &mut marks);
         // The app index just became available (or changed): re-measure the
         // notification rows so their icon hints resolve against it. The first
         // measure can run before the index loads (empty → monogram hints); this
         // recomputes and fires the resolver requests now that entries exist.
         if self.config.options.enabled {
             self.measure_notif();
+            mark("notif", &mut marks);
         }
         // A just-installed app lands in the dock: bounce its icon in
         // (same as a launch), and if the dock was auto-hidden, flash it
@@ -4972,6 +5069,37 @@ impl App {
             if self.ui.target() == Target::Hidden {
                 self.handle_command(Command::Show);
                 self.schedule_hide_after(INSTALL_REVEAL);
+            }
+        }
+        let total = landed.elapsed().as_millis();
+        if total > 40 {
+            let steps: Vec<String> = marks.iter().filter(|(_, ms)| *ms > 0).map(|(w, ms)| format!("{w} {ms}")).collect();
+            info!("apps landing took {total} ms: {}", steps.join(", "));
+        }
+        self.schedule_frame();
+    }
+
+    /// The dock's figures, made off the loop after the index landed with
+    /// blank layers for them (see `apps::Figures`): written into those layers.
+    fn figures_fill(&mut self, made: apps::Figures) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        if let Some((can, lid)) = made.bin.as_ref() {
+            renderer.update_icon_layer(self.bin_layer, can);
+            renderer.update_icon_layer(self.bin_layer + 1, lid);
+        }
+        if let (Some(layer), Some(chain)) = (self.apps_stencil, made.stencil.as_ref()) {
+            renderer.update_icon_layer(layer, chain);
+        }
+        if let (Some(first), Some(figs)) = (self.files_layer, made.files.as_ref()) {
+            for (i, chain) in figs.iter().enumerate() {
+                renderer.update_icon_layer(first + i as u32, chain);
+            }
+        }
+        if let (Some(first), Some(figs)) = (self.act_symbol_layer, made.actions.as_ref()) {
+            for (i, chain) in figs.iter().enumerate() {
+                renderer.update_icon_layer(first + i as u32, chain);
             }
         }
         self.schedule_frame();
@@ -6635,6 +6763,19 @@ impl App {
     /// output's fractional scale once the compositor has said it, else the
     /// integer `render_scale` supersample (also the whole story without the
     /// fractional-scale protocol).
+    /// The compositor's scale for the screen a surface is on, in the 1/120
+    /// steps the fractional-scale protocol speaks (None without Hyprland).
+    fn compositor_scale_hint(&self, kind: fractional::SurfaceKind) -> Option<f32> {
+        use fractional::SurfaceKind;
+        let screen = match kind {
+            SurfaceKind::Options => self.bar_screen_name(),
+            SurfaceKind::Files(_) => return None,
+            _ => self.dock_screen_name(),
+        };
+        let scale = hypr::monitor_info(screen.as_deref()).ok()?.scale as f32;
+        (scale >= 1.0).then(|| (scale * 120.0).round() / 120.0)
+    }
+
     pub(crate) fn surface_scale(&self, kind: fractional::SurfaceKind) -> f32 {
         use fractional::SurfaceKind;
         // A file window's scale and size are its own.
@@ -6658,7 +6799,15 @@ impl App {
             SurfaceKind::Files(_) => return 1.0, // answered above
         };
         let fallback = fallback.max(1) as f32;
-        let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
+        // Until the compositor has said this surface's scale, the fallback
+        // is the compositor's own for the screen (one read, cached per
+        // turn), not the integer one: the first frame comes out at the
+        // right scale and the scale event that follows changes nothing —
+        // five surfaces each drew twice at start before (2026-10-29).
+        let scale = match fs.as_ref().and_then(fractional::SurfaceScale::known) {
+            Some(known) => known,
+            None => self.compositor_scale_hint(kind).unwrap_or(fallback),
+        };
         // Never a framebuffer past the device's texture limit: at a 300 %
         // screen the dock asked for 8640×2991 and wgpu panicked in
         // Surface::configure (MacBook, 2026-10-03). Past the cap the

@@ -5522,7 +5522,7 @@ impl App {
             }
             let key = crate::desktop::thumb_key(&item.path);
             if !win.chains.contains_key(&key) {
-                if let Some((_, pixels)) = self.thumb_map.get(&item.path) {
+                if let Some(pixels) = self.thumb_recent(&item.path) {
                     win.chains.insert(key.clone(), pixels.clone());
                 }
             }

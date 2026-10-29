@@ -7,6 +7,7 @@
 //! rect; everything below the surface edge is clipped by the
 //! framebuffer. Text and icons fade with the card's animation alpha.
 
+use std::time::Instant;
 use std::ptr::NonNull;
 
 use anyhow::{anyhow, Context};
@@ -775,6 +776,7 @@ impl Renderer {
         height: u32,
         scale: f32,
     ) -> anyhow::Result<Self> {
+        let t_start = Instant::now();
         // Held for the whole setup: the GL path initializes its EGL display
         // in create_surface, not Instance::new. See `NoVblankWait`.
         let _no_vblank_wait = NoVblankWait::arm();
@@ -962,6 +964,7 @@ impl Renderer {
             });
             (surface, adapter, device, queue, shared)
         };
+        let t_device = Instant::now();
         let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
         // Only a software adapter gets the fixed throttle: every frame there
         // costs real cores. The GL backend used to be throttled too (100 ms a
@@ -1519,6 +1522,7 @@ impl Renderer {
         let (font_system, swash) = shared_text();
         let text_cache = TextCache::new(&device);
         let text_viewport = Viewport::new(&device, &text_cache);
+        let t_pipelines = Instant::now();
         let mut text_atlas = TextAtlas::new(&device, &queue, &text_cache, format);
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
@@ -1527,6 +1531,13 @@ impl Renderer {
             None,
         );
 
+        tracing::info!(
+            "renderer: ready in {} ms (device {}, pipelines {}, the rest {})",
+            t_start.elapsed().as_millis(),
+            t_device.duration_since(t_start).as_millis(),
+            t_pipelines.duration_since(t_device).as_millis(),
+            t_pipelines.elapsed().as_millis()
+        );
         Ok(Self {
             labels_linear: false,
             surface,
