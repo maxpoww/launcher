@@ -280,8 +280,9 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 // (Said at info when it took its time: on the 2013 MacBook Air
                 // the apps came 9.6 s after the dock, and nothing said why.)
                 let took = started.elapsed();
+                let (from_disk, rasterized) = loader.take_counts();
                 let line = format!(
-                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}, files {:?})",
+                    "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}: {from_disk} read, {rasterized} rasterized, files {:?})",
                     entries.len(),
                     files.len(),
                     took,
@@ -917,6 +918,9 @@ pub(crate) struct IconLoader {
     /// Theme fallback chain, best first (see [`theme_chain`]).
     themes: Vec<String>,
     rasters: HashMap<String, (Vec<u8>, bool)>,
+    /// Tiles read from the disk cache and rasterized since `take_counts`.
+    loaded: usize,
+    rasterized: usize,
     disk: DiskCache,
     resolutions: ResolutionCache,
 }
@@ -928,6 +932,8 @@ impl IconLoader {
         Self {
             resolutions: ResolutionCache::load(&themes.join("+")),
             rasters: HashMap::new(),
+            loaded: 0,
+            rasterized: 0,
             disk: DiskCache::new(),
             configured: theme,
             look,
@@ -979,14 +985,11 @@ impl IconLoader {
             return (pixels.clone(), *is_placeholder);
         }
         // Placeholder tiles are cheap to regenerate and never touch disk;
-        // real icons go through the persistent cache — except the unplated
-        // asset carriers, which skip it (cheap, and so a stale plated tile
-        // from before this behaviour is never served).
-        let cache_file = if is_asset {
-            None
-        } else {
-            path.as_deref().and_then(|p| self.disk.file_for(p))
-        };
+        // real icons go through the persistent cache, the unplated asset
+        // carriers under a tag of their own (they skipped it as "cheap":
+        // on the 2013 MacBook Air the assets were 2.7 s of every start's
+        // index, 2026-10-29).
+        let cache_file = path.as_deref().and_then(|p| self.disk.file_for(p, if is_asset { "unplated" } else { "" }));
         // `on_disk`: the persistent cache holds this tile, so a rescan reads
         // it back from there (one 349 KB file, usually still in the page
         // cache) and it is NOT kept in memory as well. Every tile used to
@@ -995,9 +998,13 @@ impl IconLoader {
         // (night audit, 2026-10-04).
         let (pixels, is_placeholder, on_disk) =
             match cache_file.as_deref().and_then(DiskCache::load) {
-                Some(pixels) => (pixels, false, true),
+                Some(pixels) => {
+                    self.loaded += 1;
+                    (pixels, false, true)
+                }
                 None => match path.and_then(|p| rasterize_icon_file(&p, &entry.id)) {
                     Some(pixels) => {
+                        self.rasterized += 1;
                         let stored = cache_file
                             .as_deref()
                             .is_some_and(|file| self.disk.store(file, &pixels));
@@ -1016,6 +1023,12 @@ impl IconLoader {
             self.rasters.insert(key, (pixels.clone(), is_placeholder));
         }
         (pixels, is_placeholder)
+    }
+
+    /// How many tiles came from the disk cache and how many were rasterized
+    /// since the last call.
+    pub(crate) fn take_counts(&mut self) -> (usize, usize) {
+        (std::mem::take(&mut self.loaded), std::mem::take(&mut self.rasterized))
     }
 
     /// Resolve an entry's icon name to a file path (absolute names pass
@@ -1062,7 +1075,7 @@ impl DiskCache {
 
     /// Cache file for `icon_path`, or `None` if the icon file cannot be
     /// stat'ed (vanished between resolve and now).
-    fn file_for(&self, icon_path: &str) -> Option<PathBuf> {
+    fn file_for(&self, icon_path: &str, tag: &str) -> Option<PathBuf> {
         // Named by the file it REALLY is: a theme path through a profile
         // (`/etc/profiles/…/share/icons/…`) stays the same across rebuilds
         // while the store file behind it changes, and every store file has
@@ -1080,7 +1093,9 @@ impl DiskCache {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let key = format!("{icon_path}|{}|{mtime}", meta.len());
+        // (`tag`: the same file drawn another way — an unplated carrier —
+        // is another tile.)
+        let key = format!("{icon_path}|{}|{mtime}|{tag}", meta.len());
         Some(self.dir.join(format!("{:016x}", fnv1a64(&key))))
     }
 
@@ -1828,7 +1843,7 @@ mod tests {
     fn disk_cache_round_trips() {
         let (cache, icon) = scratch("round-trip");
         let icon = icon.to_string_lossy().into_owned();
-        let file = cache.file_for(&icon).unwrap();
+        let file = cache.file_for(&icon, "").unwrap();
         assert_eq!(DiskCache::load(&file), None, "cold cache misses");
 
         let pixels = vec![7u8; ICON_CHAIN_BYTES];
@@ -1842,15 +1857,17 @@ mod tests {
     fn disk_cache_rejects_wrong_size_and_tracks_content() {
         let (cache, icon) = scratch("reject");
         let icon_str = icon.to_string_lossy().into_owned();
-        let file = cache.file_for(&icon_str).unwrap();
+        let file = cache.file_for(&icon_str, "").unwrap();
         cache.store(&file, &[7u8; 3]);
         assert_eq!(DiskCache::load(&file), None, "truncated raster rejected");
 
         // Growing the icon file changes its cache key.
         std::fs::write(&icon, b"<svg></svg>").unwrap();
-        assert_ne!(cache.file_for(&icon_str).unwrap(), file);
+        assert_ne!(cache.file_for(&icon_str, "").unwrap(), file);
         // A vanished icon file has no key at all.
-        assert_eq!(cache.file_for("/nonexistent/icon.svg"), None);
+        assert_eq!(cache.file_for("/nonexistent/icon.svg", ""), None);
+        // The same file drawn unplated is another tile.
+        assert_ne!(cache.file_for(&icon_str, "unplated"), cache.file_for(&icon_str, ""));
 
         std::fs::remove_dir_all(&cache.dir).unwrap();
     }
