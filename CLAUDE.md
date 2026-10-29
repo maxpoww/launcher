@@ -104,6 +104,13 @@ not the list's substring (else "cat" drags in eduCATion/notifiCATion).
 - **Colour** needs the family named: `options::EMOJI_FONT` ("Noto Color Emoji"). The
   sans-serif fallback chain resolves the smiley block to **DejaVu Sans**, which has
   monochrome outlines for it — 🎉 came out colour and 😀 a black ring until named.
+  EVERY label does it now (2026-10-29): `renderer::set_words` shapes a text in runs,
+  its emoji (`emoji_runs`: U+1F300 on, flags, any sign with U+FE0F, keycaps, with
+  what joins them) in the colour font by name — "❤️" had been DejaVu's plain heart and
+  a gap. A colour glyph ignored the text's alpha (glyphon drew it straight from its
+  atlas): glyphon 0.8.0 is vendored with that fix (`third_party/glyphon.patch`).
+  Test: `cargo test emoji_words` (the colour check skips where the font is missing —
+  the toolbox: run it with `FONTCONFIG_FILE` at the host's fonts).
 - **Typing** goes through `clipboard::paste_into_window_below`: serve the emoji to our
   data-control source (`serve_transient_text` — suppressed from the history via
   `ClipState::suppress_hash`; it does take the clipboard over), then **hand the keyboard
@@ -1525,7 +1532,20 @@ The big daemon files are cohesive but long — go straight to the function:
   (`Reading`) says which of the owner's picks and put away the history has no more (`history_with`, `gone` —
   the loop forgets them, `recents_tidy`) and when Seam's history was cleared whole (the kitchen's `cleared`:
   every web key and the pictures go, once — `Forgot::seam_cleared`); the dock's copies of Seam's pictures
-  only while Seam keeps what they were made of (`sweep_unkept`). 2026-10-27 (Max: "do 1 2 3 and
+  only while Seam keeps what they were made of (`sweep_unkept`). 2026-10-29: a song's page wears its
+  play's name when that says who sings it (`with_plays`: "Mentirosa" → "Mentirosa • Ráfaga"); Seam
+  asks YouTube for the rest (Golem `rkWhole`, `noArtist`). Site WORDS are never a word said every
+  day, a letter or a name ("so", "x", "g", "ali" asked a search: gone), and an app named by one
+  letter (X) searches only Shift-written. Google Keep is a site (links: keep.new, #reminders,
+  #archive, #trash; search `#search/text%253D{q}`; no recents: every page is "Google Keep").
+  A FILE CARRIED OUT OF THE BOX (`filer.rs` `box_file_carried_out`): a File entry dragged out of
+  the card (not over the dock) becomes a Wayland drag of ours — `filer::Lifted` with
+  `win: quicklook::BOX`, so every file target of the Files window's drag works (another app, the
+  desktop, a Files window, the bin) — the box collapses and hands the keyboard back (an
+  exclusive layer pins Hyprland's pointer), and the dock goes as a closed box's at the drop
+  (`filer_dock_back` → `dismiss`). Picture: `thumbs::made`, else the type icon
+  (`notif_icons::resolve_now`). Rig-checked into a Files window (moved), foot (path pasted),
+  the bar (let go nowhere). 2026-10-27 (Max: "do 1 2 3 and
   5"): PUT AWAY — Delete on a recent (the pointer's, or the keys' when they moved last:
   `box_delete`) hides it until it is SEEN AGAIN (`web_actions::Forgot`, `recents-forgot.json`: a
   key → when; one visited after comes back, as in a history) and forgets its picks; the Launcher
