@@ -1084,18 +1084,15 @@ impl DiskCache {
         // (Max, 2026-10-15: fast launch's Golem Files still silver in the
         // dark, after Golem-Dark was fixed). The store path changes with the
         // content.
-        let real = std::fs::canonicalize(icon_path).ok();
-        let icon_path = real.as_deref().and_then(|p| p.to_str()).unwrap_or(icon_path);
-        let meta = std::fs::metadata(icon_path).ok()?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Named by what the file HOLDS, not where it is: a new system puts
+        // the same icons at new store paths, and keyed by path every tile
+        // was drawn again at the first start after each update — 76 of 125
+        // on the 2013 MacBook Air, 4.3 s (2026-10-29). The bytes of an icon
+        // are small next to its tile; a PNG's are read once a start.
+        let bytes = std::fs::read(icon_path).ok()?;
         // (`tag`: the same file drawn another way — an unplated carrier —
         // is another tile.)
-        let key = format!("{icon_path}|{}|{mtime}|{tag}", meta.len());
+        let key = format!("{:016x}|{}|{tag}", fnv1a64_bytes(&bytes), bytes.len());
         Some(self.dir.join(format!("{:016x}", fnv1a64(&key))))
     }
 
@@ -1132,6 +1129,16 @@ fn fnv1a64(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325, |h, b| {
         (h ^ b as u64).wrapping_mul(0x100000001b3)
     })
+}
+
+/// FNV-1a over raw bytes (what [`fnv1a64`] is over a string).
+fn fnv1a64_bytes(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Persistent icon-name → file-path resolution cache
