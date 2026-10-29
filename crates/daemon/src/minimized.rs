@@ -112,8 +112,20 @@ impl App {
     /// already shown replaces the tile (fresh title/thumbnail) and re-ranks
     /// it as newest.
     pub(crate) fn on_min_add(&mut self, payload: &str) {
-        // Six fields: only the title (last) may carry spaces, so it takes the
-        // rest of the line — everything before it is a single token.
+        let Some(picture) = self.min_add_tile(payload) else {
+            return;
+        };
+        // The tile is a transient entry: refilter rebuilds those and the
+        // dock order in one move (and schedules the frame). The picture
+        // comes a moment later, from off the loop.
+        self.refilter();
+        self.min_pictures_fetch(vec![picture]);
+    }
+
+    /// The tile of a `min-add` payload, with a letter for a picture: pushed
+    /// (an address already shown is replaced). Gives back what to read for
+    /// its picture — see [`App::min_pictures_fetch`].
+    fn min_add_tile(&mut self, payload: &str) -> Option<(String, String)> {
         let mut parts = payload.splitn(6, ' ');
         let (Some(addr), Some(ws), Some(aspect), Some(class), Some(path)) = (
             parts.next(),
@@ -123,75 +135,30 @@ impl App {
             parts.next(),
         ) else {
             warn!("min-add: malformed payload {payload:?}");
-            return;
+            return None;
         };
         let addr = norm_addr(addr);
         let ws = ws.parse::<i64>().unwrap_or(0);
-        // The tile shape. A missing/garbage/non-finite ratio falls back to a
-        // square; the draw clamps the extremes (`MIN`/`MAX_TILE_ASPECT`).
         let aspect = aspect
             .parse::<f32>()
             .ok()
             .filter(|a| a.is_finite() && *a > 0.0)
             .unwrap_or(1.0);
-        // The class resolves the corner badge later (`refresh_min_badges`);
-        // `?` (unknown) simply matches no app, so the tile shows no badge.
         let class = class.to_owned();
-        // The title is everything after the path (it may contain spaces); a
-        // window with none still needs a letter for its placeholder tile.
         let title = parts.next().unwrap_or("").trim();
         let title = if title.is_empty() { "Window" } else { title }.to_owned();
         self.evict_minimized(&addr);
-        // Best effort on the picture: a missing or short file (the plugin
-        // may have failed its render) costs only the thumbnail — the tile
-        // still stands, as a letter tile on the title. The file is the
-        // plugin's, so it is read, never deleted.
-        let want = (ICON_SIZE * ICON_SIZE * 4) as usize;
-        let pixels = match std::fs::read(path) {
-            Ok(raw) if raw.len() == want => Some(to_dock_layer(raw)),
-            Ok(raw) => {
-                debug!(
-                    "min-add {addr}: thumbnail {path:?} is {} bytes, want {want}",
-                    raw.len()
-                );
-                None
-            }
-            Err(e) => {
-                debug!("min-add {addr}: no thumbnail at {path:?}: {e}");
-                None
-            }
-        };
-        // Lowest free slot in the reserved block. A full block (a 17th
-        // simultaneous minimize) degrades that tile to a letter tile — its
-        // pixels are dropped too, since nothing ever re-slots them.
-        let (slot, pixels) = match pixels {
-            Some(p) => {
-                let free =
-                    (0..MIN_THUMB_CAP).find(|s| !self.minimized.iter().any(|w| w.slot == Some(*s)));
-                match free {
-                    Some(s) => {
-                        let layer = self.min_thumb_layer_base() + s as u32;
-                        if let Some(renderer) = self.renderer.as_mut() {
-                            renderer.update_icon_layer(layer, &p);
-                        }
-                        (Some(s), Some(p))
-                    }
-                    None => (None, None),
-                }
-            }
-            None => (None, None),
-        };
         self.minimized.push(MinimizedWin {
-            addr,
+            addr: addr.clone(),
             ws,
             aspect,
             class,
             title,
-            slot,
+            slot: None,
             // Resolved on the refilter below (`recompute_dock_order` →
             // `refresh_min_badges`), which needs the current app index.
             badge_layer: None,
-            pixels,
+            pixels: None,
         });
         // Note the running count. The dock widens to fit these tiles rather
         // than clamp them (`content::layout`); the one ceiling is the
@@ -201,9 +168,73 @@ impl App {
             "min-add: {} minimized window(s) on the dock",
             self.minimized.len()
         );
-        // The tile is a transient entry: refilter rebuilds those and the
-        // dock order in one move (and schedules the frame).
-        self.refilter();
+        Some((addr, path.to_owned()))
+    }
+
+    /// Read the plugin's thumbnails (a 256² picture each) and make them
+    /// dock tiles OFF the loop — six windows adopted at a start were 86 ms
+    /// of the landing (2026-10-29) — then put each in its tile
+    /// (`min_pictures_land`).
+    fn min_pictures_fetch(&mut self, wanted: Vec<(String, String)>) {
+        if wanted.is_empty() {
+            return;
+        }
+        self.desktop_off_loop(
+            move || {
+                let want = (ICON_SIZE * ICON_SIZE * 4) as usize;
+                wanted
+                    .into_iter()
+                    .map(|(addr, path)| {
+                        let pixels = match std::fs::read(&path) {
+                            Ok(raw) if raw.len() == want => Some(to_dock_layer(raw)),
+                            Ok(raw) => {
+                                debug!("min-add {addr}: thumbnail {path:?} is {} bytes, want {want}", raw.len());
+                                None
+                            }
+                            Err(e) => {
+                                debug!("min-add {addr}: no thumbnail at {path:?}: {e}");
+                                None
+                            }
+                        };
+                        (addr, pixels)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |app, made| app.min_pictures_land(made),
+        );
+    }
+
+    /// The pictures read off the loop: each into a free slot of the block
+    /// and its tile (a window restored meanwhile is skipped), then one
+    /// refilter so the tiles show them.
+    fn min_pictures_land(&mut self, made: Vec<(String, Option<Vec<u8>>)>) {
+        let mut landed = false;
+        for (addr, pixels) in made {
+            let Some(pixels) = pixels else {
+                continue;
+            };
+            let Some(at) = self.minimized.iter().position(|w| w.addr == addr) else {
+                continue; // restored or gone meanwhile
+            };
+            if self.minimized[at].slot.is_some() {
+                continue; // (a re-add's picture landed already)
+            }
+            let free = (0..MIN_THUMB_CAP).find(|s| !self.minimized.iter().any(|w| w.slot == Some(*s)));
+            let Some(slot) = free else {
+                continue; // the block is full: the letter tile stays
+            };
+            let layer = self.min_thumb_layer_base() + slot as u32;
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.update_icon_layer(layer, &pixels);
+            }
+            let w = &mut self.minimized[at];
+            w.slot = Some(slot);
+            w.pixels = Some(pixels);
+            landed = true;
+        }
+        if landed {
+            self.refilter();
+        }
     }
 
     /// Give every window already parked on the plugin's minimized workspace a
@@ -211,8 +242,10 @@ impl App {
     /// (or a crash) those windows used to be stranded with nothing to click.
     /// Each is re-announced exactly as the plugin would, with the thumbnail
     /// the plugin left in its runtime folder (a letter tile when it is gone).
+    /// (Called from the apps landing, which refilters after.)
     pub(crate) fn adopt_minimized(&mut self) {
         let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()) + "/waverunner-min";
+        let mut wanted = Vec::new();
         for w in crate::hypr::minimized_windows() {
             let addr = norm_addr(&w.address);
             if self.minimized.iter().any(|m| m.addr == addr) {
@@ -223,8 +256,11 @@ impl App {
             let class: String = w.class.split_whitespace().collect::<Vec<_>>().join("_");
             let path = format!("{dir}/{addr}.rgba");
             debug!("minimized: adopting {addr} ({class}) left from before this daemon");
-            self.on_min_add(&format!("{addr} -1 {} {class} {path} {}", w.aspect, w.title));
+            if let Some(picture) = self.min_add_tile(&format!("{addr} -1 {} {class} {path} {}", w.aspect, w.title)) {
+                wanted.push(picture);
+            }
         }
+        self.min_pictures_fetch(wanted);
     }
 
     /// `min-del <addr>` — the window was restored or died; drop its tile.
