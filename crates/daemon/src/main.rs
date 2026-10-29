@@ -863,6 +863,8 @@ fn main() -> anyhow::Result<()> {
         notif_image_pending: HashSet::new(),
         notif_inbox: Vec::new(),
         notif_inbox_timer: false,
+        symbols: HashMap::new(),
+        symbols_asked: HashSet::new(),
         options_icons: options_icons::OptionsIcons::default(),
         ui: UiState::new(
             config.animation.clone(),
@@ -2024,6 +2026,12 @@ pub struct App {
     /// twenty writes of the history in one turn, 116 ms (2026-10-29).
     notif_inbox: Vec<notifications::NotifEvent>,
     notif_inbox_timer: bool,
+    /// THE MENUS' SYMBOLS (`glyphs.rs`) as chains, ONE copy for the desktop's
+    /// menus, every file window and the phone box (each kept its own: 60
+    /// symbols were 21 MB twice, 2026-10-29), and the keys asked of a
+    /// resolver and not answered yet.
+    symbols: HashMap<String, Vec<u8>>,
+    symbols_asked: HashSet<String>,
     /// The bar's one icon array: who holds which layer.
     options_icons: options_icons::OptionsIcons,
 
@@ -3462,7 +3470,7 @@ impl App {
                 let top: Vec<String> = top.iter().take(8).filter(|(_, kb)| *kb >= 2048).map(|(n, kb)| format!("{n} {} MB", kb / 1024)).collect();
                 info!("memory map: {}", top.join(", "));
                 info!(
-                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, clipboard {} images, notifications {} ({} KB of pictures on their way), bar icons {} layers, inboxes {}+{}",
+                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, clipboard {} images, notifications {} ({} KB of pictures on their way), bar icons {} layers, symbols {} ({} MB), files windows {} chains {} MB, minimized {} ({} pictured), inboxes {}+{}",
                     kb("VmRSS:") / 1024,
                     kb("RssAnon:") / 1024,
                     kb("RssFile:") / 1024,
@@ -3474,6 +3482,12 @@ impl App {
                     self.notif.history.len(),
                     notif_images / 1024,
                     self.options_icons.len(),
+                    self.symbols.len(),
+                    self.symbols.values().map(Vec::len).sum::<usize>() / (1024 * 1024),
+                    self.filer_chains_held().0,
+                    self.filer_chains_held().1 / (1024 * 1024),
+                    self.minimized.len(),
+                    self.minimized.iter().filter(|w| w.slot.is_some()).count(),
                     self.thumb_inbox.len(),
                     self.desktop.inbox.len()
                 );

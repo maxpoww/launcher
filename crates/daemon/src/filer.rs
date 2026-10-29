@@ -129,8 +129,9 @@ const TEXT_LINE: f32 = 17.0;
 /// log): every item is laid out each frame.
 const ITEMS_MAX: usize = 20_000;
 /// Thumbnails kept in hand per window (~350 KB each); past it, only those
-/// on screen stay.
-const CHAINS_MAX: usize = 400;
+/// on screen stay. (400 was 140 MB a window: a photo folder on a 4 GB
+/// laptop; a screen holds some sixty, 2026-10-29.)
+const CHAINS_MAX: usize = 160;
 const LAYER_HEADROOM: u32 = 16;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -2325,7 +2326,7 @@ pub(crate) struct Filer {
     /// pill's — read ONCE for all of them as the first window opens, so a
     /// menu has every symbol the moment it is up (asked for when first worn,
     /// they came a frame or many too late).
-    glyphs: HashMap<String, Vec<u8>>,
+    /// (The symbols' pixels are `App::symbols`, shared with the desktop.)
     glyphs_asked: bool,
     /// What can be printed, as last asked (`print.rs`).
     printers: print::Printers,
@@ -2367,7 +2368,6 @@ impl Filer {
             next: 1,
             keys: None,
             icons: None,
-            glyphs: HashMap::new(),
             glyphs_asked: false,
             printers: Default::default(),
             drag: None,
@@ -5491,7 +5491,16 @@ impl App {
         }
     }
 
-    /// Every symbol read once, for all the windows (`Filer::glyphs`).
+    /// The open file windows, and the bytes of pictures they hold in hand.
+    pub(crate) fn filer_chains_held(&self) -> (usize, usize) {
+        (
+            self.filer.wins.len(),
+            self.filer.wins.iter().map(|w| w.chains.values().map(Vec::len).sum::<usize>()).sum(),
+        )
+    }
+
+    /// Every symbol read once, for all the windows (`App::symbols`; the
+    /// desktop warmed most of them at its start — those are not read again).
     fn filer_glyphs_warm(&mut self) {
         if self.filer.glyphs_asked {
             return;
@@ -5501,7 +5510,11 @@ impl App {
         };
         self.filer.glyphs_asked = true;
         for (name, _) in crate::glyphs::GLYPHS {
-            if let Some(req) = crate::desktop::icon_request(&crate::glyphs::key(name)) {
+            let key = crate::glyphs::key(name);
+            if self.symbols.contains_key(&key) || !self.symbols_asked.insert(key.clone()) {
+                continue;
+            }
+            if let Some(req) = crate::desktop::icon_request(&key) {
                 icons.request(req);
             }
         }
@@ -5574,7 +5587,7 @@ impl App {
             if win.uploaded.iter().any(|u| u.as_deref() == Some(key)) {
                 continue;
             }
-            if let Some(chain) = win.chains.get(key).or_else(|| self.filer.glyphs.get(key)) {
+            if let Some(chain) = win.chains.get(key).or_else(|| self.symbols.get(key)) {
                 if !win.ink.contains_key(key) {
                     if win.ink.len() > 4000 {
                         win.ink.clear();
@@ -5631,10 +5644,11 @@ impl App {
     /// The resolver answered: every window that asked for it files the
     /// pixels and draws.
     fn filer_on_icon(&mut self, res: crate::notif_icons::Resolved) {
-        // (A symbol: kept for every window.)
+        // (A symbol: kept once, for every window and the desktop.)
         if crate::glyphs::is_key(&res.key) {
+            self.symbols_asked.remove(&res.key);
             if let Some(chain) = res.chain.as_ref() {
-                self.filer.glyphs.insert(res.key.clone(), chain.clone());
+                self.symbols.insert(res.key.clone(), chain.clone());
             }
         }
         let mut redraw = Vec::new();

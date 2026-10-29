@@ -773,7 +773,7 @@ impl App {
     /// again with the box.
     fn phone_glyphs_sync(&mut self) {
         let keys: Vec<String> = self.phone_pill.menu.as_ref().map_or_else(Vec::new, |m| {
-            m.glyphs().into_iter().map(crate::glyphs::key).filter(|k| self.desktop_top.glyphs.contains_key(k)).collect()
+            m.glyphs().into_iter().map(crate::glyphs::key).filter(|k| self.symbols.contains_key(k)).collect()
         });
         if keys == self.phone_pill.glyph_keys && keys.iter().all(|k| self.phone_pill.glyph_layer.contains_key(k)) {
             return;
@@ -785,7 +785,7 @@ impl App {
             if self.phone_pill.glyph_layer.contains_key(key) {
                 continue;
             }
-            let Some(chain) = self.desktop_top.glyphs.get(key).cloned() else {
+            let Some(chain) = self.symbols.get(key).cloned() else {
                 continue;
             };
             if let Some(layer) = self.options_icon_put(crate::options_icons::Owner::Glyph(key.clone()), &chain) {
