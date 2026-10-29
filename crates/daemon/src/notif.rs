@@ -335,7 +335,23 @@ impl From<StoredNotification> for ActiveNotification {
 
 /// Per-history-item inputs `measure_notif` computes before the renderer borrow:
 /// `(app, summary, body, time, icon_key)`.
-type NotifRowInput = (String, String, String, u64, Option<String>);
+type NotifRowInput = (String, String, String, u64, Option<String>, u32);
+
+/// The measured parts of a row, kept per notification between measures:
+/// `measure_notif` runs on every arrival and every change of the box, and
+/// measured all 480 rows of a full history each time — 24 ms a call, two
+/// or three calls per notification; at ten a second the shell was deaf
+/// half the time (2026-10-29, Max's own history in the rig). A row's
+/// text and width do not change, so its measure is kept, keyed by the
+/// notification (its time and id) and checked against its text.
+#[derive(Clone)]
+struct MeasuredRow {
+    summary: String,
+    body: String,
+    summary_w: f32,
+    body_lines: Vec<String>,
+    height: f32,
+}
 
 /// One notification's pre-measured render fields. The collapsed preview pill
 /// uses the single-line fields (`summary`/`body`/`time`); the open box uses the
@@ -384,6 +400,15 @@ pub(crate) enum NotifHit {
 pub(crate) struct NotifState {
     /// Append-only, newest first — survives dismissals (our own history).
     pub(crate) history: Vec<ActiveNotification>,
+    /// Rows measured before (see [`MeasuredRow`]), and the font size and
+    /// body width they were measured for.
+    measure_cache: HashMap<(u64, u32), MeasuredRow>,
+    measure_params: (u32, u32),
+    /// The parts of a notification that never change — its formatted
+    /// summary and body, and its picture's key (a hash of the pixels) —
+    /// prepared once: before, every measure formatted all 480 rows and
+    /// hashed 20 MB of pictures again (2026-10-29).
+    prepared: HashMap<(u64, u32), (String, String, Option<String>)>,
     /// Ids already folded into `history`, to detect genuinely new arrivals.
     seen: HashSet<u32>,
     /// How many notifications are currently *active* on the daemon (its live set).
@@ -514,6 +539,9 @@ impl NotifState {
         // `on_notif_event`.
         Self {
             history,
+            measure_cache: HashMap::new(),
+            measure_params: (0, 0),
+            prepared: HashMap::new(),
             seen: HashSet::new(),
             active_count: 0,
             last_read_ms: prefs.last_read_ms,
@@ -866,6 +894,28 @@ impl App {
     /// Re-measure every history item into [`RowInfo`]s (one canonical layout for
     /// the band and the list). Cheap; only on data change.
     pub(crate) fn measure_notif(&mut self) {
+        let _perf = crate::perf::NOTIF_MEASURE.time();
+        let started = std::time::Instant::now();
+        let mut marks: Vec<(&str, u32)> = Vec::new();
+        let mut last = started;
+        let mut mark = |what: &'static str, marks: &mut Vec<(&str, u32)>| {
+            let now = std::time::Instant::now();
+            marks.push((what, now.duration_since(last).as_millis() as u32));
+            last = now;
+        };
+        let live: HashSet<(u64, u32)> = self.notif.history.iter().map(|n| (n.timestamp_ms, n.id)).collect();
+        {
+            let (history, prepared) = (&self.notif.history, &mut self.notif.prepared);
+            for n in history {
+                prepared.entry((n.timestamp_ms, n.id)).or_insert_with(|| {
+                    let (summary, body) = web_format(n);
+                    let key = (!n.image_rgba.is_empty() && n.image_width > 0).then(|| image_key(n));
+                    (summary, body, key)
+                });
+            }
+            prepared.retain(|k, _| live.contains(k));
+        }
+        mark("prepare", &mut marks);
         // Which captured images are generic app logos vs real per-contact
         // avatars: the daemon captures `app_icon`'s browser logo as the "image"
         // when a notification has no avatar, so the SAME image ends up on many
@@ -875,9 +925,9 @@ impl App {
         let logo_keys: HashSet<String> = {
             let mut by_img: HashMap<String, HashSet<&str>> = HashMap::new();
             for n in &self.notif.history {
-                if !n.image_rgba.is_empty() && n.image_width > 0 {
+                if let Some((_, _, Some(key))) = self.notif.prepared.get(&(n.timestamp_ms, n.id)) {
                     by_img
-                        .entry(image_key(n))
+                        .entry(key.clone())
                         .or_default()
                         .insert(n.summary.as_str());
                 }
@@ -897,7 +947,12 @@ impl App {
             .history
             .iter()
             .map(|n| {
-                let (summary, body) = web_format(n);
+                let (summary, body, image_key) = self
+                    .notif
+                    .prepared
+                    .get(&(n.timestamp_ms, n.id))
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), String::new(), None));
                 (
                     n.app_name.clone(),
                     summary,
@@ -907,11 +962,10 @@ impl App {
                     // browser logo (shared image) is NOT used — those fall to the
                     // web service icon / resolved app icon.
                     {
-                        let avatar = (!n.image_rgba.is_empty() && n.image_width > 0)
-                            .then(|| image_key(n))
-                            .filter(|k| !logo_keys.contains(k));
+                        let avatar = image_key.filter(|k| !logo_keys.contains(k));
                         avatar.or_else(|| self.service_icon(n).or_else(|| self.notif_icon_hint(n)))
                     },
+                    n.id,
                 )
             })
             .collect();
@@ -921,17 +975,32 @@ impl App {
         // [`BoxMetrics`]), and because wrap_text is linear in font size, a
         // column and a font scaled by the same factor break into the same
         // lines. This width feeds notif_geom too, so measure and draw agree.
+        mark("items", &mut marks);
         let nm = self.nm();
         let box_w = nm.extended_w;
         let body_w = (box_w - 2.0 * nm.card_pad_x - nm.icon_sz - nm.icon_gap).max(1.0);
         let mut rows = Vec::with_capacity(items.len());
         if let Some(r) = self.options_renderer.as_mut() {
-            for (app, summary, body, timestamp_ms, icon_key) in items {
-                let summary_w = r.measure_text(&summary, nm.font_px, None);
-                let mut m = |s: &str| r.measure_text(s, nm.font_px, None);
-                let body_lines = wrap_text(&mut m, &body, body_w);
+            let params = (nm.font_px.to_bits(), body_w.to_bits());
+            if self.notif.measure_params != params {
+                self.notif.measure_cache.clear();
+                self.notif.measure_params = params;
+            }
+            for (app, summary, body, timestamp_ms, icon_key, id) in items {
+                let key = (timestamp_ms, id);
+                let measured = match self.notif.measure_cache.get(&key) {
+                    Some(m) if m.summary == summary && m.body == body => m.clone(),
+                    _ => {
+                        let summary_w = r.measure_text(&summary, nm.font_px, None);
+                        let mut m = |s: &str| r.measure_text(s, nm.font_px, None);
+                        let body_lines = wrap_text(&mut m, &body, body_w);
+                        let height = card_height(&body_lines, nm);
+                        let measured = MeasuredRow { summary: summary.clone(), body: body.clone(), summary_w, body_lines, height };
+                        self.notif.measure_cache.insert(key, measured.clone());
+                        measured
+                    }
+                };
                 let initial = card_initial(&app, &summary);
-                let height = card_height(&body_lines, nm);
                 let preview = newest_line(&body);
                 rows.push(RowInfo {
                     summary,
@@ -939,13 +1008,14 @@ impl App {
                     timestamp_ms,
                     initial,
                     icon_key,
-                    body_lines,
-                    summary_w,
-                    height,
+                    body_lines: measured.body_lines,
+                    summary_w: measured.summary_w,
+                    height: measured.height,
                 });
             }
+            self.notif.measure_cache.retain(|k, _| live.contains(k));
         } else {
-            for (app, summary, body, timestamp_ms, icon_key) in items {
+            for (app, summary, body, timestamp_ms, icon_key, _id) in items {
                 let initial = card_initial(&app, &summary);
                 let preview = newest_line(&body);
                 rows.push(RowInfo {
@@ -961,8 +1031,16 @@ impl App {
             }
         }
         self.notif.rows = rows;
+        mark("rows", &mut marks);
         self.ensure_notif_images();
+        mark("images", &mut marks);
         self.request_notif_icons();
+        mark("icons", &mut marks);
+        let total = started.elapsed().as_millis();
+        if total > 12 {
+            let steps: Vec<String> = marks.iter().filter(|(_, ms)| *ms > 0).map(|(w, ms)| format!("{w} {ms}")).collect();
+            tracing::info!("notifications: measured {} rows in {total} ms: {}", self.notif.history.len(), steps.join(", "));
+        }
     }
 
     /// Build + upload the icon chain for every history notification that ships
@@ -975,15 +1053,17 @@ impl App {
             .history
             .iter()
             .filter(|n| !n.image_rgba.is_empty() && n.image_width > 0)
-            .map(|n| {
-                (
-                    image_key(n),
-                    n.image_rgba.clone(),
-                    n.image_width,
-                    n.image_height,
-                )
+            .filter_map(|n| {
+                let key = self
+                    .notif
+                    .prepared
+                    .get(&(n.timestamp_ms, n.id))
+                    .and_then(|p| p.2.clone())
+                    .unwrap_or_else(|| image_key(n));
+                // (The pixels are cloned only for a picture not up yet.)
+                (!self.notif_icon_slot.contains_key(&key))
+                    .then(|| (key, n.image_rgba.clone(), n.image_width, n.image_height))
             })
-            .filter(|(k, ..)| !self.notif_icon_slot.contains_key(k))
             .collect();
         let mut added = false;
         for (key, rgba, w, h) in pending {
