@@ -2121,8 +2121,21 @@ fn retitled(mut visits: Vec<Visit>, k: &Kitchen, says: impl Fn(&str) -> bool) ->
 }
 
 /// A webapp's pages and what it played, newest first, once each (a video,
-/// a title): a song heard and its page are one.
-fn with_plays(pages: Vec<(Visit, String)>, plays: Vec<(Visit, String)>) -> Vec<(Visit, String)> {
+/// a title): a song heard and its page are one — named as the play names it
+/// when that says who sings it (the history calls the page "Mentirosa", the
+/// play "Mentirosa • Ráfaga"), whichever was the last.
+fn with_plays(mut pages: Vec<(Visit, String)>, plays: Vec<(Visit, String)>) -> Vec<(Visit, String)> {
+    let sung: HashMap<&str, &str> = plays
+        .iter()
+        .filter(|(_, title)| title.contains(" • "))
+        .filter_map(|(v, title)| Some((video_id(&v.url)?, title.as_str())))
+        .collect();
+    for (v, title) in &mut pages {
+        if let Some(&named) = video_id(&v.url).and_then(|id| sung.get(id)).filter(|_| !title.contains(" • ")) {
+            v.title = named.to_owned();
+            *title = named.to_owned();
+        }
+    }
     let mut all: Vec<(Visit, String)> = plays.into_iter().chain(pages).collect();
     all.sort_by(|a, b| b.0.last.total_cmp(&a.0.last));
     once_each(all.into_iter(), |v, title| video_id(&v.url).map_or_else(|| title.to_lowercase(), str::to_owned))
@@ -2881,9 +2894,13 @@ mod tests {
         let ym = played(&k, site("youtube-music"), "https://music.youtube.com", 20.0);
         assert_eq!(ym[0].0.url, "https://music.youtube.com/watch?v=9d9PQ1hrhBk");
         let page = (Visit { last: 5.0, score: 1.0, ..visit("https://music.youtube.com/watch?v=9d9PQ1hrhBk", "Robot Rock") }, "Robot Rock".to_string());
-        let both = with_plays(vec![page], ym);
+        let both = with_plays(vec![page.clone()], ym.clone());
         assert_eq!(both.len(), 1);
         assert_eq!(both[0].1, "Robot Rock • Daft Punk");
+        // Its page seen since: the page, still named with who sings it.
+        let newer = (Visit { last: 30.0, ..page.0.clone() }, page.1.clone());
+        let both = with_plays(vec![newer], ym);
+        assert_eq!((both.len(), both[0].0.last, both[0].1.as_str(), both[0].0.title.as_str()), (1, 30.0, "Robot Rock • Daft Punk", "Robot Rock • Daft Punk"));
         // Not a file of its own, or not ours at all: nothing.
         assert_eq!(kitchen_in(&dir.join("nowhere")).plays.len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
