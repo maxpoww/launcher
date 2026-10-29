@@ -701,6 +701,8 @@ fn main() -> anyhow::Result<()> {
         layer,
         renderer: None,
         gpu_warm,
+        gpu_waiting: Vec::new(),
+        gpu_wait_timer: false,
         options_layer,
         options_renderer: None,
         options_size: (0, 0),
@@ -1622,6 +1624,10 @@ pub struct App {
     renderer: Option<Renderer>,
     /// The GPU opened ahead for the dock's surface, until its first frame.
     gpu_warm: Option<std::thread::JoinHandle<anyhow::Result<renderer::WarmGpu>>>,
+    /// The surfaces whose first configure waits for it (`gpu_not_ready`),
+    /// and whether the look for it is on.
+    gpu_waiting: Vec<GpuWaiter>,
+    gpu_wait_timer: bool,
     /// Fractional-scale state per surface (see `fractional.rs`); `None` when
     /// the compositor lacks the protocols (integer `render_scale` path).
     dock_fscale: Option<fractional::SurfaceScale>,
@@ -7845,6 +7851,15 @@ impl App {
                 height = sh;
             }
         }
+        self.configure_dock_sized(width, height);
+    }
+
+    /// The dock's configure, with its size settled (`route_configure`): the
+    /// renderer is made on the first, or waits for the GPU opening ahead.
+    fn configure_dock_sized(&mut self, width: u32, height: u32) {
+        if self.renderer.is_none() && self.gpu_not_ready(GpuWaiter::Dock(width, height)) {
+            return;
+        }
         debug!("configure: {width}x{height}");
         // `new_size` is logical (surface-local). Input regions and pointer
         // hit-testing work in this space, so `buffer_size` stays logical.
@@ -9163,7 +9178,68 @@ fn veil_layer_new(
     Some(veil::create(compositor, layer_shell, qh, &viewporter, None))
 }
 
+/// A surface's first configure, held until the GPU opened ahead is in
+/// (`App::gpu_not_ready`): what to run it again with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GpuWaiter {
+    Dock(u32, u32),
+    Options(u32, u32),
+    Deck(u32, u32),
+    Desktop(u32, u32),
+    DesktopTop(u32, u32),
+    Files(u32, u32, u32),
+}
+
 impl App {
+    /// The GPU is still opening on its thread (`renderer::warm_gpu`): the
+    /// surface waits for it — a look every 10 ms, its configure run again
+    /// once it is in — instead of the loop blocking on the join. On the
+    /// MacBook's GL the pipelines compile 300 ms, and the loop sat on them
+    /// with twenty notifications queued (2026-10-29). True when waiting.
+    fn gpu_not_ready(&mut self, who: GpuWaiter) -> bool {
+        if self.gpu_warm.as_ref().is_none_or(|h| h.is_finished()) {
+            return false;
+        }
+        if !self.gpu_waiting.contains(&who) {
+            self.gpu_waiting.push(who);
+        }
+        if !self.gpu_wait_timer {
+            const LOOK: Duration = Duration::from_millis(10);
+            let armed = self.loop_handle.insert_source(Timer::from_duration(LOOK), |_, _, app: &mut App| {
+                if app.gpu_warm.as_ref().is_some_and(|h| !h.is_finished()) {
+                    return TimeoutAction::ToDuration(LOOK);
+                }
+                app.gpu_wait_timer = false;
+                app.gpu_waited();
+                TimeoutAction::Drop
+            });
+            if armed.is_err() {
+                self.gpu_waiting.clear();
+                return false; // (no timer: made now, waiting)
+            }
+            self.gpu_wait_timer = true;
+        }
+        true
+    }
+
+    /// The GPU is in: every surface that waited gets its configure again,
+    /// the dock's first (its renderer takes the GPU opened for it and the
+    /// others draw on it).
+    fn gpu_waited(&mut self) {
+        let mut waiting = std::mem::take(&mut self.gpu_waiting);
+        waiting.sort_by_key(|w| !matches!(w, GpuWaiter::Dock(..)));
+        for who in waiting {
+            match who {
+                GpuWaiter::Dock(w, h) => self.configure_dock_sized(w, h),
+                GpuWaiter::Options(w, h) => self.configure_options_sized(w, h),
+                GpuWaiter::Deck(w, h) => self.configure_deck_sized(w, h),
+                GpuWaiter::Desktop(w, h) => self.configure_desktop_sized(w, h),
+                GpuWaiter::DesktopTop(w, h) => self.configure_desktop_top_sized(w, h),
+                GpuWaiter::Files(id, w, h) => self.filer_configure_sized(id, w, h),
+            }
+        }
+    }
+
     /// The GPU opened ahead for the dock's surface, once it is: waited for
     /// while still opening (work the first frame needs anyway); none for
     /// another surface or after a failure (the renderer opens its own).

@@ -2138,6 +2138,14 @@ impl App {
         if width == 0 || height == 0 {
             return; // wait for the compositor to report a real size
         }
+        self.configure_options_sized(width, height);
+    }
+
+    /// (With the size settled; run again once the GPU opening ahead is in.)
+    pub(crate) fn configure_options_sized(&mut self, width: u32, height: u32) {
+        if self.options_renderer.is_none() && self.gpu_not_ready(crate::GpuWaiter::Options(width, height)) {
+            return;
+        }
         self.options_size = (width, height);
         let scale = self.surface_scale(crate::fractional::SurfaceKind::Options);
         let (pw, ph) = (
