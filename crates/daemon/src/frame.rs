@@ -1738,6 +1738,22 @@ impl App {
         } else {
             self.panel_mix = want;
         }
+        // An Install app's page (`pkg_page.rs`) pushes the same way; a page
+        // that is leaving is dropped once the results are back.
+        let page_want = if self.page_up() { 1.0 } else { 0.0 };
+        if self.ui.target() == Target::Open {
+            self.page_mix += (page_want - self.page_mix) * (1.0 - (-dt * 22.0).exp());
+            if (page_want - self.page_mix).abs() < 0.002 {
+                self.page_mix = page_want;
+            } else {
+                self.dirty = true;
+            }
+        } else {
+            self.page_mix = page_want;
+        }
+        if self.page_mix <= 0.0 && self.search.page.as_ref().is_some_and(|p| p.leaving) {
+            self.search.page = None;
+        }
         // The panel starts afresh on each visit, reset while it is out of
         // sight: pushed out behind the apps, or the card fully closed.
         if self.panel_reset_due
@@ -1784,10 +1800,15 @@ impl App {
                 orbit_only = calm;
             }
             Some(draw)
+        } else if self.search.page.is_some() {
+            let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
+            Some(self.page_draw(&layout, dock_ink, bright))
         } else {
             None
         };
         let panel_images = panel_draw.as_ref().map(|d| panel_draw_images(self, d)).unwrap_or_default();
+        // (The page rides the panel's push.)
+        let push = self.panel_mix.max(self.page_mix);
         if paint.moving {
             self.dirty = true;
         }
@@ -1990,8 +2011,8 @@ impl App {
                     (x, y - layout.apps_part.filter(|p| p.row >= 0).map_or(0.0, |p| p.up))
                 }),
                 open_box_members: &open_box_members,
-                panel: self.panel_mix >= 0.999,
-                panel_mix: self.panel_mix,
+                panel: push >= 0.999,
+                panel_mix: push,
                 panel_draw: panel_draw.as_ref(),
                 panel_images: &panel_images,
                 open_box_disp: &open_box_disp,

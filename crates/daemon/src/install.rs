@@ -346,6 +346,80 @@ fn resolve_hit(
         })
 }
 
+/// THE PACKAGES' ICONS on the dock's side: the `RANK_HITS_MAX` layers of the
+/// texture array's reserved tail, each HELD BY ONE PACKAGE (its attr) for as
+/// long as it is among the hits — so a package of the last keystroke's answer
+/// keeps its icon as the next answer comes (every answer used to put the
+/// installer box on every cell until all its icons came together).
+#[derive(Default)]
+pub(crate) struct PkgIcons {
+    slots: Vec<Option<PkgSlot>>,
+}
+
+struct PkgSlot {
+    attr: String,
+    /// Its icon's pixels (kept to be put back when the array is made
+    /// again); empty while it is asked for.
+    pixels: Vec<u8>,
+    placeholder: bool,
+}
+
+impl PkgIcons {
+    /// The new hits: each keeps the slot it holds, the others take one let
+    /// go by a package no longer among them. Which hits (their indices)
+    /// have no icon yet, in their order.
+    pub(crate) fn take(&mut self, hits: &[nix::PkgEntry]) -> Vec<usize> {
+        self.slots.resize_with(nix::RANK_HITS_MAX, || None);
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|s| !hits.iter().any(|h| h.attr == s.attr)) {
+                *slot = None;
+            }
+        }
+        let mut lacking = Vec::new();
+        for (i, hit) in hits.iter().enumerate() {
+            let held = self.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.attr == hit.attr));
+            let slot = match held {
+                Some(slot) => slot,
+                None => match self.slots.iter().position(Option::is_none) {
+                    Some(free) => {
+                        self.slots[free] = Some(PkgSlot { attr: hit.attr.clone(), pixels: Vec::new(), placeholder: true });
+                        free
+                    }
+                    None => continue, // (more hits than layers: the box)
+                },
+            };
+            if self.slots[slot].as_ref().is_some_and(|s| s.pixels.is_empty()) {
+                lacking.push(i);
+            }
+        }
+        lacking
+    }
+
+    /// `attr`'s icon has come: its slot, unless it is no longer a hit.
+    pub(crate) fn put(&mut self, attr: String, pixels: Vec<u8>, placeholder: bool) -> Option<usize> {
+        let slot = self.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.attr == attr))?;
+        self.slots[slot] = Some(PkgSlot { attr, pixels, placeholder });
+        Some(slot)
+    }
+
+    /// `attr`'s slot and placeholder flag, once its icon is in.
+    pub(crate) fn ready(&self, attr: &str) -> Option<(usize, bool)> {
+        self.slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.attr == attr && !s.pixels.is_empty()))
+            .map(|i| (i, self.slots[i].as_ref().is_some_and(|s| s.placeholder)))
+    }
+
+    pub(crate) fn pixels(&self, slot: usize) -> Option<&[u8]> {
+        self.slots.get(slot)?.as_ref().map(|s| s.pixels.as_slice()).filter(|p| !p.is_empty())
+    }
+
+    /// One past the highest layer holding an icon.
+    pub(crate) fn used(&self) -> usize {
+        self.slots.iter().rposition(|s| s.as_ref().is_some_and(|s| !s.pixels.is_empty())).map_or(0, |i| i + 1)
+    }
+}
+
 impl App {
     /// A message from the nix threads: the index became searchable, a
     /// rank answer arrived, or a profile mutation finished.
@@ -353,6 +427,11 @@ impl App {
         match event {
             nix::Event::IndexReady(count) => {
                 info!("package index ready: {count} packages");
+                if self.pkg_state == PkgIndexState::Ready {
+                    // A fresh index after the first: every answer again.
+                    self.pkg_asked = None;
+                    self.pkg_hits_query = None;
+                }
                 self.pkg_state = PkgIndexState::Ready;
                 self.refilter();
             }
@@ -361,33 +440,40 @@ impl App {
                 self.schedule_frame();
             }
             nix::Event::Ranked { query, hits } => {
+                // Each hit keeps the icon it already has; the others wear
+                // the installer box until theirs come, asked for at once
+                // (what is on screen first).
+                let lacking = self.pkg_icons.take(&hits);
                 self.pkg_hits = hits;
-                // Icons for the previous hits don't fit these; show the
-                // generic tile until this query's HitIcons arrive.
-                self.pkg_hit_icons.clear();
-                self.pkg_hit_placeholders.clear();
                 // Re-render only if the answer matches what's typed; an
                 // outdated one keeps waiting for its follower.
                 let current = query == self.search.query;
+                if current && !lacking.is_empty() {
+                    let pkgs = lacking.iter().map(|&i| self.pkg_hits[i].clone()).collect();
+                    self.nix.request(nix::Request::Icons { query: query.clone(), pkgs });
+                }
                 self.pkg_hits_query = Some(query);
                 if current {
                     self.refilter();
                 }
             }
-            nix::Event::HitIcons {
-                query,
-                icons,
-                placeholders,
-            } => {
-                if Some(&query) == self.pkg_hits_query.as_ref() {
-                    self.pkg_hit_icons = icons;
-                    self.pkg_hit_placeholders = placeholders;
-                    self.upload_pkg_icons();
-                    if query == self.search.query {
-                        // Transients hold per-entry layer/placeholder:
-                        // rebuild them onto the fresh icons.
-                        self.refilter();
+            nix::Event::Details { attr, details } => self.page_details(&attr, details),
+            nix::Event::HitIcons { query, icons } => {
+                let base = self.pkg_layer_base;
+                let mut came = false;
+                for icon in icons {
+                    let Some(slot) = self.pkg_icons.put(icon.attr, icon.pixels, icon.placeholder) else {
+                        continue; // no longer among the hits
+                    };
+                    came = true;
+                    if let (Some(renderer), Some(pixels)) = (self.renderer.as_mut(), self.pkg_icons.pixels(slot)) {
+                        renderer.update_icon_layer(base + slot as u32, pixels);
                     }
+                }
+                if came && query == self.search.query {
+                    // Transients hold per-entry layer/placeholder:
+                    // rebuild them onto the fresh icons.
+                    self.refilter();
                 }
             }
             nix::Event::Realized {
@@ -599,26 +685,22 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        for (i, pixels) in self.pkg_hit_icons.iter().enumerate() {
-            renderer.update_icon_layer(base + i as u32, pixels);
+        for slot in 0..nix::RANK_HITS_MAX {
+            if let Some(pixels) = self.pkg_icons.pixels(slot) {
+                renderer.update_icon_layer(base + slot as u32, pixels);
+            }
         }
     }
 
-    /// Append one transient Install-section entry for the `hit_idx`-th
-    /// ranked package (kind Package, its own icon from the reserved
-    /// texture tail) and return its index. The entry id is the package
-    /// attr — the install handle.
-    pub(crate) fn push_transient_pkg(&mut self, pkg: &nix::PkgEntry, hit_idx: usize) -> usize {
+    /// Append one transient Install-section entry for a ranked package
+    /// (kind Package, its own icon from the reserved texture tail once it
+    /// has come, the installer box until then) and return its index. The
+    /// entry id is the package attr — the install handle.
+    pub(crate) fn push_transient_pkg(&mut self, pkg: &nix::PkgEntry) -> usize {
         let (id, name, version) = (pkg.attr.clone(), pkg.name.clone(), pkg.version.clone());
-        let (layer, placeholder) = if hit_idx < self.pkg_hit_icons.len() {
-            (
-                self.pkg_layer_base + hit_idx as u32,
-                self.pkg_hit_placeholders[hit_idx],
-            )
-        } else {
-            // No rasterized icon delivered (shouldn't happen): generic
-            // package icon.
-            self.asset("asset-pkg").unwrap_or((0, true))
+        let (layer, placeholder) = match self.pkg_icons.ready(&pkg.attr) {
+            Some((slot, placeholder)) => (self.pkg_layer_base + slot as u32, placeholder),
+            None => self.asset("asset-pkg").unwrap_or((0, true)),
         };
         let entry = AppEntry {
             id,
@@ -647,6 +729,7 @@ impl App {
             && self.ui.target() == Target::Open
         {
             self.pkg_load_kicked = true;
+            self.pkg_asked = Some(self.search.query.clone());
             self.nix.request(nix::Request::Rank {
                 query: self.search.query.clone(),
             });
@@ -661,21 +744,22 @@ impl App {
         // query keeps showing whatever is up (no flash to empty).
         let query = self.search.query.clone();
         let rankable = query.is_empty() || query.chars().count() >= PKG_QUERY_MIN;
-        if rankable && self.pkg_hits_query.as_deref() != Some(query.as_str()) {
+        if rankable
+            && self.pkg_hits_query.as_deref() != Some(query.as_str())
+            && self.pkg_asked.as_deref() != Some(query.as_str())
+        {
+            self.pkg_asked = Some(query.clone());
             self.nix.request(nix::Request::Rank { query });
         }
         let hits = self.pkg_hits.clone();
-        // Already-installed packages drop out of the list; the original
-        // hit index is kept so each shown package keeps its own icon.
-        let shown: Vec<(usize, nix::PkgEntry)> = hits
-            .into_iter()
-            .enumerate()
-            .filter(|(_, p)| !self.pkg_installed(p))
-            .collect();
-        shown
-            .into_iter()
-            .map(|(i, p)| self.push_transient_pkg(&p, i))
-            .collect()
+        // Already-installed packages drop out of the list.
+        let shown: Vec<nix::PkgEntry> = hits.into_iter().filter(|p| !self.pkg_installed(p)).collect();
+        // (The package of the page up keeps its entry, shown or not: its icon.)
+        let paged = self.page_package().filter(|p| !shown.iter().any(|s| s.attr == p.attr)).cloned();
+        if let Some(p) = paged {
+            self.push_transient_pkg(&p);
+        }
+        shown.into_iter().map(|p| self.push_transient_pkg(&p)).collect()
     }
 
     /// Begin an ephemeral "try it" launch: realize the package
@@ -809,13 +893,10 @@ impl App {
                 })
             })
             .flatten();
-        // The package's own icon, recovered from the hits by attr; no
-        // rasterized hit icon falls back to the generic package tile.
-        let (icon_pixels, placeholder) = match hit {
-            Some(h) => (
-                self.pkg_hit_icons.get(h).cloned().unwrap_or_default(),
-                self.pkg_hit_placeholders.get(h).copied().unwrap_or(true),
-            ),
+        // The package's own icon, by its attr; none come yet = the
+        // generic package tile.
+        let (icon_pixels, placeholder) = match self.pkg_icons.ready(attr) {
+            Some((slot, placeholder)) => (self.pkg_icons.pixels(slot).map(<[u8]>::to_vec).unwrap_or_default(), placeholder),
             None => (Vec::new(), true),
         };
         if !icon_pixels.is_empty() {
@@ -1512,6 +1593,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pkg(attr: &str) -> nix::PkgEntry {
+        nix::PkgEntry { attr: attr.into(), name: attr.into(), version: String::new(), haystack: attr.into(), icons: Vec::new(), icon_path: None }
+    }
+
+    #[test]
+    fn a_package_keeps_its_icon_from_one_answer_to_the_next() {
+        let mut icons = PkgIcons::default();
+        let first: Vec<_> = ["firefox", "firefox-esr", "firefoxpwa"].iter().map(|a| pkg(a)).collect();
+        assert_eq!(icons.take(&first), vec![0, 1, 2]);
+        let slot = icons.put("firefox".into(), vec![1; 4], false).unwrap();
+        assert_eq!(icons.ready("firefox"), Some((slot, false)));
+        // The next keystroke: firefox stays where it was, with its icon;
+        // a new one takes the place let go, and only it (and the one that
+        // never came) is asked for.
+        let next: Vec<_> = ["firefox-esr", "librewolf", "firefox"].iter().map(|a| pkg(a)).collect();
+        assert_eq!(icons.take(&next), vec![0, 1]);
+        assert_eq!(icons.ready("firefox"), Some((slot, false)));
+        assert!(icons.ready("librewolf").is_none());
+        // An icon for one no longer among the hits lands nowhere.
+        assert!(icons.put("firefoxpwa".into(), vec![1; 4], false).is_none());
+        assert_eq!(icons.used(), slot + 1);
+    }
 
     fn set(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()

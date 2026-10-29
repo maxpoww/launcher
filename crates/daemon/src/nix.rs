@@ -66,19 +66,20 @@ pub enum Event {
     IndexFailed,
     /// The top matches for `query` (echoed so stale answers are
     /// recognizable after the query moved on). Sent the moment ranking
-    /// finishes; the icons follow separately as `HitIcons` so slow
-    /// theme lookups never delay the results themselves.
+    /// finishes; the icons are asked for apart (`Request::Icons`) and come
+    /// on their own thread as `HitIcons`, so no icon — nor a download of
+    /// one — ever holds a result back.
     Ranked { query: String, hits: Vec<PkgEntry> },
-    /// Rasterized `ICON_SIZE`² icons for the hits of `query`, aligned
-    /// with them: the theme icon named like the package when one exists
-    /// (Papirus ships icons for far more apps than are installed), a
-    /// letter tile otherwise (`placeholder` true). Skipped entirely
-    /// when a newer query is already waiting.
-    HitIcons {
-        query: String,
-        icons: Vec<Vec<u8>>,
-        placeholders: Vec<bool>,
-    },
+    /// Icons for packages asked for (`Request::Icons`), a few at a time,
+    /// in the order asked (what is on screen first) — each the theme's
+    /// icon named like the package (Papirus ships icons for far more apps
+    /// than are installed), else Flathub's or the package's own. A package
+    /// that has none anywhere gets nothing: its cell keeps the installer
+    /// box it wears meanwhile.
+    HitIcons { query: String, icons: Vec<HitIcon> },
+    /// What a package's page says of it beyond its name (`Request::Details`);
+    /// empty where nothing is known.
+    Details { attr: String, details: PkgDetails },
     /// A declarative install or uninstall finished — the package list was
     /// edited and the privileged apply helper ran `nixos-rebuild switch` to
     /// completion (see [`crate::applier`]). `id` echoes the request's cell
@@ -119,11 +120,39 @@ pub enum Event {
     },
 }
 
+/// What the Install section's PAGE of a package says of it beyond its name
+/// and version: its whole description, its site, its licence, the program it
+/// runs, its long description. From the details file made with the index
+/// (`build_index`: the flake's `nix-env --meta`), else asked of nix once for
+/// that package and kept on disk (`pkg-meta/`).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PkgDetails {
+    pub description: String,
+    pub homepage: Option<String>,
+    pub license: Option<String>,
+    pub program: Option<String>,
+    pub long: Option<String>,
+}
+
+/// One package's icon (`Event::HitIcons`).
+pub struct HitIcon {
+    pub attr: String,
+    /// `ICON_SIZE`² pixels, a mip chain.
+    pub pixels: Vec<u8>,
+    pub placeholder: bool,
+}
+
 /// Daemon → thread requests.
 pub enum Request {
     /// Fuzzy-rank the index against a query; answered with `Ranked`.
     /// Queued queries coalesce to the newest one.
     Rank { query: String },
+    /// The icons of these packages (the hits of `query` the daemon has
+    /// none for yet), on the icon thread; answered with `HitIcons`. A newer
+    /// request takes over from an older one still being answered.
+    Icons { query: String, pkgs: Vec<PkgEntry> },
+    /// A package's page opened: what is known of it (`Event::Details`).
+    Details { attr: String },
     /// Install a package declaratively: add `attr` to the package list and
     /// wait for the privileged helper's `nixos-rebuild switch` to finish
     /// (see [`crate::applier`]). `id` echoes to `Done { id, .. }` — the
@@ -227,6 +256,8 @@ fn recommended_hits(pkgs: &[PkgEntry]) -> Vec<PkgEntry> {
 /// flight.
 pub struct Nix {
     ranks: mpsc::Sender<String>,
+    icons: mpsc::Sender<IconJob>,
+    details: mpsc::Sender<String>,
     mutations: mpsc::Sender<Request>,
     realizes: mpsc::Sender<String>,
 }
@@ -240,6 +271,12 @@ impl Nix {
         match request {
             Request::Rank { query } => {
                 let _ = self.ranks.send(query);
+            }
+            Request::Icons { query, pkgs } => {
+                let _ = self.icons.send(IconJob::Icons { query, pkgs });
+            }
+            Request::Details { attr } => {
+                let _ = self.details.send(attr);
             }
             Request::Realize { attr } => {
                 let _ = self.realizes.send(attr);
@@ -262,15 +299,43 @@ impl Nix {
 /// alongside a rebuild, as the nix daemon serializes store access itself.
 pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
     let (ranks, ranks_rx) = mpsc::channel::<String>();
+    let (icons, icons_rx) = mpsc::channel::<IconJob>();
+    let (details, details_rx) = mpsc::channel::<String>();
     let (mutations, mutations_rx) = mpsc::channel::<Request>();
     let (realizes, realizes_rx) = mpsc::channel::<String>();
 
     let rank_events = events.clone();
+    let warm = icons.clone();
     let spawned = std::thread::Builder::new()
         .name("waverunner-nix".into())
-        .spawn(move || index_and_rank(rank_events, ranks_rx, icon_theme));
+        .spawn(move || index_and_rank(rank_events, ranks_rx, warm));
     if let Err(e) = spawned {
         warn!("failed to spawn nix index thread: {e}");
+    }
+
+    let icon_events = events.clone();
+    let spawned = std::thread::Builder::new()
+        .name("waverunner-pkg-icons".into())
+        .spawn(move || hit_icons(icon_events, icons_rx, icon_theme));
+    if let Err(e) = spawned {
+        warn!("failed to spawn the package icons' thread: {e}");
+    }
+
+    // A package's page: what is known of it, asked on a thread of its own
+    // (nix can take a second to answer, and that must hold nothing up).
+    let detail_events = events.clone();
+    let spawned = std::thread::Builder::new()
+        .name("waverunner-pkg-details".into())
+        .spawn(move || {
+            while let Ok(attr) = details_rx.recv() {
+                let details = details_of(&attr);
+                if detail_events.send(Event::Details { attr, details }).is_err() {
+                    return;
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("failed to spawn the package details' thread: {e}");
     }
 
     let mut_events = events.clone();
@@ -312,7 +377,11 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
                         Request::EnsureApplied { force } => Some(force),
                         // Routed to their own threads; a batch is opened
                         // below, before it gets here.
-                        Request::Rank { .. } | Request::Realize { .. } | Request::Batch(_) => None,
+                        Request::Rank { .. }
+                        | Request::Icons { .. }
+                        | Request::Details { .. }
+                        | Request::Realize { .. }
+                        | Request::Batch(_) => None,
                     };
                 let mut waiting = vec![request];
                 while let Ok(more) = mutations_rx.try_recv() {
@@ -429,6 +498,8 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
 
     Nix {
         ranks,
+        icons,
+        details,
         mutations,
         realizes,
     }
@@ -436,7 +507,7 @@ pub fn spawn(events: Sender<Event>, icon_theme: String) -> Nix {
 
 /// Body of the index thread: cache load, background refresh, then rank
 /// service until the daemon goes away.
-fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_theme: String) {
+fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icons: mpsc::Sender<IconJob>) {
     // Park until the first rank request — nothing about the package index is
     // loaded until the user actually opens package search. The parsed index is
     // ~8.6 MB resident (23,673 entries) plus the icon-availability sweep; a
@@ -511,33 +582,10 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
         }
     }
 
+    // The icon thread readies its theme meanwhile: the first icons are
+    // asked for a moment from now.
+    let _ = icons.send(IconJob::Warm);
     let mut searcher = waverunner_core::Searcher::new();
-    let mut loader = crate::apps::IconLoader::new(icon_theme);
-    // One sweep over the theme dirs collects every icon name that
-    // exists at all: hits get a real lookup, everything else becomes a
-    // letter tile instantly instead of paying a full (negative) theme
-    // walk per new name — that walk was why a repeated search felt so
-    // much faster than a first one.
-    let mut icon_names = IconNames::sweep(loader.themes());
-    // The theme's standard "software install" box, rasterized once —
-    // the default face of every package no icon name matched.
-    let generic: (Vec<u8>, bool) = GENERIC_PKG_ICONS
-        .iter()
-        .find_map(|name| icon_names.resolve(name))
-        .map(|actual| {
-            loader.icon_for(&waverunner_core::index::AppEntry {
-                id: "pkg-generic".into(),
-                name: "package".into(),
-                description: None,
-                exec: String::new(),
-                icon: Some(actual),
-                startup_wm_class: None,
-                needs_terminal: false,
-                path: None,
-            })
-        })
-        .filter(|(_, placeholder)| !placeholder)
-        .unwrap_or_else(|| (crate::apps::placeholder_icon("package"), true));
     let mut pending: Option<String> = Some(first_query);
     loop {
         let mut query = match pending.take() {
@@ -568,45 +616,101 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
             pkgs.len(),
             started.elapsed()
         );
-        if events
-            .send(Event::Ranked {
-                query: query.clone(),
-                hits: hits.clone(),
-            })
-            .is_err()
-        {
+        if events.send(Event::Ranked { query, hits }).is_err() {
             return;
         }
-        // Icons are the slow part (cold theme lookups); only bother
-        // when no newer query is already waiting.
-        match ranks.try_recv() {
-            Ok(newer) => {
-                pending = Some(newer);
-                continue;
-            }
-            Err(mpsc::TryRecvError::Disconnected) => return,
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
+    }
+}
+
+/// What the icon thread is asked.
+enum IconJob {
+    /// Ready the theme (the index was just loaded: icons are wanted soon).
+    Warm,
+    Icons { query: String, pkgs: Vec<PkgEntry> },
+}
+
+/// Icons sent together at most this many (the first page of the Install
+/// row), or after this long since the first of them.
+const ICONS_TOGETHER: usize = 6;
+const ICONS_WAIT: Duration = Duration::from_millis(12);
+
+/// THE PACKAGES' ICONS, on a thread of their own (they were the rank
+/// thread's: a query's icons — and the downloads of them — held the next
+/// query's results back, and every new answer showed the installer box
+/// until all its icons came at once). What is on this computer, a few at a
+/// time in the order asked; what must be downloaded goes to a thread of its
+/// own (`fetch_icons`), so a download for an older query never holds the
+/// newest one's icons back.
+fn hit_icons(events: Sender<Event>, jobs: mpsc::Receiver<IconJob>, icon_theme: String) {
+    // Parked until the index is loaded or icons are asked.
+    let mut job = match jobs.recv() {
+        Ok(job) => job,
+        Err(_) => return,
+    };
+    let (fetches, fetch_rx) = mpsc::channel::<(String, Vec<PkgEntry>)>();
+    let fetch_events = events.clone();
+    if let Err(e) = std::thread::Builder::new()
+        .name("waverunner-pkg-fetch".into())
+        .spawn(move || fetch_icons(fetch_events, fetch_rx))
+    {
+        warn!("failed to spawn the package icon downloads' thread: {e}");
+    }
+    let mut loader = crate::apps::IconLoader::new(icon_theme);
+    // One sweep over the theme dirs collects every icon name that
+    // exists at all: hits get a real lookup, everything else becomes a
+    // letter tile instantly instead of paying a full (negative) theme
+    // walk per new name — that walk was why a repeated search felt so
+    // much faster than a first one.
+    let mut icon_names = IconNames::sweep(loader.themes());
+    loop {
+        let (query, pkgs) = match job {
+            IconJob::Warm => (String::new(), Vec::new()),
+            IconJob::Icons { query, pkgs } => (query, pkgs),
+        };
+        let mut next: Option<IconJob> = None;
+        let asked = std::time::Instant::now();
         // A fresh install drops its bundled icon into hicolor: re-sweep
         // when stale so it shows up without a daemon restart.
-        if icon_names.is_stale() {
+        if !pkgs.is_empty() && icon_names.is_stale() {
             icon_names = IconNames::sweep(loader.themes());
         }
+        // A newer request (not a warm-up) takes over.
+        let newer = |next: &mut Option<IconJob>| loop {
+            match jobs.try_recv() {
+                Ok(IconJob::Warm) => continue,
+                Ok(job) => {
+                    *next = Some(job);
+                    return true;
+                }
+                Err(_) => return next.is_some(),
+            }
+        };
+        let send = |icons: Vec<HitIcon>| {
+            if icons.is_empty() {
+                return true;
+            }
+            debug!("pkg icons {query:?}: {} at {:?}", icons.len(), asked.elapsed());
+            events.send(Event::HitIcons { query: query.clone(), icons }).is_ok()
+        };
         // Icon sources compose like an app center's: local themes
         // first (Papirus and friends ship icons for far more apps than
         // are installed), then Flathub's pre-extracted icon catalog by
-        // desktop-file id, then the package's own icon streamed out of
-        // the binary cache. What exists nowhere gets the installer box.
-        let mut flathub_budget = FLATHUB_FETCH_BUDGET;
-        let mut store_budget = STORE_FETCH_BUDGET;
-        let (icons, placeholders): (Vec<_>, Vec<_>) = hits
-            .iter()
-            .map(|p| {
-                let icon = icon_candidates(p)
-                    .into_iter()
-                    .find_map(|c| icon_names.resolve(&c));
-                if let Some(icon) = icon {
-                    return loader.icon_for(&waverunner_core::index::AppEntry {
+        // desktop-file id and the package's own icon streamed out of
+        // the binary cache — kept on disk once fetched, so read here
+        // too; only what was never fetched waits for the network.
+        let mut batch: Vec<HitIcon> = Vec::new();
+        let mut since = std::time::Instant::now();
+        let mut fetch: Vec<PkgEntry> = Vec::new();
+        let mut gone = false;
+        for p in &pkgs {
+            if newer(&mut next) {
+                break;
+            }
+            let local = icon_candidates(p)
+                .into_iter()
+                .find_map(|c| icon_names.resolve(&c))
+                .map(|icon| {
+                    loader.icon_for(&waverunner_core::index::AppEntry {
                         id: format!("pkg-{}", p.attr),
                         name: p.name.clone(),
                         description: None,
@@ -615,33 +719,88 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icon_the
                         startup_wm_class: None,
                         needs_terminal: false,
                         path: None,
-                    });
-                }
-                p.icons
-                    .iter()
-                    .filter(|hint| hint.contains('.'))
-                    .find_map(|id| fetch_flathub_icon(id, &mut flathub_budget))
-                    .or_else(|| {
-                        p.icon_path
-                            .as_deref()
-                            .and_then(|path| fetch_store_icon(path, &mut store_budget))
                     })
-                    .map(|pixels| (pixels, false))
-                    .unwrap_or_else(|| generic.clone())
-            })
-            .unzip();
-        loader.save_resolutions();
-        if events
-            .send(Event::HitIcons {
-                query,
-                icons,
-                placeholders,
-            })
-            .is_err()
-        {
+                })
+                .or_else(|| downloaded_icon(p, &mut 0, &mut 0).map(|pixels| (pixels, false)));
+            match local {
+                Some((pixels, placeholder)) => {
+                    if batch.is_empty() {
+                        since = std::time::Instant::now();
+                    }
+                    batch.push(HitIcon { attr: p.attr.clone(), pixels, placeholder });
+                }
+                None => fetch.push(p.clone()),
+            }
+            let due = batch.len() >= ICONS_TOGETHER || !batch.is_empty() && since.elapsed() >= ICONS_WAIT;
+            if due && !send(std::mem::take(&mut batch)) {
+                gone = true;
+                break;
+            }
+        }
+        if gone || !send(std::mem::take(&mut batch)) {
             return;
         }
+        loader.save_resolutions();
+        // (Asked even when empty: the downloads of an older query stop.)
+        if next.is_none() && !pkgs.is_empty() {
+            let _ = fetches.send((query.clone(), fetch));
+        }
+        job = match next {
+            Some(job) => job,
+            None => match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            },
+        };
     }
+}
+
+/// The DOWNLOADS of the packages' icons, one by one in the order asked,
+/// given up between two the moment a newer query's list comes; each is kept
+/// on the disk, where the icon thread finds it the next time.
+fn fetch_icons(events: Sender<Event>, jobs: mpsc::Receiver<(String, Vec<PkgEntry>)>) {
+    let mut pending: Option<(String, Vec<PkgEntry>)> = None;
+    loop {
+        let mut job = match pending.take() {
+            Some(job) => job,
+            None => match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            },
+        };
+        // (Only the newest list asked counts.)
+        while let Ok(newer) = jobs.try_recv() {
+            job = newer;
+        }
+        let (query, pkgs) = job;
+        let started = std::time::Instant::now();
+        let mut flathub_budget = FLATHUB_FETCH_BUDGET;
+        let mut store_budget = STORE_FETCH_BUDGET;
+        for p in &pkgs {
+            if let Ok(newer) = jobs.try_recv() {
+                pending = Some(newer);
+                break;
+            }
+            if let Some(pixels) = downloaded_icon(p, &mut flathub_budget, &mut store_budget) {
+                debug!("pkg icon {} downloaded for {query:?} at {:?}", p.attr, started.elapsed());
+                let icons = vec![HitIcon { attr: p.attr.clone(), pixels, placeholder: false }];
+                if events.send(Event::HitIcons { query: query.clone(), icons }).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// A package's icon from Flathub's catalog or out of the binary cache:
+/// what was fetched before is read from the disk; budgets of 0 fetch
+/// nothing new.
+fn downloaded_icon(p: &PkgEntry, flathub: &mut u32, store: &mut u32) -> Option<Vec<u8>> {
+    p.icons
+        .iter()
+        .filter(|hint| hint.contains('.'))
+        .find_map(|id| fetch_flathub_icon(id, flathub))
+        .or_else(|| p.icon_path.as_deref().and_then(|path| fetch_store_icon(path, store)))
 }
 
 /// The top `RANK_HITS_MAX` package indices for `query`, name matches
@@ -677,7 +836,9 @@ fn rank_hits(
 }
 
 /// Generic fallback icon names for packages nothing else matched — the
-/// theme's own default package face, best first.
+/// theme's own default package face, best first. A cell wears the dock's
+/// own of it (`apps::ICON_ASSETS`' `asset-pkg`, `package-x-generic`) until
+/// its icon comes, and for good when it has none.
 ///
 /// `package-x-generic` leads deliberately: it is the freedesktop default a
 /// package wears everywhere else on the system, so the Install section
@@ -686,6 +847,7 @@ fn rank_hits(
 /// dropped (Max, 2026-09-13: "let's use default, keep it simple") — it is
 /// an app-*store* icon, a multicoloured white box, where the default is the
 /// plain green zippered one.
+#[cfg(test)]
 const GENERIC_PKG_ICONS: [&str; 3] = ["package-x-generic", "package", "application-x-executable"];
 
 /// Re-sweep the icon availability map when older than this: a freshly
@@ -1063,6 +1225,16 @@ struct SearchMeta {
     version: String,
     #[serde(default)]
     description: String,
+    // (The flake's index carries these too: `nix-env --meta`, flattened by
+    // its jq; `nix search --json` has none of them.)
+    #[serde(default)]
+    homepage: String,
+    #[serde(default)]
+    license: String,
+    #[serde(default)]
+    program: String,
+    #[serde(default)]
+    long: String,
 }
 
 /// The curated cut of nixpkgs the Install section searches: top-level
@@ -1296,7 +1468,185 @@ pub fn build_index(json_path: &Path, out_path: &Path) -> anyhow::Result<()> {
     }
     save_cache(out_path, &pkgs)?;
     println!("{} packages -> {}", pkgs.len(), out_path.display());
+    // What each package's page says beyond the index (its site, licence,
+    // long description), when the dump has it: beside the index, read only
+    // as a page opens — the index the daemon keeps is unchanged.
+    let details = search_json_details(&json, &pkgs)?;
+    if !details.is_empty() {
+        let path = details_path(out_path);
+        save_details(&path, &details)?;
+        println!("{} packages' details -> {}", details.len(), path.display());
+    }
     Ok(())
+}
+
+/// The details file beside an index.
+fn details_path(index: &Path) -> PathBuf {
+    index.with_file_name("nixpkgs-details.tsv")
+}
+
+const DETAILS_HEADER: &str = "waverunner-nixpkgs-details-v1";
+
+/// A field made one line of a TSV (and back): backslash, tab, new line escaped.
+fn tsv_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "")
+}
+
+fn tsv_unfield(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some(o) => out.push(o),
+            None => {}
+        }
+    }
+    out
+}
+
+/// The details of the kept packages out of a dump that carries them.
+fn search_json_details(json: &[u8], pkgs: &[PkgEntry]) -> anyhow::Result<Vec<(String, PkgDetails)>> {
+    let raw: std::collections::HashMap<String, SearchMeta> = serde_json::from_slice(json)?;
+    let kept: std::collections::HashSet<&str> = pkgs.iter().map(|p| p.attr.as_str()).collect();
+    let some = |s: String| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+    let mut out: Vec<(String, PkgDetails)> = raw
+        .into_iter()
+        .filter_map(|(key, m)| {
+            let attr = key.splitn(3, '.').nth(2)?.to_owned();
+            let d = PkgDetails {
+                description: m.description.trim().to_owned(),
+                homepage: some(m.homepage),
+                license: some(m.license),
+                program: some(m.program),
+                long: some(m.long),
+            };
+            let any = d.homepage.is_some() || d.license.is_some() || d.long.is_some() || d.program.is_some();
+            (kept.contains(attr.as_str()) && any).then_some((attr, d))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn save_details(path: &Path, details: &[(String, PkgDetails)]) -> anyhow::Result<()> {
+    let mut text = String::from(DETAILS_HEADER);
+    text.push('\n');
+    let o = |s: &Option<String>| tsv_field(s.as_deref().unwrap_or(""));
+    for (attr, d) in details {
+        text.push_str(&format!(
+            "{attr}\t{}\t{}\t{}\t{}\t{}\n",
+            tsv_field(&d.description),
+            o(&d.homepage),
+            o(&d.license),
+            o(&d.program),
+            o(&d.long)
+        ));
+    }
+    let tmp = path.with_extension("tsv.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `attr`'s line of a details file (read as a page opens: a scan of a few
+/// MB, no copy kept).
+fn details_in(path: &Path, attr: &str) -> Option<PkgDetails> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    if lines.next() != Some(DETAILS_HEADER) {
+        return None;
+    }
+    let want = format!("{attr}\t");
+    let line = lines.find(|l| l.starts_with(&want))?;
+    let mut cols = line.split('\t').skip(1).map(tsv_unfield);
+    let mut next = || cols.next().filter(|s| !s.is_empty());
+    let description = next().unwrap_or_default();
+    Some(PkgDetails { description, homepage: next(), license: next(), program: next(), long: next() })
+}
+
+/// The index the daemon loads: the prebuilt one, else the cache.
+fn index_path() -> PathBuf {
+    std::env::var("WAVERUNNER_PKG_INDEX").ok().filter(|p| !p.is_empty()).map_or_else(cache_path, PathBuf::from)
+}
+
+/// An attr fit to name a file and a nix attribute.
+fn plain_attr(attr: &str) -> bool {
+    !attr.is_empty() && attr.len() <= 200 && attr.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+}
+
+/// What is known of `attr` for its page: the details file beside the index;
+/// else what nix said of it before (`pkg-meta/<attr>.json`); else nix asked
+/// now (its `meta`, a second or so) and kept. The description falls back to
+/// the index's (clipped) one.
+fn details_of(attr: &str) -> PkgDetails {
+    if !plain_attr(attr) {
+        return PkgDetails::default();
+    }
+    let index = index_path();
+    let with_description = |mut d: PkgDetails| {
+        if d.description.is_empty() {
+            let text = std::fs::read_to_string(&index).unwrap_or_default();
+            let want = format!("{attr}\t");
+            d.description = text
+                .lines()
+                .find(|l| l.starts_with(&want))
+                .and_then(|l| l.splitn(6, '\t').nth(5))
+                .unwrap_or("")
+                .to_owned();
+        }
+        d
+    };
+    if let Some(d) = details_in(&details_path(&index), attr) {
+        return with_description(d);
+    }
+    let kept = cache_path().with_file_name("pkg-meta").join(format!("{attr}.json"));
+    if let Some(d) = std::fs::read(&kept).ok().and_then(|b| serde_json::from_slice::<PkgDetails>(&b).ok()) {
+        return with_description(d);
+    }
+    let asked = ask_nix_meta(attr);
+    if let Some(d) = &asked {
+        if let Some(dir) = kept.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(bytes) = serde_json::to_vec(d) {
+            let tmp = kept.with_extension("json.tmp");
+            if std::fs::write(&tmp, bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &kept);
+            }
+        }
+    }
+    with_description(asked.unwrap_or_default())
+}
+
+/// The longest nix may take to say what a package is.
+const META_PATIENCE: Duration = Duration::from_secs(10);
+
+/// What a package's meta is made into, as the flake's index flattens it.
+const META_FLAT: &str = r#"m: let one = x: if builtins.isAttrs x then (x.spdxId or x.shortName or x.fullName or "") else if builtins.isString x then x else ""; h = m.homepage or ""; l = m.license or null; in { description = m.description or ""; homepage = if builtins.isList h then (if h == [] then "" else builtins.head h) else h; license = if builtins.isList l then builtins.concatStringsSep " / " (map one l) else one l; program = m.mainProgram or ""; long = m.longDescription or ""; }"#;
+
+/// `nix eval` of `attr`'s meta.
+fn ask_nix_meta(attr: &str) -> Option<PkgDetails> {
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--impure", &format!("nixpkgs#{attr}.meta"), "--apply", META_FLAT])
+        .env("NIXPKGS_ALLOW_UNFREE", "1");
+    let started = std::time::Instant::now();
+    let out = crate::controls::finish_within(cmd, true, META_PATIENCE)?;
+    let f: SearchMeta = serde_json::from_str(&out).ok()?;
+    let some = |s: String| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+    debug!("nix meta of {attr} in {:?}", started.elapsed());
+    Some(PkgDetails {
+        description: f.description.trim().to_owned(),
+        homepage: some(f.homepage),
+        license: some(f.license),
+        program: some(f.program),
+        long: some(f.long),
+    })
 }
 
 /// The shared tail of a dump: parse the `nix search --json` map, keep
@@ -1459,6 +1809,32 @@ fn load_cache(path: &Path) -> anyhow::Result<Vec<PkgEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_packages_details_round_trip_beside_its_index() {
+        let dir = std::env::temp_dir().join("waverunner-nix-details-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let index = dir.join("nixpkgs-index.tsv");
+        let gimp = PkgDetails {
+            description: "GNU Image Manipulation Program".into(),
+            homepage: Some("https://www.gimp.org/".into()),
+            license: Some("GPL-3.0-or-later".into()),
+            program: Some("gimp".into()),
+            long: Some("Paint\tand\nedit \\ pictures".into()),
+        };
+        save_details(&details_path(&index), &[("gimp".into(), gimp.clone())]).unwrap();
+        assert_eq!(details_in(&details_path(&index), "gimp"), Some(gimp));
+        assert_eq!(details_in(&details_path(&index), "gim"), None);
+        // The flake's dump flattened by its jq: what a page needs is kept.
+        let json = br#"{"legacyPackages.x86_64-linux.krita":{"pname":"krita","version":"5.2","description":"Painting","homepage":"https://krita.org/","license":"GPL-3.0-only","program":"krita","long":""},
+                        "legacyPackages.x86_64-linux.cowsay":{"pname":"cowsay","version":"3.8","description":"Cow"}}"#;
+        let pkgs = parse_search_json(json, Default::default(), Default::default()).unwrap();
+        let details = search_json_details(json, &pkgs).unwrap();
+        assert_eq!(details.len(), 1, "a package with nothing beyond its description has no line");
+        assert_eq!(details[0].1.homepage.as_deref(), Some("https://krita.org/"));
+        assert!(!plain_attr("x; rm -rf") && plain_attr("kdePackages.kate") && plain_attr("gtk+3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn cache_round_trips() {

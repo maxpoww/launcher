@@ -106,7 +106,7 @@ fn icon(b: Button, copied: bool) -> (&'static str, f32, (f32, f32)) {
 
 /// `text` on up to `lines` lines of `room`, broken between words (a word
 /// too long for a line is cut as names are), the last cut with "…".
-fn wrap(text: &str, room: f32, lines: usize, measure: &mut dyn FnMut(&str) -> f32) -> Vec<String> {
+pub(crate) fn wrap(text: &str, room: f32, lines: usize, measure: &mut dyn FnMut(&str) -> f32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut words = text.split_whitespace().peekable();
     while words.peek().is_some() {

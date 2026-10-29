@@ -935,7 +935,7 @@ impl App {
     /// this it teleports to its long-ago-materialized end-of-grid slot),
     /// then refilter to relocate its tile. `dragged_idx` is the webapp's
     /// Install-section entry (excluded as an anchor candidate).
-    fn install_webapp(&mut self, slug: &str, dragged_idx: usize) {
+    pub(crate) fn install_webapp(&mut self, slug: &str, dragged_idx: usize) {
         info!("installing webapp {slug}");
         self.managed_webapps.add(slug);
         let id = crate::webapps::id_for_slug(slug);
@@ -1077,7 +1077,7 @@ impl App {
 
     /// "Try it": launch a catalog webapp's Chrome app-mode command without
     /// installing it (its window shows in the dock unpinned while open).
-    fn launch_webapp(&mut self, idx: usize) {
+    pub(crate) fn launch_webapp(&mut self, idx: usize) {
         let Some(entry) = self.entries.get(idx) else {
             return;
         };

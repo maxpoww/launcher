@@ -2081,6 +2081,23 @@ impl App {
         if self.ui.target() != crate::state::Target::Open || self.control_panel || self.fast.open {
             return;
         }
+        // (An app's page: Shift again goes back to the results.)
+        if self.page_up() {
+            self.page_close();
+            return;
+        }
+        // AN APP TO INSTALL under the pointer, or the keys' (`pkg_page.rs`).
+        let install = content::SECTION_INSTALL;
+        let on_install = match self.hover {
+            Some(content::Hit::GridCell(hs, i)) if hs == install && !self.search.keyed => Some(i),
+            _ if self.search.keyed => self.search.selected.and_then(|f| self.flat_to_pos(f)).filter(|&(fs, _)| fs == install).map(|(_, i)| i),
+            _ => None,
+        };
+        if let Some(&e) = on_install.and_then(|cell| self.search.visible[install].get(cell)) {
+            if self.page_open(e) {
+                return;
+            }
+        }
         if let Some((_, _, before)) = self.search.focus.take() {
             self.search.shifted = None;
             self.search.query = before;

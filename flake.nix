@@ -308,12 +308,24 @@
           export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/nix
           nix-env -f ${nixpkgs} -qa --json --meta \
             --arg config '{ allowUnfree = true; }' > raw.json
+          # (What a package's page says beyond the index — its site, licence,
+          # program, long description — flattened here; `build-index` keeps
+          # them in nixpkgs-details.tsv beside the index.)
           jq --arg sys ${pkgs.stdenv.hostPlatform.system} '
+            def one: if type == "object" then (.spdxId // .shortName // .fullName // "")
+                     elif type == "string" then . else "" end;
+            def str: if type == "string" then . else "" end;
             to_entries
             | map({ key: ("legacyPackages." + $sys + "." + .key),
                     value: { pname: (.value.pname // ""),
                              version: (.value.version // ""),
-                             description: (.value.meta.description // "") } })
+                             description: (.value.meta.description // "" | str),
+                             homepage: (.value.meta.homepage // ""
+                                        | if type == "array" then (.[0] // "") else . end | str),
+                             license: (.value.meta.license // ""
+                                       | if type == "array" then (map(one) | join(" / ")) else one end),
+                             program: (.value.meta.mainProgram // "" | str),
+                             long: (.value.meta.longDescription // "" | str) } })
             | from_entries' raw.json > search.json
           # Desktop stems + in-package icon paths from the offline file
           # database (nix-locate wants a dir containing `files`) —

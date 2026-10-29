@@ -784,7 +784,7 @@ fn finish(cmd: Command, keep_output: bool) -> Option<String> {
 
 /// [`finish`] with a patience of its own, for the few programs whose work
 /// is long by nature.
-fn finish_within(mut cmd: Command, keep_output: bool, patience: std::time::Duration) -> Option<String> {
+pub(crate) fn finish_within(mut cmd: Command, keep_output: bool, patience: std::time::Duration) -> Option<String> {
     cmd.stdin(Stdio::null()).stderr(Stdio::null());
     cmd.stdout(if keep_output { Stdio::piped() } else { Stdio::null() });
     let mut child = cmd.spawn().ok()?;

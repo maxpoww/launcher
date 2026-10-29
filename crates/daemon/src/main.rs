@@ -76,6 +76,7 @@ mod peek_slides;
 mod peek_syntax;
 mod peek_web;
 mod peek_page;
+mod pkg_page;
 mod deep_search;
 mod file_inside;
 mod file_search;
@@ -956,8 +957,8 @@ fn main() -> anyhow::Result<()> {
         nix,
         pkg_hits: Vec::new(),
         pkg_hits_query: None,
-        pkg_hit_icons: Vec::new(),
-        pkg_hit_placeholders: Vec::new(),
+        pkg_asked: None,
+        pkg_icons: install::PkgIcons::default(),
         pkg_layer_base: 0,
         bin_layer: 0,
         files_layer: None,
@@ -994,6 +995,7 @@ fn main() -> anyhow::Result<()> {
         panel_parked: panel::Panel::load_modules(),
         panel_swap_t: 1.0,
         panel_mix: 0.0,
+        page_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
         monitors_turn: None,
@@ -2245,10 +2247,12 @@ pub struct App {
     /// storefront, `None` means no answer yet. Stale hits keep showing
     /// until the fresh rank lands (no flicker between keystrokes).
     pkg_hits_query: Option<String>,
-    /// Rasterized icons for `pkg_hits` (aligned), uploaded into the
-    /// texture array's reserved tail; and their letter-tile flags.
-    pkg_hit_icons: Vec<Vec<u8>>,
-    pkg_hit_placeholders: Vec<bool>,
+    /// The query last sent to be ranked: the refilters while it is being
+    /// ranked ask nothing again (each ask was a whole second rank).
+    pkg_asked: Option<String>,
+    /// The packages' icons, a layer of the reserved tail each, held by
+    /// package (`install::PkgIcons`).
+    pkg_icons: install::PkgIcons,
     /// First reserved texture layer: the app icon count from the last
     /// `set_icons` upload.
     pkg_layer_base: u32,
@@ -2349,6 +2353,9 @@ pub struct App {
     /// swap inside an open card animates; a card opening straight into
     /// either view starts there.
     panel_mix: f32,
+    /// The same push for an Install app's page (`pkg_page.rs`): 0 the
+    /// results, 1 the page.
+    page_mix: f32,
     /// The panel should start afresh once it is out of sight (see
     /// `panel::Panel::reset`).
     panel_reset_due: bool,
@@ -2904,6 +2911,8 @@ struct SearchState {
     peek_press: bool,
     /// A found file Shift took to its row (`app_actions::add_file_row`).
     focus_file: Option<app_actions::FocusFile>,
+    /// An app of the Install section that took the box (`pkg_page.rs`).
+    page: Option<pkg_page::Page>,
     /// The apps that open a file, by its path, as asked last (`file_openers`).
     openers: HashMap<String, Vec<String>>,
     /// What the owner picked from a lone app's recents (`web_actions::rank`).
@@ -2952,6 +2961,7 @@ impl Default for SearchState {
             peeked: None,
             peek_press: false,
             focus_file: None,
+            page: None,
             openers: HashMap::new(),
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
@@ -6008,8 +6018,9 @@ impl App {
                 )
             })
             // On the panel only the dock band and the search pill are live
-            // (the panel's own field takes clicks through `panel_click`).
-            .filter(|h| !self.control_panel || matches!(h, Hit::DockIcon(_) | Hit::SearchButton))
+            // (the panel's own field takes clicks through `panel_click`);
+            // so on an app's page (`page_click`).
+            .filter(|h| !(self.control_panel || self.page_up()) || matches!(h, Hit::DockIcon(_) | Hit::SearchButton))
     }
 
     /// Recompute which item the pointer is over; redraw on change.
@@ -6314,6 +6325,11 @@ impl App {
                         if let Some(g) = g {
                             self.open_group(g);
                         }
+                        return;
+                    }
+                    // An app to install (a package, a catalog webapp): its
+                    // page takes the box (`pkg_page.rs`).
+                    if s == content::SECTION_INSTALL && self.page_open(entry_idx) {
                         return;
                     }
                     self.activate(entry_idx, LaunchFrom::Box);
@@ -6631,6 +6647,9 @@ impl App {
             // (A row Shift made — an app's or a file's — goes with the box.)
             let file_row = self.search.focus_file.take().is_some();
             let deep = self.search.deep.take().is_some();
+            // (An app's page goes with the box.)
+            self.search.page = None;
+            self.page_mix = 0.0;
             if self.search.focus.take().is_some() || file_row || deep {
                 self.refilter();
             }
@@ -7293,6 +7312,16 @@ impl App {
             && self.panel_keys(keysym, false)
         {
             return;
+        }
+        // An app's page (`pkg_page.rs`) takes the keys that walk its buttons
+        // and leave it; a letter typed goes back to the results and types.
+        if self.page_up() {
+            if self.page_key(keysym) {
+                return;
+            }
+            if utf8.is_some_and(|t| !t.is_empty() && !t.chars().all(char::is_control)) {
+                self.page_close();
+            }
         }
         // The lone app's pills (`app_actions.rs`) take the keys that walk
         // onto them and run them.
@@ -8584,6 +8613,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         if prev_pos != Some(pos) {
                             app.pointer_takes_selection();
                         }
+                        app.page_hover(pos);
                     }
                     app.schedule_frame();
                 }
@@ -8699,6 +8729,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                 // A box is open: a click off it closes the box,
                                 // not the launcher.
                                 app.close_group();
+                            } else if let Some(pos) = app.pointer_pos.filter(|&p| {
+                                app.page_up() && app.ui.target() == Target::Open && !app.outside_card(&app.current_layout(), p)
+                            }) {
+                                // An app's page (`pkg_page.rs`): its buttons.
+                                app.page_click(pos);
                             } else if let Some(pos) = app.pointer_pos.filter(|&p| {
                                 app.control_panel
                                     && app.ui.target() == Target::Open
@@ -9310,7 +9345,7 @@ impl App {
     /// thumbnails, the minimized windows' pictures), so a new app set's array
     /// is made with them — see [`renderer::Renderer::set_icons`].
     fn icon_tail_used(&self) -> u32 {
-        let pkg = self.pkg_hit_icons.len();
+        let pkg = self.pkg_icons.used();
         let pending = self
             .pending_installs
             .iter()
