@@ -267,7 +267,11 @@ impl App {
     /// reclassify.
     pub(crate) fn on_thumb(&mut self, ev: crate::thumbs::Event) {
         match ev {
-            crate::thumbs::Event::Thumb { path, pixels } => self.on_thumb_pixels(path, pixels),
+            crate::thumbs::Event::Thumb { path, pixels } => {
+                // (Pushed, never taken here: a burst comes in one turn.)
+                self.thumb_inbox.push_back((path, pixels));
+                self.thumb_inbox_arm(std::time::Duration::ZERO);
+            }
             crate::thumbs::Event::AudioOnly { path } => self.on_audio_only(path),
             crate::thumbs::Event::Moving { path, frames } => {
                 // (Asked for by a box that is gone by now: not kept.)
@@ -367,7 +371,43 @@ impl App {
     /// A finished thumbnail: park it in a reserved slot (round-robin,
     /// recycling the oldest), upload it, and repoint every entry for
     /// that path at it.
+    /// Thumbnails land in BATCHES. A folder the dock watches taking 200 text
+    /// files had 200 previews made within a second, and the channel handed
+    /// them all to one turn of the loop: each one written into four layers
+    /// (dock, desktop, Files, card) — 519 ms during which the shell answered
+    /// nothing (2026-10-29, the shell stress). Now eight a turn; the rest
+    /// wait 8 ms, and the loop answers in between.
+    pub(crate) fn thumb_inbox_drain(&mut self) {
+        const THUMBS_PER_TURN: usize = 8;
+        for _ in 0..THUMBS_PER_TURN {
+            let Some((path, pixels)) = self.thumb_inbox.pop_front() else {
+                break;
+            };
+            self.on_thumb_pixels(path, pixels);
+        }
+        if !self.thumb_inbox.is_empty() {
+            self.thumb_inbox_arm(std::time::Duration::from_millis(8));
+        }
+    }
+
+    fn thumb_inbox_arm(&mut self, delay: std::time::Duration) {
+        if self.thumb_inbox_timer {
+            return;
+        }
+        self.thumb_inbox_timer = true;
+        let timer = calloop::timer::Timer::from_duration(delay);
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.thumb_inbox_timer = false;
+            app.thumb_inbox_drain();
+            calloop::timer::TimeoutAction::Drop
+        });
+        if armed.is_err() {
+            self.thumb_inbox_timer = false;
+        }
+    }
+
     fn on_thumb_pixels(&mut self, path: String, pixels: Vec<u8>) {
+        let _perf = crate::perf::THUMB_LANDED.time();
         self.thumb_pending.remove(&path);
         let slot = match self.thumb_map.get(&path) {
             Some(&(slot, _)) => slot,

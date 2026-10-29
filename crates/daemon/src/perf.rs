@@ -99,6 +99,15 @@ pub(crate) static FILES_CMD: Counter = Counter::new();
 /// The app index landing on the loop (`on_apps_loaded`), whole, and every
 /// icon chain written into a GPU array (`write_icon_chain`).
 pub(crate) static APPS_LOADED: Counter = Counter::new();
+/// Work handed back from off the loop (`desktop_off_loop`'s `then`), the
+/// desktop folder's and the watched folders' inotify callbacks, the desktop
+/// top layer's draw request.
+pub(crate) static OFF_LOOP_THEN: Counter = Counter::new();
+pub(crate) static INOTIFY_DESKTOP: Counter = Counter::new();
+pub(crate) static INOTIFY_FILES: Counter = Counter::new();
+pub(crate) static DESKTOP_TOP: Counter = Counter::new();
+/// One thumbnail taken into its layers (`on_thumb_pixels`).
+pub(crate) static THUMB_LANDED: Counter = Counter::new();
 pub(crate) static ICON_UPLOAD: Counter = Counter::new();
 /// A whole OPTIONS-bar frame.
 pub(crate) static OPTIONS_DRAW: Counter = Counter::new();
@@ -173,6 +182,11 @@ pub(crate) fn report() -> String {
         timed("files-merge", &FILES_MERGE),
         timed("files-cmd", &FILES_CMD),
         timed("apps-loaded", &APPS_LOADED),
+        timed("off-loop-then", &OFF_LOOP_THEN),
+        timed("inotify-desktop", &INOTIFY_DESKTOP),
+        timed("inotify-files", &INOTIFY_FILES),
+        timed("desktop-top", &DESKTOP_TOP),
+        timed("thumb-landed", &THUMB_LANDED),
         timed("icon-upload", &ICON_UPLOAD),
         timed("options", &OPTIONS_DRAW),
         timed("deck", &DECK_DRAW),

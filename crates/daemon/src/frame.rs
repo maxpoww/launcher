@@ -616,6 +616,9 @@ impl App {
         }
 
         let _perf = crate::perf::DOCK_DRAW.time();
+        // The app set's icon chains still waiting go in a few per frame (see
+        // `Renderer::set_icons`); frames keep coming until they are all in.
+        let icons_landing = self.renderer.as_mut().is_some_and(|r| r.drain_icon_backlog(8));
         let now = Instant::now();
         let dt = self
             .last_frame
@@ -2043,7 +2046,12 @@ impl App {
                 false
             }
         };
-        if (search_animating && self.search.expand != search_target) || lift_animating || fit_animating {
+        if (search_animating && self.search.expand != search_target)
+            || lift_animating
+            || fit_animating
+            || icons_landing
+            || self.renderer.as_ref().is_some_and(|r| r.icon_backlog_pending())
+        {
             self.dirty = true;
         }
         if scroll_animating

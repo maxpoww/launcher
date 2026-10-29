@@ -141,6 +141,7 @@ impl App {
     /// Draw the top surface now, or once the frame in flight has been
     /// shown — when there is something up, or something to take off.
     pub(crate) fn request_desktop_top_draw(&mut self) {
+        let _perf = crate::perf::DESKTOP_TOP.time();
         if !self.desktop_top_ready() {
             return;
         }

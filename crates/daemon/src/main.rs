@@ -1049,6 +1049,8 @@ fn main() -> anyhow::Result<()> {
         group_origin_vp_y: None,
         closing_members: None,
         pending_icons: None,
+        thumb_inbox: std::collections::VecDeque::new(),
+        thumb_inbox_timer: false,
         apps_fingerprint: None,
         brain: None,
         options: Default::default(),
@@ -1326,6 +1328,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(watch_fd) = apps::watch_dirs(&app.file_watched) {
         let source = Generic::new(watch_fd, Interest::READ, Mode::Level);
         if let Err(e) = event_loop.handle().insert_source(source, |_readiness, fd, app: &mut App| {
+            let _perf = perf::INOTIFY_FILES.time();
             apps::drain_inotify(fd.as_fd());
             app.files_fresh_soon();
             Ok(PostAction::Continue)
@@ -1345,6 +1348,7 @@ fn main() -> anyhow::Result<()> {
                 event_loop
                     .handle()
                     .insert_source(source, |_readiness, fd, app: &mut App| {
+                        let _perf = perf::INOTIFY_DESKTOP.time();
                         apps::drain_inotify(fd.as_fd());
                         app.desktop_reload_soon();
                         Ok(PostAction::Continue)
@@ -2508,6 +2512,10 @@ pub struct App {
     closing_members: Option<Vec<usize>>,
     /// Icons that arrived before the renderer existed.
     pending_icons: Option<Vec<Vec<u8>>>,
+    /// Thumbnails that landed and are not yet in their layers: taken a few
+    /// per turn (see `App::thumb_inbox_drain`), and whether a turn is booked.
+    thumb_inbox: std::collections::VecDeque<(String, Vec<u8>)>,
+    thumb_inbox_timer: bool,
     /// Fingerprint of the last consumed [`apps::LoadedApps`], to skip the
     /// full rebuild + icon re-upload when a rescan reproduces the same index.
     apps_fingerprint: Option<u64>,
@@ -4050,7 +4058,7 @@ impl App {
                 match Renderer::new(&app.conn, app.layer.wl_surface(), pw, ph, scale) {
                     Ok(mut renderer) => {
                         if let Some(icons) = app.pending_icons.take() {
-                            renderer.set_icons(&icons);
+                            renderer.set_icons(icons);
                         }
                         app.renderer = Some(renderer);
                         app.upload_pkg_icons();
@@ -4891,7 +4899,7 @@ impl App {
         self.pkg_layer_base = icons.len() as u32;
         match self.renderer.as_mut() {
             Some(renderer) => {
-                renderer.set_icons(&icons);
+                renderer.set_icons(icons);
                 // set_icons rebuilt the array: restore the package-hit
                 // icons into its reserved tail, then the still-pending
                 // install icons into theirs.
@@ -7665,7 +7673,7 @@ impl App {
             None => match Renderer::new(&self.conn, self.layer.wl_surface(), pw, ph, scale) {
                 Ok(mut renderer) => {
                     if let Some(icons) = self.pending_icons.take() {
-                        renderer.set_icons(&icons);
+                        renderer.set_icons(icons);
                     }
                     self.renderer = Some(renderer);
                     self.upload_pkg_icons();
