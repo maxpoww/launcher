@@ -1806,6 +1806,9 @@ struct Win {
     ink: HashMap<String, [f32; 4]>,
     uploaded: Vec<Option<String>>,
     capacity: u32,
+    /// Pictures worn on screen still to be written (a few a frame): the
+    /// next frame writes more.
+    uploads_left: bool,
     pending: HashSet<String>,
     missing: HashSet<String>,
 
@@ -3154,6 +3157,7 @@ impl App {
             ink: HashMap::new(),
             uploaded: Vec::new(),
             capacity: 0,
+            uploads_left: false,
             pending: HashSet::new(),
             missing: HashSet::new(),
             ptr: None,
@@ -5582,12 +5586,24 @@ impl App {
             win.uploaded.clear();
         }
         win.uploaded.resize(win.capacity as usize, None);
+        // The pictures go in A FEW A FRAME: a window opening wrote some sixty
+        // layers (20 MB of staging) in its first frame and the whole shell
+        // waited 30 ms on the copy (2026-10-29); the rest come the next
+        // frames — the chrome's symbols first, they lead `worn`.
+        const UPLOADS_PER_FRAME: usize = 12;
+        let mut written = 0usize;
+        win.uploads_left = false;
         let mut asked = Vec::new();
         for key in worn {
             if win.uploaded.iter().any(|u| u.as_deref() == Some(key)) {
                 continue;
             }
             if let Some(chain) = win.chains.get(key).or_else(|| self.symbols.get(key)) {
+                if written >= UPLOADS_PER_FRAME {
+                    win.uploads_left = true;
+                    continue;
+                }
+                written += 1;
                 if !win.ink.contains_key(key) {
                     if win.ink.len() > 4000 {
                         win.ink.clear();
@@ -5811,6 +5827,11 @@ impl App {
         moving |= m;
         win.last_frame = moving.then_some(now);
         self.filer_sync_icons(&mut win, &layout);
+        if win.uploads_left {
+            // (More pictures to write: the next frame, as a motion.)
+            moving = true;
+            win.last_frame = Some(now);
+        }
 
         let (w, h) = win.virt();
         let mut scene = Scene {
