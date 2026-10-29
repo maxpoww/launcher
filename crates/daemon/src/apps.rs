@@ -878,6 +878,9 @@ pub(crate) fn scan_home_files() -> Vec<FileEntry> {
 /// rasters (cold start and rescans), then rasterizing the icon file. Icon-name → file-path
 /// resolutions get their own persistent cache because the theme
 /// directory walk — not rasterization — dominates index time.
+/// Tiles the loader keeps in memory of those not on disk (see `icon_for`).
+const RASTERS_KEPT: usize = 12;
+
 pub(crate) struct IconLoader {
     /// The theme the config names; which tone of it is walked follows the
     /// look (`look::icon_theme`).
@@ -978,6 +981,12 @@ impl IconLoader {
                 },
             };
         if !on_disk {
+            // (A few, for a burst of the same: the unplated carriers and
+            // the menus' symbols are asked for by the surfaces that keep
+            // them, so the loader keeping them all was 21 MB a resolver.)
+            if self.rasters.len() >= RASTERS_KEPT {
+                self.rasters.clear();
+            }
             self.rasters.insert(key, (pixels.clone(), is_placeholder));
         }
         (pixels, is_placeholder)

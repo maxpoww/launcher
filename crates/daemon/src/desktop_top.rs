@@ -52,12 +52,10 @@ pub(crate) struct Top {
     pub(crate) peek_edit_rev: u64,
     /// Which sharp part of a zoomed photo is in the layers.
     pub(crate) peek_detail_rev: u64,
-    /// THE MENUS' SYMBOLS (`glyphs.rs`): their pixels as the desktop's
-    /// resolver gave them, those asked for, and which layer holds which —
-    /// the first layers, lent while a menu is up (Quick Look, which uses
-    /// them too, is never up with a menu: each takes them back).
-    pub(crate) glyphs: std::collections::HashMap<String, Vec<u8>>,
-    pub(crate) glyph_asked: std::collections::HashSet<String>,
+    /// THE MENUS' SYMBOLS (`glyphs.rs`, their pixels in `App::symbols`, one
+    /// copy for every surface): which layer holds which — the first layers,
+    /// lent while a menu is up (Quick Look, which uses them too, is never up
+    /// with a menu: each takes them back).
     pub(crate) glyph_layers: Vec<String>,
     /// Every symbol asked for once, ahead of the first menu.
     pub(crate) glyphs_warm: bool,
@@ -240,8 +238,8 @@ impl App {
                 continue;
             }
             let top = &mut self.desktop_top;
-            let (Some(chain), Some(renderer)) = (top.glyphs.get(&key), top.renderer.as_mut()) else {
-                if self.desktop_top.glyph_asked.insert(key.clone()) {
+            let (Some(chain), Some(renderer)) = (self.symbols.get(&key), top.renderer.as_mut()) else {
+                if self.symbols_asked.insert(key.clone()) {
                     asked.push(key);
                 }
                 continue;
@@ -280,7 +278,7 @@ impl App {
         crate::glyphs::write_all();
         for (name, _) in crate::glyphs::GLYPHS {
             let key = crate::glyphs::key(name);
-            if self.desktop_top.glyphs.contains_key(&key) || !self.desktop_top.glyph_asked.insert(key.clone()) {
+            if self.symbols.contains_key(&key) || !self.symbols_asked.insert(key.clone()) {
                 continue;
             }
             if let Some(req) = crate::desktop::icon_request(&key) {
@@ -291,10 +289,10 @@ impl App {
 
     /// The resolver answered for a symbol of the menus: kept, and drawn.
     pub(crate) fn desktop_on_glyph(&mut self, key: String, chain: Option<Vec<u8>>) {
-        self.desktop_top.glyph_asked.remove(&key);
+        self.symbols_asked.remove(&key);
         match chain {
             Some(chain) => {
-                self.desktop_top.glyphs.insert(key, chain);
+                self.symbols.insert(key, chain);
                 self.request_desktop_top_draw();
             }
             None => warn!("desktop: no picture for the symbol {key}"),

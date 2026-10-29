@@ -2801,7 +2801,7 @@ impl App {
     /// the theme has no such icon — the name alone is shown) and draw.
     pub(crate) fn on_desktop_icon(&mut self, res: crate::notif_icons::Resolved) {
         // (A symbol of the menus: the top surface's, at once.)
-        if crate::glyphs::is_key(&res.key) || self.desktop_top.glyph_asked.contains(&res.key) {
+        if crate::glyphs::is_key(&res.key) || self.symbols_asked.contains(&res.key) {
             return self.desktop_on_glyph(res.key, res.chain);
         }
         // (Pushed, never taken here: the channel hands a burst to one turn
