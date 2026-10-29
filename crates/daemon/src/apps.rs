@@ -31,7 +31,11 @@ use waverunner_core::index::{AppEntry, DesktopIndex};
 /// hover-magnified dock icon is downscaled, never upscaled. A power of
 /// two so the mip chain halves cleanly. Icons are mostly SVG, so
 /// rasterizing larger is free vector quality.
-pub const ICON_SIZE: u32 = 256;
+///
+/// The small tier (`icons-128`, the weak machines' build) halves the side:
+/// a quarter of every tile everywhere, and at a scale of 1 nothing on screen
+/// meets more than 128 texels of an icon.
+pub const ICON_SIZE: u32 = if cfg!(feature = "icons-128") { 128 } else { 256 };
 
 /// Number of mip levels in the icon texture (base + downsamples), i.e.
 /// `log2(ICON_SIZE) + 1`. The smallest level is 1×1.
@@ -1991,7 +1995,7 @@ pub(crate) fn with_mips(base: Vec<u8>) -> Vec<u8> {
 
 /// Box-downsample one `size`×`size` premultiplied-RGBA image to half its
 /// side, averaging RGB in linear light and alpha directly.
-fn downsample_half(src: &[u8], size: u32) -> Vec<u8> {
+pub(crate) fn downsample_half(src: &[u8], size: u32) -> Vec<u8> {
     let dec = srgb_decode_lut();
     let enc = srgb_encode_lut();
     let s = size as usize;
@@ -2329,13 +2333,14 @@ mod tests {
 
     #[test]
     fn icon_mip_chain_math_is_exact() {
-        // ICON_MIPS = full chain down to 1×1 inclusive (256 → 9 levels).
-        assert_eq!(ICON_MIPS, 9);
-        // The byte total is the geometric sum 4·(256²+128²+…+1²), which the
+        // ICON_MIPS = full chain down to 1×1 inclusive (256 → 9 levels,
+        // 128 → 8).
+        assert_eq!(ICON_MIPS, ICON_SIZE.trailing_zeros() + 1);
+        // The byte total is the geometric sum 4·(S²+(S/2)²+…+1²), which the
         // texture upload reserves — an off-by-one here mis-sizes the buffer.
-        let expected: usize = (0..9)
+        let expected: usize = (0..ICON_MIPS)
             .map(|l| {
-                let s = 256usize >> l;
+                let s = ICON_SIZE as usize >> l;
                 s * s * 4
             })
             .sum();

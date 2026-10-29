@@ -181,12 +181,23 @@ impl App {
         }
         self.desktop_off_loop(
             move || {
-                let want = (ICON_SIZE * ICON_SIZE * 4) as usize;
+                // The plugin writes a 256² picture whatever the tier; the small
+                // tier halves it to its tile.
+                const PLUGIN_SIDE: u32 = 256;
+                let want = (PLUGIN_SIDE * PLUGIN_SIDE * 4) as usize;
+                let fit = |mut raw: Vec<u8>| {
+                    let mut side = PLUGIN_SIDE;
+                    while side > ICON_SIZE {
+                        raw = apps::downsample_half(&raw, side);
+                        side /= 2;
+                    }
+                    raw
+                };
                 wanted
                     .into_iter()
                     .map(|(addr, path)| {
                         let pixels = match std::fs::read(&path) {
-                            Ok(raw) if raw.len() == want => Some(to_dock_layer(raw)),
+                            Ok(raw) if raw.len() == want => Some(to_dock_layer(fit(raw))),
                             Ok(raw) => {
                                 debug!("min-add {addr}: thumbnail {path:?} is {} bytes, want {want}", raw.len());
                                 None

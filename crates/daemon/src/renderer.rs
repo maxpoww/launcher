@@ -1208,16 +1208,20 @@ impl Renderer {
         // MacBook's GL at every landing (2026-10-29). Its layers past the
         // set are not drawn; its reserved tail is written as before.
         let kept = self.icon_layer_count >= layers && self.icon_layer_count <= self.icon_layer_cap;
+        crate::perf::mark("icon texture");
         let (texture, layers) = match self.icon_texture.take() {
             Some(texture) if kept => (texture, self.icon_layer_count),
             _ => (self.create_icon_texture(layers), layers),
         };
+        crate::perf::mark("icons now");
         let mut icons = icons.into_iter().enumerate();
         for (i, chain) in icons.by_ref().take(ICON_UPLOAD_NOW) {
             write_icon_chain(&self.queue, &texture, i as u32, &chain);
         }
         self.icon_backlog.extend(icons.map(|(i, chain)| (i as u32, chain)));
+        crate::perf::mark("icons bind");
         self.bind_icon_texture(texture, layers);
+        crate::perf::mark("icons bound");
     }
 
     /// Write up to `n` of the app set's chains still waiting (see

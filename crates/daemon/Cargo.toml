@@ -8,6 +8,13 @@ license.workspace = true
 name = "waverunner"
 path = "src/main.rs"
 
+[features]
+# THE SMALL TIER: 128² icon tiles instead of 256² — a quarter of every tile
+# on disk, in RAM, in the GPU array and in every upload. Built for the weak
+# machines (`waverunner-daemon-small`: the 2013 MacBook Air, scale 1), where
+# nothing on screen ever meets more than 128 texels of an icon.
+icons-128 = []
+
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }

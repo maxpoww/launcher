@@ -96,7 +96,7 @@ thread_local! {
 pub(crate) fn mark(what: &'static str) {
     MARKS.with(|m| {
         let mut m = m.borrow_mut();
-        if m.len() < 64 {
+        if m.len() < 256 {
             m.push((what, std::time::Instant::now()));
         }
     });

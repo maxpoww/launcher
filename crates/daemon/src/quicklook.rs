@@ -60,8 +60,9 @@ pub(crate) const BOX: u32 = u32::MAX - 1;
 /// picture and the one beyond each edge again, so neighbours overlap.
 pub(crate) const TILE: u32 = ICON_SIZE;
 pub(crate) const STEP: u32 = TILE - 2;
-/// The most tiles a picture is cut into: a bigger one is made smaller.
-pub(crate) const TILES: u32 = 64;
+/// The most tiles a picture is cut into: a bigger one is made smaller. (The
+/// same texels whatever the tile: four times the tiles at the small tier.)
+pub(crate) const TILES: u32 = 64 * (256 / ICON_SIZE) * (256 / ICON_SIZE);
 /// The layers on the top surface: the tiles, the soft first picture, the
 /// head's icon.
 pub(crate) const LAYERS: u32 = 2 * TILES + 2;
@@ -3323,8 +3324,9 @@ mod tests {
             *px = image::Rgba([(x % 256) as u8, (y % 256) as u8, 7, 255]);
         }
         let (cols, rows, tiles) = cut(&img);
-        assert_eq!((cols, rows), (3, 2));
-        assert_eq!(tiles.len(), 6);
+        // (3 × 2 of 256² tiles; 5 × 3 at the small tier.)
+        assert_eq!((cols, rows), (600u32.div_ceil(STEP), 300u32.div_ceil(STEP)));
+        assert_eq!(tiles.len(), (cols * rows) as usize);
         // Tile (1, 0) begins one texel before x = STEP: that texel is the
         // picture's, so the two tiles agree where they overlap.
         let at = |t: &Vec<u8>, x: u32, y: u32| t[((y * TILE + x) * 4) as usize];
