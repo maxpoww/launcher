@@ -339,6 +339,11 @@ pub struct Renderer {
     /// The most layers the array may grow to (its content + the reserved
     /// tail).
     icon_layer_cap: u32,
+    /// Grow the icon array to its cap in one go: on the GL backend a
+    /// growth is a new texture, its zero fill and a copy of every layer —
+    /// 400 ms a time on a Haswell iGPU (the MacBook, 2026-10-29) — so it
+    /// happens once there, not once per sixteen layers.
+    grow_whole: bool,
 
     /// The shell's ONE font system and glyph-image cache (see
     /// [`shared_text`]): the same on every renderer.
@@ -1056,6 +1061,7 @@ impl Renderer {
             on_shared_gpu,
             frame_throttle,
             pace_by_gpu,
+            grow_whole: adapter.get_info().backend == wgpu::Backend::Gl,
             gpu_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scale: if scale > 0.0 { scale } else { 1.0 },
             globals_buf,
@@ -1188,11 +1194,24 @@ impl Renderer {
         let count = icons.len();
         self.icon_layer_cap = icon_layers(count + reserved);
         let had = self.icon_layer_count.min(self.icon_layer_cap);
-        let layers = icon_layers(count + tail_used as usize).min(self.icon_layer_cap).max(had);
+        let layers = if self.grow_whole {
+            // (GL: the whole tail now, once — see `grow_whole`.)
+            self.icon_layer_cap
+        } else {
+            icon_layers(count + tail_used as usize).min(self.icon_layer_cap).max(had)
+        };
         self.icon_epoch += 1;
         self.icon_layer_gen.clear();
         self.icon_backlog.clear();
-        let texture = self.create_icon_texture(layers);
+        // The array it has is kept when the set fits in it: a new one is an
+        // allocation and a zero fill — 144 ms for 183 layers on the
+        // MacBook's GL at every landing (2026-10-29). Its layers past the
+        // set are not drawn; its reserved tail is written as before.
+        let kept = self.icon_layer_count >= layers && self.icon_layer_count <= self.icon_layer_cap;
+        let (texture, layers) = match self.icon_texture.take() {
+            Some(texture) if kept => (texture, self.icon_layer_count),
+            _ => (self.create_icon_texture(layers), layers),
+        };
         let mut icons = icons.into_iter().enumerate();
         for (i, chain) in icons.by_ref().take(ICON_UPLOAD_NOW) {
             write_icon_chain(&self.queue, &texture, i as u32, &chain);
@@ -1387,7 +1406,11 @@ impl Renderer {
         let had = self.icon_layer_count;
         // A step at a time, not a layer at a time: one copy per burst of
         // new thumbnails rather than one per thumbnail.
-        let layers = icon_layers(need.max(had + ICON_GROW_STEP) as usize).min(self.icon_layer_cap);
+        let layers = if self.grow_whole {
+            self.icon_layer_cap
+        } else {
+            icon_layers(need.max(had + ICON_GROW_STEP) as usize).min(self.icon_layer_cap)
+        };
         let texture = self.create_icon_texture(layers);
         let mut encoder = self
             .device
