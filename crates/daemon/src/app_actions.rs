@@ -1273,7 +1273,9 @@ impl App {
             }
             let name = e.name.trim().to_lowercase();
             let n = name.chars().count();
-            if name.is_empty() || !lower.starts_with(&format!("{name} ")) || best.as_ref().is_some_and(|(_, m)| *m >= n) {
+            // (A name of one letter — X — asks only Shift-written: "x men"
+            // typed is not a search of X.)
+            if n < 2 || !lower.starts_with(&format!("{name} ")) || best.as_ref().is_some_and(|(_, m)| *m >= n) {
                 continue;
             }
             if let Some(t) = self.searches_in(i) {

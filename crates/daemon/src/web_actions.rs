@@ -53,7 +53,10 @@ pub(crate) struct Site {
     pub strip: &'static [&'static str],
     /// Its search's address, `{q}` the words (`{lang}` the shell's language).
     pub search: Option<&'static str>,
-    /// What typed first asks it to search ("youtube gatos").
+    /// What typed first asks it to search ("youtube gatos") — never a word
+    /// said every day, a letter or a name: "so long", "x men", "g major",
+    /// "ali" asked Stack Overflow, X, Google, AliExpress, and Enter went
+    /// there (2026-10-29). Its webapp's name, Shift-written, searches it.
     pub words: &'static [&'static str],
 }
 
@@ -82,7 +85,7 @@ pub(crate) const SITES: &[Site] = &[
         pages: &["/search"],
         strip: &[" - Buscar con Google", " - Google Search", " - Google Suche", " - Recherche Google"],
         search: Some("https://www.google.com/search?q={q}"),
-        words: &["google", "g"],
+        words: &["google"],
     },
     Site {
         slug: "facebook",
@@ -149,7 +152,7 @@ pub(crate) const SITES: &[Site] = &[
         pages: &["/status/"],
         strip: &[" / X"],
         search: Some("https://x.com/search?q={q}"),
-        words: &["x", "twitter"],
+        words: &["twitter"],
     },
     Site {
         slug: "reddit",
@@ -370,6 +373,23 @@ pub(crate) const SITES: &[Site] = &[
         words: &[],
     },
     Site {
+        slug: "google-keep",
+        name: "Google Keep",
+        hosts: &["keep.google.com"],
+        links: &[
+            link("New note", "https://keep.new", "plus"),
+            link("Reminders", "/#reminders", "bell"),
+            link("Archived", "/#archive", "package"),
+            link("Bin", "/#trash", "trash"),
+        ],
+        // (Every page of it is titled "Google Keep": no recents.)
+        pages: &[],
+        strip: &[],
+        search: Some("https://keep.google.com/#search/text%253D{q}"),
+        // ("keep" is a word said every day.)
+        words: &[],
+    },
+    Site {
         slug: "google-photos",
         name: "Google Photos",
         hosts: &["photos.google.com"],
@@ -487,7 +507,7 @@ pub(crate) const SITES: &[Site] = &[
         pages: &["/item/"],
         strip: &[" - AliExpress"],
         search: Some("https://www.aliexpress.com/wholesale?SearchText={q}"),
-        words: &["aliexpress", "ali"],
+        words: &["aliexpress"],
     },
     Site {
         slug: "booking",
@@ -555,7 +575,7 @@ pub(crate) const SITES: &[Site] = &[
         pages: &["/questions/"],
         strip: &[" - Stack Overflow"],
         search: Some("https://stackoverflow.com/search?q={q}"),
-        words: &["stackoverflow", "so"],
+        words: &["stackoverflow"],
     },
     Site {
         slug: "notion",
@@ -2541,6 +2561,15 @@ mod tests {
         assert!(asked("amazon").is_none());
         assert!(asked("amazon ").is_none());
         assert!(asked("vlc media").is_none());
+        // Words said every day, letters, names: none asks a search.
+        for typed in ["so long", "x men", "g major", "ali baba", "keep calm"] {
+            assert!(asked(typed).is_none(), "{typed:?} asked a search");
+        }
+        for s in SITES {
+            assert!(s.words.iter().all(|w| w.chars().count() >= 2), "{}: a letter asks its search", s.slug);
+        }
+        let keep = site("google-keep").unwrap();
+        assert_eq!(search_url(keep, "lista super").unwrap(), "https://keep.google.com/#search/text%253Dlista%20super");
         let s = site("youtube").unwrap();
         assert_eq!(search_url(s, "gatos & perros").unwrap(), "https://www.youtube.com/results?search_query=gatos%20%26%20perros");
         let az = site("amazon").unwrap();
