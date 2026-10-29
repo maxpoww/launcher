@@ -1213,47 +1213,64 @@ impl DiskCache {
         self.pack = Pack::open(&self.dir.join("pack.bin"));
     }
 
-    /// The index is done: the tiles it used are written as the next pack
-    /// (read back from their files, in the page cache by now), the hashes
-    /// remembered, and the pack in memory let go.
+    /// The index is done: the tiles it used become the next pack — unless
+    /// they are exactly the pack's own (the usual start: nothing to write;
+    /// reading every tile back and writing 36 MB was 885 ms of each index
+    /// on the 2013 MacBook Air). A changed set is built from the pack in
+    /// memory where it has the tile, from the tile's file where not.
     fn close_pack(&mut self) {
-        self.pack = None;
+        let pack = self.pack.take();
         let used = std::mem::take(&mut self.used);
         if !used.is_empty() {
             let mut names: Vec<(u64, PathBuf)> = used.iter().filter_map(|f| Some((tile_name(f)?, f.clone()))).collect();
             names.sort_by_key(|(n, _)| *n);
             names.dedup_by_key(|(n, _)| *n);
-            let mut head = Vec::with_capacity(8 + names.len() * 20);
-            let mut body: Vec<u8> = Vec::new();
-            let mut count = 0u32;
-            for (name, file) in &names {
-                let Ok(pixels) = std::fs::read(file) else { continue };
-                if pixels.len() != ICON_CHAIN_BYTES {
-                    continue;
+            let same = pack
+                .as_ref()
+                .is_some_and(|p| p.at.len() == names.len() && names.iter().all(|(n, _)| p.at.contains_key(n)));
+            if !same {
+                let mut head = Vec::with_capacity(8 + names.len() * 20);
+                let mut body: Vec<u8> = Vec::new();
+                let mut count = 0u32;
+                for (name, file) in &names {
+                    let pixels: Vec<u8> = match pack.as_ref().and_then(|p| p.get(*name)) {
+                        Some(px) => px.to_vec(),
+                        None => {
+                            let Ok(px) = std::fs::read(file) else { continue };
+                            still_used(file);
+                            px
+                        }
+                    };
+                    if pixels.len() != ICON_CHAIN_BYTES {
+                        continue;
+                    }
+                    head.extend_from_slice(&name.to_le_bytes());
+                    head.extend_from_slice(&(body.len() as u64).to_le_bytes());
+                    head.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+                    body.extend_from_slice(&pixels);
+                    count += 1;
                 }
-                still_used(file);
-                head.extend_from_slice(&name.to_le_bytes());
-                head.extend_from_slice(&(body.len() as u64).to_le_bytes());
-                head.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
-                body.extend_from_slice(&pixels);
-                count += 1;
-            }
-            // (The places are from the body's start: moved past the header.)
-            let header_len = 8 + count as usize * 20;
-            for i in 0..count as usize {
-                let e = i * 20 + 8;
-                let offset = u64::from_le_bytes(head[e..e + 8].try_into().unwrap_or([0; 8])) + header_len as u64;
-                head[e..e + 8].copy_from_slice(&offset.to_le_bytes());
-            }
-            let mut out = Vec::with_capacity(header_len + body.len());
-            out.extend_from_slice(PACK_MAGIC);
-            out.extend_from_slice(&count.to_le_bytes());
-            out.extend_from_slice(&head);
-            out.extend_from_slice(&body);
-            let file = self.dir.join("pack.bin");
-            let tmp = self.dir.join(format!("pack.tmp{}", std::process::id()));
-            if std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &file)).is_err() {
-                let _ = std::fs::remove_file(&tmp);
+                // (The places are from the body's start: moved past the header.)
+                let header_len = 8 + count as usize * 20;
+                for i in 0..count as usize {
+                    let e = i * 20 + 8;
+                    let offset = u64::from_le_bytes(head[e..e + 8].try_into().unwrap_or([0; 8])) + header_len as u64;
+                    head[e..e + 8].copy_from_slice(&offset.to_le_bytes());
+                }
+                let mut out = Vec::with_capacity(header_len + body.len());
+                out.extend_from_slice(PACK_MAGIC);
+                out.extend_from_slice(&count.to_le_bytes());
+                out.extend_from_slice(&head);
+                out.extend_from_slice(&body);
+                let file = self.dir.join("pack.bin");
+                let tmp = self.dir.join(format!("pack.tmp{}", std::process::id()));
+                if std::fs::create_dir_all(&self.dir)
+                    .and_then(|()| std::fs::write(&tmp, &out))
+                    .and_then(|()| std::fs::rename(&tmp, &file))
+                    .is_err()
+                {
+                    let _ = std::fs::remove_file(&tmp);
+                }
             }
         }
         if self.hashes_dirty {
