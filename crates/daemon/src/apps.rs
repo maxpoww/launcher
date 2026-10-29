@@ -277,15 +277,23 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let walk = std::time::Instant::now();
                 let files = scan_home_files();
                 let opened = crate::file_search::opened_from_record();
-                debug!(
+                // (Said at info when it took its time: on the 2013 MacBook Air
+                // the apps came 9.6 s after the dock, and nothing said why.)
+                let took = started.elapsed();
+                let line = format!(
                     "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}, files {:?})",
                     entries.len(),
                     files.len(),
-                    started.elapsed(),
+                    took,
                     scanned - started,
-                    scanned.elapsed(),
+                    walk - scanned,
                     walk.elapsed()
                 );
+                if took > std::time::Duration::from_millis(1500) {
+                    tracing::info!("{line}");
+                } else {
+                    debug!("{line}");
+                }
                 let fingerprint =
                     load_fingerprint(&entries, &kinds, &icons, &placeholders, &cli_ids);
                 if results
