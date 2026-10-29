@@ -85,6 +85,11 @@ impl SurfaceScale {
         self.scale120.map_or(fallback, |s| s as f32 / 120.0)
     }
 
+    /// The scale the compositor has said, if it has.
+    pub fn known(&self) -> Option<f32> {
+        self.scale120.map(|s| s as f32 / 120.0)
+    }
+
     /// Whether this is the state `proxy` reports for.
     pub fn is(&self, proxy: &WpFractionalScaleV1) -> bool {
         self._fractional == *proxy
@@ -140,6 +145,7 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
             if slot.scale120 == Some(scale) {
                 return;
             }
+            let first = slot.scale120.is_none();
             slot.scale120 = Some(scale);
             // A change of scale we asked for has landed: the pointer goes
             // back to where it was on the glass (see `display.rs`).
@@ -147,6 +153,12 @@ impl Dispatch<WpFractionalScaleV1, SurfaceKind> for App {
                 app.display_pointer_back(Some(scale));
             }
             tracing::info!("{kind:?}: output scale {:.3}", scale as f32 / 120.0);
+            // The first word of the scale, when the frame already drawn used
+            // it (the compositor's hint, `compositor_scale_hint`): nothing to
+            // draw again.
+            if first && (app.surface_scale(*kind) * 120.0).round() as u32 == scale {
+                return;
+            }
             app.rescale_surface(*kind);
         }
     }

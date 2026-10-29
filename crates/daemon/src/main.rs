@@ -6733,6 +6733,19 @@ impl App {
     /// output's fractional scale once the compositor has said it, else the
     /// integer `render_scale` supersample (also the whole story without the
     /// fractional-scale protocol).
+    /// The compositor's scale for the screen a surface is on, in the 1/120
+    /// steps the fractional-scale protocol speaks (None without Hyprland).
+    fn compositor_scale_hint(&self, kind: fractional::SurfaceKind) -> Option<f32> {
+        use fractional::SurfaceKind;
+        let screen = match kind {
+            SurfaceKind::Options => self.bar_screen_name(),
+            SurfaceKind::Files(_) => return None,
+            _ => self.dock_screen_name(),
+        };
+        let scale = hypr::monitor_info(screen.as_deref()).ok()?.scale as f32;
+        (scale >= 1.0).then(|| (scale * 120.0).round() / 120.0)
+    }
+
     pub(crate) fn surface_scale(&self, kind: fractional::SurfaceKind) -> f32 {
         use fractional::SurfaceKind;
         // A file window's scale and size are its own.
@@ -6756,7 +6769,15 @@ impl App {
             SurfaceKind::Files(_) => return 1.0, // answered above
         };
         let fallback = fallback.max(1) as f32;
-        let scale = fs.as_ref().map_or(fallback, |f| f.scale_or(fallback));
+        // Until the compositor has said this surface's scale, the fallback
+        // is the compositor's own for the screen (one read, cached per
+        // turn), not the integer one: the first frame comes out at the
+        // right scale and the scale event that follows changes nothing —
+        // five surfaces each drew twice at start before (2026-10-29).
+        let scale = match fs.as_ref().and_then(fractional::SurfaceScale::known) {
+            Some(known) => known,
+            None => self.compositor_scale_hint(kind).unwrap_or(fallback),
+        };
         // Never a framebuffer past the device's texture limit: at a 300 %
         // screen the dock asked for 8640×2991 and wgpu panicked in
         // Surface::configure (MacBook, 2026-10-03). Past the cap the
