@@ -524,6 +524,7 @@ impl App {
                     // captures already filed, and without this they would
                     // reference texture layers the new renderer never received.
                     if self.deck_icon_capacity > 0 {
+                        crate::perf::mark("deck array");
                         renderer.alloc_icon_array(self.deck_icon_capacity);
                         for (i, chain) in self.deck_thumb_chains.iter().enumerate() {
                             renderer.update_icon_layer(i as u32, chain);
@@ -540,6 +541,7 @@ impl App {
             }
         }
         self.sync_deck_input();
+        crate::perf::mark("deck draw");
         self.draw_deck();
     }
 
