@@ -7350,8 +7350,10 @@ mod tests {
         rgba_to_argb(&src, &mut dst);
         assert_eq!(dst, [30, 20, 10, 40, 70, 60, 50, 80]);
         // 256 px raster shown at 54 logical px → scale 5 (51 px); never 0.
-        assert_eq!(icon_buffer_scale(1.0), 5);
-        assert_eq!(icon_buffer_scale(1.65), 3);
+        // (The small tier's 128: 2, then 1.)
+        let (at_1, at_165) = if ICON_PX == 256 { (5, 3) } else { (2, 1) };
+        assert_eq!(icon_buffer_scale(1.0), at_1);
+        assert_eq!(icon_buffer_scale(1.65), at_165);
         assert_eq!(icon_buffer_scale(100.0), 1);
     }
 

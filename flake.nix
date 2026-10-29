@@ -240,8 +240,12 @@
             '';
           };
 
-        waverunner-daemon = pkgs.rustPlatform.buildRustPackage {
-          pname = "waverunner-daemon";
+        # The daemon, in two tiers: the full one, and the SMALL one for weak
+        # machines (128² icon tiles — a quarter of every tile on disk, in RAM,
+        # on the GPU; the 2013 MacBook Air, 2026-10-29). A system picks its
+        # tier at install time (`programs.waverunner.smallIcons`).
+        mkDaemon = { smallIcons ? false }: pkgs.rustPlatform.buildRustPackage {
+          pname = "waverunner-daemon" + pkgs.lib.optionalString smallIcons "-small";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
@@ -250,6 +254,7 @@
           nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
 
           cargoBuildFlags = [ "-p" "waverunner-daemon" ];
+          buildFeatures = pkgs.lib.optional smallIcons "icons-128";
           # Tests that exercise Hyprland IPC need a live session; skip here.
           doCheck = false;
 
@@ -270,6 +275,8 @@
               --set-default WAVERUNNER_TRANSLATE ${translate}/bin/translateLocally
           '';
         };
+        waverunner-daemon = mkDaemon { };
+        waverunner-daemon-small = mkDaemon { smallIcons = true; };
 
         waverunner-ctl = pkgs.rustPlatform.buildRustPackage {
           pname = "waverunner-ctl";
@@ -369,12 +376,24 @@
         let
           cfg = config.programs.waverunner;
           sys = pkgs.stdenv.hostPlatform.system;
-          defaultPkg = self.packages.${sys}.waverunner-daemon;
+          defaultPkg =
+            if cfg.smallIcons then self.packages.${sys}.waverunner-daemon-small
+            else self.packages.${sys}.waverunner-daemon;
           defaultCtl = self.packages.${sys}.waverunner-ctl;
           defaultIdx = self.packages.${sys}.package-index;
         in {
           options.programs.waverunner = {
             enable = lib.mkEnableOption "waverunner dock launcher";
+
+            smallIcons = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                The small tier: 128² icon tiles instead of 256² (a quarter of
+                every tile on disk, in RAM and on the GPU). For weak machines
+                at a scale of 1; picks waverunner-daemon-small as the package.
+              '';
+            };
 
             package = lib.mkOption {
               type = lib.types.package;
