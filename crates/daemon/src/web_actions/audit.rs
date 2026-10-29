@@ -124,6 +124,11 @@ fn real_every_webapp() {
                 f(format!("no time seen: \"{}\"", r.title));
             }
         }
+        // (How many wear a picture of their own, not the site's tile: a site's
+        // pages all on tiles was the clue to a whole class — Wikipedia, 2026-10-29.)
+        if !got.is_empty() {
+            println!("   previews: {} of {}", got.iter().filter(|r| r.aspect.is_some()).count(), got.len());
+        }
         // Pictures two pages wear (a site's tile, fine; a preview twice: not its own).
         let mut worn: HashMap<&Path, Vec<&str>> = HashMap::new();
         for r in got.iter().filter(|r| r.aspect.is_some()) {

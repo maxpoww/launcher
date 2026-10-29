@@ -1552,7 +1552,14 @@ The big daemon files are cohesive but long — go straight to the function:
   the bar (let go nowhere). A RECENT of the lone app's row (`box_recent_lift`, from the press
   motion past 14 px) goes out at once — a file as itself, a page as its LINK (`Lifted::links`:
   uri-list + text); the desktop, a Files window and the bin refuse links (`carries_links`),
-  the desktop is for files. APPS NEVER LEAVE the dock or box (Max): their drags stay internal. 2026-10-27 (Max: "do 1 2 3 and
+  the desktop is for files. APPS NEVER LEAVE the dock or box (Max): their drags stay internal.
+  PICTURES OF ONE PAGE (2026-10-29, Max: "give [Wikipedia] thumbnails… use that issue as a clue"):
+  a visit wears the kitchen's picture of its own address before the grouping (`kept_pictures`:
+  a page several visits are shows the one any has — the dock looked only at the address it
+  shows); the kitchen's logo check counts one page's addresses as one (`page_key` in
+  `kitchen_in`: a post and its comments). Wikipedia: a "#/media/" picture view is its article,
+  `WIKI_OWN` pages none; Seam fetches pictures for the articles from before (Golem
+  `rkWikiBackfill`). The audit prints "previews: N of M" per app. 2026-10-27 (Max: "do 1 2 3 and
   5"): PUT AWAY — Delete on a recent (the pointer's, or the keys' when they moved last:
   `box_delete`) hides it until it is SEEN AGAIN (`web_actions::Forgot`, `recents-forgot.json`: a
   key → when; one visited after comes back, as in a history) and forgets its picks; the Launcher

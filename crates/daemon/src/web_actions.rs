@@ -1586,10 +1586,12 @@ fn kitchen_in(dir: &Path) -> Kitchen {
                 let Some(pic) = page.pic.clone() else {
                     continue;
                 };
+                // (One page's addresses — a post and its comments, a tracking
+                // tag — wear its picture as one: `page_key`.)
                 let page = match (video_id(url), list_id(url)) {
                     (Some(id), _) => id.to_owned(),
                     (None, Some(list)) => format!("list:{list}"),
-                    (None, None) => url.clone(),
+                    (None, None) => page_key(origin(url).and_then(|(_, h)| site_of_host(&h)), url),
                 };
                 match seen.get(&pic) {
                     Some(other) if *other != page => {
@@ -2116,7 +2118,7 @@ pub(crate) fn webapp_reading(site: Option<&Site>, start: &str, name: &str, wante
     };
     // (A search in it: the whole history looked through for its words, as
     // the titles it shows say them.)
-    let mut pages = webapp_pages(retitled(visits, &k, says), site, start, name, usize::MAX);
+    let mut pages = webapp_pages(kept_pictures(retitled(visits, &k, says), &k), site, start, name, usize::MAX);
     pages.retain(|(v, title)| wanted.says(&v.url, title));
     pages.truncate(CANDIDATES);
     let plays = played(&k, site, start, crate::usage::now_secs());
@@ -2133,6 +2135,17 @@ pub(crate) fn webapp_reading(site: Option<&Site>, start: &str, name: &str, wante
 
 /// A history with each page's title as Seam saw it last, where it kept one
 /// (an app that names the song after the history wrote "YouTube Music").
+/// `visits` wearing the picture Seam's kitchen kept for each one's address:
+/// a page several visits are (its address tidied, a tracking tag on it, a
+/// post's comment) shows the one any of them has (`once_per_page`,
+/// `once_each` carry it) — the dock looked only at the address it shows.
+fn kept_pictures(mut visits: Vec<Visit>, k: &Kitchen) -> Vec<Visit> {
+    for v in visits.iter_mut().filter(|v| v.pic.is_none()) {
+        v.pic = k.page_picture(&v.url).map(|p| p.to_string_lossy().into_owned());
+    }
+    visits
+}
+
 fn retitled(mut visits: Vec<Visit>, k: &Kitchen, says: impl Fn(&str) -> bool) -> Vec<Visit> {
     for v in &mut visits {
         if let Some(t) = k.title_of(&v.url).filter(|t| says(t)) {
@@ -2951,6 +2964,34 @@ mod tests {
         assert_eq!((both.len(), both[0].0.last, both[0].1.as_str(), both[0].0.title.as_str()), (1, 30.0, "Robot Rock • Daft Punk", "Robot Rock • Daft Punk"));
         // Not a file of its own, or not ours at all: nothing.
         assert_eq!(kitchen_in(&dir.join("nowhere")).plays.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_several_visits_are_wears_the_picture_any_of_them_has() {
+        let dir = scratch("one-page-pics");
+        std::fs::create_dir_all(dir.join("pics")).unwrap();
+        for name in ["0123456789abcdef.jpg", "fedcba9876543210.jpg"] {
+            std::fs::write(dir.join("pics").join(name), b"jpeg").unwrap();
+        }
+        std::fs::write(
+            dir.join("recents.json"),
+            r#"{"v":1,"pages":{
+                "https://es.wikipedia.org/wiki/Permacultura":{"title":"Permacultura - Wikipedia, la enciclopedia libre","pic":"0123456789abcdef.jpg"},
+                "https://www.reddit.com/r/linux/comments/abc123/a_post/":{"title":"A post","pic":"fedcba9876543210.jpg"},
+                "https://www.reddit.com/r/linux/comments/abc123/comment/def456/?screen_view_count=2":{"title":"A post","pic":"fedcba9876543210.jpg"}
+            },"plays":[]}"#,
+        )
+        .unwrap();
+        let k = kitchen_in(&dir);
+        // A post and its comment wearing one picture are one page: not a logo.
+        assert!(k.page_picture("https://www.reddit.com/r/linux/comments/abc123/a_post/").is_some());
+        // The newest visit had a tracking tag; the picture is on the clean address.
+        let at = |url: &str, last: f64| Visit { last, score: 1.0, ..visit(url, "Permacultura - Wikipedia, la enciclopedia libre") };
+        let visits = vec![at("https://es.wikipedia.org/wiki/Permacultura?wprov=srpw1_0", 9.0), at("https://es.wikipedia.org/wiki/Permacultura", 8.0)];
+        let got = webapp_pages(kept_pictures(visits, &k), site("wikipedia"), "https://www.wikipedia.org", "Wikipedia", 24);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].0.pic.as_deref().is_some_and(|p| p.ends_with("0123456789abcdef.jpg")), "{:?}", got[0].0.pic);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
