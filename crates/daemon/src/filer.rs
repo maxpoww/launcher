@@ -5264,6 +5264,7 @@ impl App {
             renderer.set_scale(drawn);
             renderer.resize(pw, ph);
         } else {
+            crate::perf::mark("files renderer");
             match crate::renderer::Renderer::new(&self.conn, win.window.wl_surface(), pw, ph, drawn) {
                 Ok(mut renderer) => {
                     renderer.labels_linear = true;

@@ -95,6 +95,7 @@ impl App {
                 let Some(layer) = self.desktop_top.layer.as_ref() else {
                     return;
                 };
+                crate::perf::mark("top renderer");
                 Renderer::new(&self.conn, layer.wl_surface(), pw, ph, scale)
             };
             match built {

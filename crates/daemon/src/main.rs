@@ -1566,9 +1566,10 @@ fn main() -> anyhow::Result<()> {
                     perf::LOOP_LATE.record_nanos(late.as_nanos() as u64);
                 }
                 // A stall the owner would feel gets a line of its own, so the
-                // log says WHEN — the lines around it say what was going on.
+                // log says WHEN, and the marks what the loop did meanwhile.
+                let marks = perf::take_marks(deadline - TICK);
                 if late > Duration::from_millis(100) {
-                    info!("loop: stalled {} ms (the shell answered nothing)", late.as_millis());
+                    info!("loop: stalled {} ms (the shell answered nothing): {marks}", late.as_millis());
                 }
                 TimeoutAction::ToDuration(TICK)
             },
@@ -4147,6 +4148,7 @@ impl App {
                 if app.renderer.is_some() {
                     return TimeoutAction::Drop;
                 }
+                perf::mark("dock renderer again");
                 match Renderer::new(&app.conn, app.layer.wl_surface(), pw, ph, scale) {
                     Ok(mut renderer) => {
                         if let Some(icons) = app.pending_icons.take() {
@@ -4849,6 +4851,7 @@ impl App {
         // Where the landing's time goes, step by step (logged when it is felt).
         let landed = Instant::now();
         let mut marks: Vec<(&str, u32)> = Vec::new();
+        perf::mark("apps landing");
         let mut last = landed;
         let mut mark = |what: &'static str, marks: &mut Vec<(&str, u32)>| {
             let now = Instant::now();
@@ -7848,6 +7851,9 @@ impl App {
             fs.set_logical_size(width, height);
         }
 
+        if self.renderer.is_none() {
+            perf::mark("dock renderer");
+        }
         match self.renderer.as_mut() {
             Some(renderer) => {
                 renderer.set_scale(scale);

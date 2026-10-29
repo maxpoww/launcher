@@ -2423,6 +2423,7 @@ impl App {
                 let Some(layer) = self.desktop_layer.as_ref() else {
                     return;
                 };
+                crate::perf::mark("desktop renderer");
                 crate::renderer::Renderer::new(&self.conn, layer.wl_surface(), pw, ph, scale)
             };
             match built {
@@ -2505,6 +2506,7 @@ impl App {
     /// Read the folder again and show what is there now. Pictures already
     /// in hand are kept; files that left take theirs with them.
     pub(crate) fn reload_desktop(&mut self) {
+        crate::perf::mark("desktop reload");
         if self.desktop_layer.is_none() {
             return;
         }

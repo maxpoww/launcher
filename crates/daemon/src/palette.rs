@@ -3541,6 +3541,7 @@ impl crate::App {
     /// it and the apps get it. At start, on a pick in the panel, and when
     /// the look turns dark or light.
     pub(crate) fn colors_apply(&mut self, look_changed: bool) {
+        crate::perf::mark("colours");
         // Programs the compositor starts (keys, a terminal's children) get
         // Qt's palette route too, without a new login.
         let vars = launch_vars();

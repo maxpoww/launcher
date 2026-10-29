@@ -910,6 +910,7 @@ impl App {
     /// Re-measure every history item into [`RowInfo`]s (one canonical layout for
     /// the band and the list). Cheap; only on data change.
     pub(crate) fn measure_notif(&mut self) {
+        crate::perf::mark("notif measure");
         let _perf = crate::perf::NOTIF_MEASURE.time();
         let started = std::time::Instant::now();
         let mut marks: Vec<(&str, u32)> = Vec::new();

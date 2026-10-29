@@ -376,6 +376,7 @@ impl App {
     /// whenever the compositor forgot them or the monitor changed
     /// (`reassert_floating_mode`).
     pub(crate) fn reassert_place_rules(&mut self) {
+        crate::perf::mark("window memory");
         self.window_memory.declared.clear();
         self.track_windows();
         self.sync_place_rules();

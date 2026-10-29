@@ -81,6 +81,38 @@ impl Drop for Timed<'_> {
 /// write) — the time the shell could not answer anything. `calls` are the
 /// ticks that were late by more than 30 ms; the timing is the lateness.
 pub(crate) static LOOP_LATE: Counter = Counter::new();
+
+thread_local! {
+    /// What the loop's thread did since the lateness tick last fired, for a
+    /// stall's line (`mark`).
+    static MARKS: std::cell::RefCell<Vec<(&'static str, std::time::Instant)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Note a step on the loop's thread: a stall's line (`loop: stalled …`)
+/// then says what the loop did, and when, since the tick before it — the
+/// steps that may take their time at a start are marked (the renderers,
+/// the measures, the desktop's reload, the apps' landing). Two words and a
+/// clock read.
+pub(crate) fn mark(what: &'static str) {
+    MARKS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() < 64 {
+            m.push((what, std::time::Instant::now()));
+        }
+    });
+}
+
+/// The marks since the last take, each with its ms from `since`.
+pub(crate) fn take_marks(since: std::time::Instant) -> String {
+    MARKS.with(|m| {
+        let marks = std::mem::take(&mut *m.borrow_mut());
+        marks
+            .iter()
+            .map(|(what, at)| format!("{what} +{}", at.saturating_duration_since(since).as_millis()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
 /// The ticks themselves (how long the report covers, at 40 a second).
 pub(crate) static LOOP_TICKS: Counter = Counter::new();
 /// A whole dock frame: animation step, scene build, render.
