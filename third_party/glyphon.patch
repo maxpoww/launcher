@@ -1,0 +1,13 @@
+diff -ru a/glyphon/src/shader.wgsl b/glyphon/src/shader.wgsl
+--- a/glyphon/src/shader.wgsl	2026-10-29 13:08:22.915377740 +0000
++++ b/glyphon/src/shader.wgsl	2026-10-29 13:08:22.917590676 +0000
+@@ -116,7 +116,8 @@
+ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
+     switch in_frag.content_type {
+         case 0u: {
+-            return textureSampleLevel(color_atlas_texture, atlas_sampler, in_frag.uv, 0.0);
++            let sampled = textureSampleLevel(color_atlas_texture, atlas_sampler, in_frag.uv, 0.0);
++            return vec4<f32>(sampled.rgb, sampled.a * in_frag.color.a);
+         }
+         case 1u: {
+             return vec4<f32>(in_frag.color.rgb, in_frag.color.a * textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x);

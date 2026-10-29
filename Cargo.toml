@@ -47,5 +47,8 @@ strip = true
 
 # wgpu-hal 24.0.4 with ONE addition: a present can say what part of the image
 # changed (third_party/README.md, third_party/wgpu-hal.patch).
+# glyphon 0.8.0 with ONE fix: a colour glyph (an emoji) fades with its words
+# (third_party/README.md, third_party/glyphon.patch).
 [patch.crates-io]
 wgpu-hal = { path = "third_party/wgpu-hal" }
+glyphon = { path = "third_party/glyphon" }

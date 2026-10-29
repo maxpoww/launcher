@@ -1989,12 +1989,7 @@ impl Renderer {
             let mut buffer =
                 TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
             let (fam, weight) = resolve_family(family);
-            buffer.set_text(
-                &mut font_system,
-                text,
-                Attrs::new().family(fam).weight(weight),
-                Shaping::Advanced,
-            );
+            set_words(&mut buffer, &mut font_system, text, Attrs::new().family(fam).weight(weight));
             buffer.shape_until_scroll(&mut font_system, false);
             let w = buffer
                 .layout_runs()
@@ -2029,12 +2024,7 @@ impl Renderer {
         let mut swash = self.swash.borrow_mut();
         let mut buffer = TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
         let (fam, weight) = resolve_family(family);
-        buffer.set_text(
-            &mut font_system,
-            text,
-            Attrs::new().family(fam).weight(weight),
-            Shaping::Advanced,
-        );
+        set_words(&mut buffer, &mut font_system, text, Attrs::new().family(fam).weight(weight));
         buffer.shape_until_scroll(&mut font_system, false);
         buffer.draw(
             &mut font_system,
@@ -2244,12 +2234,7 @@ impl Renderer {
                 Some(label.line_px * scale),
             );
             let (family, weight) = resolve_family(label.family);
-            buffer.set_text(
-                font_system,
-                &label.text,
-                Attrs::new().family(family).weight(weight),
-                Shaping::Advanced,
-            );
+            set_words(&mut buffer, font_system, &label.text, Attrs::new().family(family).weight(weight));
             buffer.shape_until_scroll(font_system, false);
             buffer
         };
@@ -3318,6 +3303,53 @@ fn sans_medium(fonts: &mut FontSystem) -> Option<String> {
     medium.then_some(family)
 }
 
+/// Words into `buffer` to be shaped in `attrs` — their EMOJI in the colour
+/// font, asked for by name. The sans chain finds the smileys in DejaVu Sans
+/// first, black outlines ("😀"), and an emoji asked for as one ("❤️", "☀️":
+/// the sign with U+FE0F) came out as DejaVu's plain sign and a gap after it
+/// (Golem's fonts, 2026-10-29); naming the family is what the emoji picker
+/// does too ([`crate::options::EMOJI_FONT`]).
+fn set_words(buffer: &mut TextBuffer, fonts: &mut FontSystem, text: &str, attrs: Attrs) {
+    match emoji_runs(text) {
+        Some(runs) => {
+            let emoji = attrs.family(Family::Name(crate::options::EMOJI_FONT));
+            let spans = runs.into_iter().map(|(r, is)| (&text[r], if is { emoji } else { attrs }));
+            buffer.set_rich_text(fonts, spans, attrs, Shaping::Advanced);
+        }
+        None => buffer.set_text(fonts, text, attrs, Shaping::Advanced),
+    }
+}
+
+/// `text` cut where it goes in and out of emoji (true: an emoji's run),
+/// or `None` when it has none. An emoji: a pictograph (U+1F300 on: faces,
+/// things, flags), or any sign asked for as one (U+FE0F after it; a digit
+/// with its keycap); with what joins it (U+200D and the next, a skin tone,
+/// U+FE0F, a keycap, a flag's tags).
+fn emoji_runs(text: &str) -> Option<Vec<(std::ops::Range<usize>, bool)>> {
+    let pictograph = |c: char| {
+        matches!(c as u32, 0x1F1E6..=0x1F1FF | 0x1F300..=0x1F64F | 0x1F680..=0x1F6FF | 0x1F7E0..=0x1F7FF | 0x1F900..=0x1FAFF)
+    };
+    let joins = |c: char| matches!(c as u32, 0xFE0F | 0x200D | 0x20E3 | 0x1F3FB..=0x1F3FF | 0xE0020..=0xE007F);
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut runs: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let mut in_emoji = false;
+    for (k, &(i, c)) in chars.iter().enumerate() {
+        let next = chars.get(k + 1).map(|&(_, n)| n);
+        let after = chars.get(k + 2).map(|&(_, n)| n);
+        let keycap = matches!(c, '0'..='9' | '#' | '*') && (next == Some('\u{20E3}') || next == Some('\u{FE0F}') && after == Some('\u{20E3}'));
+        let asked = next == Some('\u{FE0F}') && !c.is_ascii();
+        let joined = in_emoji && (joins(c) || k > 0 && chars[k - 1].1 == '\u{200D}');
+        let is = pictograph(c) || asked || keycap || joined;
+        let end = i + c.len_utf8();
+        match runs.last_mut() {
+            Some((r, was)) if *was == is => r.end = end,
+            _ => runs.push((i..end, is)),
+        }
+        in_emoji = is;
+    }
+    runs.iter().any(|(_, is)| *is).then_some(runs)
+}
+
 /// Resolve a `Label::family` into a glyphon family + weight.
 ///
 /// [`crate::content::FONT_BOLD`] is a sentinel, not a real family name: it
@@ -3442,5 +3474,52 @@ mod width_slack {
             }
         }
         eprintln!("bare boxes that wrapped: {wrapped_bare}");
+    }
+}
+
+#[cfg(test)]
+mod emoji_words {
+    use super::{emoji_runs, set_words};
+    use glyphon::cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics};
+
+    fn emoji_of(text: &str) -> Vec<&str> {
+        emoji_runs(text).unwrap_or_default().into_iter().filter(|(_, is)| *is).map(|(r, _)| &text[r]).collect()
+    }
+
+    #[test]
+    fn an_emoji_is_cut_out_whole_and_a_plain_sign_is_left_alone() {
+        assert_eq!(emoji_of("😀 Smile"), ["😀"]);
+        assert_eq!(emoji_of("❤️ Love ❤ plain"), ["❤\u{fe0f}"]);
+        assert_eq!(emoji_of("👍🏽 ok 🇦🇷"), ["👍🏽", "🇦🇷"]);
+        assert_eq!(emoji_of("👨\u{200d}👩\u{200d}👧 family"), ["👨\u{200d}👩\u{200d}👧"]);
+        assert_eq!(emoji_of("1️⃣ first, 2 second"), ["1\u{fe0f}\u{20e3}"]);
+        assert!(emoji_runs("Café ★ ♪ → ✓ 100% #1").is_none());
+        assert!(emoji_runs("\u{f07b} Nerd folder").is_none());
+    }
+
+    /// On fonts with the colour emoji (Golem's), every emoji is shaped in
+    /// it, none is missing, and the words around it stay in the sans.
+    #[test]
+    fn an_emoji_comes_out_in_the_colour_font() {
+        let mut fs = FontSystem::new();
+        if !fs.db().faces().any(|f| f.families.iter().any(|(n, _)| n == crate::options::EMOJI_FONT)) {
+            eprintln!("no {} here: skipped", crate::options::EMOJI_FONT);
+            return;
+        }
+        for text in ["😀 Smile", "❤️ Love", "☀️ sun", "👍🏽 ok", "🇦🇷 Arg", "🎉 party", "Lo-fi 🎧 beats 🔥"] {
+            let mut b = Buffer::new(&mut fs, Metrics::new(15.0, 19.5));
+            b.set_size(&mut fs, Some(800.0), Some(40.0));
+            set_words(&mut b, &mut fs, text, Attrs::new().family(Family::SansSerif));
+            b.shape_until_scroll(&mut fs, false);
+            for run in b.layout_runs() {
+                for g in run.glyphs.iter() {
+                    let piece = &run.text[g.start..g.end];
+                    let family = fs.db().face(g.font_id).map(|f| f.families[0].0.clone()).unwrap_or_default();
+                    let emoji = emoji_of(piece).len() == 1;
+                    assert_ne!(g.glyph_id, 0, "{piece:?} of {text:?} is missing in {family}");
+                    assert_eq!(emoji, family == crate::options::EMOJI_FONT, "{piece:?} of {text:?} came out in {family}");
+                }
+            }
+        }
     }
 }
