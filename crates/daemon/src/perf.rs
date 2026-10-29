@@ -108,6 +108,8 @@ pub(crate) static INOTIFY_FILES: Counter = Counter::new();
 pub(crate) static DESKTOP_TOP: Counter = Counter::new();
 /// One thumbnail taken into its layers (`on_thumb_pixels`).
 pub(crate) static THUMB_LANDED: Counter = Counter::new();
+/// The notification rows measured (`measure_notif`), whole.
+pub(crate) static NOTIF_MEASURE: Counter = Counter::new();
 pub(crate) static ICON_UPLOAD: Counter = Counter::new();
 /// A whole OPTIONS-bar frame.
 pub(crate) static OPTIONS_DRAW: Counter = Counter::new();
@@ -187,6 +189,7 @@ pub(crate) fn report() -> String {
         timed("inotify-files", &INOTIFY_FILES),
         timed("desktop-top", &DESKTOP_TOP),
         timed("thumb-landed", &THUMB_LANDED),
+        timed("notif-measure", &NOTIF_MEASURE),
         timed("icon-upload", &ICON_UPLOAD),
         timed("options", &OPTIONS_DRAW),
         timed("deck", &DECK_DRAW),

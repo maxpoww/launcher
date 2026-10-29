@@ -3426,6 +3426,9 @@ impl App {
                 };
                 let thumbs: usize = self.thumb_recent.iter().map(|(_, p)| p.len()).sum();
                 let chains: usize = self.desktop.chains.values().map(Vec::len).sum();
+                let clip_images: usize = self.clip.icon_chains.iter().map(Vec::len).sum();
+                let notif_images: usize = self.notif.history.iter().map(|n| n.image_rgba.len()).sum::<usize>()
+                    + self.notif_icon_chains.iter().map(Vec::len).sum::<usize>();
                 // The biggest mappings, by what they hold in RAM (the heap,
                 // the GPU driver's, the loaded files) — the process's own
                 // /proc/self/smaps, read only here.
@@ -3450,7 +3453,7 @@ impl App {
                 let top: Vec<String> = top.iter().take(8).filter(|(_, kb)| *kb >= 2048).map(|(n, kb)| format!("{n} {} MB", kb / 1024)).collect();
                 info!("memory map: {}", top.join(", "));
                 info!(
-                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, inboxes {}+{}",
+                    "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, clipboard {} images {} MB, notifications {} ({} MB of pictures), inboxes {}+{}",
                     kb("VmRSS:") / 1024,
                     kb("RssAnon:") / 1024,
                     kb("RssFile:") / 1024,
@@ -3458,6 +3461,10 @@ impl App {
                     thumbs / (1024 * 1024),
                     self.desktop.chains.len(),
                     chains / (1024 * 1024),
+                    self.clip.icon_chains.len(),
+                    clip_images / (1024 * 1024),
+                    self.notif.history.len(),
+                    notif_images / (1024 * 1024),
                     self.thumb_inbox.len(),
                     self.desktop.inbox.len()
                 );
@@ -4980,10 +4987,12 @@ impl App {
         match self.renderer.as_mut() {
             Some(renderer) => {
                 renderer.set_icons(icons);
+                mark("set-icons", &mut marks);
                 // set_icons rebuilt the array: restore the package-hit
                 // icons into its reserved tail, then the still-pending
                 // install icons into theirs.
                 self.upload_pkg_icons();
+                mark("pkg-icons", &mut marks);
                 self.reupload_pending_icons();
                 self.reupload_thumb_icons();
                 self.reupload_min_thumbs();
