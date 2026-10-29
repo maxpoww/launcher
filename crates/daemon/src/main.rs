@@ -9222,20 +9222,39 @@ impl App {
         true
     }
 
-    /// The GPU is in: every surface that waited gets its configure again,
-    /// the dock's first (its renderer takes the GPU opened for it and the
-    /// others draw on it).
+    /// The GPU is in: the surfaces that waited get their configure again,
+    /// ONE A TURN — the dock's first (its renderer takes the GPU opened for
+    /// it and the others draw on it), the rest a timer tick apart. On the
+    /// MacBook's GL a surface's first frame is 100–300 ms (the driver's
+    /// first draws); all five in one turn were a second during which the
+    /// shell answered nothing (2026-10-29).
     fn gpu_waited(&mut self) {
-        let mut waiting = std::mem::take(&mut self.gpu_waiting);
-        waiting.sort_by_key(|w| !matches!(w, GpuWaiter::Dock(..)));
-        for who in waiting {
-            match who {
-                GpuWaiter::Dock(w, h) => self.configure_dock_sized(w, h),
-                GpuWaiter::Options(w, h) => self.configure_options_sized(w, h),
-                GpuWaiter::Deck(w, h) => self.configure_deck_sized(w, h),
-                GpuWaiter::Desktop(w, h) => self.configure_desktop_sized(w, h),
-                GpuWaiter::DesktopTop(w, h) => self.configure_desktop_top_sized(w, h),
-                GpuWaiter::Files(id, w, h) => self.filer_configure_sized(id, w, h),
+        self.gpu_waiting.sort_by_key(|w| !matches!(w, GpuWaiter::Dock(..)));
+        if self.gpu_waiting.is_empty() {
+            return;
+        }
+        let who = self.gpu_waiting.remove(0);
+        match who {
+            GpuWaiter::Dock(w, h) => self.configure_dock_sized(w, h),
+            GpuWaiter::Options(w, h) => self.configure_options_sized(w, h),
+            GpuWaiter::Deck(w, h) => self.configure_deck_sized(w, h),
+            GpuWaiter::Desktop(w, h) => self.configure_desktop_sized(w, h),
+            GpuWaiter::DesktopTop(w, h) => self.configure_desktop_top_sized(w, h),
+            GpuWaiter::Files(id, w, h) => self.filer_configure_sized(id, w, h),
+        }
+        if !self.gpu_waiting.is_empty() && !self.gpu_wait_timer {
+            let armed = self.loop_handle.insert_source(Timer::immediate(), |_, _, app: &mut App| {
+                app.gpu_wait_timer = false;
+                app.gpu_waited();
+                TimeoutAction::Drop
+            });
+            if armed.is_ok() {
+                self.gpu_wait_timer = true;
+            } else {
+                // (No timer: the rest now.)
+                while !self.gpu_waiting.is_empty() {
+                    self.gpu_waited();
+                }
             }
         }
     }
