@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use calloop::timer::{TimeoutAction, Timer};
 
 // The tempo comes from the surface, not from this module — One Material
-// (`OptionUXRules.md` §3). This import is the only place the bell's speed is
+// (`UXRules.md` §3). This import is the only place the bell's speed is
 // decided; there is deliberately no rate constant below.
 use crate::animation::{
     ease_toward, lerp, lerp4, settle_t, LEAVE_HOLD, MORPH_RATE, SCROLL_RATE, SETTLE_PX,
@@ -202,7 +202,7 @@ const MORPH_EPS: f32 = 0.001;
 /// This is an auto-withdraw dwell, NOT a leave-hold: nobody's pointer arrived,
 /// so nobody's pointer can leave. It answers "how long does this need to be
 /// readable", which is each OPTION's own question, and it is explicitly outside
-/// the shared hold (`OptionUXRules.md` §3) — collapsing a critical notification
+/// the shared hold (`UXRules.md` §3) — collapsing a critical notification
 /// in a leave-hold's time would be data loss dressed as consistency.
 const HOLD: Duration = Duration::from_millis(1500);
 /// After "Clear all", how long the box lingers on the empty state before it
@@ -2820,7 +2820,7 @@ impl App {
         let was_shown = self.notif.peek_t > MORPH_EPS;
         // Each progress settles against the span it actually carries: the peek
         // grows the pill out to the extended width, the expand drops the box to
-        // its full height (`OptionUXRules.md` §3).
+        // its full height (`UXRules.md` §3).
         let box_full = self.notif_full_h(self.notif_band_h());
         let (pt, pm) = ease_toward(
             self.notif.peek_t,
@@ -3975,7 +3975,7 @@ mod tests {
     }
 
     /// The arrival flash is an auto-withdraw dwell, NOT the shared leave-hold
-    /// (`OptionUXRules.md` §3). Nobody's pointer arrived, so nobody's pointer
+    /// (`UXRules.md` §3). Nobody's pointer arrived, so nobody's pointer
     /// can leave: it answers "how long must this stay readable", and unifying
     /// it into the leave-hold would be data loss dressed as consistency.
     #[test]

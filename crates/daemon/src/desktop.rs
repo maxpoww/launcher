@@ -1271,7 +1271,7 @@ fn camera_picture_known() -> Option<Picture> {
 }
 
 fn camera_picture_keep(picture: Picture) {
-    let _ = std::fs::write(crate::persist::data_path("camera-picture"), format!("{} {}", picture.size, picture.fps));
+    crate::persist::write_text("camera", &crate::persist::data_path("camera-picture"), &format!("{} {}", picture.size, picture.fps));
 }
 
 /// The lenses a phone has (`scrcpy --list-cameras`). Empty when it would
@@ -1393,7 +1393,7 @@ fn camera_step_known() -> usize {
 
 fn camera_step_keep(step: usize) {
     if CAMERA_STEP.swap(step, std::sync::atomic::Ordering::Relaxed) != step {
-        let _ = std::fs::write(crate::persist::data_path("camera-step"), step.to_string());
+        crate::persist::write_text("camera", &crate::persist::data_path("camera-step"), &step.to_string());
     }
 }
 
@@ -3408,7 +3408,7 @@ impl App {
                 .or_else(|| offered.first().copied())
                 .unwrap_or(Picture { size: 1920, fps: 30 }),
         };
-        let _ = std::fs::write(crate::persist::data_path("camera-lens"), &lens.name);
+        crate::persist::write_text("camera", &crate::persist::data_path("camera-lens"), &lens.name);
         let (name, serial) = (v.name.clone(), phone_serial_of(v));
         let path = path.to_owned();
         // (The new one waits for the device to be let go.)

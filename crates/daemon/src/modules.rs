@@ -199,7 +199,9 @@ pub(crate) fn machine() -> &'static Machine {
     })
 }
 
-/// The selection file the system side reads.
+/// The selection file: what the owner asked of Modules. (No system side
+/// reads it yet — Apply goes through the install pipeline; it is the
+/// record a system side would read.)
 fn selection_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -212,22 +214,55 @@ fn selection_path() -> PathBuf {
 /// per line (`pkg:<attr>` / `web:<url>`), sorted. The system side (next)
 /// watches it and rebuilds; for now this is where the front end ends.
 pub(crate) fn apply(module: &str, add: &[&Program], remove: &[&Program]) {
-    let path = selection_path();
-    let mut set: BTreeSet<String> = std::fs::read_to_string(&path)
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_owned)
-        .collect();
+    let mut set = read_selection();
     for p in add {
         set.insert(p.source());
     }
     for p in remove {
         set.remove(&p.source());
     }
+    if write_selection(&set) {
+        info!(
+            "modules: {module} — {} to add, {} to remove → {}",
+            add.len(),
+            remove.len(),
+            selection_path().display()
+        );
+    }
+}
+
+/// The programs (package attributes) a rebuild could not change: the
+/// selection says again what is really there — one that failed to come is
+/// not wanted after all, one that failed to go is still here (a failed
+/// Office left five programs "wanted" that no rebuild had brought).
+pub(crate) fn unapply(failed: &[String], removing: bool) {
+    let mut set = read_selection();
+    for attr in failed {
+        let source = format!("pkg:{attr}");
+        if removing {
+            set.insert(source);
+        } else {
+            set.remove(&source);
+        }
+    }
+    write_selection(&set);
+}
+
+fn read_selection() -> BTreeSet<String> {
+    std::fs::read_to_string(selection_path())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whole or not at all (temp + rename); whether it was written.
+fn write_selection(set: &BTreeSet<String>) -> bool {
+    let path = selection_path();
     let mut text = String::from("# Golem modules: the programs wanted (written by the dock's Modules).\n");
-    for line in &set {
+    for line in set {
         text.push_str(line);
         text.push('\n');
     }
@@ -236,13 +271,11 @@ pub(crate) fn apply(module: &str, add: &[&Program], remove: &[&Program]) {
     }
     let tmp = path.with_extension("list.tmp");
     match std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path)) {
-        Ok(()) => info!(
-            "modules: {module} — {} to add, {} to remove → {}",
-            add.len(),
-            remove.len(),
-            path.display()
-        ),
-        Err(e) => warn!("modules: could not write {}: {e}", path.display()),
+        Ok(()) => true,
+        Err(e) => {
+            warn!("modules: could not write {}: {e}", path.display());
+            false
+        }
     }
 }
 
@@ -268,7 +301,8 @@ pub(crate) struct ModuleJob {
     task: crate::tasks::TaskHandle,
     waiting: BTreeSet<String>,
     total: u64,
-    failed: u64,
+    /// The programs the rebuild could not change (their attributes).
+    failed: Vec<String>,
     /// Whether it is taking programs away (the closing words differ).
     removing: bool,
 }
@@ -364,7 +398,7 @@ impl crate::App {
         let task = self.task_begin(&label);
         task.set(0, total);
         info!("modules: {module}: {total} program(s) through the rebuild");
-        self.module_job = Some(ModuleJob { name: module.to_owned(), task, waiting, total, failed: 0, removing });
+        self.module_job = Some(ModuleJob { name: module.to_owned(), task, waiting, total, failed: Vec::new(), removing });
     }
 
     /// [`Self::modules_apply`] for the `modules apply:<name>` /
@@ -395,7 +429,7 @@ impl crate::App {
             return;
         }
         if !ok {
-            job.failed += 1;
+            job.failed.push(attr.to_owned());
         }
         job.task.set(job.total - job.waiting.len() as u64, job.total);
         if !job.waiting.is_empty() {
@@ -404,18 +438,22 @@ impl crate::App {
         let Some(job) = self.module_job.take() else {
             return;
         };
+        if !job.failed.is_empty() {
+            unapply(&job.failed, job.removing);
+        }
+        let failed = job.failed.len() as u64;
         let name = crate::i18n::tr_dyn(&job.name).to_owned();
-        let body = if job.failed == 0 {
+        let body = if failed == 0 {
             crate::i18n::fill(
                 crate::i18n::tr(if job.removing { "{module} was removed." } else { "{module} is ready." }),
                 &[("module", &name)],
             )
-        } else if job.failed == job.total {
+        } else if failed == job.total {
             crate::i18n::fill(crate::i18n::tr("{module} could not be changed. Nothing was touched."), &[("module", &name)])
         } else {
             crate::i18n::fill(
                 crate::i18n::tr("{module}: {n} of {total} programs could not be changed."),
-                &[("module", &name), ("n", &job.failed), ("total", &job.total)],
+                &[("module", &name), ("n", &failed), ("total", &job.total)],
             )
         };
         crate::desktop_send_notify_open(crate::i18n::tr("Modules"), "package-x-generic", &body, None);

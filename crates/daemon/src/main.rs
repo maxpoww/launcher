@@ -122,6 +122,7 @@ mod other_apps;
 mod order;
 // Golem's control panel: the main card, opened empty.
 mod panel;
+mod dmabuf;
 mod perf;
 mod pager;
 mod pages;
@@ -214,6 +215,7 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 use wayland_protocols::wp::pointer_constraints::zv1::client::{
     zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
     zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
@@ -508,6 +510,19 @@ fn main() -> anyhow::Result<()> {
                 .ok()
         })
         .flatten();
+    // linux-dmabuf: the sampler captures into a buffer on the GPU (see
+    // dmabuf.rs — an shm capture freezes the compositor for a readback).
+    // Without it, or with `WAVERUNNER_SHM_SAMPLER=1` (the way to compare),
+    // shm as before.
+    let linux_dmabuf = screencopy
+        .as_ref()
+        .filter(|_| std::env::var_os("WAVERUNNER_SHM_SAMPLER").is_none())
+        .and_then(|_| {
+            globals
+                .bind::<ZwpLinuxDmabufV1, App, _>(&qh, 3..=4, ())
+                .map_err(|e| info!("linux-dmabuf unavailable; the sampler captures through shm: {e}"))
+                .ok()
+        });
 
     // App discovery runs on the one allowed background thread; it
     // rescans on request (dock reveals) and delivers results over this
@@ -705,6 +720,11 @@ fn main() -> anyhow::Result<()> {
         screencopy,
         shm,
         shm_pool: None,
+        linux_dmabuf,
+        dmabuf: None,
+        dmabuf_off: false,
+        dmabuf_ok: false,
+        dmabuf_fails: 0,
         pointer_constraints,
         relative_pointer_manager,
         pointer_gestures,
@@ -1652,6 +1672,15 @@ pub struct App {
     screencopy: Option<ZwlrScreencopyManagerV1>,
     shm: Option<Shm>,
     shm_pool: Option<RawPool>,
+    /// linux-dmabuf and the GPU buffer the sampler captures into (see
+    /// dmabuf.rs). `dmabuf_off`: back to shm for good (the buffer could not
+    /// be made, or the compositor refused it before ever filling one, or
+    /// three times running); `dmabuf_ok`: it has delivered at least once.
+    linux_dmabuf: Option<ZwpLinuxDmabufV1>,
+    dmabuf: Option<screencopy::DmabufTarget>,
+    dmabuf_off: bool,
+    dmabuf_ok: bool,
+    dmabuf_fails: u8,
     /// Pointer-lock + relative-motion managers (both optional — absent on a
     /// compositor without the protocols). Used only by the [current task] pill's
     /// right-click "nub drag" (see nub_drag.rs).
@@ -1712,7 +1741,7 @@ pub struct App {
     pseudo_sweep_pending: bool,
     /// The mode the bar is currently laid out from. Catches up with
     /// `options_mode` only once the pointer leaves the surface, so the buttons
-    /// never move under the hand that pressed them — `OptionUXRules.md` §2, via
+    /// never move under the hand that pressed them — `UXRules.md` §2, via
     /// `sync_window_state`.
     options_mode_shown: hypr::WindowMode,
     overview_hover: Option<String>,
@@ -1894,24 +1923,24 @@ pub struct App {
     options_clock_meta: options::ClockMeta,
     /// Title "metamorphosis": the window pill eases between two title widths
     /// and crossfades the two names, instead of jumping — the visible half of
-    /// the Leader rule (`OptionUXRules.md` §1).
+    /// the Leader rule (`UXRules.md` §1).
     options_title_meta: options::TitleMeta,
     /// The Leader: the pill the pointer has hold of, if any. Its group is
     /// laid out from it rather than from its resting anchor, so it holds
-    /// still while everything else re-flows (`OptionUXRules.md` §1).
+    /// still while everything else re-flows (`UXRules.md` §1).
     options_leader: Option<options::Leader>,
     /// Per-group displacement from the resting layout, and the ease home that
     /// runs after the leader is released.
     options_lead: options::LeadAnim,
     /// The last control acted on from the bar, where it was drawn, and when —
     /// so that a concealment arriving straight afterwards can be blamed on it
-    /// and leave that control behind (`OptionUXRules.md` §4).
+    /// and leave that control behind (`UXRules.md` §4).
     options_acted: Option<(options::PillId, content::Rect, Instant)>,
     /// The sticky OPTION currently standing on a concealed bar, if any: the
     /// control that took the bar away, plus the doorway back to the rest.
     options_sticky: Option<options::Sticky>,
     /// The bar's own fade in/out, on the surface's shared tempo
-    /// (`OptionUXRules.md` §3).
+    /// (`UXRules.md` §3).
     options_show: options::ShowAnim,
     /// Which window was last focused on each workspace, so a space entered by
     /// swipe hands back the window you left there (see [`crate::focus_cycle`]).
@@ -2471,7 +2500,7 @@ pub struct App {
     /// is the ordinary bar: the pill shows the task.
     ///
     /// One field rather than a flag per module, because the pill is one object
-    /// and can only wear one sentence (`OptionUXRules.md` §5).
+    /// and can only wear one sentence (`UXRules.md` §5).
     module_shown: Option<options::Module>,
     /// A module forced onto the pill for demos and screenshots (the
     /// `debug-sunset` ctl verb), as if the Mind had offered it.

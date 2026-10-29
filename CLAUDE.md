@@ -23,6 +23,10 @@ what to check rather than claiming it's verified.
 - `crates/client` — `waverunner-ctl`.
 - `crates/core` — config, `.desktop` index (`DesktopIndex`/`AppEntry`), fuzzy search.
 - `crates/proto` — socket message types.
+- `crates/options-engine` — the headless "Brain": the collectors (what the machine is doing) and the Mind
+  (`Engine::start_shell` runs the shell's); see the end of this file.
+- `crates/options-notify` — OPTIONS' own notification server (`org.freedesktop.Notifications`, zbus) that
+  feeds the bell's box.
 
 ## Model
 - **Dock** = pinned apps only. **Grid** (`SECTION_APPS`) = every indexed `.desktop`.
@@ -444,22 +448,9 @@ The big daemon files are cohesive but long — go straight to the function:
   its number and `+N` (no words, no fill; `task_pill_click`); collapsed, hover shows it whole
   and leaving puts it back, a click while whole keeps it whole (`update_task_hover`). The look
   was settled on `~/task-pill-mockup`. `debug-desktop "taskbox open|close|collapse|peek|unpeek|cancel"`.
-- `camera_pill.rs` — the CAMERA pill (Max, 2026-10-10): on the OPTIONS bar while a phone is this
-  computer's camera (`Desktop::camera_on`, a `CameraOn { path, lens, picture, torch }`). The phone's
-  MENU only turns the camera on and off ("Use as camera" starts it with the lens and picture last
-  used — `desktop_camera_use`); the rest is here. One pill, `Camera`, centred between the window's
-  pills and the bell and far enough left that its widest self ends before the bell; the pointer on
-  it brings its children out from behind it to the right: `Flash` (a click toggles it, lit amber
-  when on, absent for a front lens), the PICTURE in use ("1080p · 30") and the LENS in use. The
-  pointer on either of those grows it into everything there is to choose from, the one in use
-  first; a click takes one. Every change is `App::camera_set(lens, picture, torch)` →
-  `desktop_camera_start`, which starts the camera again (scrcpy sets all three as it starts).
-  Pictures offered: `desktop::camera_pictures(lens, chip)` — 1080p/720p at the lens's best rate and
-  at 30; where the graphics chip decodes (`GOLEM_CAMERA_FEED`, old Intel) 1080p/720p/540p at 30
-  only (60 froze the camera app there). One `PillId::Camera`, parts hit-tested inside
-  (`camera_parts`). Pointer-free: `debug-desktop "campill fake|gone"` (a camera that is not there,
-  to look at the pill without a phone), `campill open|picture|lens|close|free`, `campill flash|p
-  <k>|l <k>` (a click on that part).
+- THE CAMERA PILL is gone (Max, 2026-10-11, ff99e88: "get rid of the camera pill"): a phone used as a
+  camera is driven from the PHONE pill's box — its camera page (flash, lens, picture, each a line a click
+  sets; `phone_pill.rs`) — and the phone's menu (Use as camera / Stop camera, `desktop_camera_use`).
 - `phone_pill.rs` — the PHONE pill (Max, 2026-10-11; the start of "a proper phones pill, not only
   for the cam but the whole menu"): on the OPTIONS bar while a phone is plugged in
   (`Desktop::volumes`), a ROUND pill with a phone on it, left of the bell. The pointer on it

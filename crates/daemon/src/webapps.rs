@@ -305,8 +305,10 @@ pub fn materialize_catalog() {
         let unchanged = std::fs::read_to_string(&path)
             .map(|c| c == contents)
             .unwrap_or(false);
+        // (Whole or not at all — temp + rename: a half-written entry is an
+        // app the index cannot read. The watch hears the rename, IN_MOVED_TO.)
         if !unchanged {
-            let _ = std::fs::write(&path, contents);
+            crate::persist::write_text("webapps", &path, &contents);
         }
     }
 }
