@@ -180,8 +180,13 @@ The loop is one thread: anything over ~30 ms on it is a stall the owner feels. W
 - A stall of 100 ms or more logs `loop: stalled N ms (…): what +ms, …` — the `perf::mark("…")` steps the loop
   did since the tick before (the renderers' making, surface configured/pipelines/fonts, bar text, notif
   measure, desktop reload, apps landing). Mark a new slow step with `crate::perf::mark`.
-- The apps index logs `indexed N entries + M home files in … (scan, icons: read/rasterized, resolve, name,
-  read, placeholders, pack open/close, cli, folders, save, files)` — at info when over 1.5 s.
+- The apps index logs `indexed N entries + M home files in … (scan, icons: read/rasterized, resolve (N walked),
+  name, read, placeholders, pack open/close, cli, folders, save, files)` — a run's first always at info, later
+  ones when over 1.5 s. Each icon loader logs what it loaded (`icon paths: N names for <chain> (fence …)`):
+  "walked" or "dropped" at a normal start means the resolution cache is not serving — find out why.
+- The frame's own steps are marked (render, acquire, text, submit, present, presented), the landing's
+  (`set_icons`: icon texture, icons now, icons bind) and refilter's (ranked, install hits, grid): a stall line
+  at a start says where a first frame went (on GL: the texture, the uploads, the submit, the first present).
 - The rig: `~/.cache/golem-nested/host-rig.sh <tag> <bindir> [VAR=v…]` (nested headless Hyprland + the dock on
   a private bus, ON the host via `hyprctl dispatch 'hl.dsp.exec_cmd("bash …")'`), `host-dock.sh` restarts the
   dock alone, `~/.cache/golem-stress/shell-stress.sh <tag>` = 14 scenarios with three meters (ctl latency, the
@@ -200,10 +205,25 @@ Design rules that came out of it (keep them):
   growth there is an allocation, a zero fill and a copy (400 ms–1 s on a Haswell).
 - The icon disk cache names a tile by the icon file's CONTENT (a new system moves store paths), remembers
   store files' hashes by real path (`hashes.tsv`), keeps the index's tiles in one `pack.bin` read once a
-  start, and caches the unplated carriers and the fixed figures too. Measured notification rows are kept
-  between runs (`notif-measure.json`).
-Numbers to keep (2026-10-29): dev box rss 263 → 153 MB, first turn 384 → ~170 ms; MacBook (HD 5000, GL)
-boot-to-userspace 1m46 → 10 s, apps index 9.6 → ~2 s, first turn 1.6 s → three turns under 400 ms.
+  start (rewritten only when the set changed), and caches the unplated carriers and the fixed figures too.
+  Measured notification rows are kept between runs (`notif-measure.json`).
+- The icons' tone is settled BEFORE the loaders spawn (`look::set_icons_dark(palette::icons_dark())`): set
+  late, every loader started in the built-in dark and a light machine indexed twice at each start. The icon
+  name → path cache is one file PER FENCE (`icon-paths-<fence>.json`): the dark and the light theme chains
+  live side by side; one shared file had them dropping each other's at every start. A cached path is taken
+  without a stat; one that vanished is walked again once when its tile is named.
+- The indexer sends the apps first and the home walk after (`IndexEvent::Apps`, `IndexEvent::Files`): the
+  dock's icons never wait for the walk (0.4–1.7 s cold on the MacBook).
+- THE SMALL TIER (`--features icons-128`, `waverunner-daemon-small`, picked at install time by the home-manager
+  option `programs.waverunner.smallIcons`; Golem sets it for light effects or under 6 GB): `ICON_SIZE` 128 and
+  every constant made from it. A quarter of every tile on disk, in RAM, on the GPU and in every upload; at a
+  scale of 1 nothing on screen meets more than 128 texels of an icon. Producers that fix 256² (the plugin's
+  minimized pictures) are halved on the way in; tests know the tier. Build it beside the full one with
+  `--target-dir target-128` (a features change rebuilds the crate).
+Numbers to keep (2026-10-29): dev box rss 263 → 153 MB, first turn 384 → ~110 ms, index 303 ms one pass,
+0 walked; MacBook (HD 5000, GL) boot-to-userspace 1m46 → 10 s, apps index 9.6 → ~1.3 s (pack close 885 → 24
+ms), first turn 1.6 s → a few turns under 400 ms, the icons landing before the home walk. (A MacBook boot at
+800 MHz = PROCHOT not released — check `rdmsr -p0 -c 0x1fc` bit 0 before trusting its numbers.)
 
 ## Non-negotiables (don't revisit)
 Persistent daemon (no per-invocation spawn); fixed-size layer surface (animate content, never
