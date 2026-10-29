@@ -380,6 +380,9 @@ pub struct Renderer {
     /// layer's own content (`icon_layer_gen`, bumped when it is rewritten).
     icon_epoch: u64,
     icon_layer_gen: Vec<u32>,
+    /// Icon chains of the app set not written into their layers yet (see
+    /// [`Renderer::set_icons`]): `(layer, chain)`, written a few per frame.
+    icon_backlog: std::collections::VecDeque<(u32, Vec<u8>)>,
     /// `WAVERUNNER_DAMAGE_CHECK=1` (see [`DamageCheck`]).
     damage_check: Option<DamageCheck>,
 }
@@ -1576,6 +1579,7 @@ impl Renderer {
             damage_cur: crate::damage::TileMap::default(),
             icon_epoch: 0,
             icon_layer_gen: Vec::new(),
+            icon_backlog: std::collections::VecDeque::new(),
             damage_check: std::env::var_os("WAVERUNNER_DAMAGE_CHECK").map(|v| DamageCheck {
                 paths: v == "paths",
                 ..DamageCheck::default()
@@ -1642,7 +1646,7 @@ impl Renderer {
     /// order: dynamic package-search icons, packages installing in the
     /// grid, file thumbnails, and minimized-window thumbnails
     /// ([`Renderer::update_icon_layer`]).
-    pub fn set_icons(&mut self, icons: &[Vec<u8>]) {
+    pub fn set_icons(&mut self, icons: Vec<Vec<u8>>) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
         self.label_fit.clear();
@@ -1650,7 +1654,57 @@ impl Renderer {
             + crate::nix::PENDING_INSTALL_CAP
             + crate::thumbs::THUMB_CAP
             + crate::minimized::MIN_THUMB_CAP;
-        self.upload_icon_array(icons.len(), reserved, icons.iter());
+        // The array is made whole; the chains go in a few per frame. 183
+        // apps are 64 MB of chains: written in one go they were one staging
+        // flush and the loop deaf for 200–400 ms right as the shell came up
+        // (2026-10-29). The most used go first (the set is sorted by use),
+        // enough for the dock's own row; the rest follow over the next frames
+        // (`drain_icon_backlog`), before the grid can be opened.
+        const ICON_UPLOAD_NOW: usize = 32;
+        let count = icons.len();
+        let layers = icon_layers(count);
+        self.icon_layer_cap = icon_layers(count + reserved);
+        self.icon_epoch += 1;
+        self.icon_layer_gen.clear();
+        self.icon_backlog.clear();
+        let texture = self.create_icon_texture(layers);
+        let mut icons = icons.into_iter().enumerate();
+        for (i, chain) in icons.by_ref().take(ICON_UPLOAD_NOW) {
+            write_icon_chain(&self.queue, &texture, i as u32, &chain);
+        }
+        self.icon_backlog.extend(icons.map(|(i, chain)| (i as u32, chain)));
+        self.bind_icon_texture(texture, layers);
+    }
+
+    /// Write up to `n` of the app set's chains still waiting (see
+    /// [`Renderer::set_icons`]). True when any was written.
+    pub fn drain_icon_backlog(&mut self, n: usize) -> bool {
+        let Some(texture) = &self.icon_texture else {
+            self.icon_backlog.clear();
+            return false;
+        };
+        let mut wrote = false;
+        for _ in 0..n {
+            let Some((layer, chain)) = self.icon_backlog.pop_front() else {
+                break;
+            };
+            if layer >= self.icon_layer_count {
+                continue;
+            }
+            write_icon_chain(&self.queue, texture, layer, &chain);
+            let at = layer as usize;
+            if self.icon_layer_gen.len() <= at {
+                self.icon_layer_gen.resize(at + 1, 0);
+            }
+            self.icon_layer_gen[at] = self.icon_layer_gen[at].wrapping_add(1);
+            wrote = true;
+        }
+        wrote
+    }
+
+    /// Chains of the app set still to be written.
+    pub fn icon_backlog_pending(&self) -> bool {
+        !self.icon_backlog.is_empty()
     }
 
     /// Populate the OPTIONS surface's icon array. The topbar renderer is a
@@ -1998,6 +2052,9 @@ impl Renderer {
         if layer >= self.icon_layer_count {
             self.grow_icon_array(layer + 1);
         }
+        // (A chain of the set still waiting for this layer would overwrite
+        // the picture written now.)
+        self.icon_backlog.retain(|(l, _)| *l != layer);
         let Some(texture) = &self.icon_texture else {
             return;
         };

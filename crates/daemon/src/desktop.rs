@@ -2474,6 +2474,7 @@ impl App {
         }
         let waiting = self.loop_handle.insert_source(rx, move |event, _, app: &mut App| {
             if let calloop::channel::Event::Msg(r) = event {
+                let _perf = crate::perf::OFF_LOOP_THEN.time();
                 then(app, r);
             }
         });
@@ -2803,15 +2804,17 @@ impl App {
         if crate::glyphs::is_key(&res.key) || self.desktop_top.glyph_asked.contains(&res.key) {
             return self.desktop_on_glyph(res.key, res.chain);
         }
+        // (Pushed, never taken here: the channel hands a burst to one turn
+        // of the loop, and taking each as it comes undid the batches.)
         self.desktop.inbox.push_back(Arrival::Icon(res));
-        self.desktop_inbox_drain();
+        self.desktop_inbox_arm_in(std::time::Duration::ZERO);
     }
 
     /// The thumbnailer finished a file that is on the desktop: it wears its
     /// own picture from now on.
     pub(crate) fn desktop_on_thumb(&mut self, path: &str, pixels: &[u8]) {
         self.desktop.inbox.push_back(Arrival::Thumb(path.to_owned(), pixels.to_vec()));
-        self.desktop_inbox_drain();
+        self.desktop_inbox_arm_in(std::time::Duration::ZERO);
     }
 
     /// Pictures land in BATCHES. 200 files dropped on the desktop sent 201
@@ -2848,11 +2851,15 @@ impl App {
 
     /// Book a turn for what is still to land or to be written (one at a time).
     fn desktop_inbox_arm(&mut self) {
+        self.desktop_inbox_arm_in(std::time::Duration::from_millis(8));
+    }
+
+    fn desktop_inbox_arm_in(&mut self, delay: std::time::Duration) {
         if self.desktop.inbox_timer {
             return;
         }
         self.desktop.inbox_timer = true;
-        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(8));
+        let timer = calloop::timer::Timer::from_duration(delay);
         let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
             app.desktop.inbox_timer = false;
             app.desktop_inbox_drain();
