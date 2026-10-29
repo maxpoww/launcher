@@ -6,13 +6,14 @@
 //! a background thread in the daemon and sends a finished
 //! `DesktopIndex` over a channel.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use freedesktop_desktop_entry::{default_paths, get_languages_from_env, DesktopEntry, Iter};
+use serde::{Deserialize, Serialize};
 
 /// One launchable application, extracted from a `.desktop` file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppEntry {
     /// Desktop-file ID (`org.mozilla.firefox`, `codium`, …), unique.
     pub id: String,
@@ -45,6 +46,78 @@ pub struct DesktopIndex {
     pub entries: Vec<AppEntry>,
 }
 
+/// What a `.desktop` file gave when it was last parsed: the id it claims
+/// (when it should stand in the way of a later directory's same id — an
+/// application, shown or hidden) and the entry (when shown), under the
+/// file's length and mtime (0 and 0 for a store file: immutable).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Parsed {
+    pub len: u64,
+    pub mtime: u64,
+    pub id: Option<String>,
+    pub entry: Option<AppEntry>,
+}
+
+/// The parses of the last scan, by file path (`desktop-index.json`): a
+/// scan reads only the files that changed. On the 2013 MacBook Air the
+/// ~230 files read cold were 208 ms of every start (2026-10-29).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ScanCache {
+    /// The locales the names were taken in: others drop the lot.
+    pub locales: Vec<String>,
+    pub files: HashMap<String, Parsed>,
+}
+
+impl ScanCache {
+    pub fn load(file: &Path) -> Self {
+        std::fs::read_to_string(file)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Written whole, atomically; a failure is nothing (the next scan parses).
+    pub fn save(&self, file: &Path) {
+        let Ok(json) = serde_json::to_string(self) else { return };
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, file)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// A file's mtime in seconds (0 when it has none).
+fn mtime_secs(m: &std::fs::Metadata) -> u64 {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse one `.desktop` file: its id when it should mark the id seen (an
+/// application, shown or hidden), and the entry when it is shown.
+fn parse_one(path: PathBuf, locales: &[String]) -> (Option<String>, Option<AppEntry>) {
+    let entry = match DesktopEntry::from_path(path, Some(locales)) {
+        Ok(entry) => entry,
+        Err(_) => return (None, None), // not valid UTF-8 / not an entry: skip
+    };
+    let id = entry.id().to_string();
+    if entry.type_().is_some_and(|t| t != "Application") {
+        return (None, None);
+    }
+    if entry.no_display() || entry.hidden() {
+        return (Some(id), None);
+    }
+    match app_entry(&entry, locales) {
+        Some(app) => (Some(id), Some(app)),
+        None => (None, None),
+    }
+}
+
 impl DesktopIndex {
     /// Scan the XDG data dirs for `.desktop` files and build the index.
     pub fn scan() -> Self {
@@ -53,39 +126,80 @@ impl DesktopIndex {
 
     /// Scan an explicit set of `applications` directories (testable core
     /// of [`DesktopIndex::scan`]). Earlier paths take precedence when
-    /// two files share a desktop-file ID.
+    /// two files share a desktop-file ID (a hidden one claims it too: an
+    /// overriding NoDisplay entry in data home is how users hide a
+    /// system-wide app).
     pub fn scan_paths(paths: impl Iterator<Item = PathBuf>) -> Self {
         let locales = get_languages_from_env();
         let mut seen: HashSet<String> = HashSet::new();
         let mut entries = Vec::new();
 
         for path in Iter::new(paths) {
-            let entry = match DesktopEntry::from_path(path, Some(&locales)) {
-                Ok(entry) => entry,
-                Err(_) => continue, // not valid UTF-8 / not an entry: skip
-            };
-            let id = entry.id().to_string();
+            let (id, entry) = parse_one(path, &locales);
+            let Some(id) = id else { continue };
             if seen.contains(&id) {
                 continue;
             }
-            if entry.type_().is_some_and(|t| t != "Application") {
-                continue;
-            }
-            if entry.no_display() || entry.hidden() {
-                // Still claims the ID: an overriding NoDisplay entry in
-                // data home is how users hide a system-wide app.
-                seen.insert(id);
-                continue;
-            }
-            let Some(app) = app_entry(&entry, &locales) else {
-                continue;
-            };
-            entries.push(app);
+            entries.extend(entry);
             seen.insert(id);
         }
 
         entries.sort_by_key(|e| e.name.to_lowercase());
         Self { entries }
+    }
+
+    /// The scan through `cache`: a file under /nix/store is taken as it was
+    /// parsed (the walk already made the paths real; a store file never
+    /// changes), any other while its length and mtime stand (one stat).
+    /// Returns whether the cache changed (then it is worth saving).
+    pub fn scan_cached(cache: &mut ScanCache) -> (Self, bool) {
+        let locales = get_languages_from_env();
+        let mut changed = false;
+        if cache.locales != locales {
+            cache.files.clear();
+            cache.locales = locales.clone();
+            changed = true;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut entries = Vec::new();
+        let mut walked: HashSet<String> = HashSet::new();
+
+        for path in Iter::new(default_paths()) {
+            let key = path.to_string_lossy().into_owned();
+            let stamp = if key.starts_with("/nix/store/") {
+                (0, 0)
+            } else {
+                match std::fs::metadata(&path) {
+                    Ok(m) => (m.len(), mtime_secs(&m)),
+                    Err(_) => continue,
+                }
+            };
+            let (id, entry) = match cache.files.get(&key) {
+                Some(p) if (p.len, p.mtime) == stamp => (p.id.clone(), p.entry.clone()),
+                _ => {
+                    let (id, entry) = parse_one(path, &locales);
+                    cache.files.insert(
+                        key.clone(),
+                        Parsed { len: stamp.0, mtime: stamp.1, id: id.clone(), entry: entry.clone() },
+                    );
+                    changed = true;
+                    (id, entry)
+                }
+            };
+            walked.insert(key);
+            let Some(id) = id else { continue };
+            if seen.contains(&id) {
+                continue;
+            }
+            entries.extend(entry);
+            seen.insert(id);
+        }
+        let before = cache.files.len();
+        cache.files.retain(|k, _| walked.contains(k));
+        changed |= cache.files.len() != before;
+
+        entries.sort_by_key(|e| e.name.to_lowercase());
+        (Self { entries }, changed)
     }
 
     /// Names of all entries, in index order — the haystack handed to
