@@ -3459,6 +3459,19 @@ pub(crate) fn warm_fonts() {
             crate::font_index::database(),
         );
         let _ = SANS_MEDIUM.set(sans_medium(&mut fonts));
+        // The faces the first frames wear, loaded here: a font file is read
+        // and parsed the first time it shapes (the bar's first frame paid
+        // for sans, its medium, mono and the colour emoji).
+        let medium = SANS_MEDIUM.get().cloned().flatten();
+        let mut buffer = TextBuffer::new(&mut fonts, Metrics::new(16.0, 20.0));
+        let families = [Family::SansSerif, Family::Monospace, Family::Name(crate::options::EMOJI_FONT)]
+            .into_iter()
+            .chain(medium.as_deref().map(Family::Name));
+        for family in families {
+            let attrs = Attrs::new().family(family);
+            buffer.set_text(&mut fonts, "Golem 0123456789 Search ñ 😀", attrs, Shaping::Advanced);
+            buffer.shape_until_scroll(&mut fonts, false);
+        }
         fonts
     });
     if let (Ok(handle), Ok(mut slot)) = (spawned, FONTS_AHEAD.lock()) {

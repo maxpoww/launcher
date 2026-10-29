@@ -345,7 +345,7 @@ type NotifRowInput = (String, String, String, u64, Option<String>, u32);
 /// half the time (2026-10-29, Max's own history in the rig). A row's
 /// text and width do not change, so its measure is kept, keyed by the
 /// notification (its time and id) and checked against its text.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct MeasuredRow {
     summary: String,
     body: String,
@@ -353,6 +353,21 @@ struct MeasuredRow {
     body_lines: Vec<String>,
     height: f32,
 }
+
+/// The measured rows KEPT between runs (`MEASURE_FILE`): a start measured
+/// 480 cards cold — every summary and body shaped — for 39 ms of the first
+/// turn (2026-10-29); the same words at the same size and width need no
+/// shaping again. Kept with what they were measured with: the font size,
+/// the body's width, the faces' index.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredMeasure {
+    font_px: u32,
+    body_w: u32,
+    fonts: u64,
+    rows: Vec<((u64, u32), MeasuredRow)>,
+}
+
+const MEASURE_FILE: &str = "notif-measure.json";
 
 /// One notification's pre-measured render fields. The collapsed preview pill
 /// uses the single-line fields (`summary`/`body`/`time`); the open box uses the
@@ -405,6 +420,8 @@ pub(crate) struct NotifState {
     /// body width they were measured for.
     measure_cache: HashMap<(u64, u32), MeasuredRow>,
     measure_params: (u32, u32),
+    /// A save of the measured rows is on its way (`notif_measure_save_soon`).
+    measure_save_due: bool,
     /// What the rows were last measured from (`notif_measure_fingerprint`):
     /// the same again is no measure.
     measured_as: Option<u64>,
@@ -486,6 +503,11 @@ pub(crate) struct NotifState {
 
 impl NotifState {
     pub(crate) fn new(handle: Option<NotifHandle>) -> Self {
+        // The rows measured last time, for the same fonts (see `StoredMeasure`).
+        let (measure_cache, measure_params) = crate::persist::read_json::<StoredMeasure>(&crate::persist::data_path(MEASURE_FILE))
+            .filter(|m| m.fonts == crate::font_index::fingerprint())
+            .map(|m| (m.rows.into_iter().collect::<HashMap<_, _>>(), (m.font_px, m.body_w)))
+            .unwrap_or_default();
         // Durable history: reload what the last session left so notifications
         // persist across reboots until explicitly erased. A missing or corrupt
         // file simply yields an empty history (see [`crate::persist`]).
@@ -529,8 +551,9 @@ impl NotifState {
         // `on_notif_event`.
         Self {
             history,
-            measure_cache: HashMap::new(),
-            measure_params: (0, 0),
+            measure_cache,
+            measure_params,
+            measure_save_due: false,
             measured_as: None,
             prepared: HashMap::new(),
             seen: HashSet::new(),
@@ -911,6 +934,36 @@ impl App {
         self.schedule_notif_collapse(hold);
     }
 
+    /// Keep the measured rows for the next start (`StoredMeasure`), a
+    /// moment after the last measure that shaped something new: written
+    /// off the loop.
+    fn notif_measure_save_soon(&mut self) {
+        if self.notif.measure_save_due {
+            return;
+        }
+        self.notif.measure_save_due = true;
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(3));
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.notif.measure_save_due = false;
+            let stored = StoredMeasure {
+                font_px: app.notif.measure_params.0,
+                body_w: app.notif.measure_params.1,
+                fonts: crate::font_index::fingerprint(),
+                rows: app.notif.measure_cache.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            };
+            let spawned = std::thread::Builder::new().name("notif-measure-save".into()).spawn(move || {
+                crate::persist::write_json("notif-measure", &crate::persist::data_path(MEASURE_FILE), &stored);
+            });
+            if spawned.is_err() {
+                tracing::warn!("notifications: the measured rows were not kept (no thread)");
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+        if armed.is_err() {
+            self.notif.measure_save_due = false;
+        }
+    }
+
     /// Everything the rows are made from: the cards (their words and
     /// pictures), the apps the icons resolve against, the box's metrics,
     /// whether there is a renderer to measure with.
@@ -1038,6 +1091,7 @@ impl App {
                 self.notif.measure_cache.clear();
                 self.notif.measure_params = params;
             }
+            let mut measured_anew = false;
             for (app, summary, body, timestamp_ms, icon_key, id) in items {
                 let key = (timestamp_ms, id);
                 let measured = match self.notif.measure_cache.get(&key) {
@@ -1049,6 +1103,7 @@ impl App {
                         let height = card_height(&body_lines, nm);
                         let measured = MeasuredRow { summary: summary.clone(), body: body.clone(), summary_w, body_lines, height };
                         self.notif.measure_cache.insert(key, measured.clone());
+                        measured_anew = true;
                         measured
                     }
                 };
@@ -1066,6 +1121,9 @@ impl App {
                 });
             }
             self.notif.measure_cache.retain(|k, _| live.contains(k));
+            if measured_anew {
+                self.notif_measure_save_soon();
+            }
         } else {
             for (app, summary, body, timestamp_ms, icon_key, _id) in items {
                 let initial = card_initial(&app, &summary);

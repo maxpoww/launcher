@@ -50,6 +50,19 @@ struct Face {
     monospaced: bool,
 }
 
+/// What the faces' index is now (its size and time), for what was measured
+/// with it: other fonts, other widths.
+pub(crate) fn fingerprint() -> u64 {
+    let path = crate::apps::cache_base().join("waverunner/font-index.json");
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| {
+            let secs = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            m.len() ^ secs.rotate_left(20)
+        })
+        .unwrap_or(0)
+}
+
 /// The process-wide font database (a clone is cheap: faces are shared).
 pub(crate) fn database() -> Database {
     static DB: OnceLock<Database> = OnceLock::new();
