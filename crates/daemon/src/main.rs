@@ -555,7 +555,7 @@ fn main() -> anyhow::Result<()> {
     // Icon-plate mode is a process-wide switch read by the tile producers on
     // several worker threads; set it before any of them start.
     apps::set_icon_plate(config.theme.icon_plate);
-    let (apps_tx, apps_rx) = channel::channel::<apps::LoadedApps>();
+    let (apps_tx, apps_rx) = channel::channel::<apps::IndexEvent>();
     // The look first: every icon loader is built in its tone. The dock's look
     // is the SHELL row's (Max, 2026-10-18: no general Dark toggle; each row
     // has its own, the shell's Light being what the general Light was).
@@ -1175,10 +1175,10 @@ fn main() -> anyhow::Result<()> {
 
     event_loop
         .handle()
-        .insert_source(apps_rx, |event, _, app| {
-            if let channel::Event::Msg(loaded) = event {
-                app.on_apps_loaded(loaded);
-            }
+        .insert_source(apps_rx, |event, _, app| match event {
+            channel::Event::Msg(apps::IndexEvent::Apps(loaded)) => app.on_apps_loaded(loaded),
+            channel::Event::Msg(apps::IndexEvent::Files { files, opened }) => app.on_files_loaded(files, opened),
+            channel::Event::Closed => {}
         })
         .map_err(|e| anyhow::anyhow!("registering apps channel: {e}"))?;
 
@@ -1582,8 +1582,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 // A stall the owner would feel gets a line of its own, so the
                 // log says WHEN, and the marks what the loop did meanwhile.
-                let marks = perf::take_marks(deadline - TICK);
+                let marks = perf::take_marks();
                 if late > Duration::from_millis(100) {
+                    let marks = perf::marks_line(&marks, deadline - TICK);
                     info!("loop: stalled {} ms (the shell answered nothing): {marks}", late.as_millis());
                 }
                 TimeoutAction::ToDuration(TICK)
@@ -4914,8 +4915,6 @@ impl App {
         // and the gesture drop below would cancel an innocent in-flight drag.
         if self.apps_fingerprint == Some(loaded.fingerprint) {
             debug!("app index unchanged; skipping rebuild");
-            self.file_index = loaded.files;
-            self.file_opened_merge(loaded.opened);
             // An unchanged scan must STILL re-run pending-install
             // resolution: a scan can capture a fresh `.desktop` into the
             // fingerprint while its tile is still busy/held (the window
@@ -4978,8 +4977,6 @@ impl App {
         self.placeholders = placeholders;
         self.base_len = self.entries.len();
         self.icon_layers = (0..self.base_len as u32).collect();
-        self.file_index = loaded.files;
-        self.file_opened_merge(loaded.opened);
         // Resolve every icon-carrier asset once per scan.
         self.assets = apps::ICON_ASSETS
             .iter()
@@ -5220,7 +5217,19 @@ impl App {
             .is_some_and(|slug| self.webapp_recommended.contains(slug))
     }
 
+    /// The home walk of a scan landed (after its apps): the search's file
+    /// index, and the Files section when it is showing.
+    fn on_files_loaded(&mut self, files: Vec<apps::FileEntry>, opened: crate::file_search::Opened) {
+        self.file_index = files;
+        self.file_opened_merge(opened);
+        if !self.grid_resting() {
+            self.refilter();
+            self.schedule_frame();
+        }
+    }
+
     fn refilter(&mut self) {
+        perf::mark("refilter");
         // Snapshot the Apps cells' animated display positions (by
         // entry id — indices won't survive the rebuild) so the new
         // list can pick them up seamlessly below.
@@ -5246,6 +5255,7 @@ impl App {
         self.prev_resting_grid = resting_grid;
         let names: Vec<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
         let ranked = self.search.matcher.rank(&self.search.query, &names);
+        perf::mark("ranked");
         let mut visible: [Vec<usize>; content::N_SECTIONS] = Default::default();
         // Install-section catalog-webapp hits, ranked by the live query. On
         // an empty query only the recommended few show; any webapp surfaces
@@ -5291,11 +5301,13 @@ impl App {
                 blend_hits(webapp_hits, pkgs)
             };
         }
+        perf::mark("install hits");
         self.group_minis.clear();
         // Every box gets a transient Group entry each refilter (indices
         // shift), used by both the grid and the dock; a box pinned to the
         // dock is hidden from the grid, like a pinned app.
         let group_cells = self.group_cells();
+        perf::mark("grid");
         if !resting_grid {
             // (Nothing typed — an app Shift took to its row —: the home's.)
             visible[content::SECTION_FILES] = if self.search.deep.is_some() {

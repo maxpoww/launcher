@@ -1622,6 +1622,7 @@ impl Renderer {
         before_present: &mut dyn FnMut(),
     ) -> anyhow::Result<Frame> {
         let _perf = crate::perf::RENDER.time();
+        crate::perf::mark("render");
         // `w`/`h` are the physical framebuffer size; the scene is authored in
         // logical px. Geometry pipelines map `px / screen → NDC`, so feeding a
         // *logical* `screen` while the framebuffer is physical scales all
@@ -2073,6 +2074,7 @@ impl Renderer {
         }
 
         let acquire = crate::perf::RENDER_ACQUIRE.time();
+        crate::perf::mark("acquire");
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             // Timeout is recovered the same way as Lost/Outdated: a fresh
@@ -2190,6 +2192,7 @@ impl Renderer {
                 default_color: *col,
                 custom_glyphs: &[],
             });
+        crate::perf::mark("text");
         self.text_renderer
             .prepare(
                 &self.device,
@@ -2486,6 +2489,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        crate::perf::mark("submit");
         {
             let _submit = crate::perf::RENDER_SUBMIT.time();
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -2537,10 +2541,12 @@ impl Renderer {
         // OPTIONS bar sat on such a request through whole animations and drew
         // at the 100 ms overdue fallback (dev box, 165 Hz, 2026-10-06).
         before_present();
+        crate::perf::mark("present");
         {
             let _present = crate::perf::RENDER_PRESENT.time();
             frame.present();
         }
+        crate::perf::mark("presented");
         LAST_PRESENT.with(|t| t.set(Some(now)));
         if let Some(tiles) = frame_tiles {
             if let Some(old) = self.damage_prev.replace(tiles) {

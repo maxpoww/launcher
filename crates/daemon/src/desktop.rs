@@ -2440,6 +2440,7 @@ impl App {
                     // first build): start it with an empty array of the
                     // right size, and the uploads below refill it.
                     if self.desktop.capacity > 0 {
+                        crate::perf::mark("desktop array");
                         renderer.alloc_icon_array(self.desktop.capacity);
                         self.desktop.uploaded.iter_mut().for_each(|u| *u = None);
                     }

@@ -130,13 +130,8 @@ pub struct LoadedApps {
     /// to its real app, so a wrapped GUI package (`chromium` →
     /// `chromium-browser`) never latches onto its own `chromium` placeholder.
     pub cli_ids: Vec<String>,
-    /// Home-tree file index for search (fresh every rescan).
-    pub files: Vec<FileEntry>,
-    /// When each file was opened last, as the system's record says
-    /// (`file_search::opened_from_record`; read with the walk).
-    pub opened: crate::file_search::Opened,
-    /// Content fingerprint of everything *except* `files` (entries, kinds,
-    /// icon bytes, placeholders, cli ids), computed on the indexer thread.
+    /// Content fingerprint of the load (entries, kinds, icon bytes,
+    /// placeholders, cli ids), computed on the indexer thread.
     /// Most rescans (every dock summon requests one) reproduce the identical
     /// index; the event loop compares this against the previous load and
     /// skips the expensive rebuild — the full-array icon re-upload +
@@ -145,9 +140,20 @@ pub struct LoadedApps {
     pub fingerprint: u64,
 }
 
+/// What the indexer sends: the apps as soon as their tiles are ready, the
+/// home walk after them (the apps landed 0.4 s later for it on the 2013
+/// MacBook Air, 2026-10-29).
+pub enum IndexEvent {
+    Apps(LoadedApps),
+    /// Home-tree file index for search (fresh every rescan), and when each
+    /// file was opened last, as the system's record says
+    /// (`file_search::opened_from_record`; read with the walk).
+    Files { files: Vec<FileEntry>, opened: crate::file_search::Opened },
+}
+
 /// Hash the parts of a load that would require the event loop to rebuild
-/// state and re-upload textures. `files` is deliberately excluded — it is
-/// fresh every scan and cheap to swap in.
+/// state and re-upload textures. The home files are not in it — they come
+/// in a message of their own, fresh every scan and cheap to swap in.
 fn load_fingerprint(
     entries: &[AppEntry],
     kinds: &[EntryKind],
@@ -222,12 +228,13 @@ pub fn patch_xdg_data_dirs() {
 
 /// Spawn the indexer thread and queue the initial scan. The thread
 /// exits when either channel closes (daemon shutdown).
-pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer {
+pub fn spawn_indexer(icon_theme: String, results: Sender<IndexEvent>) -> Indexer {
     let (requests, rx) = mpsc::channel::<bool>();
     let spawned = std::thread::Builder::new()
         .name("waverunner-index".into())
         .spawn(move || {
             let mut loader = IconLoader::new(icon_theme);
+            let mut first = true;
             while let Ok(flush) = rx.recv() {
                 // Coalesce any requests that queued up meanwhile; OR the
                 // flush flags so a fresh-rescan request is never lost.
@@ -286,6 +293,21 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let t_close = std::time::Instant::now();
                 loader.disk.close_pack();
                 let t_close = t_close.elapsed();
+                // The apps go first; the home walk follows in its own message.
+                let fingerprint =
+                    load_fingerprint(&entries, &kinds, &icons, &placeholders, &cli_ids);
+                let apps = LoadedApps {
+                    entries,
+                    kinds,
+                    icons,
+                    placeholders,
+                    cli_ids,
+                    fingerprint,
+                };
+                let n_entries = apps.entries.len();
+                if results.send(IndexEvent::Apps(apps)).is_err() {
+                    return; // event loop is gone
+                }
                 let walk = std::time::Instant::now();
                 let files = scan_home_files();
                 let opened = crate::file_search::opened_from_record();
@@ -295,33 +317,22 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<LoadedApps>) -> Indexer
                 let (from_disk, rasterized, where_) = loader.take_counts();
                 let line = format!(
                     "indexed {} entries + {} home files in {:?} (scan {:?}, icons {:?}: {from_disk} read, {rasterized} rasterized, {where_}, pack open {t_open:?} close {t_close:?}, cli {t_cli:?}, folders {t_folders:?}, save {t_save:?}, files {:?})",
-                    entries.len(),
+                    n_entries,
                     files.len(),
                     took,
                     scanned - started,
                     walk - scanned,
                     walk.elapsed()
                 );
-                if took > std::time::Duration::from_millis(1500) {
+                // (A run's first index is always said: it is the start's
+                // measure on any machine.)
+                if first || took > std::time::Duration::from_millis(1500) {
                     tracing::info!("{line}");
                 } else {
                     debug!("{line}");
                 }
-                let fingerprint =
-                    load_fingerprint(&entries, &kinds, &icons, &placeholders, &cli_ids);
-                if results
-                    .send(LoadedApps {
-                        entries,
-                        kinds,
-                        icons,
-                        placeholders,
-                        cli_ids,
-                        files,
-                        opened,
-                        fingerprint,
-                    })
-                    .is_err()
-                {
+                first = false;
+                if results.send(IndexEvent::Files { files, opened }).is_err() {
                     return; // event loop is gone
                 }
             }

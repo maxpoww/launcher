@@ -102,16 +102,19 @@ pub(crate) fn mark(what: &'static str) {
     });
 }
 
-/// The marks since the last take, each with its ms from `since`.
-pub(crate) fn take_marks(since: std::time::Instant) -> String {
-    MARKS.with(|m| {
-        let marks = std::mem::take(&mut *m.borrow_mut());
-        marks
-            .iter()
-            .map(|(what, at)| format!("{what} +{}", at.saturating_duration_since(since).as_millis()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+/// The marks since the last take (every tick takes them; a stall's line
+/// formats them with [`marks_line`]).
+pub(crate) fn take_marks() -> Vec<(&'static str, std::time::Instant)> {
+    MARKS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+
+/// The marks, each with its ms from `since`.
+pub(crate) fn marks_line(marks: &[(&'static str, std::time::Instant)], since: std::time::Instant) -> String {
+    marks
+        .iter()
+        .map(|(what, at)| format!("{what} +{}", at.saturating_duration_since(since).as_millis()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 /// The ticks themselves (how long the report covers, at 40 a second).
 pub(crate) static LOOP_TICKS: Counter = Counter::new();
