@@ -998,10 +998,11 @@ impl Card {
     /// Which emoji the picker shows: all, or those its search names.
     fn repick(&mut self) {
         let needle = self.pick_query.trim().to_lowercase();
+        let spanish = crate::i18n::lang().is_some_and(|l| l.starts_with("es"));
         let found = crate::emoji_table::EMOJI
             .iter()
             .enumerate()
-            .filter(|(_, def)| needle.is_empty() || crate::emoji::emoji_matches(def, &needle))
+            .filter(|(_, def)| needle.is_empty() || crate::emoji::emoji_matches(def, &needle, spanish))
             .map(|(n, _)| n);
         // (With nothing searched: the ones used lately first, then all.)
         self.picked = match needle.is_empty() {

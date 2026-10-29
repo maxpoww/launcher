@@ -140,13 +140,15 @@ impl App {
     /// `EmojiState::shown`; call it on open and after any query edit.
     pub(crate) fn refilter_emoji(&mut self) {
         let needle = self.clip_search_needle();
+        // (In Spanish its Spanish words too: "fuego" finds 🔥.)
+        let spanish = crate::i18n::lang().is_some_and(|l| l.starts_with("es"));
         self.emoji.shown = if needle.is_empty() {
             (0..EMOJI.len() as u32).collect()
         } else {
             EMOJI
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| emoji_matches(e, &needle))
+                .filter(|(_, e)| emoji_matches(e, &needle, spanish))
                 .map(|(i, _)| i as u32)
                 .collect()
         };
@@ -406,20 +408,45 @@ impl App {
 /// Word-prefix, not substring (which is what the clip list wants): searching
 /// "cat" for substrings drags in edu**cat**ion 🎓, notifi**cat**ion 🔔 and
 /// appli**cat**ion 🈸 ahead of half the cats (seen live, 2026-09-13).
-pub(crate) fn emoji_matches(def: &crate::emoji_table::EmojiDef, needle: &str) -> bool {
-    word_prefix(def.name, needle) || word_prefix(def.keys, needle)
+///
+/// `spanish`: CLDR's Spanish name and keywords as well ([`crate::emoji_words`];
+/// the English ones still answer — "ok", "love" are typed in Spanish too). Not
+/// in English: "car" would find every "cara".
+pub(crate) fn emoji_matches(def: &crate::emoji_table::EmojiDef, needle: &str, spanish: bool) -> bool {
+    word_prefix(def.name, needle) || word_prefix(def.keys, needle) || spanish && spanish_words(def.ch).is_some_and(|w| word_prefix(w, needle))
+}
+
+/// An emoji's Spanish words, by the emoji without U+FE0F (how CLDR keys them).
+fn spanish_words(ch: &str) -> Option<&'static str> {
+    let key: std::borrow::Cow<str> = if ch.contains('\u{FE0F}') { ch.replace('\u{FE0F}', "").into() } else { ch.into() };
+    let table = crate::emoji_words::ES;
+    table.binary_search_by(|(k, _)| (*k).cmp(&key)).ok().map(|i| table[i].1)
+}
+
+/// A letter without its accent ("corazon" finds "corazón", "nino" "niño").
+fn plain(c: char) -> char {
+    match c {
+        'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
+        'é' | 'è' | 'ë' | 'ê' => 'e',
+        'í' | 'ì' | 'ï' | 'î' => 'i',
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+        'ú' | 'ù' | 'ü' | 'û' => 'u',
+        'ñ' => 'n',
+        'ç' => 'c',
+        c => c,
+    }
 }
 
 /// Whether any word of `hay` starts with `needle`, case-insensitively. Words
 /// break on spaces and the punctuation gemoji uses in names and shortcodes
 /// ("flag: St. Kitts", "man_dancing"), so "kitt" and "dancing" both hit.
 fn word_prefix(hay: &str, needle: &str) -> bool {
-    let pat: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    let pat: Vec<char> = needle.chars().flat_map(char::to_lowercase).map(plain).collect();
     if pat.is_empty() {
         return true;
     }
     hay.split(|c: char| !c.is_alphanumeric()).any(|word| {
-        let mut chars = word.chars().flat_map(char::to_lowercase);
+        let mut chars = word.chars().flat_map(char::to_lowercase).map(plain);
         pat.iter().all(|&c| chars.next() == Some(c))
     })
 }
@@ -431,7 +458,7 @@ mod tests {
     fn find(needle: &str) -> Vec<&'static str> {
         EMOJI
             .iter()
-            .filter(|e| emoji_matches(e, needle))
+            .filter(|e| emoji_matches(e, needle, false))
             .map(|e| e.ch)
             .collect()
     }
@@ -470,5 +497,28 @@ mod tests {
     #[test]
     fn search_is_case_insensitive() {
         assert_eq!(find("HAPPY"), find("happy"));
+    }
+
+    fn buscar(needle: &str) -> Vec<&'static str> {
+        EMOJI.iter().filter(|e| emoji_matches(e, needle, true)).map(|e| e.ch).collect()
+    }
+
+    #[test]
+    fn in_spanish_an_emoji_answers_to_its_spanish_words_too() {
+        // Every emoji of the table has its Spanish words, sorted to be found by halves.
+        assert!(crate::emoji_words::ES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(EMOJI.iter().all(|e| spanish_words(e.ch).is_some()), "{:?}", EMOJI.iter().find(|e| spanish_words(e.ch).is_none()).map(|e| e.ch));
+        assert!(buscar("fuego").contains(&"🔥"));
+        assert!(buscar("mate").contains(&"🧉"));
+        assert!(buscar("pulgar").contains(&"👍"));
+        // (An emoji written with U+FE0F is found by its plain key.)
+        assert!(buscar("corazón").contains(&"❤\u{fe0f}"));
+        // Accents may be left out, either way round.
+        assert_eq!(buscar("corazon"), buscar("corazón"));
+        assert!(buscar("nino").contains(&"👦") && buscar("niño").contains(&"👦"));
+        assert!(buscar("cumpleanos").contains(&"🎂"));
+        // The English words still answer; in English the Spanish do not.
+        assert!(buscar("happy").contains(&"😀"));
+        assert!(!find("fuego").contains(&"🔥"));
     }
 }

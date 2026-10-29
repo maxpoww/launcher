@@ -51,6 +51,7 @@ mod dragging;
 mod drives;
 mod emoji;
 mod emoji_table;
+mod emoji_words;
 mod filer;
 mod filer_live;
 mod files;
