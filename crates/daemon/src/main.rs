@@ -4186,7 +4186,8 @@ impl App {
                     Ok(mut renderer) => {
                         if let Some(icons) = app.pending_icons.take() {
                             let tail_used = app.icon_tail_used();
-                            renderer.set_icons(icons, tail_used);
+                            let first = app.icon_priority(false);
+                            renderer.set_icons(icons, tail_used, &first);
                         }
                         app.renderer = Some(renderer);
                         app.upload_pkg_icons();
@@ -5038,9 +5039,12 @@ impl App {
         });
         self.pkg_layer_base = icons.len() as u32;
         let tail_used = self.icon_tail_used();
+        // (The dock order is of the entries before this scan: the pins say
+        // what the dock shows.)
+        let first = self.icon_priority(true);
         match self.renderer.as_mut() {
             Some(renderer) => {
-                renderer.set_icons(icons, tail_used);
+                renderer.set_icons(icons, tail_used, &first);
                 mark("set-icons", &mut marks);
                 // set_icons rebuilt the array: restore the package-hit
                 // icons into its reserved tail, then the still-pending
@@ -5850,6 +5854,40 @@ impl App {
         {
             self.schedule_frame();
         }
+    }
+
+    /// The icon layers the dock shows at once — uploaded before the box's
+    /// at a landing: the dock's entries (its order, or at a fresh scan the
+    /// pins), its figures (the bin, the stencil, Files' and the actions'),
+    /// then the carriers (the assets). On the 2013 MacBook Air the first 32
+    /// by name went up first and the dock's own icons came in over the
+    /// following frames (2026-10-29).
+    fn icon_priority(&self, fresh: bool) -> Vec<u32> {
+        let mut first: Vec<u32> = if fresh || self.dock_order.is_empty() {
+            self.pins
+                .pins()
+                .iter()
+                .filter_map(|id| self.entries.iter().position(|e| &e.id == id))
+                .map(|i| i as u32)
+                .collect()
+        } else {
+            self.dock_order.iter().map(|&i| i as u32).collect()
+        };
+        if self.bin_layer > 0 {
+            first.extend([self.bin_layer, self.bin_layer + 1]);
+        }
+        first.extend(self.apps_stencil);
+        if let Some(base) = self.files_layer {
+            first.extend(base..self.pkg_layer_base);
+        }
+        first.extend(
+            self.kinds
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| **k == apps::EntryKind::Asset)
+                .map(|(i, _)| i as u32),
+        );
+        first
     }
 
     fn recompute_dock_order(&mut self) {
@@ -7938,7 +7976,8 @@ impl App {
                 Ok(mut renderer) => {
                     if let Some(icons) = self.pending_icons.take() {
                         let tail_used = self.icon_tail_used();
-                        renderer.set_icons(icons, tail_used);
+                        let first = self.icon_priority(false);
+                        renderer.set_icons(icons, tail_used, &first);
                     }
                     self.renderer = Some(renderer);
                     self.upload_pkg_icons();

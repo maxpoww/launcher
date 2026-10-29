@@ -1176,7 +1176,10 @@ impl Renderer {
     /// is made with them, and never smaller than it was — grown for them
     /// after, it was a copy of the whole array (183 apps, 64 MB) right at
     /// landing (2026-10-29).
-    pub fn set_icons(&mut self, icons: Vec<Vec<u8>>, tail_used: u32) {
+    /// `first`: the layers the dock shows (its pins, its figures) — uploaded
+    /// now, before the box's; the first 32 by name were the box's and the
+    /// dock's own icons came in over the following frames on a weak machine.
+    pub fn set_icons(&mut self, icons: Vec<Vec<u8>>, tail_used: u32, first: &[u32]) {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
         self.label_fit.clear();
@@ -1214,11 +1217,22 @@ impl Renderer {
             _ => (self.create_icon_texture(layers), layers),
         };
         crate::perf::mark("icons now");
-        let mut icons = icons.into_iter().enumerate();
-        for (i, chain) in icons.by_ref().take(ICON_UPLOAD_NOW) {
-            write_icon_chain(&self.queue, &texture, i as u32, &chain);
+        let mut icons: Vec<Option<Vec<u8>>> = icons.into_iter().map(Some).collect();
+        let mut order: Vec<u32> = Vec::with_capacity(icons.len());
+        for &i in first {
+            if (i as usize) < icons.len() && !order.contains(&i) {
+                order.push(i);
+            }
         }
-        self.icon_backlog.extend(icons.map(|(i, chain)| (i as u32, chain)));
+        order.extend((0..icons.len() as u32).filter(|i| !first.contains(i)));
+        let mut order = order.into_iter();
+        for i in order.by_ref().take(ICON_UPLOAD_NOW) {
+            if let Some(chain) = icons[i as usize].take() {
+                write_icon_chain(&self.queue, &texture, i, &chain);
+            }
+        }
+        self.icon_backlog
+            .extend(order.filter_map(|i| icons[i as usize].take().map(|chain| (i, chain))));
         crate::perf::mark("icons bind");
         self.bind_icon_texture(texture, layers);
         crate::perf::mark("icons bound");
