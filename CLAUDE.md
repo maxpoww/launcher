@@ -31,7 +31,7 @@ what to check rather than claiming it's verified.
 ## Model
 - **Dock** = pinned apps only. **Grid** (`SECTION_APPS`) = every indexed `.desktop`.
   **Install section** (`SECTION_INSTALL`) = nixpkgs packages **and webapps** (see below),
-  searchable, drag-to-grid to install. **Files** = live home listing.
+  searchable, drag-to-grid to install, a click opens the app's page (`pkg_page.rs`). **Files** = live home listing.
 - App discovery on one background thread → `LoadedApps` over a channel; `request_rescan(_fresh)`
   re-indexes. Live reload: inotify on the XDG app dirs (calloop `Generic` source) → rescan.
 - Icons: freedesktop theme chain (Papirus-Dark → hicolor), SVG via resvg, PNG via tiny-skia,
@@ -205,6 +205,36 @@ The big daemon files are cohesive but long — go straight to the function:
   rounded rects, separable blur, neumorph/edge shadows, icon atlas.
 - `animation.rs` — `lerp`, `ease_toward` (exp approach), `Follower` (damped spring / AGUA body).
 - `install.rs` / `applier.rs` / `nix.rs` — declarative install flow + nixpkgs index.
+- `pkg_page.rs` — AN APP'S PAGE IN THE BOX (Max, 2026-10-29: "if click or shift on an app, instead of
+  drag it to install, i want the app to take the whole box… intall the app, websita (or more info) and…
+  some info about the app"): a click, Enter or Shift (`box_shift`) on an Install cell — a package or a
+  catalog webapp — gives the box to it (`SearchState::page`, `page_open`; drawn in the control panel's
+  place, `panel_draw` → `page_draw`, eased by `App::page_mix` as `panel_mix` is, the results pushed down
+  behind it): ‹ Back, its icon (the package keeps its entry while its page is up, installed or not —
+  `page_package`), its name, "version · licence · App to install" (a webapp: "host · Web app"), what it
+  does (two lines) and, faint, its long description in the room left; buttons Install (Installing… /
+  Installed; a webapp installed: Open) · Website (the package's homepage; none: More info =
+  search.nixos.org) · Try (a package built and run — Starting… while it builds, the page stays —, a
+  webapp opened; not once installed or while installing). Escape, Backspace, Shift or ‹ Back go back;
+  a letter typed goes back and types; ←/→/Tab walk the buttons, Enter/Space press. Install and Try are
+  the drag's own (`start_pending_install`, `install_webapp`, `start_launch`, `launch_webapp`): apps
+  never leave the box. WHAT A PACKAGE IS (`nix::details_of`, on a thread of its own — `Request::Details`
+  → `Event::Details`, `PkgDetails`): the DETAILS FILE beside the index (`nixpkgs-details.tsv`, the
+  flake's package-index jq writes homepage, licence, mainProgram, longDescription — reaches an install
+  with the Golem pin); else what nix said before (`~/.cache/waverunner/pkg-meta/<attr>.json`); else nix
+  ASKED (`nix eval nixpkgs#<attr>.meta --apply META_FLAT`, ~0.6–0.9 s on the dev box, 10 s at most) and
+  kept; the description falls back to the index's. No network of the dock's own.
+- THE INSTALL ROW'S SPEED (2026-10-29, Max: "the result takes a little while to show up, and the icon
+  even more"): the rank thread only ranks (`index_and_rank`, 1–5 ms; a query asked is not asked again
+  while it is ranked — `App::pkg_asked`); the ICONS are a thread of their own (`hit_icons`, readied by
+  `IconJob::Warm` as the index loads): what is on this computer first — the theme, else Flathub's and
+  the store's icons fetched before (`downloaded_icon` with no budget) — sent `ICONS_TOGETHER` (6) at a
+  time or `ICONS_WAIT` (12 ms) after the first, a newer request taking over between any two; what must
+  be downloaded goes to a thread of its own (`fetch_icons`, one by one, the newest list only), so a
+  download for an older query never holds the newest one's icons back. The dock keeps each package's icon BY ATTR (`install::PkgIcons`, a layer of the
+  reserved tail a hit): an app keeps its icon from one answer to the next (they were all cleared at
+  each answer, every cell the installer box until all came at once); only the ones it lacks are asked
+  (`Request::Icons`). `debug` logs say "pkg rank … in", "pkg icons … at".
 - `hypr.rs` — all compositor IPC (dispatch + JSON reads).
 - `panel.rs` — the control panel (the card as a field of settings pills); an open setting's
   content is `open_content`: Scale and Resolution from `display.rs`, every other setting from
