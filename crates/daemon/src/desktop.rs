@@ -29,7 +29,7 @@
 //! Pointer-free: `waverunner-ctl debug-desktop [reload|open <n>|move <n>
 //! <col> <row>|import <col> <row> <uri…>|forget]`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use smithay_client_toolkit::data_device_manager::data_offer::DragOffer;
@@ -402,9 +402,22 @@ pub struct Done {
     pub can: bool,
 }
 
+/// A picture that landed for the desktop: an icon resolved, a thumbnail made.
+pub(crate) enum Arrival {
+    Icon(crate::notif_icons::Resolved),
+    Thumb(String, Vec<u8>),
+}
+
 /// The desktop's state on the loop.
 #[derive(Default)]
 pub(crate) struct Desktop {
+    /// Pictures that landed and are not yet in their layers (see
+    /// [`App::desktop_inbox_drain`]), and whether a turn is booked for them.
+    pub inbox: VecDeque<Arrival>,
+    pub inbox_timer: bool,
+    /// Pictures in the chains whose layers are not written yet: the last
+    /// sync stopped at its budget (see [`App::sync_desktop_icons`]).
+    pub inbox_more: bool,
     /// How bright the wallpaper is behind each place (`desktop_ink.rs`): the
     /// names' ink. None: not read (yet), or unreadable — white, shadowed.
     pub ink: Option<std::sync::Arc<crate::desktop_ink::Map>>,
@@ -2494,6 +2507,7 @@ impl App {
         if self.desktop_layer.is_none() {
             return;
         }
+        let _perf = crate::perf::DESKTOP_RELOAD.time();
         let dir = desktop_dir();
         let mut items = list(&dir);
         // What is plugged in comes first (it takes the first free cells
@@ -2725,17 +2739,29 @@ impl App {
         self.desktop
             .uploaded
             .resize(self.desktop.capacity as usize, None);
+        /// Layers written per sync: 200 chains in one sync were one 70 MB
+        /// flush and a submit of 270 ms–1.5 s (the shell stress, 2026-10-29);
+        /// eight are a few ms, and the rest follow a turn apart
+        /// (`desktop_inbox_drain`), the pictures appearing over a few frames.
+        const UPLOADS_PER_SYNC: usize = 8;
         let mut asked = Vec::new();
+        let mut written = 0usize;
+        self.desktop.inbox_more = false;
         for key in worn {
             if self.desktop.uploaded.iter().any(|u| u.as_deref() == Some(key.as_str())) {
                 continue;
             }
             if let Some(chain) = self.desktop.chains.get(&key) {
+                if written >= UPLOADS_PER_SYNC {
+                    self.desktop.inbox_more = true;
+                    continue;
+                }
                 let free = self.desktop.uploaded.iter().position(Option::is_none);
                 if let (Some(layer), Some(r)) = (free, self.desktop_renderer.as_mut()) {
                     r.update_icon_layer(layer as u32, chain);
                     self.desktop.seen.insert(key.clone(), crate::filer::ink_box(chain));
                     self.desktop.uploaded[layer] = Some(key);
+                    written += 1;
                 }
             } else if !self.desktop.pending.contains(&key) && !self.desktop.missing.contains(&key)
             {
@@ -2749,6 +2775,9 @@ impl App {
             for req in asked {
                 icons.request(req);
             }
+        }
+        if self.desktop.inbox_more {
+            self.desktop_inbox_arm();
         }
     }
 
@@ -2770,32 +2799,94 @@ impl App {
     /// The resolver answered: file the pixels (a placeholder answer means
     /// the theme has no such icon — the name alone is shown) and draw.
     pub(crate) fn on_desktop_icon(&mut self, res: crate::notif_icons::Resolved) {
-        // (A symbol of the menus: the top surface's.)
+        // (A symbol of the menus: the top surface's, at once.)
         if crate::glyphs::is_key(&res.key) || self.desktop_top.glyph_asked.contains(&res.key) {
             return self.desktop_on_glyph(res.key, res.chain);
         }
-        self.desktop.pending.remove(&res.key);
-        let Some(chain) = res.chain else {
-            warn!("desktop: no icon for {}", res.key);
-            self.desktop.missing.insert(res.key);
-            return;
-        };
-        if !self.desktop.items.iter().any(|it| it.icon == res.key) {
-            return; // nothing wears it any more
-        }
-        self.desktop.chains.insert(res.key, chain);
-        self.sync_desktop_icons();
-        self.request_desktop_draw();
+        self.desktop.inbox.push_back(Arrival::Icon(res));
+        self.desktop_inbox_drain();
     }
 
     /// The thumbnailer finished a file that is on the desktop: it wears its
     /// own picture from now on.
     pub(crate) fn desktop_on_thumb(&mut self, path: &str, pixels: &[u8]) {
-        if !self.desktop.items.iter().any(|it| it.path == path) {
+        self.desktop.inbox.push_back(Arrival::Thumb(path.to_owned(), pixels.to_vec()));
+        self.desktop_inbox_drain();
+    }
+
+    /// Pictures land in BATCHES. 200 files dropped on the desktop sent 201
+    /// pictures, one message each, and each one was walked into the layers
+    /// and drawn on its own: 480 ms during which the shell answered nothing
+    /// (2026-10-29, the shell stress). Now up to [`INBOX_BATCH`] of them are
+    /// taken into the chains, the layers are written once and the desktop
+    /// drawn once; what is left waits a turn, so the loop keeps answering
+    /// while the pictures come in over a few frames.
+    pub(crate) fn desktop_inbox_drain(&mut self) {
+        /// Pictures per turn: a turn's worth of layer writes stays well under
+        /// a frame at 165 Hz, and 200 pictures are all up within a third of a
+        /// second.
+        const INBOX_BATCH: usize = 8;
+        let _perf = crate::perf::DESKTOP_ICON.time();
+        let mut touched = false;
+        for _ in 0..INBOX_BATCH {
+            let Some(arrival) = self.desktop.inbox.pop_front() else {
+                break;
+            };
+            touched |= match arrival {
+                Arrival::Icon(res) => self.desktop_icon_landed(res),
+                Arrival::Thumb(path, pixels) => self.desktop_thumb_landed(&path, pixels),
+            };
+        }
+        if touched || self.desktop.inbox_more {
+            self.sync_desktop_icons();
+            self.request_desktop_draw();
+        }
+        if !self.desktop.inbox.is_empty() || self.desktop.inbox_more {
+            self.desktop_inbox_arm();
+        }
+    }
+
+    /// Book a turn for what is still to land or to be written (one at a time).
+    fn desktop_inbox_arm(&mut self) {
+        if self.desktop.inbox_timer {
             return;
         }
+        self.desktop.inbox_timer = true;
+        let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_millis(8));
+        let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+            app.desktop.inbox_timer = false;
+            app.desktop_inbox_drain();
+            calloop::timer::TimeoutAction::Drop
+        });
+        if armed.is_err() {
+            self.desktop.inbox_timer = false;
+        }
+    }
+
+    /// An icon resolved: into the chains if something wears it. True when
+    /// the layers must be written again.
+    fn desktop_icon_landed(&mut self, res: crate::notif_icons::Resolved) -> bool {
+        self.desktop.pending.remove(&res.key);
+        let Some(chain) = res.chain else {
+            warn!("desktop: no icon for {}", res.key);
+            self.desktop.missing.insert(res.key);
+            return false;
+        };
+        if !self.desktop.items.iter().any(|it| it.icon == res.key) {
+            return false; // nothing wears it any more
+        }
+        self.desktop.chains.insert(res.key, chain);
+        true
+    }
+
+    /// A thumbnail made: the file wears it. True when the layers must be
+    /// written again.
+    fn desktop_thumb_landed(&mut self, path: &str, pixels: Vec<u8>) -> bool {
+        if !self.desktop.items.iter().any(|it| it.path == path) {
+            return false;
+        }
         let key = thumb_key(path);
-        self.desktop.chains.insert(key.clone(), pixels.to_vec());
+        self.desktop.chains.insert(key.clone(), pixels);
         // (A picture taken anew for the same file: its layer is written again.)
         for held in self.desktop.uploaded.iter_mut() {
             if held.as_deref() == Some(key.as_str()) {
@@ -2803,8 +2894,7 @@ impl App {
             }
         }
         self.desktop.repoint(path, &key);
-        self.sync_desktop_icons();
-        self.request_desktop_draw();
+        true
     }
 
     /// A "video" on the desktop turned out to be audio only: the audio icon.
@@ -4826,6 +4916,7 @@ impl App {
     /// wallpaper is read off the loop (or a new screen size); a veil moved
     /// far enough to change a name's ink draws again.
     pub(crate) fn desktop_ink_start(&mut self) {
+        let _perf = crate::perf::DESKTOP_INK.time();
         let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(2));
         let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
             app.desktop_ink_sync();
@@ -4864,6 +4955,7 @@ impl App {
 
     /// Draw one desktop frame.
     pub(crate) fn draw_desktop(&mut self) {
+        let _perf = crate::perf::DESKTOP_DRAW.time();
         if self.part_lost(crate::shell_screens::Part::Desktop) {
             return;
         }

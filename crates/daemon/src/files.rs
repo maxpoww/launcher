@@ -146,6 +146,7 @@ impl App {
                 |app, (dirs, tops)| {
                     app.file_fresh_pending = false;
                     info!("files: the watched folders read again ({} at their tops)", tops.len());
+                    let _perf = crate::perf::FILES_MERGE.time();
                     crate::file_search::merge_tops(&mut app.file_index, &dirs, tops);
                     if std::mem::take(&mut app.file_fresh_again) {
                         app.files_fresh_soon();

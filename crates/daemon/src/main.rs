@@ -271,6 +271,9 @@ fn main() -> anyhow::Result<()> {
     // into every app we launch (see `launch::WORKSPACE_TICKET`). Dropped
     // before any thread exists — the environment is not safe to change later.
     let had_workspace_ticket = launch::drop_workspace_ticket();
+    // The Vulkan driver of the compositor's card, named before any thread
+    // (the environment is not safe to change later) — see `renderer`.
+    renderer::pin_vulkan_driver();
     // The time zone chosen in the control panel is this process's own too.
     controls::adopt_zone(display::GolemSettings::load().time_zone.as_deref());
 
@@ -298,6 +301,9 @@ fn main() -> anyhow::Result<()> {
 
     if had_workspace_ticket {
         info!("dropped the compositor's initial-workspace ticket: launched apps open on the workspace that is showing");
+    }
+    if let Some(pinned) = renderer::PINNED_DRIVER.get() {
+        info!("renderer: Vulkan driver pinned to the compositor's card {pinned}");
     }
 
     // Owner-only state dirs (clipboard text + notification bodies live
@@ -1533,6 +1539,28 @@ fn main() -> anyhow::Result<()> {
     app.filer_folder_bell();
 
     info!("daemon up; try: waverunner-ctl toggle");
+    // The loop's lateness meter (perf::LOOP_LATE): a 25 ms tick that notes how
+    // late it was woken — every ms of lateness is a ms the shell was busy
+    // and answered nothing. `waverunner-ctl debug-perf` reads it.
+    {
+        const TICK: Duration = Duration::from_millis(25);
+        let _ = event_loop.handle().insert_source(
+            Timer::from_duration(TICK),
+            |deadline, _, _app: &mut App| {
+                let late = std::time::Instant::now().saturating_duration_since(deadline);
+                perf::LOOP_TICKS.hit();
+                if late > Duration::from_millis(30) {
+                    perf::LOOP_LATE.record_nanos(late.as_nanos() as u64);
+                }
+                // A stall the owner would feel gets a line of its own, so the
+                // log says WHEN — the lines around it say what was going on.
+                if late > Duration::from_millis(100) {
+                    info!("loop: stalled {} ms (the shell answered nothing)", late.as_millis());
+                }
+                TimeoutAction::ToDuration(TICK)
+            },
+        );
+    }
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
     hypr::snapshot_enable();
     while !app.exit {
@@ -3770,6 +3798,7 @@ impl App {
                 return;
             }
             Command::Files(what) => {
+                let _perf = perf::FILES_CMD.time();
                 let done = self.filer_command(&what);
                 info!("files: {done}");
                 return;
@@ -4714,6 +4743,7 @@ impl App {
     }
 
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
+        let _perf = perf::APPS_LOADED.time();
         info!("app index ready: {} entries", loaded.entries.len());
 
         // Self-heal: every live box must own a grid slot. A box's slot can
