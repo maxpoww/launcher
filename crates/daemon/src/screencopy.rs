@@ -9,9 +9,12 @@
 //! behind it.
 //!
 //! Wayland forbids reading another window's pixels directly, so screencopy is
-//! the only way. We capture the whole focused output into an shm buffer, read
-//! the physical rows either surface currently wants, and average each. Both
-//! surfaces share ONE capture (a [`Slot`] per row wanted).
+//! the only way. We capture the whole focused output into a buffer on the GPU
+//! (`dmabuf.rs`: rendered there, no readback, the compositor never waits —
+//! an shm capture froze it 30–70 ms a time; shm only where the compositor
+//! offers nothing else), read the physical rows either surface currently
+//! wants, and average each. Both surfaces share ONE capture (a [`Slot`] per
+//! row wanted).
 //!
 //! WHEN a capture is taken is the whole cost of this module — a capture the
 //! compositor has to redraw the screen for is two orders of magnitude dearer
@@ -21,6 +24,7 @@
 //! changes. At rest nothing is captured at all. Everything degrades
 //! gracefully: without the protocol neither surface ever colour-matches.
 
+use std::os::fd::AsFd;
 use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
@@ -36,8 +40,40 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::{
     self, ZwlrScreencopyManagerV1,
 };
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+    zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
+};
 
+use crate::dmabuf::{self, DumbBuffer};
 use crate::{hypr, App};
+
+/// The GPU buffer every capture is rendered into, and its `wl_buffer`: made
+/// once for the output's size and format, reused by every frame (the
+/// compositor is done with it at `ready`).
+pub(crate) struct DmabufTarget {
+    pub(crate) dumb: DumbBuffer,
+    buffer: WlBuffer,
+    fourcc: u32,
+}
+
+impl Drop for DmabufTarget {
+    fn drop(&mut self) {
+        self.buffer.destroy();
+    }
+}
+
+/// The wl_shm format whose memory layout a DRM fourcc has (the readers
+/// decode by the wl_shm name).
+fn shm_format_of(fourcc: u32) -> Option<wl_shm::Format> {
+    match fourcc {
+        dmabuf::FORMAT_XRGB8888 => Some(wl_shm::Format::Xrgb8888),
+        dmabuf::FORMAT_ARGB8888 => Some(wl_shm::Format::Argb8888),
+        0x3432_4258 => Some(wl_shm::Format::Xbgr8888),
+        0x3432_4241 => Some(wl_shm::Format::Abgr8888),
+        _ => None,
+    }
+}
 
 /// Poll cadence for re-evaluating both surfaces' colour-match. Runs whenever
 /// either could plausibly match — matched or not — so each converges on the
@@ -256,6 +292,12 @@ pub(crate) struct Capture {
     /// When the frame object was made, and when it was asked to deliver.
     started: std::time::Instant,
     shared_at: Option<std::time::Instant>,
+    /// The compositor's offers — shm (`buffer` event) and GPU (`linux_dmabuf`
+    /// event) — decided between at `buffer_done`.
+    shm_offer: Option<(wl_shm::Format, u32, u32, u32)>,
+    dmabuf_offer: Option<(u32, u32, u32)>,
+    /// Captured into the GPU buffer, which outlives the frame.
+    via_dmabuf: bool,
 }
 
 impl App {
@@ -572,8 +614,10 @@ impl App {
     pub(crate) fn abort_capture(&mut self) {
         if let Some(cap) = self.capture.take() {
             cap.frame.destroy();
-            if let Some(buf) = cap.buffer {
-                buf.destroy();
+            if !cap.via_dmabuf {
+                if let Some(buf) = cap.buffer {
+                    buf.destroy();
+                }
             }
             options_engine::end_self_capture();
         }
@@ -777,6 +821,9 @@ impl App {
             forced: std::mem::take(&mut self.capture_force),
             started: std::time::Instant::now(),
             shared_at: None,
+            shm_offer: None,
+            dmabuf_offer: None,
+            via_dmabuf: false,
         });
     }
 
@@ -882,9 +929,125 @@ impl App {
         }
     }
 
-    /// `buffer` event: allocate the shm buffer; the frame is then primed (see
-    /// [`Self::pump_capture`]). Extra buffer offers (e.g. dmabuf) after we've
-    /// picked an shm one are ignored.
+    /// `buffer` event: the shm offer, kept for `buffer_done`. A v1/v2
+    /// compositor sends no `buffer_done`: there the offer is taken at once.
+    fn options_capture_shm_offer(
+        &mut self,
+        format: WEnum<wl_shm::Format>,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) {
+        let WEnum::Value(fmt) = format else {
+            return;
+        };
+        let patient = self.screencopy.as_ref().is_some_and(|m| m.version() >= 3);
+        match self.capture.as_mut().filter(|c| c.stage == Stage::AwaitBuffer) {
+            Some(cap) => cap.shm_offer = Some((fmt, width, height, stride)),
+            None => return,
+        }
+        if !patient {
+            self.options_capture_choose();
+        }
+    }
+
+    /// `linux_dmabuf` event: the GPU offer (a DRM fourcc and the size).
+    fn options_capture_dmabuf_offer(&mut self, format: u32, width: u32, height: u32) {
+        if let Some(cap) = self.capture.as_mut().filter(|c| c.stage == Stage::AwaitBuffer) {
+            cap.dmabuf_offer = Some((format, width, height));
+        }
+    }
+
+    /// `buffer_done`: the GPU buffer when offered and possible, else shm.
+    fn options_capture_choose(&mut self) {
+        let Some(cap) = self.capture.as_ref().filter(|c| c.stage == Stage::AwaitBuffer) else {
+            return;
+        };
+        let (shm_offer, dmabuf_offer) = (cap.shm_offer, cap.dmabuf_offer);
+        if let Some((fourcc, w, h)) = dmabuf_offer {
+            if self.options_capture_dmabuf(fourcc, w, h) {
+                return;
+            }
+        }
+        if let Some((fmt, w, h, stride)) = shm_offer {
+            self.options_capture_buffer(WEnum::Value(fmt), w, h, stride);
+        }
+    }
+
+    /// Prime the frame with the GPU buffer (made, or remade for a new size or
+    /// format). False when it cannot be: the caller falls back to shm.
+    fn options_capture_dmabuf(&mut self, fourcc: u32, width: u32, height: u32) -> bool {
+        if self.dmabuf_off || width == 0 || height == 0 {
+            return false;
+        }
+        let Some(linux_dmabuf) = self.linux_dmabuf.clone() else {
+            return false;
+        };
+        let Some(fmt) = shm_format_of(fourcc) else {
+            return false;
+        };
+        let fits = self.dmabuf.as_ref().is_some_and(|d| {
+            d.fourcc == fourcc && d.dumb.width == width && d.dumb.height == height
+        });
+        if !fits {
+            self.dmabuf = None;
+            let Some(card) = dmabuf::compositor_card() else {
+                warn!("sampler: no DRM card found; capturing through shm");
+                self.dmabuf_off = true;
+                return false;
+            };
+            let dumb = match DumbBuffer::create(&card, width, height) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("sampler: no GPU buffer on {}: {e}; capturing through shm", card.display());
+                    self.dmabuf_off = true;
+                    return false;
+                }
+            };
+            let params = linux_dmabuf.create_params(&self.qh, ());
+            params.add(
+                dumb.fd.as_fd(),
+                0,
+                0,
+                dumb.stride,
+                (dmabuf::MODIFIER_LINEAR >> 32) as u32,
+                dmabuf::MODIFIER_LINEAR as u32,
+            );
+            let buffer = params.create_immed(
+                width as i32,
+                height as i32,
+                fourcc,
+                zwp_linux_buffer_params_v1::Flags::empty(),
+                &self.qh,
+                (),
+            );
+            params.destroy();
+            tracing::info!(
+                "sampler: captures into a GPU buffer on {} ({width}x{height}, stride {})",
+                card.display(),
+                dumb.stride
+            );
+            self.dmabuf = Some(DmabufTarget { dumb, buffer, fourcc });
+        }
+        let Some(target) = self.dmabuf.as_ref() else {
+            return false;
+        };
+        let (buffer, stride) = (target.buffer.clone(), target.dumb.stride);
+        if let Some(cap) = self.capture.as_mut() {
+            cap.buffer = Some(buffer);
+            cap.width = width;
+            cap.height = height;
+            cap.stride = stride;
+            cap.format = fmt;
+            cap.via_dmabuf = true;
+            cap.stage = Stage::Primed;
+        }
+        self.pump_capture();
+        true
+    }
+
+    /// The shm buffer: allocated for the offer, the frame is then primed (see
+    /// [`Self::pump_capture`]).
     fn options_capture_buffer(
         &mut self,
         format: WEnum<wl_shm::Format>,
@@ -958,6 +1121,13 @@ impl App {
             return;
         };
         self.options_capture_failing = false;
+        if cap.via_dmabuf {
+            self.dmabuf_ok = true;
+            self.dmabuf_fails = 0;
+            if let Some(d) = self.dmabuf.as_ref() {
+                d.dumb.begin_read();
+            }
+        }
         let wants: Vec<(Slot, u32)> = [&self.bar_want, &self.dock_want, &self.clip_want]
             .into_iter()
             .filter_map(|w| w.as_ref().map(|w| (w.slot, w.sample_y)))
@@ -996,9 +1166,16 @@ impl App {
                 }
             }
         }
+        if cap.via_dmabuf {
+            if let Some(d) = self.dmabuf.as_ref() {
+                d.dumb.end_read();
+            }
+        }
         cap.frame.destroy();
-        if let Some(buf) = cap.buffer {
-            buf.destroy();
+        if !cap.via_dmabuf {
+            if let Some(buf) = cap.buffer {
+                buf.destroy();
+            }
         }
         options_engine::end_self_capture();
         let changed = bar_changed || dock_changed;
@@ -1067,6 +1244,17 @@ impl App {
     }
 
     fn options_capture_failed(&mut self) {
+        // A GPU buffer the compositor would not fill — never, or three
+        // times running (a failure can also be a busy compositor) — is given
+        // up for shm.
+        if self.capture.as_ref().is_some_and(|c| c.via_dmabuf) && !self.dmabuf_off {
+            self.dmabuf_fails = self.dmabuf_fails.saturating_add(1);
+            if !self.dmabuf_ok || self.dmabuf_fails >= 3 {
+                warn!("sampler: the compositor did not fill the GPU buffer; capturing through shm from now on");
+                self.dmabuf_off = true;
+                self.dmabuf = None;
+            }
+        }
         self.abort_capture();
         debug!("options: screencopy failed");
         // Retry on the burst rather than waiting out a whole POLL: a
@@ -1100,9 +1288,11 @@ impl App {
             return None;
         }
         let rows = [card.y + 7.0, card.y + card.h - 7.0].map(|y| ((y * px).max(0.0) as u32).min(cap.height - 1));
-        let pool = self.shm_pool.as_mut()?;
-        let map = pool.mmap();
-        let bytes: &[u8] = &map[..];
+        let bytes: &[u8] = if cap.via_dmabuf {
+            self.dmabuf.as_ref()?.dumb.bytes()
+        } else {
+            &self.shm_pool.as_mut()?.mmap()[..]
+        };
         let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
         for y in rows {
             let row = if cap.y_invert { cap.height - 1 - y } else { y };
@@ -1305,9 +1495,11 @@ impl App {
             sample_y
         };
 
-        let pool = self.shm_pool.as_mut()?;
-        let map = pool.mmap();
-        let bytes: &[u8] = &map[..];
+        let bytes: &[u8] = if cap.via_dmabuf {
+            self.dmabuf.as_ref()?.dumb.bytes()
+        } else {
+            &self.shm_pool.as_mut()?.mmap()[..]
+        };
 
         // Frost path: average the clean columns this slot asked for (see above)
         // — the nearest ones outward from a bar box, or the dock's own width.
@@ -1550,7 +1742,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for App {
                 width,
                 height,
                 stride,
-            } => app.options_capture_buffer(format, width, height, stride),
+            } => app.options_capture_shm_offer(format, width, height, stride),
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
+                format,
+                width,
+                height,
+            } => app.options_capture_dmabuf_offer(format, width, height),
+            zwlr_screencopy_frame_v1::Event::BufferDone => app.options_capture_choose(),
             zwlr_screencopy_frame_v1::Event::Flags { flags } => {
                 if let (Some(cap), WEnum::Value(f)) = (app.capture.as_mut(), flags) {
                     cap.y_invert = f.bits() & 1 != 0;
@@ -1581,8 +1779,35 @@ impl Dispatch<WlBuffer, ()> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // Release is ignored — screencopy buffers are single-use and we
-        // destroy them explicitly after reading.
+        // Release is ignored — an shm buffer is single-use and destroyed
+        // after reading; the GPU buffer is reused once `ready` came.
+    }
+}
+
+impl Dispatch<ZwpLinuxDmabufV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpLinuxDmabufV1,
+        _: zwp_linux_dmabuf_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The format/modifier lists: the compositor names the format it
+        // wants per capture (`linux_dmabuf` event), linear is always in.
+    }
+}
+
+impl Dispatch<ZwpLinuxBufferParamsV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ZwpLinuxBufferParamsV1,
+        _: zwp_linux_buffer_params_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // `create_immed` answers with the buffer itself; nothing arrives here.
     }
 }
 

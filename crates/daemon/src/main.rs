@@ -122,6 +122,7 @@ mod other_apps;
 mod order;
 // Golem's control panel: the main card, opened empty.
 mod panel;
+mod dmabuf;
 mod perf;
 mod pager;
 mod pages;
@@ -214,6 +215,7 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 use wayland_protocols::wp::pointer_constraints::zv1::client::{
     zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
     zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
@@ -508,6 +510,19 @@ fn main() -> anyhow::Result<()> {
                 .ok()
         })
         .flatten();
+    // linux-dmabuf: the sampler captures into a buffer on the GPU (see
+    // dmabuf.rs — an shm capture freezes the compositor for a readback).
+    // Without it, or with `WAVERUNNER_SHM_SAMPLER=1` (the way to compare),
+    // shm as before.
+    let linux_dmabuf = screencopy
+        .as_ref()
+        .filter(|_| std::env::var_os("WAVERUNNER_SHM_SAMPLER").is_none())
+        .and_then(|_| {
+            globals
+                .bind::<ZwpLinuxDmabufV1, App, _>(&qh, 3..=4, ())
+                .map_err(|e| info!("linux-dmabuf unavailable; the sampler captures through shm: {e}"))
+                .ok()
+        });
 
     // App discovery runs on the one allowed background thread; it
     // rescans on request (dock reveals) and delivers results over this
@@ -705,6 +720,11 @@ fn main() -> anyhow::Result<()> {
         screencopy,
         shm,
         shm_pool: None,
+        linux_dmabuf,
+        dmabuf: None,
+        dmabuf_off: false,
+        dmabuf_ok: false,
+        dmabuf_fails: 0,
         pointer_constraints,
         relative_pointer_manager,
         pointer_gestures,
@@ -1652,6 +1672,15 @@ pub struct App {
     screencopy: Option<ZwlrScreencopyManagerV1>,
     shm: Option<Shm>,
     shm_pool: Option<RawPool>,
+    /// linux-dmabuf and the GPU buffer the sampler captures into (see
+    /// dmabuf.rs). `dmabuf_off`: back to shm for good (the buffer could not
+    /// be made, or the compositor refused it before ever filling one, or
+    /// three times running); `dmabuf_ok`: it has delivered at least once.
+    linux_dmabuf: Option<ZwpLinuxDmabufV1>,
+    dmabuf: Option<screencopy::DmabufTarget>,
+    dmabuf_off: bool,
+    dmabuf_ok: bool,
+    dmabuf_fails: u8,
     /// Pointer-lock + relative-motion managers (both optional — absent on a
     /// compositor without the protocols). Used only by the [current task] pill's
     /// right-click "nub drag" (see nub_drag.rs).
