@@ -239,6 +239,9 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<IndexEvent>) -> Indexer
         .spawn(move || {
             let mut loader = IconLoader::new(icon_theme);
             let mut first = true;
+            // The parses of the last scan: only the files that changed are read.
+            let scan_file = cache_base().join("waverunner").join("desktop-index.json");
+            let mut scan_cache = waverunner_core::index::ScanCache::load(&scan_file);
             while let Ok(flush) = rx.recv() {
                 // Coalesce any requests that queued up meanwhile; OR the
                 // flush flags so a fresh-rescan request is never lost.
@@ -254,7 +257,10 @@ pub fn spawn_indexer(icon_theme: String, results: Sender<IndexEvent>) -> Indexer
                 }
 
                 let started = std::time::Instant::now();
-                let index = DesktopIndex::scan();
+                let (index, scan_changed) = DesktopIndex::scan_cached(&mut scan_cache);
+                if scan_changed {
+                    scan_cache.save(&scan_file);
+                }
                 let scanned = std::time::Instant::now();
                 let mut entries = index.entries;
                 let mut kinds = vec![EntryKind::App; entries.len()];
@@ -1138,10 +1144,13 @@ impl IconLoader {
 /// entries are tiny (`ICON_SIZE`² × 4 bytes) and simply linger.
 struct DiskCache {
     dir: PathBuf,
-    /// A store file's content hash and length as last read, by path
-    /// (`hashes.tsv`): a store path is immutable, so its bytes are not read
-    /// at every start to name its tile. Only paths under /nix/store.
-    hashes: HashMap<String, (u64, usize)>,
+    /// An icon file's content hash and length as last read, by its REAL
+    /// path (`hashes.tsv`; a profile path keeps its name while the store
+    /// file behind it changes): a store file is immutable, its bytes are
+    /// never read again; any other file is trusted while its length and
+    /// mtime stand (one stat, not a read: 70 webapp PNGs read cold were
+    /// 127 ms of a MacBook start, 2026-10-29).
+    hashes: HashMap<String, Known>,
     hashes_dirty: bool,
     /// THE PACK (`pack.bin`): every tile of the last index in one file, read
     /// once at a start — 115 tiles read one file each from a cold SSD were
@@ -1157,6 +1166,15 @@ struct DiskCache {
 struct Pack {
     bytes: Vec<u8>,
     at: HashMap<u64, (usize, usize)>,
+}
+
+/// What an icon file held when it was last read, and when (`mtime` 0: a
+/// store file, immutable).
+#[derive(Clone, Copy)]
+struct Known {
+    hash: u64,
+    len: usize,
+    mtime: u64,
 }
 
 const PACK_MAGIC: &[u8; 4] = b"GTP1";
@@ -1222,11 +1240,16 @@ impl DiskCache {
         let mut hashes = HashMap::new();
         if let Ok(text) = std::fs::read_to_string(dir.join("hashes.tsv")) {
             for line in text.lines() {
-                let mut parts = line.splitn(3, '\t');
-                if let (Some(h), Some(l), Some(path)) = (parts.next(), parts.next(), parts.next()) {
-                    if let (Ok(h), Ok(l)) = (u64::from_str_radix(h, 16), l.parse::<usize>()) {
-                        hashes.insert(path.to_owned(), (h, l));
-                    }
+                // hash, len, mtime, path — or the older hash, len, path (a
+                // store file by its real path).
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                let (h, l, m, path) = match parts[..] {
+                    [h, l, m, path] => (h, l, m, path),
+                    [h, l, path] => (h, l, "0", path),
+                    _ => continue,
+                };
+                if let (Ok(hash), Ok(len), Ok(mtime)) = (u64::from_str_radix(h, 16), l.parse::<usize>(), m.parse::<u64>()) {
+                    hashes.insert(path.to_owned(), Known { hash, len, mtime });
                 }
             }
         }
@@ -1309,8 +1332,8 @@ impl DiskCache {
         if self.hashes_dirty {
             self.hashes_dirty = false;
             let mut text = String::new();
-            for (path, (h, l)) in &self.hashes {
-                text.push_str(&format!("{h:016x}\t{l}\t{path}\n"));
+            for (path, k) in &self.hashes {
+                text.push_str(&format!("{:016x}\t{}\t{}\t{path}\n", k.hash, k.len, k.mtime));
             }
             let file = self.dir.join("hashes.tsv");
             let tmp = self.dir.join(format!("hashes.tmp{}", std::process::id()));
@@ -1341,16 +1364,29 @@ impl DiskCache {
         let real = std::fs::canonicalize(icon_path).ok();
         let real = real.as_deref().and_then(|p| p.to_str()).unwrap_or(icon_path);
         let in_store = real.starts_with("/nix/store/");
-        let (hash, len) = match self.hashes.get(real).filter(|_| in_store) {
-            Some(&known) => known,
+        // Known by its real path: a store file as it was; any other while
+        // its length and mtime stand (a stat).
+        let known = match self.hashes.get(real) {
+            Some(k) if in_store => Some((k.hash, k.len)),
+            Some(k) => std::fs::metadata(real)
+                .ok()
+                .filter(|m| m.len() as usize == k.len && file_mtime_secs(m) == k.mtime)
+                .map(|_| (k.hash, k.len)),
+            None => None,
+        };
+        let (hash, len) = match known {
+            Some(known) => known,
             None => {
                 let bytes = std::fs::read(real).ok()?;
-                let known = (fnv1a64_bytes(&bytes), bytes.len());
-                if in_store {
-                    self.hashes.insert(real.to_owned(), known);
-                    self.hashes_dirty = true;
-                }
-                known
+                let (hash, len) = (fnv1a64_bytes(&bytes), bytes.len());
+                let mtime = if in_store {
+                    0
+                } else {
+                    std::fs::metadata(real).map(|m| file_mtime_secs(&m)).unwrap_or(1).max(1)
+                };
+                self.hashes.insert(real.to_owned(), Known { hash, len, mtime });
+                self.hashes_dirty = true;
+                (hash, len)
             }
         };
         // (`tag`: the same file drawn another way — an unplated carrier —
@@ -1712,8 +1748,12 @@ pub(crate) fn available_icon_names(themes: &[String]) -> HashMap<String, String>
 
 /// A path's mtime in unix seconds; 0 if it cannot be stat'ed.
 fn mtime_secs(path: &str) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
+    std::fs::metadata(path).map(|m| file_mtime_secs(&m)).unwrap_or(0)
+}
+
+/// A file's mtime in seconds (0 when it has none).
+fn file_mtime_secs(m: &std::fs::Metadata) -> u64 {
+    m.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
