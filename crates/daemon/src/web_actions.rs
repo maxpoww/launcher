@@ -705,12 +705,30 @@ fn is_page(site: &Site, url: &str) -> bool {
     if site.links.iter().any(|l| is_link(l, path)) {
         return false;
     }
+    // (A wiki's own pages — its searches, its random article, its front page
+    // — are none of its articles.)
+    if site.slug == "wikipedia" && path.strip_prefix("/wiki/").is_some_and(|t| WIKI_OWN.iter().any(|w| t.starts_with(w))) {
+        return false;
+    }
     if site.pages == ["/"] {
         // Any page but the first, and none of the site's own known pages.
         let bare = path.split(['?', '#']).next().unwrap_or("");
         return bare.len() > 1 && !site.links.iter().any(|l| l.url.starts_with(bare));
     }
     site.pages.iter().any(|p| path.contains(p))
+}
+
+/// What begins a Wikipedia page's title when the page is the wiki's own, not
+/// an article: its namespaces for searches, the random article and the like
+/// (in the languages it is read in most), and its front pages.
+const WIKI_OWN: [&str; 10] = [
+    "Special:", "Especial:", "Spezial:", "Sp%C3%A9cial:", "Speciale:", "Wikipedia:", "Portal:", "Main_Page", "Portada", "Accueil_principal",
+];
+
+/// The picture viewer over a wiki's article (`#/media/File:…`): the article,
+/// though its title names the picture.
+fn media_view(url: &str) -> bool {
+    url.contains("#/media/")
 }
 
 /// Whether a page at `path` (from the site's address on) is `link`'s.
@@ -1828,7 +1846,8 @@ const ID_MARKS: [&str; 18] = [
 /// list, on a site Golem knows the thing after its kind (a Reddit post's
 /// address, its comment's, its picture's open; a post on X with its photo
 /// open), else the address without what only moves within the page
-/// ("#lightbox"; a "#/route" or "#NOTE/…" is a page of its own).
+/// ("#lightbox", a wiki's "#/media/…" picture; a "#/route" or "#NOTE/…" is a
+/// page of its own).
 fn page_key(site: Option<&Site>, url: &str) -> String {
     if let Some(id) = video_id(url) {
         return format!("v:{id}");
@@ -1852,7 +1871,7 @@ fn page_key(site: Option<&Site>, url: &str) -> String {
         }
     }
     let path = match path.split_once('#') {
-        Some((page, within)) if !within.contains('/') => page,
+        Some((page, within)) if !within.contains('/') || within.starts_with("/media/") => page,
         _ => path,
     };
     // (A tab of a page is that page: GitHub's "?tab=repositories".)
@@ -1937,7 +1956,9 @@ fn chrome_titles(visits: &[Visit], site: Option<&Site>, start: &str, name: &str)
 
 /// `pages` once each by the page they are (`page_key`): the newest stands
 /// for it, with the whole group's use, named by the newest title that is
-/// the page's own (`own`), else by its address's words, else not shown.
+/// the page's own (`own`) — and at that title's address (the post, not its
+/// photo open; the article, not its picture) —, else by its address's words,
+/// else not shown.
 fn once_per_page(pages: Vec<(Visit, String)>, site: Option<&Site>, own: impl Fn(&Visit, &str) -> bool) -> Vec<(Visit, String)> {
     let mut at: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<(Visit, String, bool)> = Vec::new();
@@ -1952,6 +1973,7 @@ fn once_per_page(pages: Vec<(Visit, String)>, site: Option<&Site>, own: impl Fn(
                 }
                 if !out[i].2 && fit {
                     (out[i].1, out[i].2) = (title, true);
+                    out[i].0.url = v.url;
                 }
             }
             None => {
@@ -2035,7 +2057,7 @@ fn webapp_pages(visits: Vec<Visit>, site: Option<&Site>, start: &str, name: &str
     let own = |v: &Visit, title: &str| {
         let t = title.to_lowercase();
         let named = !t.is_empty() && !names.contains(&t) && !chrome_word(&t);
-        named && (video_id(&v.url).is_some() || (!chrome.contains(&t) && fits_address(&v.url, title)))
+        named && !media_view(&v.url) && (video_id(&v.url).is_some() || (!chrome.contains(&t) && fits_address(&v.url, title)))
     };
     let pages: Vec<(Visit, String)> = visits
         .into_iter()
@@ -2757,6 +2779,31 @@ mod tests {
     }
 
     #[test]
+    fn a_wikis_picture_view_is_its_article_and_its_own_pages_are_none() {
+        let wiki = site("wikipedia").unwrap();
+        let at = |url: &str, title: &str, last: f64| Visit { last, score: 1.0, ..visit(url, title) };
+        let visits = vec![
+            at("https://en.wikipedia.org/wiki/Bauhaus#/media/File:Joost-schmidt.jpg", "Joost-schmidt - Wikipedia", 9.0),
+            at("https://en.wikipedia.org/wiki/Bauhaus", "Bauhaus - Wikipedia", 8.0),
+            at("https://en.wikipedia.org/wiki/Special:Search?search=permacultura&go=Go", "permacultura - Search results - Wikipedia", 7.0),
+            at("https://es.wikipedia.org/wiki/Wikipedia:Portada", "Wikipedia, la enciclopedia libre", 6.0),
+            at("https://en.wikipedia.org/wiki/Main_Page", "Wikipedia, the free encyclopedia", 5.0),
+            at("https://es.wikipedia.org/wiki/Especial:Aleatoria", "Gato - Wikipedia, la enciclopedia libre", 4.0),
+            at("https://es.wikipedia.org/wiki/Portal:Actualidad", "Portal:Actualidad - Wikipedia, la enciclopedia libre", 3.5),
+            at("https://en.wikipedia.org/wiki/Star_Wars:_Episode_IV", "Star Wars: Episode IV - Wikipedia", 3.0),
+        ];
+        let got = webapp_pages(visits, Some(wiki), "https://www.wikipedia.org", "Wikipedia", 24);
+        let shown: Vec<(&str, &str, f64)> = got.iter().map(|(v, t)| (v.url.as_str(), t.as_str(), v.last)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("https://en.wikipedia.org/wiki/Bauhaus", "Bauhaus", 9.0),
+                ("https://en.wikipedia.org/wiki/Star_Wars:_Episode_IV", "Star Wars: Episode IV", 3.0),
+            ]
+        );
+    }
+
+    #[test]
     fn a_page_without_a_favicon_wears_a_sheet() {
         let dir = scratch("sheet");
         let tile = tile_in(&dir, SHEET.as_bytes()).expect("drawn");
@@ -2776,7 +2823,8 @@ mod tests {
     #[test]
     fn a_page_an_app_named_with_its_own_pages_title_is_not_shown_so() {
         // X kept "Home" over a post with its photo open, and the search's
-        // title over another; the post itself came back named.
+        // title over another; the post itself came back named — at the
+        // post's own address, the one that names it.
         let x = site("x");
         let history = vec![
             visit("https://x.com/dhh/status/2107462374915523022/photo/1", "(1) Home / X"),
@@ -2787,7 +2835,7 @@ mod tests {
         ];
         let got = webapp_pages(history, x, "https://x.com", "X", 8);
         assert_eq!(got.iter().map(|(v, t)| (v.url.as_str(), t.as_str())).collect::<Vec<_>>(), [(
-            "https://x.com/dhh/status/2107462374915523022/photo/1",
+            "https://x.com/dhh/status/2107462374915523022",
             "DHH on X: \"Linux\""
         )]);
         // Reddit's "Inbox" and its tagline over posts, and a picture of one
