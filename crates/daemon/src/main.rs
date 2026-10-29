@@ -271,6 +271,9 @@ fn main() -> anyhow::Result<()> {
     // into every app we launch (see `launch::WORKSPACE_TICKET`). Dropped
     // before any thread exists — the environment is not safe to change later.
     let had_workspace_ticket = launch::drop_workspace_ticket();
+    // The Vulkan driver of the compositor's card, named before any thread
+    // (the environment is not safe to change later) — see `renderer`.
+    renderer::pin_vulkan_driver();
     // The time zone chosen in the control panel is this process's own too.
     controls::adopt_zone(display::GolemSettings::load().time_zone.as_deref());
 
@@ -298,6 +301,9 @@ fn main() -> anyhow::Result<()> {
 
     if had_workspace_ticket {
         info!("dropped the compositor's initial-workspace ticket: launched apps open on the workspace that is showing");
+    }
+    if let Some(pinned) = renderer::PINNED_DRIVER.get() {
+        info!("renderer: Vulkan driver pinned to the compositor's card {pinned}");
     }
 
     // Owner-only state dirs (clipboard text + notification bodies live
@@ -4737,6 +4743,7 @@ impl App {
     }
 
     fn on_apps_loaded(&mut self, loaded: apps::LoadedApps) {
+        let _perf = perf::APPS_LOADED.time();
         info!("app index ready: {} entries", loaded.entries.len());
 
         // Self-heal: every live box must own a grid slot. A box's slot can

@@ -694,6 +694,72 @@ fn make_check_target(
     }
 }
 
+/// Tell the Vulkan loader which driver to load: the compositor's card's.
+///
+/// On a laptop with two GPUs the loader opens EVERY installed driver to
+/// enumerate adapters, and NVIDIA's initialises its card to answer — 0.85 s
+/// at every start of the shell, with the discrete GPU woken for nothing
+/// (dev box, 2026-10-29: the adapter answered at 0.92 s with both drivers,
+/// at 0.04 s with Intel's alone). The shell only ever draws on the card the
+/// compositor draws on (`dmabuf::compositor_card`), so that card's driver is
+/// named in `VK_DRIVER_FILES` (and its older spelling) before any Vulkan
+/// call — unless the owner set either already. A card whose driver has no
+/// Vulkan file here is left to the loader as before; a wrong pick costs
+/// nothing but the GL fallback `Renderer::new` already has.
+pub(crate) fn pin_vulkan_driver() {
+    if std::env::var_os("VK_DRIVER_FILES").is_some() || std::env::var_os("VK_ICD_FILENAMES").is_some() {
+        return;
+    }
+    let Some(card) = crate::dmabuf::compositor_card() else {
+        return;
+    };
+    let Some(name) = card.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let driver = std::fs::read_link(format!("/sys/class/drm/{name}/device/driver"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let icd: &[&str] = match driver.as_str() {
+        "i915" | "xe" => &["intel_icd", "intel_hasvk_icd"],
+        "amdgpu" | "radeon" => &["radeon_icd"],
+        "nvidia" => &["nvidia_icd"],
+        "nouveau" => &["nouveau_icd"],
+        "virtio-pci" | "virtio_gpu" => &["virtio_icd"],
+        _ => return,
+    };
+    let dirs = ["/run/opengl-driver/share/vulkan/icd.d", "/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"];
+    let mut files: Vec<String> = Vec::new();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let file = e.file_name().to_string_lossy().into_owned();
+            if icd.iter().any(|i| file.starts_with(i)) && file.ends_with(".json") {
+                files.push(e.path().to_string_lossy().into_owned());
+            }
+        }
+        if !files.is_empty() {
+            break;
+        }
+    }
+    if files.is_empty() {
+        return;
+    }
+    let list = files.join(":");
+    // SAFETY: called before any other thread exists (see `main`).
+    unsafe {
+        std::env::set_var("VK_DRIVER_FILES", &list);
+        std::env::set_var("VK_ICD_FILENAMES", &list);
+    }
+    // (Said once the log exists: `main` reads this after it set logging up.)
+    let _ = PINNED_DRIVER.set(format!("{name} ({driver}): {list}"));
+}
+
+/// What [`pin_vulkan_driver`] chose, for the log.
+pub(crate) static PINNED_DRIVER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 impl Renderer {
     /// Create the wgpu device and configure the swapchain against an
     /// already-configured layer surface of `width` x `height` physical
@@ -2430,6 +2496,7 @@ impl Renderer {
             return Ok(Frame::Unchanged);
         }
 
+        let acquire = crate::perf::RENDER_ACQUIRE.time();
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             // Timeout is recovered the same way as Lost/Outdated: a fresh
@@ -2465,6 +2532,7 @@ impl Renderer {
             }
             Err(e) => return Err(anyhow!("get_current_texture: {e}")),
         };
+        drop(acquire);
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2842,7 +2910,10 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        {
+            let _submit = crate::perf::RENDER_SUBMIT.time();
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
         if self.pace_by_gpu {
             use std::sync::atomic::Ordering;
             self.gpu_busy.store(true, Ordering::Release);
@@ -2890,7 +2961,10 @@ impl Renderer {
         // OPTIONS bar sat on such a request through whole animations and drew
         // at the 100 ms overdue fallback (dev box, 165 Hz, 2026-10-06).
         before_present();
-        frame.present();
+        {
+            let _present = crate::perf::RENDER_PRESENT.time();
+            frame.present();
+        }
         LAST_PRESENT.with(|t| t.set(Some(now)));
         if let Some(tiles) = frame_tiles {
             if let Some(old) = self.damage_prev.replace(tiles) {
@@ -3083,6 +3157,7 @@ fn icon_layers(count: usize) -> u32 {
 }
 
 fn write_icon_chain(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, chain: &[u8]) {
+    let _perf = crate::perf::ICON_UPLOAD.time();
     let mut offset = 0usize;
     let mut size = ICON_SIZE;
     for mip in 0..ICON_MIPS {

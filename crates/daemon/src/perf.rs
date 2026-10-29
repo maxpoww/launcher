@@ -96,12 +96,20 @@ pub(crate) static DESKTOP_ICON: Counter = Counter::new();
 pub(crate) static FILES_MERGE: Counter = Counter::new();
 /// A `files …` command (open a folder, close, …), whole.
 pub(crate) static FILES_CMD: Counter = Counter::new();
+/// The app index landing on the loop (`on_apps_loaded`), whole, and every
+/// icon chain written into a GPU array (`write_icon_chain`).
+pub(crate) static APPS_LOADED: Counter = Counter::new();
+pub(crate) static ICON_UPLOAD: Counter = Counter::new();
 /// A whole OPTIONS-bar frame.
 pub(crate) static OPTIONS_DRAW: Counter = Counter::new();
 /// A whole deck frame.
 pub(crate) static DECK_DRAW: Counter = Counter::new();
 /// `Renderer::render` on any surface (inside the three above).
 pub(crate) static RENDER: Counter = Counter::new();
+/// …of which: waiting for a swapchain image, the submit, the present.
+pub(crate) static RENDER_ACQUIRE: Counter = Counter::new();
+pub(crate) static RENDER_SUBMIT: Counter = Counter::new();
+pub(crate) static RENDER_PRESENT: Counter = Counter::new();
 /// `Renderer::measure_text`.
 pub(crate) static MEASURE: Counter = Counter::new();
 /// A label shaped (a cache miss, or an uncached label).
@@ -164,9 +172,14 @@ pub(crate) fn report() -> String {
         timed("desktop-icon", &DESKTOP_ICON),
         timed("files-merge", &FILES_MERGE),
         timed("files-cmd", &FILES_CMD),
+        timed("apps-loaded", &APPS_LOADED),
+        timed("icon-upload", &ICON_UPLOAD),
         timed("options", &OPTIONS_DRAW),
         timed("deck", &DECK_DRAW),
         timed("render", &RENDER),
+        timed("acquire", &RENDER_ACQUIRE),
+        timed("submit", &RENDER_SUBMIT),
+        timed("present", &RENDER_PRESENT),
         timed("measure_text", &MEASURE),
         timed("shapes", &SHAPE),
         timed("hypr", &HYPR_REQUEST),
