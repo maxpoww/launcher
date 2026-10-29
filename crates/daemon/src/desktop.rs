@@ -2554,7 +2554,7 @@ impl App {
             }
             let key = thumb_key(&item.path);
             if !self.desktop.chains.contains_key(&key) {
-                if let Some((_, pixels)) = self.thumb_map.get(&item.path) {
+                if let Some(pixels) = self.thumb_recent(&item.path) {
                     self.desktop.chains.insert(key.clone(), pixels.clone());
                 }
             }

@@ -931,6 +931,7 @@ fn main() -> anyhow::Result<()> {
         assets: HashMap::new(),
         thumbs,
         thumb_map: HashMap::new(),
+        thumb_recent: std::collections::VecDeque::new(),
         thumb_next: 0,
         thumb_pending: HashSet::new(),
         moving: HashMap::new(),
@@ -2180,7 +2181,13 @@ pub struct App {
     thumbs: thumbs::Thumbs,
     /// Finished thumbnails by path: reserved-slot index + pixels (kept
     /// for re-upload after a rescan rebuilds the texture array).
-    thumb_map: HashMap<String, (usize, Vec<u8>)>,
+    /// Each thumbnailed path's layer slot and its picture's aspect. The
+    /// pixels themselves live on the GPU (and in the thumbnail cache on
+    /// disk): kept here too they were 350 KB each, 53 MB for 160 — a tenth
+    /// of a 4 GB machine's free memory (2026-10-29). The last few are kept
+    /// in `thumb_recent` for the readers that need the pixels right away.
+    thumb_map: HashMap<String, (usize, f32)>,
+    thumb_recent: std::collections::VecDeque<(String, Vec<u8>)>,
     /// Round-robin cursor over the reserved thumbnail slots.
     thumb_next: usize,
     /// Paths with a thumbnail job in flight (request deduplication).
@@ -3417,8 +3424,31 @@ impl App {
                         .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
                         .unwrap_or(0)
                 };
-                let thumbs: usize = self.thumb_map.values().map(|(_, p)| p.len()).sum();
+                let thumbs: usize = self.thumb_recent.iter().map(|(_, p)| p.len()).sum();
                 let chains: usize = self.desktop.chains.values().map(Vec::len).sum();
+                // The biggest mappings, by what they hold in RAM (the heap,
+                // the GPU driver's, the loaded files) — the process's own
+                // /proc/self/smaps, read only here.
+                let mut by_name: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                let mut name = String::new();
+                for line in std::fs::read_to_string("/proc/self/smaps").unwrap_or_default().lines() {
+                    if let Some(rss) = line.strip_prefix("Rss:") {
+                        let kb = rss.trim().trim_end_matches("kB").trim().parse::<u64>().unwrap_or(0);
+                        *by_name.entry(name.clone()).or_default() += kb;
+                    } else if line
+                        .split_once(' ')
+                        .is_some_and(|(range, _)| range.split_once('-').is_some_and(|(a, b)| !a.is_empty() && a.chars().all(|c| c.is_ascii_hexdigit()) && b.chars().all(|c| c.is_ascii_hexdigit())))
+                    {
+                        name = line.split_whitespace().nth(5).unwrap_or("[anon]").to_owned();
+                        if name.starts_with("/nix/store/") {
+                            name = name.rsplit('/').next().unwrap_or(&name).to_owned();
+                        }
+                    }
+                }
+                let mut top: Vec<(String, u64)> = by_name.into_iter().collect();
+                top.sort_by_key(|(_, kb)| std::cmp::Reverse(*kb));
+                let top: Vec<String> = top.iter().take(8).filter(|(_, kb)| *kb >= 2048).map(|(n, kb)| format!("{n} {} MB", kb / 1024)).collect();
+                info!("memory map: {}", top.join(", "));
                 info!(
                     "memory: rss {} MB (anon {}, file {}), {} thumbs {} MB, desktop {} chains {} MB, inboxes {}+{}",
                     kb("VmRSS:") / 1024,

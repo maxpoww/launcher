@@ -648,7 +648,7 @@ impl App {
         let sh = self.output_logical_height().unwrap_or(0.0);
         let aspect = if sw > 0.0 && sh > 0.0 { sw / sh } else { 16.0 / 10.0 };
         let card = if sw > 0.0 { ((self.config.window.width as f32 + 24.0) / sw).min(0.9) } else { 0.5 };
-        self.wall_guess = self.thumb_map.get(path).and_then(|(_, pixels)| preview_colour(pixels, aspect, card));
+        self.wall_guess = self.thumb_recent(path).and_then(|pixels| preview_colour(pixels, aspect, card));
         self.wall_until = Some(now + WALL_WINDOW);
         tracing::info!("wallpaper: changing; its colour from the preview: {:?}", self.wall_guess);
         self.demand_capture(Demand::Fresh);
