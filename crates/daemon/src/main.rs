@@ -1533,6 +1533,28 @@ fn main() -> anyhow::Result<()> {
     app.filer_folder_bell();
 
     info!("daemon up; try: waverunner-ctl toggle");
+    // The loop's lateness meter (perf::LOOP_LATE): a 25 ms tick that notes how
+    // late it was woken — every ms of lateness is a ms the shell was busy
+    // and answered nothing. `waverunner-ctl debug-perf` reads it.
+    {
+        const TICK: Duration = Duration::from_millis(25);
+        let _ = event_loop.handle().insert_source(
+            Timer::from_duration(TICK),
+            |deadline, _, _app: &mut App| {
+                let late = std::time::Instant::now().saturating_duration_since(deadline);
+                perf::LOOP_TICKS.hit();
+                if late > Duration::from_millis(30) {
+                    perf::LOOP_LATE.record_nanos(late.as_nanos() as u64);
+                }
+                // A stall the owner would feel gets a line of its own, so the
+                // log says WHEN — the lines around it say what was going on.
+                if late > Duration::from_millis(100) {
+                    info!("loop: stalled {} ms (the shell answered nothing)", late.as_millis());
+                }
+                TimeoutAction::ToDuration(TICK)
+            },
+        );
+    }
     // One view of the compositor per turn of the loop (hypr::SNAPSHOT).
     hypr::snapshot_enable();
     while !app.exit {
@@ -3770,6 +3792,7 @@ impl App {
                 return;
             }
             Command::Files(what) => {
+                let _perf = perf::FILES_CMD.time();
                 let done = self.filer_command(&what);
                 info!("files: {done}");
                 return;

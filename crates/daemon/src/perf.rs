@@ -14,6 +14,9 @@ use std::time::Instant;
 pub(crate) struct Counter {
     calls: AtomicU64,
     nanos: AtomicU64,
+    /// The longest single timing since the last report: the frame that
+    /// was felt, which an average hides.
+    max_nanos: AtomicU64,
 }
 
 impl Counter {
@@ -21,7 +24,15 @@ impl Counter {
         Self {
             calls: AtomicU64::new(0),
             nanos: AtomicU64::new(0),
+            max_nanos: AtomicU64::new(0),
         }
+    }
+
+    /// Record one timing of `nanos` (for work timed by the caller).
+    pub(crate) fn record_nanos(&self, nanos: u64) {
+        self.calls.fetch_add(1, Relaxed);
+        self.nanos.fetch_add(nanos, Relaxed);
+        self.max_nanos.fetch_max(nanos, Relaxed);
     }
 
     /// Count one occurrence.
@@ -48,6 +59,10 @@ impl Counter {
             self.nanos.swap(0, Relaxed) as f64 / 1e6,
         )
     }
+
+    fn take_max_ms(&self) -> f64 {
+        self.max_nanos.swap(0, Relaxed) as f64 / 1e6
+    }
 }
 
 pub(crate) struct Timed<'a> {
@@ -57,15 +72,30 @@ pub(crate) struct Timed<'a> {
 
 impl Drop for Timed<'_> {
     fn drop(&mut self) {
-        self.counter.calls.fetch_add(1, Relaxed);
-        self.counter
-            .nanos
-            .fetch_add(self.start.elapsed().as_nanos() as u64, Relaxed);
+        self.counter.record_nanos(self.start.elapsed().as_nanos() as u64);
     }
 }
 
+/// The event loop's own lateness: a 25 ms timer records how late each tick
+/// fires. Late = the loop was busy (one draw, one blocking call, one file
+/// write) — the time the shell could not answer anything. `calls` are the
+/// ticks that were late by more than 30 ms; the timing is the lateness.
+pub(crate) static LOOP_LATE: Counter = Counter::new();
+/// The ticks themselves (how long the report covers, at 40 a second).
+pub(crate) static LOOP_TICKS: Counter = Counter::new();
 /// A whole dock frame: animation step, scene build, render.
 pub(crate) static DOCK_DRAW: Counter = Counter::new();
+/// The desktop's folder read into icons (`reload_desktop`), on the loop.
+pub(crate) static DESKTOP_RELOAD: Counter = Counter::new();
+/// A desktop frame (`draw_desktop`), the ink map started (`desktop_ink_start`),
+/// an icon or a thumbnail landing (`on_desktop_icon` / `desktop_on_thumb`).
+pub(crate) static DESKTOP_DRAW: Counter = Counter::new();
+pub(crate) static DESKTOP_INK: Counter = Counter::new();
+pub(crate) static DESKTOP_ICON: Counter = Counter::new();
+/// The file index taking the watched folders' tops (`merge_tops`), on the loop.
+pub(crate) static FILES_MERGE: Counter = Counter::new();
+/// A `files …` command (open a folder, close, …), whole.
+pub(crate) static FILES_CMD: Counter = Counter::new();
 /// A whole OPTIONS-bar frame.
 pub(crate) static OPTIONS_DRAW: Counter = Counter::new();
 /// A whole deck frame.
@@ -118,16 +148,27 @@ pub(crate) static VISIBLE_MISSED: Counter = Counter::new();
 pub(crate) fn report() -> String {
     let timed = |name: &str, c: &Counter| {
         let (n, ms) = c.take();
-        format!("{name} {n} in {ms:.1} ms")
+        let max = c.take_max_ms();
+        format!("{name} {n} in {ms:.1} ms (max {max:.1})")
     };
     let count = |name: &str, c: &Counter| format!("{name} {}", c.take().0);
+    let (stalls, late_ms) = LOOP_LATE.take();
+    let worst = LOOP_LATE.take_max_ms();
+    let ticks = LOOP_TICKS.take().0;
     [
+        format!("loop {ticks} ticks, {stalls} stalls >30 ms ({late_ms:.0} ms late, worst {worst:.1})"),
         timed("dock", &DOCK_DRAW),
+        timed("desktop-reload", &DESKTOP_RELOAD),
+        timed("desktop-draw", &DESKTOP_DRAW),
+        timed("desktop-ink", &DESKTOP_INK),
+        timed("desktop-icon", &DESKTOP_ICON),
+        timed("files-merge", &FILES_MERGE),
+        timed("files-cmd", &FILES_CMD),
         timed("options", &OPTIONS_DRAW),
         timed("deck", &DECK_DRAW),
         timed("render", &RENDER),
         timed("measure_text", &MEASURE),
-        count("shapes", &SHAPE),
+        timed("shapes", &SHAPE),
         timed("hypr", &HYPR_REQUEST),
         count("hypr-cached", &HYPR_CACHED),
         count("captures", &CAPTURE),

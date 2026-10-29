@@ -2494,6 +2494,7 @@ impl App {
         if self.desktop_layer.is_none() {
             return;
         }
+        let _perf = crate::perf::DESKTOP_RELOAD.time();
         let dir = desktop_dir();
         let mut items = list(&dir);
         // What is plugged in comes first (it takes the first free cells
@@ -2770,6 +2771,7 @@ impl App {
     /// The resolver answered: file the pixels (a placeholder answer means
     /// the theme has no such icon — the name alone is shown) and draw.
     pub(crate) fn on_desktop_icon(&mut self, res: crate::notif_icons::Resolved) {
+        let _perf = crate::perf::DESKTOP_ICON.time();
         // (A symbol of the menus: the top surface's.)
         if crate::glyphs::is_key(&res.key) || self.desktop_top.glyph_asked.contains(&res.key) {
             return self.desktop_on_glyph(res.key, res.chain);
@@ -2791,6 +2793,7 @@ impl App {
     /// The thumbnailer finished a file that is on the desktop: it wears its
     /// own picture from now on.
     pub(crate) fn desktop_on_thumb(&mut self, path: &str, pixels: &[u8]) {
+        let _perf = crate::perf::DESKTOP_ICON.time();
         if !self.desktop.items.iter().any(|it| it.path == path) {
             return;
         }
@@ -4826,6 +4829,7 @@ impl App {
     /// wallpaper is read off the loop (or a new screen size); a veil moved
     /// far enough to change a name's ink draws again.
     pub(crate) fn desktop_ink_start(&mut self) {
+        let _perf = crate::perf::DESKTOP_INK.time();
         let timer = calloop::timer::Timer::from_duration(std::time::Duration::from_secs(2));
         let armed = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
             app.desktop_ink_sync();
@@ -4864,6 +4868,7 @@ impl App {
 
     /// Draw one desktop frame.
     pub(crate) fn draw_desktop(&mut self) {
+        let _perf = crate::perf::DESKTOP_DRAW.time();
         if self.part_lost(crate::shell_screens::Part::Desktop) {
             return;
         }

@@ -1853,7 +1853,7 @@ impl Renderer {
             if let Some(&w) = map.get(key.as_str()) {
                 return w;
             }
-            crate::perf::SHAPE.hit();
+            let _shape = crate::perf::SHAPE.time();
             let mut font_system = self.font_system.borrow_mut();
             let mut buffer =
                 TextBuffer::new(&mut font_system, Metrics::new(font_px, font_px * 1.3));
@@ -2090,7 +2090,7 @@ impl Renderer {
         // Shaped at physical px (metrics × scale) so glyphs are rasterized at
         // the resolution they are displayed, then laid out in physical coords.
         let shape = |font_system: &mut FontSystem, label: &crate::content::Label| {
-            crate::perf::SHAPE.hit();
+            let _shape = crate::perf::SHAPE.time();
             let mut buffer = TextBuffer::new(
                 font_system,
                 Metrics::new(label.font_px * scale, label.line_px * scale),
