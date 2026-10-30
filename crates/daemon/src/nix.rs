@@ -1582,8 +1582,8 @@ fn plain_attr(attr: &str) -> bool {
 
 /// What is known of `attr` for its page: the details file beside the index;
 /// else what nix said of it before (`pkg-meta/<attr>.json`); else nix asked
-/// now (its `meta`, a second or so) and kept. The description falls back to
-/// the index's (clipped) one.
+/// now (its `meta` from this computer's nixpkgs, offline: under half a second)
+/// and kept. The description falls back to the index's (clipped) one.
 fn details_of(attr: &str) -> PkgDetails {
     if !plain_attr(attr) {
         return PkgDetails::default();
@@ -1630,11 +1630,14 @@ const META_PATIENCE: Duration = Duration::from_secs(10);
 /// What a package's meta is made into, as the flake's index flattens it.
 const META_FLAT: &str = r#"m: let one = x: if builtins.isAttrs x then (x.spdxId or x.shortName or x.fullName or "") else if builtins.isString x then x else ""; h = m.homepage or ""; l = m.license or null; in { description = m.description or ""; homepage = if builtins.isList h then (if h == [] then "" else builtins.head h) else h; license = if builtins.isList l then builtins.concatStringsSep " / " (map one l) else one l; program = m.mainProgram or ""; long = m.longDescription or ""; }"#;
 
-/// `nix eval` of `attr`'s meta.
+/// `nix eval` of `attr`'s meta, from the nixpkgs this computer installs from
+/// (`<nixpkgs>`: the system's channel or its flake) and OFFLINE — the dock asks
+/// nothing of the network (`nixpkgs#…` went to the registry, which on the dev
+/// box is no pin: GitHub's nixpkgs-unstable, downloaded). Each part of the
+/// attr quoted (`plain_attr` keeps quotes and `${` out of it).
 fn ask_nix_meta(attr: &str) -> Option<PkgDetails> {
     let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", "--impure", &format!("nixpkgs#{attr}.meta"), "--apply", META_FLAT])
-        .env("NIXPKGS_ALLOW_UNFREE", "1");
+    cmd.args(["eval", "--offline", "--json", "--impure", "--expr", &meta_expr(attr)]);
     let started = std::time::Instant::now();
     let out = crate::controls::finish_within(cmd, true, META_PATIENCE)?;
     let f: SearchMeta = serde_json::from_str(&out).ok()?;
@@ -1647,6 +1650,12 @@ fn ask_nix_meta(attr: &str) -> Option<PkgDetails> {
         program: some(f.program),
         long: some(f.long),
     })
+}
+
+/// The expression `ask_nix_meta` evaluates for `attr`.
+fn meta_expr(attr: &str) -> String {
+    let path: String = attr.split('.').map(|part| format!(".\"{part}\"")).collect();
+    format!("({META_FLAT}) ((import <nixpkgs> {{ config.allowUnfree = true; }}){path}.meta)")
 }
 
 /// The shared tail of a dump: parse the `nix search --json` map, keep
@@ -1809,6 +1818,14 @@ fn load_cache(path: &Path) -> anyhow::Result<Vec<PkgEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_packages_meta_is_asked_of_this_computers_nixpkgs_each_part_quoted() {
+        let e = meta_expr("python3Packages.requests");
+        assert!(e.contains(r#"(import <nixpkgs> { config.allowUnfree = true; })."python3Packages"."requests".meta"#), "{e}");
+        assert!(meta_expr("gtk+3").contains(r#"."gtk+3".meta"#));
+        assert!(!e.contains("nixpkgs#"));
+    }
 
     #[test]
     fn a_packages_details_round_trip_beside_its_index() {

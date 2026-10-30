@@ -276,8 +276,10 @@ The big daemon files are cohesive but long — go straight to the function:
   → `Event::Details`, `PkgDetails`): the DETAILS FILE beside the index (`nixpkgs-details.tsv`, the
   flake's package-index jq writes homepage, licence, mainProgram, longDescription — reaches an install
   with the Golem pin); else what nix said before (`~/.cache/waverunner/pkg-meta/<attr>.json`); else nix
-  ASKED (`nix eval nixpkgs#<attr>.meta --apply META_FLAT`, ~0.6–0.9 s on the dev box, 10 s at most) and
-  kept; the description falls back to the index's. No network of the dock's own.
+  ASKED — `nix eval --offline --expr` of `(import <nixpkgs> {…})."<attr>".meta` through META_FLAT: the
+  nixpkgs this computer installs from, never the network (`nixpkgs#…` was the registry's, on the dev box
+  GitHub's nixpkgs-unstable, downloaded; 2026-10-29), ~0.4 s, 10 s at most — and kept; the description
+  falls back to the index's.
 - THE INSTALL ROW'S SPEED (2026-10-29, Max: "the result takes a little while to show up, and the icon
   even more"): the rank thread only ranks (`index_and_rank`, 1–5 ms; a query asked is not asked again
   while it is ranked — `App::pkg_asked`); the ICONS are a thread of their own (`hit_icons`, readied by
