@@ -173,7 +173,7 @@ workers — kept separate so a slow build never blocks an install, or search.
 
 ## Performance (2026-10-29: "Golem tiene que fluir", the dev box AND a 4 GB Haswell)
 The loop is one thread: anything over ~30 ms on it is a stall the owner feels. What tells:
-- `waverunner-ctl debug-perf` → the daemon log's `perf:` line (loop ticks, stalls >30 ms, worst; per-counter
+- `waverunner-ctl debug-perf` → the daemon log's `perf:` line (loop turns, stalls >30 ms, worst; per-counter
   counts/ms/max: dock, options, render, submit, present, icon-upload, notif-measure, files-cmd, off-loop-then,
   hypr IPC…), a `memory map` line (top mappings) and a `memory:` line (rss, thumbs, desktop chains, clipboard
   images, notification pictures on their way, bar icons layers, symbols, files windows' chains, minimized).
@@ -220,6 +220,33 @@ Design rules that came out of it (keep them):
   scale of 1 nothing on screen meets more than 128 texels of an icon. Producers that fix 256² (the plugin's
   minimized pictures) are halved on the way in; tests know the tier. Build it beside the full one with
   `--target-dir target-128` (a features change rebuilds the crate).
+THE DOCK AT REST (2026-10-30, after reading Omarchy, whose rule is "long-running code reacts to events; polling is the
+last resort"; the whole study is Golem's `docs/omarchy.md`): `tools/perf-guard/rest-check.py` measures the dock on an
+empty workspace against a budget (wake-ups, CPU, processes started — counts, the same on any machine) and fails over it;
+run it after anything that adds a timer. 100.7 wake-ups a second and 0.60 % of a CPU became 15.3 and 0.25 %:
+- The loop's meter is not a timer (`perf::TurnMeter`, calloop's "the poll came back"; `perf::turn_ended` from the loop):
+  it times whole turns; it was a 25 ms timer, 40 wake-ups a second to measure the others.
+- `GolemSettings::load` reads and parses the file only when its inode, mtime or length changed (it was read twice every
+  2 s on the loop for the desktop names' veil, and on many more questions). Ask it freely.
+- A probe's answer goes to a file in memory, read once at its end (`audio.rs::probe`): `pw-dump` writes a line at a time,
+  6000 wake-ups a dump through a pipe. Do the same for any tool that prints much and slowly.
+- USB is told by the kernel (`usb_watch.rs`: its uevent socket; no privileges, no daemon), for the mounts' and the
+  scanners' workers, each with a slow look behind it; it was 20 sysfs reads a second and two wake-ups every 3 s.
+- Media and Bluetooth are told by the bus (`collectors/bus_wait.rs`, tested on a private bus with fake services:
+  `tests/told_by_the_bus.rs`): they asked every 1 s and 3 s, each question waking the bus, the player and us. A playing
+  track is still read every second (its position moves with no word). ⚠ a zbus `MessageStream` left unread hangs the
+  connection: every wait goes through `bus_wait::next`.
+- The zone poll (`zone_poll_arm`) keeps its 800 ms only while someone is touching something or a colour capture brought a
+  frame lately; nobody for 3 s (`lighting_is_quiet`, the idle protocol): 4 s, and a look at once when a hand comes back.
+  Each tick is two IPC round trips, which wake the compositor too.
+- Not worth it, measured: `MALLOC_ARENA_MAX=2` (175 against 176 MB), `malloc_trim` (6 MB of 177).
+THE POWER MODE (`power_mode.rs`, Omarchy's `omarchy-powerprofiles-set`): `power_mode::follow` from the brain's metrics, on
+a change of source only: performance on the charger, balanced on the battery, unless the owner picked another for that
+source (`settings.power_charger/power_battery`, kept by `power_mode::picked` from the control panel and the gear page).
+Rig: `debug-desktop "power battery|charger"` (the next look at the machine puts the real source back). ⚠ in a test rig
+it is REAL on the machine's daemon. Measured on the dev box on the charger, balanced then performance: a small job right
+after idling 31.8 → 13.7 ms, one thread 3.20 → 2.26 s, all 6.58 → 4.84 s, a build of this crate 120.9 → 98.0 s; 44 → 51 C
+at rest.
 Numbers to keep (2026-10-29): dev box rss 263 → 153 MB, first turn 384 → ~110 ms, index 303 ms one pass,
 0 walked; MacBook (HD 5000, GL) boot-to-userspace 1m46 → 10 s, apps index 9.6 → ~1.3 s (pack close 885 → 24
 ms), first turn 1.6 s → a few turns under 400 ms, the icons landing before the home walk. (A MacBook boot at
