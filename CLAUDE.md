@@ -269,7 +269,9 @@ The big daemon files are cohesive but long — go straight to the function:
   card's side and is kept out; `COLUMN` 560 wide at most): its icon (the package keeps its entry while its
   page is up, installed or not — `page_package`), its name, "version · licence · App to install" (a webapp:
   "host · Web app"), what it does (two lines), the buttons as a centred row and, faint, its long description
-  (`LONG_MAX` 6 lines). The CONTROL PANEL sends the page away (`toggle_panel` → `page_close`; `page_up` is
+  (`LONG_MAX` 6 lines). THE BOX CLOSING — off the screen or into the dock — sends the page away (and an
+  open More: `sync_surface_state`, any target but Open; Max, 2026-10-30: "el dock se tiene que resetear
+  cuando se cierra, siempre"). The CONTROL PANEL sends the page away (`toggle_panel` → `page_close`; `page_up` is
   false under it): the page had taken every click while it stood under the panel. Buttons Install (Installing… /
   Installed; a webapp installed: Open) · Website (the package's homepage; none: More info =
   search.nixos.org) · Try (a package built and run — Starting… while it builds, the page stays —, a
@@ -295,6 +297,28 @@ The big daemon files are cohesive but long — go straight to the function:
   reserved tail a hit): an app keeps its icon from one answer to the next (they were all cleared at
   each answer, every cell the installer box until all came at once); only the ones it lacks are asked
   (`Request::Icons`). `debug` logs say "pkg rank … in", "pkg icons … at".
+- THE INSTALL ROW AND "MORE" (2026-10-30, Max: "i searched for krita… i get krita-plugin… i want chrome
+  not the other ones… the more common ones and then a… 'more'… no queremos que paquetes usados terminen
+  en more"): `nix::tiers` splits what a query found into THE ROW (`Event::Ranked::main`, `ROW_MAX` 6) and
+  the rest, under a "More" plate after the row (`install::PKG_MORE_ID`, `push_pkg_more_cell`: the
+  installer box dimmed with the word on it, "{n} more" under; drawn in `content.rs` from
+  `FrameInput::more_cell`); a click or Enter opens it for that query (`SearchState::pkg_more_for`,
+  `pkg_more_open`) — any other query or the box closing shuts it; not draggable. USE decides: each
+  package's share of real machines (`assets/pkg-popularity.tsv`, parts per 10 000: the higher of Debian
+  popcon and Arch pkgstats; `tools/pkg-popularity/gen-popularity.sh` regenerates it, names that differ
+  in `aliases.tsv` — "code" is vscode; vendored: the dock goes on no network). The rules, the
+  real-index check (`QUERIES=… cargo test --release -p waverunner-daemon rank_the_real -- --ignored
+  --nocapture`) and the tests are in `nix.rs` at "THE ROW AND MORE": a used program typed whole first,
+  names starting with it (typing ahead: ghostscript AND ghostty), a word of a name, apps by a name inside
+  or by what they do ("office" → libreoffice, "browser" → firefox) when no used program has the name;
+  never a PART (`is_part`: lib…, a library, bindings, plugin, driver… — counted wherever needed) unless a
+  named program's own (docker's plugins), a BUILD of a program found (`variant_of`: vlc-bin, python313),
+  an offshoot far less used (krita's plugin). A Python app's pname is `bare_name`'d. The rank answers
+  TWICE: names (and the descriptions of the broadly used) at once, then after `MORE_AFTER` (250 ms of
+  no typing) the whole description search joins More. A package's icon is its own or a VARIANT's
+  program's (`icon_candidates`: `-bin`… only — chrome-export had Chrome's). A FAILED install tile is
+  not on the list (`restore_install_state` stages only live ones; the krita of 2026-10-26 hid krita for
+  good) and Install on its page or a drag retries it (`retry_failed_install`).
 - `hypr.rs` — all compositor IPC (dispatch + JSON reads).
 - `panel.rs` — the control panel (the card as a field of settings pills); an open setting's
   content is `open_content`: Scale and Resolution from `display.rs`, every other setting from
