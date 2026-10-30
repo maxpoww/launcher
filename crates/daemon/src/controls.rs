@@ -2682,7 +2682,9 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             }
         }
         "profile" => {
-            run("powerprofilesctl", &["set", value]);
+            if run("powerprofilesctl", &["set", value]) {
+                crate::power_mode::picked(value);
+            }
         }
         "speed" => {
             if let Ok(v) = value.parse::<f64>() {

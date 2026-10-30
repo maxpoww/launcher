@@ -165,6 +165,7 @@ mod transition;
 mod trash;
 mod usage;
 mod usb_watch;
+mod power_mode;
 mod visible;
 mod wall_follow;
 mod wall_tint;
@@ -4726,6 +4727,13 @@ impl App {
         }
         self.check_battery(&ctx);
         self.battery_watch(ctx.metrics.battery_pct, ctx.metrics.is_charging || ctx.metrics.on_ac);
+        // (Memory read as nothing: the first sample is not in yet, and a laptop
+        // on its battery must not be taken for a desktop for a moment.)
+        if ctx.metrics.ram_usage_pct > 0.0 {
+            power_mode::follow(
+                ctx.metrics.on_ac || ctx.metrics.is_charging || ctx.metrics.battery_pct.is_none(),
+            );
+        }
         // Compared by reference, not by cloning both sides: this runs on every
         // brain update, which is often.
         let playing_changed = self.brain.as_ref().is_none_or(|c| c.playing != ctx.playing);

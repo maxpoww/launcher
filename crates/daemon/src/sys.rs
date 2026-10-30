@@ -334,7 +334,10 @@ fn run(events: &Sender<SysEvent>, rx: &mpsc::Receiver<SysCommand>) {
                     }
                 }
             }
-            Some(SysCommand::Profile(p)) => run_quiet("powerprofilesctl", &["set", &p]),
+            Some(SysCommand::Profile(p)) => {
+                run_quiet("powerprofilesctl", &["set", &p]);
+                crate::power_mode::picked(&p);
+            }
             Some(SysCommand::ChargeLimit(on)) => {
                 if let Some(path) = battery_dir().map(|d| d.join("charge_control_end_threshold")) {
                     if let Err(e) = std::fs::write(&path, if on { "80" } else { "100" }) {

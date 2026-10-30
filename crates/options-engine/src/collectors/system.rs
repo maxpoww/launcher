@@ -564,7 +564,8 @@ fn mains_online() -> bool {
         let Ok(kind) = std::fs::read_to_string(p.join("type")) else {
             continue;
         };
-        if kind.trim() != "Mains" {
+        // (A USB-C charger is a charger: some machines have only that.)
+        if !matches!(kind.trim(), "Mains" | "USB" | "USB_C" | "USB_PD" | "USB_PD_DRP") {
             continue;
         }
         if let Ok(online) = std::fs::read_to_string(p.join("online")) {

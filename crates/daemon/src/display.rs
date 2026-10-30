@@ -459,6 +459,12 @@ pub(crate) struct GolemSettings {
     /// login, Dynamic — keeps working).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wallpaper_follows: bool,
+    /// The power mode the owner picked on the charger and on the battery
+    /// ([`crate::power_mode`]); absent: performance and balanced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_charger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_battery: Option<String>,
     /// The desktop's colours: the palette and how the shell wears it
     /// ([`crate::palette`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -6496,6 +6496,13 @@ impl App {
         }
         // (`collapse`, `peek`, `unpeek`, `cancel`: what a click and the
         // pointer do to the pill.)
+        // `power charger|battery`: what the power mode does when the source
+        // changes, with no cable to pull (the next look at the machine puts the
+        // real source back).
+        if let Some(rest) = what.strip_prefix("power ") {
+            crate::power_mode::follow(rest == "charger");
+            return format!("power mode: as on {rest}");
+        }
         if let Some(rest) = what.strip_prefix("taskbox ") {
             return self.task_pill_debug(rest.trim());
         }

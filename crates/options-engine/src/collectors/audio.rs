@@ -31,8 +31,10 @@ use crate::state::{
 /// The probe interval when there is no `pw-mon` to say when (tool missing,
 /// or it died): polling is then the only clock.
 const POLL: Duration = Duration::from_secs(2);
-/// The safety-net interval while `pw-mon` is watching.
-const HEARTBEAT: Duration = Duration::from_secs(60);
+/// The safety-net interval while `pw-mon` is watching. Each one starts two
+/// processes, so it is slow (it was every minute until 2026-10-30): the watcher
+/// says what changes, and a dropped echo already earns its confirming probe.
+const HEARTBEAT: Duration = Duration::from_secs(300);
 /// How often a watcher that died is started again. PipeWire restarting takes
 /// `pw-mon` with it, and the collector then polled every [`POLL`] for the rest
 /// of the session.
