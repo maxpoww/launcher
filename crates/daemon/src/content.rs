@@ -154,6 +154,9 @@ pub const FONT_BOLD: &str = "\u{1}bold";
 /// regular one, never to bold.
 pub const FONT_MEDIUM: &str = "\u{1}medium";
 
+/// The Install "More" plate's word, as a share of the tile.
+const MORE_WORD: f32 = 0.24;
+
 /// One text label.
 #[derive(Debug, Clone)]
 pub struct Label {
@@ -2317,6 +2320,9 @@ pub struct FrameInput<'a> {
     /// The action cell whose name may spread over `WIDE_LABEL` cells (a
     /// site's search, alone in its row).
     pub act_wide: Option<usize>,
+    /// The Install row's "More" cell (`install::pkg_results`) and the word
+    /// on its plate.
+    pub more_cell: Option<(usize, &'static str)>,
     /// The lone app's recents' title ("Recent in VLC"), drawn in the room
     /// opened under its row.
     pub recent_title: Option<&'a str>,
@@ -2707,6 +2713,7 @@ pub fn scene(
         act_cells,
         act_asking,
         act_wide,
+        more_cell,
         recent_title,
         deep,
         fast,
@@ -4176,6 +4183,54 @@ pub fn scene(
                             clip: Some(clip),
                         });
                     }
+                }
+                continue;
+            }
+            // THE INSTALL ROW'S "MORE" (Max, 2026-10-30: "like a plate with the
+            // word 'more'"): the installer box at half its light as the action
+            // cells wear their app's, the word white over it with a soft shadow,
+            // and how many wait under it for a name.
+            if let Some((_, word)) = more_cell.filter(|(e, _)| *e == entry_idx) {
+                let rect = Rect::new(cx - size / 2.0, icon_cy - size / 2.0 - lift(entry_idx), size, size);
+                g.icons.push(IconInst {
+                    rect,
+                    layer: layer_of(entry_idx),
+                    tint: [0.0, 0.0, 0.0, 1.0 - crate::app_actions::DIM],
+                    ring: -1.3,
+                    plate: plate_of(entry_idx),
+                });
+                let v = sec.viewport;
+                let clip = reveal_clip(Rect::new(v.x, v.y, v.w, v.h + 2.0 * LABEL_LINE_PX));
+                let px = size * MORE_WORD;
+                for (dy, color) in [(size * 0.02, [0.0, 0.0, 0.0, 0.45]), (0.0, [1.0, 1.0, 1.0, 1.0])] {
+                    g.labels.push(Label {
+                        text: word.to_string(),
+                        pos: (cx, rect.y + (size - px * 1.25) / 2.0 + dy),
+                        max_w: size * 0.92,
+                        font_px: px,
+                        line_px: px * 1.25,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        family: Some(FONT_MEDIUM),
+                        color: Some(color),
+                        clip: Some(clip),
+                    });
+                }
+                if !covered {
+                    g.labels.push(Label {
+                        text: entry.name.clone(),
+                        pos: (cx, cell.y + grid_icon_top + grid_icon + GRID_LABEL_GAP),
+                        max_w: cell.w - 12.0,
+                        font_px: LABEL_FONT_PX,
+                        line_px: LABEL_LINE_PX,
+                        centered: true,
+                        dim: false,
+                        cache: true,
+                        family: None,
+                        color: None,
+                        clip: Some(clip),
+                    });
                 }
                 continue;
             }

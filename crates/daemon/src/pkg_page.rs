@@ -194,7 +194,8 @@ impl App {
                 Of::Package(pkg) => pkg.attr.as_str(),
                 Of::Webapp { id, .. } => id.as_str(),
             };
-            self.busy_ids.contains(id) || self.pending_installs.iter().any(|i| i.attr == id) || self.pending_webapps.iter().any(|w| w.id == id)
+            // (A failed install is not busy: Install tries it again.)
+            self.busy_ids.contains(id) || self.pending_installs.iter().any(|i| i.attr == id && !i.failed) || self.pending_webapps.iter().any(|w| w.id == id)
         })
     }
 

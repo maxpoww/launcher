@@ -963,6 +963,8 @@ fn main() -> anyhow::Result<()> {
         nix,
         pkg_hits: Vec::new(),
         pkg_hits_query: None,
+        pkg_main: 0,
+        pkg_more_cell: None,
         pkg_asked: None,
         pkg_icons: install::PkgIcons::default(),
         pkg_layer_base: 0,
@@ -2259,6 +2261,11 @@ pub struct App {
     /// storefront, `None` means no answer yet. Stale hits keep showing
     /// until the fresh rank lands (no flicker between keystrokes).
     pkg_hits_query: Option<String>,
+    /// How many of `pkg_hits` are the Install row; the rest is its "More".
+    pkg_main: usize,
+    /// The "More" cell's entry this refilter, while there is one (drawn as a
+    /// plate with the word on it).
+    pkg_more_cell: Option<usize>,
     /// The query last sent to be ranked: the refilters while it is being
     /// ranked ask nothing again (each ask was a whole second rank).
     pkg_asked: Option<String>,
@@ -2925,6 +2932,11 @@ struct SearchState {
     focus_file: Option<app_actions::FocusFile>,
     /// An app of the Install section that took the box (`pkg_page.rs`).
     page: Option<pkg_page::Page>,
+    /// The query whose Install "More" is open (`install::pkg_more_open`): it
+    /// closes with any other query, and with the box.
+    pkg_more_for: Option<String>,
+    /// Where the "More" plate stood (flat), as it opened: the selection's.
+    more_at: Option<usize>,
     /// The apps that open a file, by its path, as asked last (`file_openers`).
     openers: HashMap<String, Vec<String>>,
     /// What the owner picked from a lone app's recents (`web_actions::rank`).
@@ -2974,6 +2986,8 @@ impl Default for SearchState {
             peek_press: false,
             focus_file: None,
             page: None,
+            pkg_more_for: None,
+            more_at: None,
             openers: HashMap::new(),
             picks: usage::UsageDb::load_named("recents-use.json"),
             recent_pager: Default::default(),
@@ -5240,6 +5254,15 @@ impl App {
 
     fn refilter(&mut self) {
         perf::mark("refilter");
+        // (With an Install "More" open the selection stays on its cell —
+        // the plate's place, or what the keys walked to — through the
+        // refilters its icons bring.)
+        let more_open = self.search.pkg_more_for.is_some() && self.search.pkg_more_for.as_deref() == Some(self.search.query.as_str());
+        let kept_sel: Option<String> = more_open
+            .then(|| self.search.selected.and_then(|at| self.flat_to_pos(at)))
+            .flatten()
+            .and_then(|(s, i)| self.entries.get(*self.search.visible[s].get(i)?))
+            .map(|e| e.id.clone());
         // Snapshot the Apps cells' animated display positions (by
         // entry id — indices won't survive the rebuild) so the new
         // list can pick them up seamlessly below.
@@ -5302,7 +5325,7 @@ impl App {
         // query storefront spreads the few recommendations among the programs.
         {
             let webapp_hits = std::mem::take(&mut visible[content::SECTION_INSTALL]);
-            let pkgs = self.pkg_results();
+            let pkgs = self.pkg_results(webapp_hits.len());
             visible[content::SECTION_INSTALL] = if searching {
                 let mut v = webapp_hits;
                 v.extend(pkgs);
@@ -5554,6 +5577,13 @@ impl App {
             // (A lone app stands in its row's middle: `app_actions.rs`.)
             Some(self.lone_anchor().unwrap_or(0))
         };
+        if more_open {
+            let flat = || self.search.visible.iter().flatten().copied();
+            let kept = kept_sel.and_then(|id| flat().position(|e| self.entries.get(e).is_some_and(|en| en.id == id)));
+            if let Some(at) = kept.or(self.search.more_at.filter(|&at| at < self.flat_len())) {
+                self.search.selected = Some(at);
+            }
+        }
         if !resting_grid || grid_flip {
             // Entering / leaving the searched grid replaces the content
             // wholesale: start every section back at its first page.
@@ -6514,6 +6544,11 @@ impl App {
         if self.search.deep.is_some() && self.kinds.get(index) == Some(&apps::EntryKind::File) {
             self.deep_used();
         }
+        // The Install row's "More": the rest of what the query found joins it.
+        if self.entries.get(index).is_some_and(|e| e.id == install::PKG_MORE_ID) {
+            self.pkg_more_open();
+            return;
+        }
         // "Show all in Files" (`deep_search.rs`): the search in Golem Files.
         if self.entries.get(index).is_some_and(|e| e.id == deep_search::SHOW_ALL_ID) {
             if self.search.deep.is_some() {
@@ -6542,30 +6577,7 @@ impl App {
         // drag-to-install tile: clicking it retries the install.
         if self.kinds.get(index) == Some(&apps::EntryKind::Package) {
             let attr = entry.id.clone();
-            let desktop_ids = self
-                .pending_installs
-                .iter_mut()
-                .find(|p| p.attr == attr && p.failed)
-                .map(|p| {
-                    p.failed = false;
-                    p.started = std::time::Instant::now(); // restart the ring
-                    p.completed_at = None;
-                    p.last_rescan = None;
-                    p.desktop_ids.clone()
-                });
-            if let Some(desktop_ids) = desktop_ids {
-                info!("retrying install of {attr}");
-                // Re-stage in memory; packages.nix not written until success.
-                self.managed.stage(&attr, desktop_ids);
-                self.recompute_removable();
-                self.busy_ids.insert(attr.clone());
-                self.nix.request(nix::Request::Install {
-                    id: attr.clone(),
-                    attr,
-                });
-                self.save_install_state();
-                self.refilter();
-            }
+            self.retry_failed_install(&attr);
             return;
         }
         // The Settings gear launches nothing: it opens the configuration
@@ -8626,6 +8638,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                                             || e.id.starts_with("min:")
                                             || e.id.starts_with(app_actions::PREFIX)
                                             || e.id == deep_search::SHOW_ALL_ID
+                                            || e.id == install::PKG_MORE_ID
                                             || apps::is_dock_fixed(&e.id)
                                     })
                                 });

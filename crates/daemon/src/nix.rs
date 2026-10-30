@@ -68,8 +68,10 @@ pub enum Event {
     /// recognizable after the query moved on). Sent the moment ranking
     /// finishes; the icons are asked for apart (`Request::Icons`) and come
     /// on their own thread as `HitIcons`, so no icon — nor a download of
-    /// one — ever holds a result back.
-    Ranked { query: String, hits: Vec<PkgEntry> },
+    /// one — ever holds a result back. The first `main` are the row, the
+    /// rest its "More" (`tiers`); a query is answered twice — at once, and
+    /// with every description searched once the typing rests.
+    Ranked { query: String, hits: Vec<PkgEntry>, main: usize },
     /// Icons for packages asked for (`Request::Icons`), a few at a time,
     /// in the order asked (what is on screen first) — each the theme's
     /// icon named like the package (Papirus ships icons for far more apps
@@ -202,9 +204,10 @@ pub enum DoneOp {
     Reconcile,
 }
 
-/// How many top-ranked packages a `Ranked` reply carries. The renderer
-/// reserves this many texture-array layers for their icons.
-pub const RANK_HITS_MAX: usize = 25;
+/// How many top-ranked packages a `Ranked` reply carries — the row and its
+/// "More" together. The renderer reserves this many texture-array layers for
+/// their icons.
+pub const RANK_HITS_MAX: usize = 36;
 
 /// How many packages can be mid-install *in the grid* at once. The
 /// renderer reserves this many more texture-array layers (past the
@@ -587,6 +590,10 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icons: m
     let _ = icons.send(IconJob::Warm);
     let mut searcher = waverunner_core::Searcher::new();
     let mut pending: Option<String> = Some(first_query);
+    // Each package's use, and the ones most use (made at the first rank, and
+    // again should the index change under it).
+    let mut uses: Vec<Used> = Vec::new();
+    let mut popular: Vec<usize> = Vec::new();
     loop {
         let mut query = match pending.take() {
             Some(query) => query,
@@ -601,25 +608,369 @@ fn index_and_rank(events: Sender<Event>, ranks: mpsc::Receiver<String>, icons: m
         }
         let started = std::time::Instant::now();
         // The empty query is the storefront: curated recommendations
-        // instead of a rank over everything.
-        let hits: Vec<PkgEntry> = if query.is_empty() {
-            recommended_hits(&pkgs)
-        } else {
-            rank_hits(&mut searcher, &query, &pkgs)
-                .into_iter()
-                .map(|i| pkgs[i].clone())
-                .collect()
-        };
-        debug!(
-            "pkg rank {query:?}: {} hits of {} in {:?}",
-            hits.len(),
-            pkgs.len(),
-            started.elapsed()
-        );
-        if events.send(Event::Ranked { query, hits }).is_err() {
+        // instead of a rank over everything — all of them the row.
+        if query.is_empty() {
+            let hits = recommended_hits(&pkgs);
+            let main = hits.len();
+            if events.send(Event::Ranked { query, hits, main }).is_err() {
+                return;
+            }
+            continue;
+        }
+        if uses.len() != pkgs.len() {
+            uses = uses_of(&pkgs);
+            popular = (0..pkgs.len()).filter(|&i| uses[i].share >= BROAD).collect();
+        }
+        // At each letter: the names, and what the programs most use do (the
+        // row is whole from the first answer)…
+        let mut pool = name_pool(&mut searcher, &query, &pkgs, &popular);
+        let (main, more) = tiers(&query, &pkgs, &uses, &pool);
+        debug!("pkg rank {query:?}: {} in the row, {} more, of {} in {:?}", main.len(), more.len(), pkgs.len(), started.elapsed());
+        if events.send(Event::Ranked { hits: answer(&pkgs, &main, &more), main: main.len(), query: query.clone() }).is_err() {
+            return;
+        }
+        // …and once the typing rests, what every other package does, for
+        // "More" (Max: "when the user stop writing we can load the results
+        // inside more").
+        match ranks.recv_timeout(MORE_AFTER) {
+            Ok(newer) => {
+                pending = Some(newer);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let started = std::time::Instant::now();
+        let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
+        for i in searcher.rank(&query, &keys) {
+            if !pool.contains(&i) {
+                pool.push(i);
+            }
+        }
+        let (main, more) = tiers(&query, &pkgs, &uses, &pool);
+        debug!("pkg rank {query:?} whole: {} in the row, {} more in {:?}", main.len(), more.len(), started.elapsed());
+        if events.send(Event::Ranked { hits: answer(&pkgs, &main, &more), main: main.len(), query }).is_err() {
             return;
         }
     }
+}
+
+/// Each package's use, and whether its pname is its own (not another attr).
+fn uses_of(pkgs: &[PkgEntry]) -> Vec<Used> {
+    let attrs: std::collections::HashSet<&str> = pkgs.iter().map(|p| p.attr.as_str()).collect();
+    pkgs.iter()
+        .map(|p| Used { own_name: p.name == p.attr || !attrs.contains(bare_name(&p.name)), ..used(p) })
+        .collect()
+}
+
+/// The row then "More", as many as the icons have layers for.
+fn answer(pkgs: &[PkgEntry], main: &[usize], more: &[usize]) -> Vec<PkgEntry> {
+    main.iter().chain(more).take(RANK_HITS_MAX).map(|&i| pkgs[i].clone()).collect()
+}
+
+/// How long the typing rests before the descriptions are searched for "More".
+const MORE_AFTER: Duration = Duration::from_millis(250);
+
+/// The packages `query` names (nucleo over the names, best first), then the
+/// programs most use (`popular`) whose description says every word of it.
+fn name_pool(searcher: &mut waverunner_core::Searcher, query: &str, pkgs: &[PkgEntry], popular: &[usize]) -> Vec<usize> {
+    let names: Vec<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
+    let mut pool = searcher.rank(query, &names);
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    for &i in popular {
+        if !pool.contains(&i) && says_all(&pkgs[i], &words) {
+            pool.push(i);
+        }
+    }
+    pool
+}
+
+// THE ROW AND "MORE" (Max, 2026-10-30: "the more common ones and then a +
+// button for the rest … no queremos que paquetes usados terminen en more").
+// A package's USE is its share of real machines: Debian's popularity contest
+// and Arch's pkgstats, the higher (tools/pkg-popularity, vendored — the dock
+// goes on no network). An APP ships a .desktop file; a PART of other
+// programs (`is_part`: a library, bindings, a plugin, a driver…) is counted
+// on every machine that needs one, so its use says nothing about wanting it.
+// The row:
+//   - the program whose name was typed whole (`Exact`), first when it is used
+//     — and then beside it only what is near as used (`NEAR_TOP`);
+//   - names that START with what was typed, used (`KNOWN`, a quarter of a
+//     percent) — typing ahead: "ghost" is ghostscript AND ghostty;
+//   - names with it as a word ("google-chrome"), and — unless a used program
+//     has the name typed — apps with it anywhere in the name (libreoffice
+//     for "office") or whose description says every word typed ("browser"
+//     is firefox; what is no app, by the head of its description: chromium): all used, broadly (`BROAD`) or at least a fifth as much
+//     as the best of them (`NEAR_TOP`: a wrapper named after chrome waits);
+//   - no part (unless a program beside it owns it: docker's plugins), no build of a program found (vlc-bin), no offshoot far less
+//     used than its program (krita's plugin under krita), and a name typed
+//     whole but unused only after the others, never when it is a part.
+// Most used first, `ROW_MAX` at most; with none, the `FILL` best matches.
+// Everything else is "More": the names first, then the rest, used first.
+
+/// How widely each package is used, in parts per 10 000 machines, and the
+/// name it is also known by there ("code" for vscode); attr <TAB> share <TAB>
+/// name, below a header line.
+const POPULARITY: &str = include_str!("../assets/pkg-popularity.tsv");
+
+/// A share of machines: a quarter of a percent.
+const KNOWN: u16 = 25;
+/// Five percent.
+const BROAD: u16 = 500;
+/// An offshoot stays in the row while it is used at least a fifth as much
+/// as its program, a name with the word inside while a fifth as much as the
+/// best such.
+const NEAR_TOP: u32 = 5;
+/// The word anywhere in a name counts from four letters ("ng-" is in every
+/// "…ing-").
+const WITHIN_FROM: usize = 4;
+const ROW_MAX: usize = 6;
+const FILL: usize = 3;
+
+/// A package's use: its share of machines, the other name it goes by, and
+/// whether its pname is its own (python313's "python3" is python3's).
+#[derive(Clone, Copy, Debug, Default)]
+struct Used {
+    share: u16,
+    also: Option<&'static str>,
+    own_name: bool,
+}
+
+fn used(p: &PkgEntry) -> Used {
+    static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, Used>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        POPULARITY
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let mut cols = line.split('\t');
+                let attr = cols.next()?;
+                let share = cols.next()?.parse().ok()?;
+                let also = cols.next().filter(|s| !s.is_empty());
+                Some((attr, Used { share, also, own_name: false }))
+            })
+            .collect()
+    });
+    table.get(p.attr.as_str()).copied().unwrap_or_default()
+}
+
+/// How a package's names meet what was typed, best first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Fit {
+    Exact,
+    Start,
+    Word,
+    Within,
+    Loose,
+}
+
+/// The best fit of `query` (lowercase) against the package's attr (a KDE
+/// app's without `kdePackages.`), its pname when it is its own, and the name
+/// it is also known by.
+fn fit_of(query: &str, p: &PkgEntry, u: Used) -> Fit {
+    let tail = p.attr.strip_prefix("kdePackages.").unwrap_or(&p.attr);
+    let name = if u.own_name { bare_name(&p.name) } else { "" };
+    [tail, name, u.also.unwrap_or("")]
+        .iter()
+        .filter(|n| !n.is_empty())
+        .map(|n| {
+            let n = n.to_lowercase();
+            if n == query {
+                Fit::Exact
+            } else if n.starts_with(query) {
+                Fit::Start
+            } else if n.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(query)) {
+                Fit::Word
+            } else if query.chars().count() >= WITHIN_FROM && n.contains(query) {
+                Fit::Within
+            } else {
+                Fit::Loose
+            }
+        })
+        .min()
+        .unwrap_or(Fit::Loose)
+}
+
+/// A pname without the interpreter a Python app is built for
+/// ("python3.14-s-tui" is s-tui, not a python).
+fn bare_name(name: &str) -> &str {
+    name.strip_prefix("python")
+        .and_then(|rest| rest.split_once('-'))
+        .filter(|(version, _)| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .map_or(name, |(_, rest)| rest)
+}
+
+/// `a` is named for `b` (attrs, lowercase): `b` then a dash ("krita-plugin-gmic"
+/// for krita, not "gobject-introspection" for go).
+fn named_for(a: &str, b: &str) -> bool {
+    a.strip_prefix(b).is_some_and(|rest| rest.starts_with(['-', '_', '.']))
+}
+
+/// `a` is a build of `b` (attrs, lowercase): `b` and a variant word or a
+/// version — vlc-bin, python3Minimal, python313, audacity_3.
+fn variant_of(a: &str, b: &str) -> bool {
+    let Some(rest) = a.strip_prefix(b) else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(['-', '_']);
+    !rest.is_empty() && (VARIANTS.contains(&rest) || rest.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '-'))
+}
+
+/// The words of what the package is (its name, attr and description), lowercase.
+fn words_of(p: &PkgEntry) -> Vec<String> {
+    p.haystack.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_owned).collect()
+}
+
+/// An app: it ships a .desktop file.
+fn is_app(p: &PkgEntry) -> bool {
+    !p.icons.is_empty()
+}
+
+/// Every word typed is a WORD of what the package is (or that word and an
+/// s): "git" is not in "digital", "browser" is in "Web browser".
+fn says_all(p: &PkgEntry, words: &[String]) -> bool {
+    let have = words_of(p);
+    !words.is_empty() && words.iter().all(|w| have.iter().any(|h| h == w || (h.len() == w.len() + 1 && h.starts_with(w.as_str()) && h.ends_with('s'))))
+}
+
+/// What it is, from its description: its first words, up to where it goes
+/// on to say what it is for, made with or from ("Open source web browser
+/// from Google"; not "Ripgrep, but also search in … Office documents", nor
+/// "Rust based network stack"). Empty when that leaves a lone word.
+fn head_of(p: &PkgEntry) -> String {
+    let desc = p.haystack.splitn(3, ' ').nth(2).unwrap_or("").to_lowercase();
+    let mut end = desc.len();
+    for cut in [",", ";", " - ", " with ", " for ", " from ", " in ", " that ", " which ", " using ", " written ", " based ", " developed ", " built ", " by "] {
+        if let Some(at) = desc.find(cut) {
+            end = end.min(at);
+        }
+    }
+    let words: Vec<&str> = desc[..end].split_whitespace().take(HEAD_WORDS).collect();
+    if words.len() < 2 {
+        return String::new();
+    }
+    words.join(" ")
+}
+
+/// How many words say what a package is.
+const HEAD_WORDS: usize = 6;
+
+/// Every word typed is a word of what it is (`head_of`), or that and an s.
+fn is_said(p: &PkgEntry, words: &[String]) -> bool {
+    let head = head_of(p);
+    let have: Vec<&str> = head.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    !words.is_empty() && words.iter().all(|w| have.iter().any(|h| *h == w || (h.len() == w.len() + 1 && h.starts_with(w.as_str()) && h.ends_with('s'))))
+}
+
+/// What a description calls a part of other programs.
+const PARTS: [&str; 22] = [
+    "library", "libraries", "bindings", "binding", "plugin", "plugins", "extension", "extensions", "headers", "driver", "drivers", "module", "modules", "theme",
+    "component", "components", "connector", "integration", "codec", "codecs", "framework", "thumbnailer",
+];
+
+/// A part of other programs rather than one to install for itself: a library
+/// by its name ("lib…", unless that is what was typed; "libre…" is a free
+/// program's), or, for what is no app, what its description says it is.
+/// Machines count those wherever a program needs them (libexif on nearly
+/// every one; libvlc beside vlc).
+fn is_part(p: &PkgEntry, query: &str) -> bool {
+    let name = p.name.to_lowercase();
+    if name.starts_with("lib") && !name.starts_with("libre") && !query.starts_with("lib") {
+        return true;
+    }
+    // (Named one: krita-plugin-gmic, firefox-gnome-theme, an app or not.)
+    if name.split(|c: char| !c.is_alphanumeric()).skip(1).any(|w| PARTS.contains(&w)) {
+        return true;
+    }
+    if is_app(p) {
+        return false;
+    }
+    let h = p.haystack.to_lowercase();
+    ["development files", "data files", "packaged as"].iter().any(|s| h.contains(s)) || words_of(p).iter().any(|w| PARTS.contains(&w.as_str()))
+}
+
+/// `pool` (the packages the query found, best first) split into the row and
+/// "More" (see above). `uses` is each package's use, as `pkgs`.
+fn tiers(query: &str, pkgs: &[PkgEntry], uses: &[Used], pool: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    let q = query.trim().to_lowercase();
+    let words: Vec<String> = q.split_whitespace().map(str::to_owned).collect();
+    let found: Vec<(usize, Fit, u16)> = pool
+        .iter()
+        .map(|&i| {
+            let u = uses.get(i).copied().unwrap_or_default();
+            (i, fit_of(&q, &pkgs[i], u), u.share)
+        })
+        .collect();
+    let part = |i: usize| is_part(&pkgs[i], &q);
+    let app = |i: usize| is_app(&pkgs[i]);
+    let key = |i: usize| pkgs[i].attr.strip_prefix("kdePackages.").unwrap_or(&pkgs[i].attr).to_lowercase();
+    // The used programs with the name typed: what is wanted is them, their
+    // own parts and names that go on — not what merely says the word.
+    let named: Vec<String> = found.iter().filter(|&&(i, fit, share)| fit == Fit::Exact && share >= KNOWN && !part(i)).map(|f| key(f.0)).collect();
+    let mut row: Vec<(usize, Fit, u16)> = found
+        .iter()
+        .copied()
+        .filter(|&(i, fit, share)| match fit {
+            Fit::Exact => share >= KNOWN || !part(i),
+            Fit::Start => share >= KNOWN,
+            Fit::Word => share >= KNOWN && !part(i),
+            Fit::Within => named.is_empty() && share >= BROAD && app(i),
+            // (An app by any word of its description; what has no .desktop
+            // in the index — unfree, wrapped: chromium, google-chrome — by
+            // what it is.)
+            Fit::Loose => named.is_empty() && share >= BROAD && if app(i) { says_all(&pkgs[i], &words) } else { is_said(&pkgs[i], &words) },
+        })
+        .collect();
+    // (A part stays only as the own of a program it stands beside: the
+    // docker plugin for "docker" — not librevenge for "libre".)
+    let owners: Vec<String> = row.iter().filter(|r| r.1 <= Fit::Start && !part(r.0)).map(|r| key(r.0)).collect();
+    row.retain(|&(i, fit, _)| fit == Fit::Exact || !part(i) || owners.iter().any(|n| named_for(&key(i), n)));
+    // (Beside a used program typed whole, only what is near as used: "steam"
+    // is steam, steamcmd waits.)
+    let named_best = found.iter().filter(|f| f.1 == Fit::Exact && named.contains(&key(f.0))).map(|f| f.2).max().unwrap_or(0);
+    row.retain(|r| r.1 == Fit::Exact || u32::from(r.2) * NEAR_TOP >= u32::from(named_best));
+    // (A build of a program found waits under More: vlc-bin under vlc.)
+    let programs: Vec<String> = found.iter().filter(|f| f.2 >= KNOWN).map(|f| key(f.0)).collect();
+    row.retain(|r| !programs.iter().any(|b| variant_of(&key(r.0), b)));
+    // (What only has the word somewhere: broadly used, or near the best of
+    // its kind.)
+    let inside = |fit: Fit| matches!(fit, Fit::Word | Fit::Within | Fit::Loose);
+    let best = row.iter().filter(|r| inside(r.1)).map(|r| r.2).max().unwrap_or(0);
+    row.retain(|r| !inside(r.1) || r.2 >= BROAD || u32::from(r.2) * NEAR_TOP >= u32::from(best));
+    // (An offshoot far less used than its program waits under More: its
+    // attr is the program's and a dash.)
+    let stems: Vec<(String, u16)> = row.iter().map(|r| (key(r.0), r.2)).collect();
+    row.retain(|r| {
+        let mine = key(r.0);
+        !stems.iter().any(|(n, share)| named_for(&mine, n) && u32::from(r.2) * NEAR_TOP < u32::from(*share))
+    });
+    let rank = |&(i, fit, share): &(usize, Fit, u16)| match fit {
+        Fit::Exact if share >= KNOWN && !part(i) => 0,
+        Fit::Exact if share < KNOWN => 3,
+        Fit::Start if share >= BROAD => 1,
+        _ => 2,
+    };
+    row.sort_by(|a, b| rank(a).cmp(&rank(b)).then(b.2.cmp(&a.2)).then(pkgs[a.0].name.len().cmp(&pkgs[b.0].name.len())));
+    let mut main: Vec<usize> = row.iter().take(ROW_MAX).map(|r| r.0).collect();
+    if main.is_empty() {
+        main = found.iter().filter(|f| f.1 <= Fit::Word).take(FILL).map(|f| f.0).collect();
+    }
+    if main.is_empty() {
+        main = pool.iter().copied().take(FILL).collect();
+    }
+    // More: the names, the names with it inside, what says it — each most
+    // used first —, then what only has its letters in order, as the
+    // matcher ranked it (krita's letters are in "kernel/userspace
+    // communication": no use orders that).
+    let class = |&(i, fit, _): &(usize, Fit, u16)| match fit {
+        Fit::Exact | Fit::Start | Fit::Word => 0,
+        Fit::Within => 1,
+        Fit::Loose if says_all(&pkgs[i], &words) => 2,
+        Fit::Loose => 3,
+    };
+    let mut rest: Vec<(usize, u8, (usize, Fit, u16))> = found.iter().copied().enumerate().filter(|(_, f)| !main.contains(&f.0)).map(|(at, f)| (at, class(&f), f)).collect();
+    rest.sort_by(|(pa, ca, a), (pb, cb, b)| ca.cmp(cb).then(if *ca == 3 { std::cmp::Ordering::Equal } else { b.2.cmp(&a.2) }).then(pa.cmp(pb)));
+    (main, rest.into_iter().map(|(_, _, f)| f.0).collect())
 }
 
 /// What the icon thread is asked.
@@ -801,38 +1152,6 @@ fn downloaded_icon(p: &PkgEntry, flathub: &mut u32, store: &mut u32) -> Option<V
         .filter(|hint| hint.contains('.'))
         .find_map(|id| fetch_flathub_icon(id, flathub))
         .or_else(|| p.icon_path.as_deref().and_then(|path| fetch_store_icon(path, store)))
-}
-
-/// The top `RANK_HITS_MAX` package indices for `query`, name matches
-/// first. nucleo scores a word-boundary match in a description the
-/// same as one on the name (ties then break alphabetically), which
-/// buried `firefox` itself under dozens of packages that merely
-/// mention Firefox — so names rank in their own pass and always beat
-/// description-only matches, which remain as discovery fill (a "media
-/// player" query still finds players).
-fn rank_hits(
-    searcher: &mut waverunner_core::Searcher,
-    query: &str,
-    pkgs: &[PkgEntry],
-) -> Vec<usize> {
-    let names: Vec<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
-    let mut hits: Vec<usize> = searcher
-        .rank(query, &names)
-        .into_iter()
-        .take(RANK_HITS_MAX)
-        .collect();
-    if hits.len() < RANK_HITS_MAX {
-        let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
-        for i in searcher.rank(query, &keys) {
-            if !hits.contains(&i) {
-                hits.push(i);
-                if hits.len() == RANK_HITS_MAX {
-                    break;
-                }
-            }
-        }
-    }
-    hits
 }
 
 /// Generic fallback icon names for packages nothing else matched — the
@@ -1045,10 +1364,12 @@ fn fetch_store_icon(store_path: &str, budget: &mut u32) -> Option<Vec<u8>> {
 /// own `.desktop` stems (authoritative, from the nix-index file
 /// database), the pname, the reverse-DNS aliases KDE and GNOME apps
 /// publish their icons under (`kdePackages.kate` → `org.kde.kate`,
-/// `gnome-calculator` → `org.gnome.Calculator`), then the pname with
-/// trailing `-segments` progressively stripped so variants inherit the
-/// family icon (`firefox-bin` → `firefox`, `telegram-desktop-bin` →
-/// `telegram-desktop`).
+/// `gnome-calculator` → `org.gnome.Calculator`), then the pname without a
+/// trailing VARIANT word so a variant inherits its program's icon
+/// (`firefox-bin` → `firefox`, `telegram-desktop-bin` → `telegram-desktop`).
+/// Any other ending is another program (Max, 2026-10-30: "i search for
+/// chrome and i see 4 diferent apps with the chrome icon" — chrome-export,
+/// krita-plugin-gmic): it keeps its own icon or the package box.
 fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     let mut candidates = pkg.icons.clone();
     candidates.push(pkg.name.clone());
@@ -1070,10 +1391,10 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     }
     let mut base = pkg.name.as_str();
     for _ in 0..2 {
-        let Some((stripped, _)) = base.rsplit_once('-') else {
+        let Some((stripped, variant)) = base.rsplit_once('-') else {
             break;
         };
-        if stripped.len() < 3 {
+        if stripped.len() < 3 || !VARIANTS.contains(&variant) {
             break;
         }
         candidates.push(stripped.to_owned());
@@ -1081,6 +1402,12 @@ fn icon_candidates(pkg: &PkgEntry) -> Vec<String> {
     }
     candidates
 }
+
+/// The endings that name a build of the same program, not another one.
+const VARIANTS: [&str; 32] = [
+    "bin", "unwrapped", "wrapped", "wayland", "x11", "esr", "beta", "dev", "devedition", "nightly", "git", "stable", "unstable", "desktop", "full", "fhs", "gtk", "gtk3",
+    "gtk4", "qt", "qt5", "qt6", "nox", "pgtk", "lts", "latest", "preview", "canary", "ptb", "appimage", "minimal", "headless",
+];
 
 /// What a `realize` produced: whether the build succeeded, whether the
 /// package is a terminal tool, and (for a terminal tool) its main program
@@ -1955,10 +2282,7 @@ mod tests {
             "1".into(),
             "",
         );
-        assert_eq!(
-            icon_candidates(&calc),
-            vec!["gnome-calculator", "org.gnome.Calculator", "gnome"]
-        );
+        assert_eq!(icon_candidates(&calc), vec!["gnome-calculator", "org.gnome.Calculator"], "not GNOME's icon");
         // Variants inherit the family icon via suffix stripping.
         let tg = entry(
             "telegram-desktop-bin".into(),
@@ -1972,30 +2296,325 @@ mod tests {
         );
         let plain = entry("cowsay".into(), "cowsay".into(), "1".into(), "");
         assert_eq!(icon_candidates(&plain), vec!["cowsay"]);
+        // Another program named after one keeps its own (or the box).
+        for (name, own) in [("chrome-export", "chrome-export"), ("krita-plugin-gmic", "krita-plugin-gmic"), ("chrome-token-signing", "chrome-token-signing")] {
+            assert_eq!(icon_candidates(&entry(name.into(), name.into(), "1".into(), "")), vec![own]);
+        }
+    }
+
+    /// Every package `query` finds, as "More" sees it once the typing rests:
+    /// the names, then the descriptions.
+    fn whole_pool(query: &str, pkgs: &[PkgEntry]) -> Vec<usize> {
+        let mut searcher = waverunner_core::Searcher::new();
+        let mut pool = name_pool(&mut searcher, query, pkgs, &[]);
+        let keys: Vec<&str> = pkgs.iter().map(|p| p.haystack.as_str()).collect();
+        for i in searcher.rank(query, &keys) {
+            if !pool.contains(&i) {
+                pool.push(i);
+            }
+        }
+        pool
+    }
+
+    /// The uses of `pkgs` as `uses_of` finds them, with these shares.
+    fn uses_with(pkgs: &[PkgEntry], shares: &[u16]) -> Vec<Used> {
+        uses_of(pkgs).into_iter().zip(shares).map(|(u, &share)| Used { share, also: None, ..u }).collect()
+    }
+
+    /// `query`'s row and "More" over `pkgs` (attr, name, description, share),
+    /// as attrs.
+    fn row_and_more(query: &str, list: &[(&str, &str, &str, u16)]) -> (Vec<String>, Vec<String>) {
+        row_and_more_apps(query, list, &[])
+    }
+
+    /// The same, `apps` shipping a .desktop file.
+    fn row_and_more_apps(query: &str, list: &[(&str, &str, &str, u16)], apps: &[&str]) -> (Vec<String>, Vec<String>) {
+        let pkgs: Vec<PkgEntry> = list
+            .iter()
+            .map(|(a, n, d, _)| {
+                let mut p = entry((*a).into(), (*n).into(), "1".into(), d);
+                if apps.contains(a) {
+                    p.icons = vec![(*n).into()];
+                }
+                p
+            })
+            .collect();
+        let uses = uses_with(&pkgs, &list.iter().map(|l| l.3).collect::<Vec<_>>());
+        let (main, more) = tiers(query, &pkgs, &uses, &whole_pool(query, &pkgs));
+        let attrs = |v: Vec<usize>| v.into_iter().map(|i| pkgs[i].attr.clone()).collect();
+        (attrs(main), attrs(more))
     }
 
     #[test]
     fn name_matches_outrank_description_mentions() {
         // Alphabetically before "firefox" AND mentioning it in the
         // description — the exact trap that buried the real package.
-        let pkgs = vec![
-            entry(
-                "addwater".into(),
-                "addwater".into(),
-                "1".into(),
-                "Firefox theme configurator",
-            ),
-            entry(
-                "firefox".into(),
-                "firefox".into(),
-                "128".into(),
-                "Web browser",
-            ),
+        let (main, more) = row_and_more("firefox", &[("addwater", "addwater", "Firefox theme configurator", 0), ("firefox", "firefox", "Web browser", 6913)]);
+        assert_eq!(main, ["firefox"], "the name match is the row");
+        assert_eq!(more, ["addwater"], "a description mention waits under More");
+    }
+
+    #[test]
+    fn the_app_itself_not_its_plugin() {
+        // Max, 2026-10-30: "i searched for krita, and instead of krita i get krita-plugin…"
+        let (main, more) = row_and_more("krita", &[("krita-plugin-gmic", "krita-plugin-gmic", "GMic plugin for Krita", 300), ("krita", "krita", "Free and open source painting application", 2257)]);
+        assert_eq!(main, ["krita"]);
+        assert_eq!(more, ["krita-plugin-gmic"], "used far less than krita: under More");
+    }
+
+    #[test]
+    fn chrome_is_google_chrome_and_its_tools_wait() {
+        // "i search for chrome and i see 4 diferent apps with the chrome icon.. i want chrome"
+        let list = [
+            ("chrome-export", "chrome-export", "Scripts to save Google Chrome's bookmarks and history", 0),
+            ("chrome-pak-customizer", "chrome-pak-customizer", "Simple batch tool to customize pak files", 0),
+            ("chrome-token-signing", "chrome-token-signing", "Chrome and Firefox extension for signing", 0),
+            ("chromedriver", "chromedriver-unwrapped", "WebDriver server for running Selenium tests on Chrome", 23),
+            ("google-chrome", "google-chrome", "Freeware web browser developed by Google", 1699),
+            ("chromium", "chromium", "Open source web browser from Google", 3960),
+            ("netflix", "netflix-via-google-chrome", "Open Netflix in Google Chrome app mode", 26),
         ];
-        let mut searcher = waverunner_core::Searcher::new();
-        let hits = rank_hits(&mut searcher, "firefox", &pkgs);
-        assert_eq!(hits.first(), Some(&1), "the name match must come first");
-        assert!(hits.contains(&0), "description matches still fill the tail");
+        let (main, more) = row_and_more("chrome", &list);
+        assert_eq!(main, ["google-chrome"]);
+        assert!(more.contains(&"chromedriver".to_string()) && more.contains(&"chrome-export".to_string()), "{more:?}");
+    }
+
+    #[test]
+    fn the_used_ones_stay_in_the_row_most_used_first() {
+        let list = [
+            ("gitg", "gitg", "GNOME GUI client to view git repositories", 464),
+            ("git-lfs", "git-lfs", "Git extension for versioning large files", 2051),
+            ("git", "git", "Distributed version control system", 9522),
+            ("git-crypt", "git-crypt", "Transparent file encryption in git", 0),
+            ("git-filter-repo", "git-filter-repo", "Quickly rewrite git repository history", 724),
+        ];
+        let (main, more) = row_and_more("git", &list);
+        assert_eq!(main, ["git", "git-lfs"], "the name whole first, then what is near as used");
+        assert_eq!(more, ["git-filter-repo", "gitg", "git-crypt"], "the less used after, used first");
+        // Typed on the way to a name, what starts with it stands if used.
+        let (main, _) = row_and_more("gi", &list);
+        assert_eq!(main, ["git", "git-lfs", "gitg"], "git's offshoot far less used still waits");
+    }
+
+    #[test]
+    fn a_variant_waits_behind_its_program() {
+        let list = [("python313", "python3", "High-level dynamically-typed programming language", 130), ("python3", "python3", "High-level dynamically-typed programming language", 9988)];
+        let (main, more) = row_and_more("python", &list);
+        assert_eq!(main, ["python3"]);
+        assert_eq!(more, ["python313"]);
+    }
+
+    #[test]
+    fn an_exact_name_is_the_row_used_or_not() {
+        let (main, _) = row_and_more("hello", &[("hello-wayland", "hello-wayland", "Hello world Wayland client", 0), ("hello", "hello", "A program that produces a familiar, friendly greeting", 0)]);
+        assert_eq!(main, ["hello"]);
+    }
+
+    #[test]
+    fn with_nothing_known_the_best_few_are_the_row() {
+        // "i search ng- i have a couple results, not what im looking for" — then More.
+        let list = [
+            ("ng-a", "ng-a", "", 0),
+            ("ng-b", "ng-b", "", 0),
+            ("ng-c", "ng-c", "", 0),
+            ("ng-d", "ng-d", "", 0),
+            ("ng-e", "ng-e", "", 0),
+        ];
+        let (main, more) = row_and_more("ng-", &list);
+        assert_eq!(main.len(), FILL);
+        assert_eq!(main.len() + more.len(), list.len());
+    }
+
+    #[test]
+    fn what_it_does_finds_the_programs_most_use() {
+        let list = [
+            ("firefox", "firefox", "Web browser built from Firefox source tree", 6913),
+            ("browsh", "browsh", "A fully-modern text-based browser", 12),
+            ("w3m", "w3m", "Text-mode web browser", 900),
+        ];
+        let (main, more) = row_and_more_apps("browser", &list, &["firefox"]);
+        assert_eq!(main, ["firefox", "w3m"], "used: an app whose description says the word, what is no app by what it is");
+        assert_eq!(more, ["browsh"]);
+    }
+
+    #[test]
+    fn a_program_is_found_by_the_name_others_give_it() {
+        let pkgs = vec![entry("vscode".into(), "vscode".into(), "1".into(), "Code editor developed by Microsoft"), entry("code-server".into(), "code-server".into(), "1".into(), "Run VS Code on a remote server")];
+        let mut uses = uses_with(&pkgs, &[1531, 0]);
+        uses[0].also = Some("code");
+        let (main, _) = tiers("code", &pkgs, &uses, &whole_pool("code", &pkgs));
+        assert_eq!(main.first(), Some(&0), "\"code\" is vscode");
+    }
+
+    #[test]
+    fn unrelated_programs_stand_side_by_side() {
+        // ghostscript is on far more machines; ghostty is still the program typed.
+        let list = [("ghostscript", "ghostscript", "PostScript interpreter", 8116), ("ghostty", "ghostty", "Fast, native, feature-rich terminal emulator", 1260)];
+        let (main, _) = row_and_more("ghost", &list);
+        assert_eq!(main, ["ghostscript", "ghostty"]);
+    }
+
+    #[test]
+    fn parts_of_other_programs_wait() {
+        // Machines count a library wherever a program needs one.
+        let list = [
+            ("libraw", "libraw", "Library for reading RAW files obtained from digital photo cameras", 6000),
+            ("rawtherapee", "rawtherapee", "RAW converter and digital photo processing software", 300),
+            ("rawst", "rawst", "Layered, parallel file downloader", 100),
+            ("python-rawkit", "python-rawkit", "Python bindings for libraw", 2000),
+        ];
+        let (main, more) = row_and_more("raw", &list);
+        assert_eq!(main, ["rawtherapee", "rawst"]);
+        assert_eq!(more, ["python-rawkit", "libraw"], "the name's word first");
+        // Asked for by its own name, a library is what was typed.
+        let (main, _) = row_and_more("libraw", &list);
+        assert_eq!(main, ["libraw"]);
+        // So is a part named for its program: "docker" is docker AND compose.
+        let list = [
+            ("docker-compose", "docker-compose", "Docker CLI plugin to define and run multi-container applications", 3611),
+            ("docker", "docker", "Open source project to pack, ship and run any application as a lightweight container", 4542),
+            ("docker-buildx", "docker-buildx", "Docker CLI plugin for extended build capabilities with BuildKit", 1792),
+        ];
+        let (main, _) = row_and_more("docker", &list);
+        assert_eq!(main, ["docker", "docker-compose", "docker-buildx"]);
+    }
+
+    #[test]
+    fn an_app_is_found_inside_a_name_and_by_what_it_does() {
+        let list = [
+            ("ripgrep-all", "ripgrep-all", "Ripgrep, but also search in PDFs, E-Books, Office documents", 5103),
+            ("libreoffice", "libreoffice", "Comprehensive, professional-quality productivity suite", 4737),
+            ("kdePackages.calligra", "calligra", "Office and graphic art suite", 631),
+            ("officecli", "officecli", "Office files from the command line", 0),
+        ];
+        let (main, more) = row_and_more_apps("office", &list, &["libreoffice", "kdePackages.calligra"]);
+        assert_eq!(main, ["libreoffice", "kdePackages.calligra"], "apps: the name inside, then what it does");
+        assert_eq!(more, ["officecli", "ripgrep-all"]);
+    }
+
+    #[test]
+    fn an_unused_part_named_like_the_query_waits() {
+        let list = [("fire", "fire", "LV2 plugin for distortion", 0), ("firefox", "firefox", "Web browser", 6913)];
+        let (main, more) = row_and_more("fire", &list);
+        assert_eq!(main, ["firefox"]);
+        assert_eq!(more, ["fire"]);
+    }
+
+    #[test]
+    fn a_description_says_a_word_not_part_of_one() {
+        // "git" in "digital" is not git.
+        let list = [("darktable", "darktable", "Virtual lighttable and darkroom for digital photographers", 900), ("gitg", "gitg", "GNOME GUI client to view git repositories", 464)];
+        let (main, more) = row_and_more("git", &list);
+        assert_eq!(main, ["gitg"]);
+        assert_eq!(more, ["darktable"]);
+        let (main, _) = row_and_more_apps("photographer", &list, &["darktable"]);
+        assert_eq!(main, ["darktable"], "a plural is the word");
+    }
+
+    #[test]
+    fn a_short_query_is_not_looked_for_inside_names() {
+        let list = [("thin-provisioning-tools", "thin-provisioning-tools", "", 900), ("ng-a", "ng-a", "", 0)];
+        let (main, more) = row_and_more("ng-", &list);
+        assert_eq!(main, ["ng-a"]);
+        assert_eq!(more, ["thin-provisioning-tools"]);
+    }
+
+    #[test]
+    fn a_variant_is_not_the_name_it_borrows() {
+        // go_1_27's pname is "go" — go's name, not its own.
+        let list = [("go_1_27", "go", "The Go Programming language", 0), ("go", "go", "The Go Programming language", 5866)];
+        let (main, more) = row_and_more("go", &list);
+        assert_eq!(main, ["go"]);
+        assert_eq!(more, ["go_1_27"]);
+    }
+
+    #[test]
+    fn a_build_of_a_program_found_waits() {
+        let list = [
+            ("vlc-bin", "vlc-bin", "Cross-platform media player and streaming server", 1524),
+            ("vlc", "vlc", "Cross-platform media player and streaming server", 5299),
+            ("libvlc", "libvlc", "Cross-platform media player and streaming server", 6485),
+            ("python3Minimal", "python3-minimal", "High-level dynamically-typed programming language", 9766),
+        ];
+        let (main, more) = row_and_more_apps("vlc", &list, &["vlc", "vlc-bin", "libvlc"]);
+        assert_eq!(main, ["vlc"]);
+        assert!(more.contains(&"vlc-bin".to_string()));
+        // libvlc is vlc's library, though it carries vlc's .desktop files.
+        let (main, _) = row_and_more_apps("media player", &list, &["vlc", "vlc-bin", "libvlc"]);
+        assert_eq!(main, ["vlc"]);
+    }
+
+    #[test]
+    fn a_python_app_is_not_a_python() {
+        let list = [("s-tui", "python3.14-s-tui", "Stress-Terminal UI monitoring tool", 651), ("python3", "python3", "High-level dynamically-typed programming language", 9988)];
+        let (main, more) = row_and_more("python", &list);
+        assert_eq!(main, ["python3"]);
+        assert_eq!(more, ["s-tui"]);
+        let (main, _) = row_and_more("s-tui", &list);
+        assert_eq!(main, ["s-tui"], "found by its own name");
+    }
+
+    #[test]
+    fn libraries_of_a_name_wait_for_the_program() {
+        let list = [
+            ("librevenge", "librevenge", "A base library for writing document import filters", 6791),
+            ("libreoffice", "libreoffice", "Comprehensive, professional-quality productivity suite", 4737),
+            ("librewolf", "librewolf", "Fork of Firefox, focused on privacy, security and freedom", 427),
+        ];
+        let (main, more) = row_and_more_apps("libre", &list, &["libreoffice", "librewolf"]);
+        assert_eq!(main, ["libreoffice", "librewolf"]);
+        assert_eq!(more, ["librevenge"]);
+    }
+
+    #[test]
+    fn a_name_typed_whole_is_not_looked_for_inside_others() {
+        // "code" is vscode — not every name with "code" inside.
+        let list = [("vscode", "vscode", "Code editor developed by Microsoft", 1531), ("rxvt-unicode", "rxvt-unicode", "Clone of xterm with xft and unicode support", 581)];
+        let pkgs: Vec<PkgEntry> = list
+            .iter()
+            .map(|(a, n, d, _)| {
+                let mut p = entry((*a).into(), (*n).into(), "1".into(), d);
+                p.icons = vec![(*n).into()];
+                p
+            })
+            .collect();
+        let mut uses = uses_with(&pkgs, &[1531, 581]);
+        uses[0].also = Some("code");
+        let (main, more) = tiers("code", &pkgs, &uses, &whole_pool("code", &pkgs));
+        assert_eq!((main, more), (vec![0], vec![1]));
+    }
+
+    #[test]
+    fn what_has_no_desktop_file_is_found_by_what_it_is() {
+        let list = [
+            ("chromium", "chromium", "Open source web browser from Google", 3960),
+            ("ripgrep-all", "ripgrep-all", "Ripgrep, but also search in PDFs, E-Books, Office documents", 5103),
+            ("libreoffice", "libreoffice", "Comprehensive, professional-quality productivity suite", 4737),
+        ];
+        let (main, _) = row_and_more_apps("browser", &list, &["libreoffice"]);
+        assert_eq!(main, ["chromium"]);
+        let (main, more) = row_and_more_apps("office", &list, &["libreoffice"]);
+        assert_eq!((main, more), (vec!["libreoffice".to_string()], vec!["ripgrep-all".to_string()]), "office documents are not what ripgrep-all is");
+    }
+
+    #[test]
+    fn more_puts_what_only_has_the_letters_last() {
+        let list = [
+            ("libnfnetlink", "libnfnetlink", "Low-level library for netfilter related kernel/userspace communication", 9000),
+            ("krita-plugin-gmic", "krita-plugin-gmic", "GMic plugin for Krita", 300),
+            ("krita", "krita", "Free and open source painting application", 2257),
+            ("painty", "painty", "Plugins and brushes made for Krita", 0),
+        ];
+        let (_, more) = row_and_more("krita", &list);
+        assert_eq!(more, ["krita-plugin-gmic", "painty", "libnfnetlink"]);
+    }
+
+    #[test]
+    fn the_shipped_table_reads() {
+        let p = entry("krita".into(), "krita".into(), "1".into(), "");
+        assert!(used(&p).share > KNOWN, "krita is used");
+        let p = entry("vscode".into(), "vscode".into(), "1".into(), "");
+        assert_eq!(used(&p).also, Some("code"));
     }
 
     #[test]
@@ -2019,7 +2638,8 @@ mod tests {
         assert!(e.haystack.len() < 200);
     }
 
-    /// Manual perf check against the machine's real package cache:
+    /// Manual check against the machine's real package cache — each query's
+    /// row and the start of its "More", and the time:
     /// `cargo test -p waverunner-daemon rank_the_real -- --ignored --nocapture`
     #[test]
     #[ignore = "needs the real nixpkgs cache"]
@@ -2028,21 +2648,17 @@ mod tests {
             eprintln!("no cache; skipping");
             return;
         };
+        let uses = uses_of(&pkgs);
+        let popular: Vec<usize> = (0..pkgs.len()).filter(|&i| uses[i].share >= BROAD).collect();
         let mut searcher = waverunner_core::Searcher::new();
-        for query in ["fi", "firefox", "mozill", "media player", "zzqx"] {
+        let queries = std::env::var("QUERIES").unwrap_or_else(|_| "krita,chrome,git,ng-,code,python,fire,firefox,obs,vlc,media player,browser,steam,zed,ghost,office,spotify,discord,zzqx".into());
+        for query in queries.split(',') {
             let started = std::time::Instant::now();
-            let hits = rank_hits(&mut searcher, query, &pkgs);
-            let top: Vec<&str> = hits
-                .iter()
-                .take(5)
-                .map(|&i| pkgs[i].attr.as_str())
-                .collect();
-            eprintln!(
-                "rank {query:?}: {} hits of {} in {:?}; top: {top:?}",
-                hits.len(),
-                pkgs.len(),
-                started.elapsed()
-            );
+            let pool = name_pool(&mut searcher, query, &pkgs, &popular);
+            let (main, more) = tiers(query, &pkgs, &uses, &pool);
+            let took = started.elapsed();
+            let names = |v: &[usize], n: usize| v.iter().take(n).map(|&i| format!("{}({})", pkgs[i].attr, uses[i].share)).collect::<Vec<_>>().join(" ");
+            eprintln!("{query:>14} {took:>9.2?}  ROW {}  | MORE {}: {}", names(&main, 6), more.len(), names(&more, 6));
         }
     }
 

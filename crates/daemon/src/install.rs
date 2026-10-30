@@ -271,6 +271,9 @@ impl PendingInstall {
 /// character matches half of nixpkgs and helps no one.
 pub(crate) const PKG_QUERY_MIN: usize = 2;
 
+/// The Install row's "More" cell (`pkg_results`).
+pub(crate) const PKG_MORE_ID: &str = "golem:install-more";
+
 /// How long a failed install/remove flashes "Failed" on its cell.
 pub(crate) const FAIL_FLASH: Duration = Duration::from_secs(5);
 
@@ -439,18 +442,14 @@ impl App {
                 self.pkg_state = PkgIndexState::Failed;
                 self.schedule_frame();
             }
-            nix::Event::Ranked { query, hits } => {
-                // Each hit keeps the icon it already has; the others wear
-                // the installer box until theirs come, asked for at once
-                // (what is on screen first).
-                let lacking = self.pkg_icons.take(&hits);
+            nix::Event::Ranked { query, hits, main } => {
                 self.pkg_hits = hits;
+                self.pkg_main = main;
                 // Re-render only if the answer matches what's typed; an
                 // outdated one keeps waiting for its follower.
                 let current = query == self.search.query;
-                if current && !lacking.is_empty() {
-                    let pkgs = lacking.iter().map(|&i| self.pkg_hits[i].clone()).collect();
-                    self.nix.request(nix::Request::Icons { query: query.clone(), pkgs });
+                if current {
+                    self.pkg_ask_icons(&query);
                 }
                 self.pkg_hits_query = Some(query);
                 if current {
@@ -715,10 +714,72 @@ impl App {
         self.push_transient(entry, apps::EntryKind::Package, placeholder, layer)
     }
 
+    /// Each hit keeps the icon it already has; the others wear the
+    /// installer box until theirs come, asked for at once — the row's, and
+    /// "More"'s only once it is open (what is on screen).
+    fn pkg_ask_icons(&mut self, query: &str) {
+        let lacking = self.pkg_icons.take(&self.pkg_hits);
+        let open = self.search.pkg_more_for.as_deref() == Some(query);
+        let pkgs: Vec<nix::PkgEntry> = lacking.into_iter().filter(|&i| open || i < self.pkg_main).map(|i| self.pkg_hits[i].clone()).collect();
+        if !pkgs.is_empty() {
+            self.nix.request(nix::Request::Icons { query: query.to_owned(), pkgs });
+        }
+    }
+
+    /// The "More" cell was pressed: the rest of what the query found joins
+    /// the row (Max, 2026-10-30: "i click on it, and it reveal more
+    /// packages, even the more niche ones").
+    pub(crate) fn pkg_more_open(&mut self) {
+        let query = self.search.query.clone();
+        info!("install: more for {query:?}");
+        // (The selection stays where the plate stood: on the first of them.)
+        let s = content::SECTION_INSTALL;
+        self.search.more_at = self.pkg_more_cell.and_then(|cell| {
+            let i = self.search.visible[s].iter().position(|&e| e == cell)?;
+            Some(self.search.visible[..s].iter().map(Vec::len).sum::<usize>() + i)
+        });
+        self.search.selected = None;
+        self.search.pkg_more_for = Some(query.clone());
+        self.pkg_ask_icons(&query);
+        self.refilter();
+        self.schedule_frame();
+    }
+
+    /// How many of the row fit on the Install section's first page beside
+    /// `before` cells and the "More" plate (a full row pushed the plate to
+    /// the second page, out of sight).
+    fn install_room(&self, before: usize) -> usize {
+        if self.renderer.is_none() {
+            return usize::MAX;
+        }
+        let cap = self.layout_at(self.ui.extent_of(Target::Open)).sections[content::SECTION_INSTALL].cap;
+        cap.saturating_sub(before + 1).max(1)
+    }
+
+    /// The "More" cell: the installer box with the word over it, how many
+    /// wait under it for a name.
+    fn push_pkg_more_cell(&mut self, waiting: usize) -> usize {
+        let (layer, placeholder) = self.asset("asset-pkg").map_or((0, true), |(l, p)| (l, p));
+        let entry = AppEntry {
+            id: PKG_MORE_ID.to_owned(),
+            name: crate::i18n::fill(crate::i18n::tr("{n} more"), &[("n", &waiting.to_string())]),
+            description: None,
+            exec: String::new(),
+            icon: None,
+            startup_wm_class: None,
+            needs_terminal: false,
+            path: None,
+        };
+        self.push_transient(entry, apps::EntryKind::App, placeholder, layer)
+    }
+
     /// Rank the package index against the query and append the top
     /// matches as transient entries, returning their indices for the
-    /// Install section.
-    pub(crate) fn pkg_results(&mut self) -> Vec<usize> {
+    /// Install section: THE ROW, then the "More" cell — or, once it is
+    /// open, everything the query found. `before`: the cells ahead of them
+    /// (the webapps found).
+    pub(crate) fn pkg_results(&mut self, before: usize) -> Vec<usize> {
+        self.pkg_more_cell = None;
         // Lazily load the index the first time the launcher card is actually
         // opened (not during the hidden-state refilters that run at startup and
         // on every rescan). Until this fires the nix thread is parked holding no
@@ -749,17 +810,40 @@ impl App {
             && self.pkg_asked.as_deref() != Some(query.as_str())
         {
             self.pkg_asked = Some(query.clone());
-            self.nix.request(nix::Request::Rank { query });
+            self.nix.request(nix::Request::Rank { query: query.clone() });
         }
         let hits = self.pkg_hits.clone();
-        // Already-installed packages drop out of the list.
-        let shown: Vec<nix::PkgEntry> = hits.into_iter().filter(|p| !self.pkg_installed(p)).collect();
+        let main_n = self.pkg_main.min(hits.len());
+        // Already-installed packages drop out of the list — and leave their
+        // place empty: with chrome installed, "chrome" is the More plate
+        // alone, not three other programs with chrome in the name.
+        let mut main: Vec<nix::PkgEntry> = hits[..main_n].iter().filter(|p| !self.pkg_installed(p)).cloned().collect();
+        let mut more: Vec<nix::PkgEntry> = hits[main_n..].iter().filter(|p| !self.pkg_installed(p)).cloned().collect();
+        if !query.is_empty() {
+            let room = self.install_room(before);
+            if main.len() > room {
+                let over: Vec<nix::PkgEntry> = main.drain(room..).collect();
+                more.splice(0..0, over);
+            }
+        }
         // (The package of the page up keeps its entry, shown or not: its icon.)
-        let paged = self.page_package().filter(|p| !shown.iter().any(|s| s.attr == p.attr)).cloned();
+        let paged = self
+            .page_package()
+            .filter(|p| !main.iter().chain(&more).any(|s| s.attr == p.attr))
+            .cloned();
         if let Some(p) = paged {
             self.push_transient_pkg(&p);
         }
-        shown.into_iter().map(|p| self.push_transient_pkg(&p)).collect()
+        let open = self.search.pkg_more_for.as_deref() == Some(query.as_str());
+        let mut shown: Vec<usize> = main.iter().map(|p| self.push_transient_pkg(p)).collect();
+        if open {
+            shown.extend(more.iter().map(|p| self.push_transient_pkg(p)));
+        } else if !more.is_empty() {
+            let cell = self.push_pkg_more_cell(more.len());
+            self.pkg_more_cell = Some(cell);
+            shown.push(cell);
+        }
+        shown
     }
 
     /// Begin an ephemeral "try it" launch: realize the package
@@ -838,7 +922,7 @@ impl App {
         dock_slot: Option<usize>,
         box_dest: Option<String>,
     ) {
-        if self.busy_ids.contains(attr) || self.pending_installs.iter().any(|p| p.attr == attr) {
+        if self.retry_failed_install(attr) || self.busy_ids.contains(attr) || self.pending_installs.iter().any(|p| p.attr == attr) {
             return;
         }
         // The desktop ids the package ships (uninstall mapping + resolve
@@ -938,6 +1022,32 @@ impl App {
         });
         self.save_install_state();
         self.refilter();
+    }
+
+    /// Install again what a "Failed" tile holds (a click on it, or Install
+    /// on its page or a drag of it from the results): its ring restarts.
+    /// False when `attr` has no failed tile.
+    pub(crate) fn retry_failed_install(&mut self, attr: &str) -> bool {
+        let Some(p) = self.pending_installs.iter_mut().find(|p| p.attr == attr && p.failed) else {
+            return false;
+        };
+        p.failed = false;
+        p.started = Instant::now(); // restart the ring
+        p.completed_at = None;
+        p.last_rescan = None;
+        let desktop_ids = p.desktop_ids.clone();
+        info!("retrying install of {attr}");
+        // Re-stage in memory; packages.nix not written until success.
+        self.managed.stage(attr, desktop_ids);
+        self.recompute_removable();
+        self.busy_ids.insert(attr.to_owned());
+        self.nix.request(nix::Request::Install {
+            id: attr.to_owned(),
+            attr: attr.to_owned(),
+        });
+        self.save_install_state();
+        self.refilter();
+        true
     }
 
     /// Drop a pending-install tile (dismissed by the user, or resolved),
@@ -1540,8 +1650,11 @@ impl App {
                 .checked_sub(Duration::from_secs_f64(elapsed))
                 .unwrap_or_else(Instant::now);
             info!("restoring pending install {} (failed={})", t.attr, t.failed);
-            self.managed.stage(&t.attr, t.desktop_ids.clone());
+            // (A failed one is not on the list: staging it hid the app from
+            // the Install results for good — krita, failed 2026-10-26, was
+            // "installed" from then on. Its retry stages it again.)
             if !t.failed {
+                self.managed.stage(&t.attr, t.desktop_ids.clone());
                 self.busy_ids.insert(t.attr.clone());
                 self.nix.request(nix::Request::Install {
                     id: t.attr.clone(),

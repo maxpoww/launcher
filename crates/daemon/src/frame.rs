@@ -1946,6 +1946,7 @@ impl App {
                 act_cells: &act_cells,
                 act_asking,
                 act_wide,
+                more_cell: self.pkg_more_cell.map(|e| (e, crate::i18n::tr("More"))),
                 recent_title: self.search.actions.title.as_deref(),
                 deep: self.search.deep.as_ref().map(|d| content::DeepDraw {
                     titles: [d.shelves[0].title.as_str(), d.shelves[1].title.as_str(), d.shelves[2].title.as_str()],
