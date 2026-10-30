@@ -223,7 +223,9 @@ Design rules that came out of it (keep them):
 THE DOCK AT REST (2026-10-30, after reading Omarchy, whose rule is "long-running code reacts to events; polling is the
 last resort"; the whole study is Golem's `docs/omarchy.md`): `tools/perf-guard/rest-check.py` measures the dock on an
 empty workspace against a budget (wake-ups, CPU, processes started — counts, the same on any machine) and fails over it;
-run it after anything that adds a timer. 100.7 wake-ups a second and 0.60 % of a CPU became 15.3 and 0.25 %:
+run it after anything that adds a timer. `tools/perf-guard/churn-check.sh` is the same for a busy dock (boxes, gear, Files,
+quick controls opened and closed; the loop's own stall counter). 100.7 wake-ups a second and 0.60 % of a CPU became 12.6
+and 0.13 %:
 - The loop's meter is not a timer (`perf::TurnMeter`, calloop's "the poll came back"; `perf::turn_ended` from the loop):
   it times whole turns; it was a 25 ms timer, 40 wake-ups a second to measure the others.
 - `GolemSettings::load` reads and parses the file only when its inode, mtime or length changed (it was read twice every

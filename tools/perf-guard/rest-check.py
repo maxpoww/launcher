@@ -12,7 +12,7 @@ number rather than by a warm laptop months later.
 Budgets are counts because a count is the same on a slow machine and a fast one.
 The idea is Omarchy's (test/shell.d/shell-idle-spawn-test.sh: a shell at rest must
 start no process), read 2026-10-30. Measured here that day: 100.7 wake-ups a
-second and 0.60 % of a CPU before, 15.3 and 0.25 % after.
+second and 0.60 % of a CPU before, 12.6 and 0.13 % after.
 
 A "wake-up" is a context switch of a thread: a thread that went to sleep and was
 woken. What each one is: strace the dock (ptrace_scope=1 means as its parent).
