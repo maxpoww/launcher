@@ -68,11 +68,16 @@ const BUTTON_H: f32 = 34.0;
 const BUTTON_PX: f32 = 15.0;
 const BUTTON_PAD: f32 = 20.0;
 const BUTTON_GAP: f32 = 10.0;
+/// The column's widest (a page on a wide card keeps its lines readable), and the
+/// long description's most lines.
+const COLUMN: f32 = 560.0;
+const LONG_MAX: usize = 6;
 
 impl App {
-    /// The page is up (not on its way out).
+    /// The page is up (not on its way out, and not under the control panel:
+    /// the panel's field takes the card's clicks).
     pub(crate) fn page_up(&self) -> bool {
-        self.search.page.as_ref().is_some_and(|p| !p.leaving)
+        !self.control_panel && self.search.page.as_ref().is_some_and(|p| !p.leaving)
     }
 
     /// The package whose page is up (or going): it keeps an entry for its
@@ -133,7 +138,8 @@ impl App {
     }
 
     /// Where the page has its parts: the card's own room between the dock's
-    /// band (when it rides the card's top) and the search.
+    /// band (riding the card's top, or down its side with the dock on the left
+    /// or the right) and the search.
     fn page_area(layout: &content::Layout, sc: f32) -> Rect {
         let band = layout.dock_band;
         let top = if !layout.sideways() && band.y >= layout.card_top - 1.0 && band.y < layout.card_top + layout.card_h / 2.0 {
@@ -142,8 +148,17 @@ impl App {
             layout.card_top
         };
         let bottom = if layout.search_box.y > top { layout.search_box.y } else { layout.card_top + layout.card_h };
+        let (mut x0, mut x1) = (layout.card_x, layout.card_x + layout.card_w);
+        if layout.sideways() && band.w > 0.0 && band.y < layout.card_top + layout.card_h && band.y + band.h > layout.card_top {
+            let mid = layout.card_x + layout.card_w / 2.0;
+            if band.x + band.w <= mid && band.x + band.w > x0 {
+                x0 = band.x + band.w; // the band down the card's left
+            } else if band.x >= mid && band.x < x1 {
+                x1 = band.x; // down its right
+            }
+        }
         let pad = PAD * sc;
-        Rect::new(layout.card_x + pad, top + pad * 0.6, (layout.card_w - 2.0 * pad).max(0.0), (bottom - top - pad).max(0.0))
+        Rect::new(x0 + pad, top + pad * 0.6, (x1 - x0 - 2.0 * pad).max(0.0), (bottom - top - pad).max(0.0))
     }
 
     /// The state of the page's package or webapp: what Install says.
@@ -298,42 +313,61 @@ impl App {
         }
         draw.labels.push(label(back, back_rect.x + 9.0 * sc, back_rect.y + (back_rect.h - FACTS_PX * sc * 1.3) / 2.0, back_w, FACTS_PX * sc, FACTS_PX * sc * 1.3, None, dim));
         buttons.push((Button::Back, back_rect));
-        // The icon, and beside it the name, what it is and what it does.
-        let top = back_rect.y + back_rect.h + 14.0 * sc;
-        let side = (ICON * sc).min(area.h * 0.4);
-        let icon = Rect::new(area.x, top, side, side);
+        // ONE COLUMN, CENTRED (Max, 2026-10-30: "i want it centered"): the icon, the
+        // name, what it is, what it does, the buttons, and as much of the long
+        // description as fits (`LONG_MAX` lines at most) — the whole of it in the
+        // middle of the room under ‹ Back, across and down.
+        let cw = area.w.min(COLUMN * sc);
+        let cx = area.x + area.w / 2.0;
+        let x0 = cx - cw / 2.0;
+        let room_top = back_rect.y + back_rect.h + 8.0 * sc;
+        let room_h = (area.y + area.h - room_top).max(0.0);
+        let side = (ICON * sc).min(room_h * 0.3);
+        let name_line = NAME_PX * sc * 1.3;
+        let facts_line = FACTS_PX * sc * 1.35;
+        let text_line = TEXT_PX * sc * 1.4;
+        let long_line = LONG_PX * sc * 1.5;
+        let texts = crate::peek_page::wrap(&text, cw, 2, &mut |s: &str| measure(self, s, TEXT_PX * sc, None));
+        let head = side + 16.0 * sc + name_line + 2.0 * sc + facts_line + 10.0 * sc + texts.len() as f32 * text_line + 20.0 * sc + BUTTON_H * sc;
+        let long = long.split_whitespace().collect::<Vec<_>>().join(" ");
+        let long_gap = 24.0 * sc;
+        let long_room = (((room_h - head - long_gap) / long_line).floor().max(0.0) as usize).min(LONG_MAX);
+        let longs = if long.is_empty() || long_room == 0 {
+            Vec::new()
+        } else {
+            crate::peek_page::wrap(&long, cw, long_room, &mut |s: &str| measure(self, s, LONG_PX * sc, None))
+        };
+        let total = head + if longs.is_empty() { 0.0 } else { long_gap + longs.len() as f32 * long_line };
+        let mut y = room_top + ((room_h - total) / 2.0).max(0.0);
+        let centred = |text: String, y: f32, px: f32, line: f32, family: Option<&'static str>, color: [f32; 4]| Label {
+            centered: true,
+            ..label(text, cx, y, cw, px, line, family, color)
+        };
+        let icon = Rect::new(cx - side / 2.0, y, side, side);
         if let Some(e) = self.entries.iter().position(|e| e.id == page.of.id()) {
             draw.icons.push((e, icon));
         }
-        let tx = icon.x + side + 22.0 * sc;
-        let tw = (area.x + area.w - tx).max(0.0);
-        let name_line = NAME_PX * sc * 1.3;
-        draw.labels.push(label(
-            crate::desktop::fit_label(&name, tw, &mut |s: &str| measure(self, s, NAME_PX * sc, Some(content::FONT_MEDIUM))),
-            tx,
-            top + 2.0 * sc,
-            tw,
-            NAME_PX * sc,
-            name_line,
-            Some(content::FONT_MEDIUM),
-            ink,
-        ));
-        let mut y = top + 2.0 * sc + name_line + 2.0 * sc;
-        draw.labels.push(label(facts, tx, y, tw, FACTS_PX * sc, FACTS_PX * sc * 1.35, None, dim));
-        y += FACTS_PX * sc * 1.35 + 8.0 * sc;
-        let text_line = TEXT_PX * sc * 1.4;
-        for line in crate::peek_page::wrap(&text, tw, 2, &mut |s: &str| measure(self, s, TEXT_PX * sc, None)) {
-            draw.labels.push(label(line, tx, y, tw, TEXT_PX * sc, text_line, None, ink));
+        y += side + 16.0 * sc;
+        let name = crate::desktop::fit_label(&name, cw, &mut |s: &str| measure(self, s, NAME_PX * sc, Some(content::FONT_MEDIUM)));
+        draw.labels.push(centred(name, y, NAME_PX * sc, name_line, Some(content::FONT_MEDIUM), ink));
+        y += name_line + 2.0 * sc;
+        let facts = crate::desktop::fit_label(&facts, cw, &mut |s: &str| measure(self, s, FACTS_PX * sc, None));
+        draw.labels.push(centred(facts, y, FACTS_PX * sc, facts_line, None, dim));
+        y += facts_line + 10.0 * sc;
+        for line in texts {
+            draw.labels.push(centred(line, y, TEXT_PX * sc, text_line, None, ink));
             y += text_line;
         }
-        // The buttons, under the icon's block.
-        let by = (icon.y + side).max(y) + 22.0 * sc;
-        let mut bx = area.x;
+        // The buttons, a row in the middle.
+        y += 20.0 * sc;
+        let order = self.page_buttons();
+        let widths: Vec<f32> = order.iter().map(|&b| measure(self, &self.page_words(b), BUTTON_PX * sc, None) + 2.0 * BUTTON_PAD * sc).collect();
+        let row = widths.iter().sum::<f32>() + BUTTON_GAP * sc * (widths.len().saturating_sub(1)) as f32;
+        let mut bx = (cx - row / 2.0).max(x0.min(area.x));
         let lit = self.page_install_state() == Button::Install && !self.page_busy();
-        for b in self.page_buttons() {
+        for (&b, &w) in order.iter().zip(&widths) {
             let words = self.page_words(b);
-            let w = measure(self, &words, BUTTON_PX * sc, None) + 2.0 * BUTTON_PAD * sc;
-            let r = Rect::new(bx, by, w, BUTTON_H * sc);
+            let r = Rect::new(bx, y, w, BUTTON_H * sc);
             let first = b == Button::Install && lit;
             let on = page.hover == Some(b) || page.keyed == Some(b);
             let rest = if first { 0.20 } else { 0.10 };
@@ -354,16 +388,10 @@ impl App {
             buttons.push((b, r));
             bx += w + BUTTON_GAP * sc;
         }
-        // The long description, as much as the room under the buttons holds.
-        let mut ly = by + BUTTON_H * sc + 26.0 * sc;
-        let long_line = LONG_PX * sc * 1.5;
-        let room = ((area.y + area.h - ly) / long_line).floor().max(0.0) as usize;
-        let long = long.split_whitespace().collect::<Vec<_>>().join(" ");
-        if room > 0 && !long.is_empty() {
-            for line in crate::peek_page::wrap(&long, area.w, room, &mut |s: &str| measure(self, s, LONG_PX * sc, None)) {
-                draw.labels.push(label(line, area.x, ly, area.w, LONG_PX * sc, long_line, None, faint));
-                ly += long_line;
-            }
+        y += BUTTON_H * sc + long_gap;
+        for line in longs {
+            draw.labels.push(centred(line, y, LONG_PX * sc, long_line, None, faint));
+            y += long_line;
         }
         if let Some(p) = self.search.page.as_mut() {
             p.buttons = buttons;

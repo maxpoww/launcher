@@ -4545,6 +4545,9 @@ impl App {
     fn toggle_panel(&mut self, modules: bool) {
         let what = if modules { "modules" } else { "control panel" };
         self.close_group();
+        // (An app's page goes with the results it was opened from: the panel
+        // took every click while the page stood under it — Max, 2026-10-30.)
+        self.page_close();
         if self.ui.target() == Target::Open && self.control_panel && self.panel.is_modules() != modules {
             info!("{what}: in place of the other field");
             self.panel_switch(modules);
@@ -4689,6 +4692,7 @@ impl App {
         }
         info!("control panel: {label} from the apps search");
         self.close_group();
+        self.page_close();
         // The Controls row holds settings, never modules.
         self.panel_switch(false);
         if self.panel_reset_due {

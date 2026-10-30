@@ -264,9 +264,13 @@ The big daemon files are cohesive but long — go straight to the function:
   some info about the app"): a click, Enter or Shift (`box_shift`) on an Install cell — a package or a
   catalog webapp — gives the box to it (`SearchState::page`, `page_open`; drawn in the control panel's
   place, `panel_draw` → `page_draw`, eased by `App::page_mix` as `panel_mix` is, the results pushed down
-  behind it): ‹ Back, its icon (the package keeps its entry while its page is up, installed or not —
-  `page_package`), its name, "version · licence · App to install" (a webapp: "host · Web app"), what it
-  does (two lines) and, faint, its long description in the room left; buttons Install (Installing… /
+  behind it): ‹ Back at the top left, then ONE CENTRED COLUMN (Max, 2026-10-30: "i want it centered"),
+  across and down the room left (`page_area`: under a dock on the left or the right the band runs down the
+  card's side and is kept out; `COLUMN` 560 wide at most): its icon (the package keeps its entry while its
+  page is up, installed or not — `page_package`), its name, "version · licence · App to install" (a webapp:
+  "host · Web app"), what it does (two lines), the buttons as a centred row and, faint, its long description
+  (`LONG_MAX` 6 lines). The CONTROL PANEL sends the page away (`toggle_panel` → `page_close`; `page_up` is
+  false under it): the page had taken every click while it stood under the panel. Buttons Install (Installing… /
   Installed; a webapp installed: Open) · Website (the package's homepage; none: More info =
   search.nixos.org) · Try (a package built and run — Starting… while it builds, the page stays —, a
   webapp opened; not once installed or while installing). Escape, Backspace, Shift or ‹ Back go back;
