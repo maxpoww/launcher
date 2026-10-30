@@ -64,6 +64,7 @@ fn start() -> bool {
                 is_usb_change(&event[..n as usize])
             };
             if usb {
+                debug!("usb: the kernel says a device came or went");
                 LISTENERS.lock().unwrap_or_else(|e| e.into_inner()).retain_mut(|told| told());
             }
         }

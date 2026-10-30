@@ -21,13 +21,20 @@ use tokio::sync::{mpsc, watch};
 use zbus::fdo::{DBusProxy, PropertiesProxy};
 use zbus::names::InterfaceName;
 use zbus::zvariant::OwnedValue;
-use zbus::Connection;
+use zbus::{Connection, MatchRule};
 
+use super::bus_wait;
 use crate::collector::{Collector, CollectorFuture};
 use crate::message::{ContextDelta, Update};
 use crate::state::{ContextState, Layer, PlaybackState, Playing, PlayingSource};
 
+/// While something plays (its track moves with no word from the player).
 const POLL: Duration = Duration::from_millis(1000);
+/// While nothing plays: a player coming or changing says so on the bus, and
+/// this is only the net behind that.
+const LOOK: Duration = Duration::from_secs(60);
+/// A word from the bus is let finish before looking.
+const SETTLE: Duration = Duration::from_millis(80);
 const RECONNECT: Duration = Duration::from_secs(5);
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
@@ -66,6 +73,10 @@ impl Collector for MediaCollector {
                     }
                 };
                 let mut last: Option<Vec<Playing>> = None;
+                // A player comes or goes (its name on the bus)…
+                let mut names = bus_wait::listen(&conn, names_rule()).await;
+                // …or changes (play, pause, another song).
+                let mut changes = bus_wait::listen(&conn, changes_rule()).await;
                 loop {
                     match reconcile(&conn).await {
                         Ok(state) => {
@@ -88,12 +99,44 @@ impl Collector for MediaCollector {
                             break;
                         }
                     }
-                    tokio::time::sleep(POLL).await;
+                    let playing = last
+                        .iter()
+                        .flatten()
+                        .any(|p| p.state == PlaybackState::Playing);
+                    let told = names.is_some() && changes.is_some();
+                    let patience = if playing || !told { POLL } else { LOOK };
+                    tokio::select! {
+                        () = bus_wait::next(&mut names) => {}
+                        () = bus_wait::next(&mut changes) => {}
+                        () = tokio::time::sleep(patience) => continue,
+                    }
+                    bus_wait::settle(&mut [&mut names, &mut changes], SETTLE).await;
                 }
                 tokio::time::sleep(RECONNECT).await;
             }
         })
     }
+}
+
+/// A name under MPRIS's coming or going.
+fn names_rule() -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.freedesktop.DBus")?
+        .interface("org.freedesktop.DBus")?
+        .member("NameOwnerChanged")?
+        .arg0ns("org.mpris.MediaPlayer2")?
+        .build())
+}
+
+/// A player's properties changing.
+fn changes_rule() -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.DBus.Properties")?
+        .member("PropertiesChanged")?
+        .path(MPRIS_PATH)?
+        .build())
 }
 
 /// Read EVERY MPRIS player. Nothing is chosen and nothing is discarded — that

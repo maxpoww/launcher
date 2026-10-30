@@ -19,14 +19,20 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
-use zbus::{Connection, Proxy};
+use zbus::{Connection, MatchRule, Proxy};
 
+use super::bus_wait;
 use crate::collector::{Collector, CollectorFuture};
 use crate::message::{ContextDelta, Update};
 use crate::state::{BluetoothState, ContextState, Layer};
 
-/// Slow-changing state: a device connects or drops on human timescales.
+/// Slow-changing state: a device connects or drops on human timescales. Where
+/// the bus cannot tell us, asked this often.
 const POLL: Duration = Duration::from_secs(3);
+/// BlueZ says what changes; the look behind that is only a net.
+const LOOK: Duration = Duration::from_secs(120);
+/// A word from BlueZ is let finish before looking (a scan sends many a second).
+const SETTLE: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(10);
 const DEST: &str = "org.bluez";
 const OBJECT_MANAGER: &str = "org.freedesktop.DBus.ObjectManager";
@@ -68,6 +74,7 @@ impl Collector for BluetoothCollector {
                     }
                 };
                 let mut last: Option<BluetoothState> = None;
+                let mut said = bus_wait::listen(proxy.connection(), said_rule()).await;
                 loop {
                     match managed_objects(&proxy).await {
                         Ok(objects) => {
@@ -91,7 +98,12 @@ impl Collector for BluetoothCollector {
                             break;
                         }
                     }
-                    tokio::time::sleep(POLL).await;
+                    let patience = if said.is_some() { LOOK } else { POLL };
+                    tokio::select! {
+                        () = bus_wait::next(&mut said) => {}
+                        () = tokio::time::sleep(patience) => continue,
+                    }
+                    bus_wait::settle(&mut [&mut said], SETTLE).await;
                 }
                 // BlueZ went away: the layer goes dark rather than leaving its
                 // last answer standing as if it were still true.
@@ -100,6 +112,11 @@ impl Collector for BluetoothCollector {
             }
         })
     }
+}
+
+/// Anything BlueZ says.
+fn said_rule() -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(DEST)?.build())
 }
 
 /// Connect to the SYSTEM bus and build BlueZ's ObjectManager proxy.

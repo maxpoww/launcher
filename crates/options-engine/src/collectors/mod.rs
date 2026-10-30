@@ -9,6 +9,7 @@
 pub mod audio;
 pub mod bluetooth;
 pub mod bridge;
+mod bus_wait;
 pub mod daylight;
 pub mod deploy;
 pub mod downloads;

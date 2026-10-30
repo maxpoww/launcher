@@ -592,6 +592,14 @@ impl App {
 
     /// Drop a capture whose events are never coming: it would otherwise hold
     /// the one slot forever.
+    /// Whether the colour-match found a frame to read lately: the screen is
+    /// changing under it, and it keeps its pace (the poll's tick starts its
+    /// next capture).
+    pub(crate) fn colour_sample_lately(&self) -> bool {
+        const LATELY: std::time::Duration = std::time::Duration::from_secs(4);
+        self.colour_sampled_at.is_some_and(|at| at.elapsed() < LATELY)
+    }
+
     pub(crate) fn reap_stalled_capture(&mut self) {
         let stalled = self.capture.as_ref().is_some_and(|c| match c.stage {
             Stage::AwaitBuffer => c.started.elapsed() > CAPTURE_STALL,
@@ -1117,6 +1125,7 @@ impl App {
     /// wanted NOW (the frame has them all), paint whichever changed, and make
     /// the next frame object while the capture session is still open.
     fn options_capture_ready(&mut self) {
+        self.colour_sampled_at = Some(std::time::Instant::now());
         let Some(cap) = self.capture.take() else {
             return;
         };

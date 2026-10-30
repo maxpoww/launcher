@@ -739,6 +739,8 @@ fn main() -> anyhow::Result<()> {
         capture_share_timer: false,
         capture_deadline_timer: false,
         zone_poll_running: false,
+        zone_poll: None,
+        colour_sampled_at: None,
         options_burst_pending: false,
         options_capture_failing: false,
         screencopy,
@@ -1460,26 +1462,7 @@ fn main() -> anyhow::Result<()> {
                 // event); the bar colour-match runs its own self-healing poll
                 // (started from `reeval_options_bar`).
                 if app.config.input.intellihide {
-                    match event_loop.handle().insert_source(
-                        Timer::from_duration(ZONE_POLL_INTERVAL),
-                        |_, _, app: &mut App| {
-                            // The colour-match's safety net rides this tick
-                            // (see `schedule_options_poll`): reap a capture
-                            // whose events never came, then re-evaluate.
-                            app.reap_stalled_capture();
-                            // A timer, not news: the colour captures it
-                            // starts may wait for the screen to change.
-                            app.capture_from_poll = true;
-                            app.on_layout_changed();
-                            app.capture_from_poll = false;
-                            TimeoutAction::ToDuration(ZONE_POLL_INTERVAL)
-                        },
-                    ) {
-                        Ok(_) => app.zone_poll_running = true,
-                        Err(e) => {
-                            warn!("zone poll timer failed ({e}); intellihide is event-driven only")
-                        }
-                    }
+                    app.zone_poll_arm(ZONE_POLL_INTERVAL);
                 }
             }
             Err(e) => warn!("Hyprland IPC unavailable: {e:#}"),
@@ -1731,6 +1714,9 @@ pub struct App {
     /// The steady zone poll is installed (intellihide): it re-evaluates the
     /// colour-match on every tick, so the colour poll does not run as well.
     zone_poll_running: bool,
+    zone_poll: Option<calloop::RegistrationToken>,
+    /// When a colour capture last brought a frame.
+    colour_sampled_at: Option<std::time::Instant>,
     /// A [`screencopy`] settle-burst re-evaluation is armed (one quick
     /// follow-up capture after a sample changed a colour).
     options_burst_pending: bool,
@@ -3121,6 +3107,11 @@ const RESCAN_COOLDOWN: Duration = Duration::from_secs(30);
 /// emit no Hyprland event, so polling is the only reliable signal. The
 /// render loop stays fully idle between polls.
 const ZONE_POLL_INTERVAL: Duration = Duration::from_millis(800);
+/// The same with nobody touching anything: what the poll is for — a float
+/// moved or resized — takes a hand. A hand coming back looks at once
+/// (`zone_poll_now`), and a screen that keeps changing keeps the first pace (the
+/// colour-match rides this tick).
+const ZONE_POLL_QUIET: Duration = Duration::from_secs(4);
 
 /// Duration of the launch bounce (two decaying hops), after which the
 /// card hides.
@@ -4042,6 +4033,40 @@ impl App {
     /// steady zone poll: float toggles, interactive float moves/resizes,
     /// and the re-tiling they cause all emit *no* Hyprland event
     /// (verified on socket2), so events alone can never be sufficient.
+    /// (Re)start the zone poll, its first look after `first`.
+    fn zone_poll_arm(&mut self, first: Duration) {
+        if let Some(old) = self.zone_poll.take() {
+            self.loop_handle.remove(old);
+        }
+        let armed = self.loop_handle.insert_source(Timer::from_duration(first), |_, _, app: &mut App| {
+            // The colour-match's safety net rides this tick
+            // (see `schedule_options_poll`): reap a capture
+            // whose events never came, then re-evaluate.
+            app.reap_stalled_capture();
+            // A timer, not news: the colour captures it
+            // starts may wait for the screen to change.
+            app.capture_from_poll = true;
+            app.on_layout_changed();
+            app.capture_from_poll = false;
+            let quiet = app.lighting_is_quiet() && !app.colour_sample_lately();
+            TimeoutAction::ToDuration(if quiet { ZONE_POLL_QUIET } else { ZONE_POLL_INTERVAL })
+        });
+        match armed {
+            Ok(token) => {
+                self.zone_poll = Some(token);
+                self.zone_poll_running = true;
+            }
+            Err(e) => warn!("zone poll timer failed ({e}); intellihide is event-driven only"),
+        }
+    }
+
+    /// A hand is back on the machine: the zone is looked at now.
+    pub(crate) fn zone_poll_now(&mut self) {
+        if self.zone_poll_running {
+            self.zone_poll_arm(Duration::ZERO);
+        }
+    }
+
     fn on_layout_changed(&mut self) {
         // The card's window may have moved, changed space or gone.
         self.sync_card();

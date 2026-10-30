@@ -914,10 +914,18 @@ impl App {
 
     /// The 3 s notification: the room is quiet, or it is not.
     fn lighting_quiet(&mut self, quiet: bool) {
-        self.lighting.quiet = quiet;
+        let was = std::mem::replace(&mut self.lighting.quiet, quiet);
         if quiet {
             self.lighting_apply_if_due();
+        } else if was {
+            self.zone_poll_now();
         }
+    }
+
+    /// Nobody has touched anything for a few seconds (false where the
+    /// compositor cannot say).
+    pub(crate) fn lighting_is_quiet(&self) -> bool {
+        self.lighting.quiet
     }
 }
 
