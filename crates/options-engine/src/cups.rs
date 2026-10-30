@@ -321,10 +321,22 @@ fn socket() -> PathBuf {
     }
 }
 
-/// Whether the scheduler's socket is there at all (a lean machine has no
-/// CUPS).
+/// Whether the scheduler is RUNNING: its pid file names a live process
+/// (or `CUPS_SERVER` points elsewhere). Not the socket: with socket
+/// activation the socket is always there, and asking through it STARTS
+/// the scheduler — the collector woke CUPS at every boot and kept it up
+/// (1 s of a weak machine's login, a resident cupsd; 2026-10-30). A print
+/// from any app starts it, and the collector finds it running within
+/// ten seconds.
 pub fn present() -> bool {
-    socket().exists()
+    if std::env::var("CUPS_SERVER").is_ok_and(|s| !s.is_empty() && !s.starts_with('/')) {
+        return true;
+    }
+    let pid_file = socket().with_file_name("cupsd.pid");
+    std::fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
 }
 
 /// The user this process runs as, by name (what PeerCred claims).

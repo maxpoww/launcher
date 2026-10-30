@@ -32,8 +32,9 @@ use crate::cups;
 use crate::message::{ContextDelta, Update};
 use crate::state::{ContextState, Layer, PrintJob, PrinterState, PrintingState};
 
-/// No scheduler socket: looked for again after this.
-const ABSENT: Duration = Duration::from_secs(60);
+/// No scheduler running: looked for again after this (a print from any
+/// app starts it; it is found within this).
+const ABSENT: Duration = Duration::from_secs(10);
 /// The scheduler did not answer: asked again after this.
 const RETRY: Duration = Duration::from_secs(10);
 /// A print running, with CUPS's signals heard: a safety look this often.
