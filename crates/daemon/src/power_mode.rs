@@ -50,6 +50,10 @@ fn wanted(on_charger: bool, picked: Option<&str>, has: &[String]) -> Option<Stri
 /// A look at the power supply (often; it costs a compare). Only a change, or
 /// the first one, does anything, on a thread of its own.
 pub(crate) fn follow(on_charger: bool) {
+    // A nested test dock does not change the computer's power mode.
+    if crate::palette::rig() {
+        return;
+    }
     let now = if on_charger { CHARGER } else { BATTERY };
     if SOURCE.swap(now, Ordering::Relaxed) == now {
         return;

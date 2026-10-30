@@ -4064,6 +4064,7 @@ impl App {
     /// A hand is back on the machine: the zone is looked at now.
     pub(crate) fn zone_poll_now(&mut self) {
         if self.zone_poll_running {
+            debug!("zone poll: a hand is back, looking now");
             self.zone_poll_arm(Duration::ZERO);
         }
     }

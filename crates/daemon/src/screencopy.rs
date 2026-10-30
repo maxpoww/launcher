@@ -1125,7 +1125,13 @@ impl App {
     /// wanted NOW (the frame has them all), paint whichever changed, and make
     /// the next frame object while the capture session is still open.
     fn options_capture_ready(&mut self) {
+        // The screen moved after a rest: the poll goes back to its pace now
+        // rather than at its next quiet look.
+        let was_resting = !self.colour_sample_lately();
         self.colour_sampled_at = Some(std::time::Instant::now());
+        if was_resting && self.lighting_is_quiet() && self.zone_poll_running {
+            self.zone_poll_arm(crate::ZONE_POLL_INTERVAL);
+        }
         let Some(cap) = self.capture.take() else {
             return;
         };
