@@ -1151,6 +1151,12 @@ struct DiskCache {
     /// mtime stand (one stat, not a read: 70 webapp PNGs read cold were
     /// 127 ms of a MacBook start, 2026-10-29).
     hashes: HashMap<String, Known>,
+    /// The same by the path the entry NAMES, good while the icon
+    /// directories are what they were (`dirs_fence`): no canonicalize —
+    /// 125 of them on a cold disk were 179 ms of a MacBook start
+    /// (2026-10-29). `mtime` 0: the real file is in the store.
+    by_given: HashMap<String, Known>,
+    given_fence: String,
     hashes_dirty: bool,
     /// THE PACK (`pack.bin`): every tile of the last index in one file, read
     /// once at a start — 115 tiles read one file each from a cold SSD were
@@ -1238,24 +1244,42 @@ impl DiskCache {
     /// The cache in `dir`, its remembered hashes read.
     fn at(dir: PathBuf) -> Self {
         let mut hashes = HashMap::new();
+        let mut by_given = HashMap::new();
+        let given_fence = dirs_fence();
         if let Ok(text) = std::fs::read_to_string(dir.join("hashes.tsv")) {
+            // `#fence <dirs>` heads the file; a given-path line (`G`) serves
+            // under that fence only.
+            let fence_held = text
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix("#fence "))
+                .is_some_and(|f| f == given_fence);
             for line in text.lines() {
                 // hash, len, mtime, path — or the older hash, len, path (a
-                // store file by its real path).
-                let parts: Vec<&str> = line.splitn(4, '\t').collect();
-                let (h, l, m, path) = match parts[..] {
-                    [h, l, m, path] => (h, l, m, path),
-                    [h, l, path] => (h, l, "0", path),
+                // store file by its real path); G, hash, len, mtime, given.
+                let parts: Vec<&str> = line.splitn(5, '\t').collect();
+                let (given, h, l, m, path) = match parts[..] {
+                    ["G", h, l, m, path] => (true, h, l, m, path),
+                    [h, l, m, path] => (false, h, l, m, path),
+                    [h, l, path] => (false, h, l, "0", path),
                     _ => continue,
                 };
                 if let (Ok(hash), Ok(len), Ok(mtime)) = (u64::from_str_radix(h, 16), l.parse::<usize>(), m.parse::<u64>()) {
-                    hashes.insert(path.to_owned(), Known { hash, len, mtime });
+                    if given {
+                        if fence_held {
+                            by_given.insert(path.to_owned(), Known { hash, len, mtime });
+                        }
+                    } else {
+                        hashes.insert(path.to_owned(), Known { hash, len, mtime });
+                    }
                 }
             }
         }
         Self {
             dir,
             hashes,
+            by_given,
+            given_fence,
             hashes_dirty: false,
             pack: None,
             used: Vec::new(),
@@ -1331,9 +1355,12 @@ impl DiskCache {
         }
         if self.hashes_dirty {
             self.hashes_dirty = false;
-            let mut text = String::new();
+            let mut text = format!("#fence {}\n", self.given_fence);
             for (path, k) in &self.hashes {
                 text.push_str(&format!("{:016x}\t{}\t{}\t{path}\n", k.hash, k.len, k.mtime));
+            }
+            for (path, k) in &self.by_given {
+                text.push_str(&format!("G\t{:016x}\t{}\t{}\t{path}\n", k.hash, k.len, k.mtime));
             }
             let file = self.dir.join("hashes.tsv");
             let tmp = self.dir.join(format!("hashes.tmp{}", std::process::id()));
@@ -1361,30 +1388,48 @@ impl DiskCache {
         // are small next to its tile; a PNG's are read once a start.
         // (A store file never changes: its hash is remembered by its real
         // path — a theme path through a profile is a link into the store.)
-        let real = std::fs::canonicalize(icon_path).ok();
-        let real = real.as_deref().and_then(|p| p.to_str()).unwrap_or(icon_path);
-        let in_store = real.starts_with("/nix/store/");
-        // Known by its real path: a store file as it was; any other while
-        // its length and mtime stand (a stat).
-        let known = match self.hashes.get(real) {
-            Some(k) if in_store => Some((k.hash, k.len)),
-            Some(k) => std::fs::metadata(real)
+        // Known by the path the entry names, under the directories' fence:
+        // a store-backed one as it was, any other while its length and
+        // mtime stand (a stat through the link — no canonicalize).
+        let by_given = match self.by_given.get(icon_path) {
+            Some(k) if k.mtime == 0 => Some((k.hash, k.len)),
+            Some(k) => std::fs::metadata(icon_path)
                 .ok()
                 .filter(|m| m.len() as usize == k.len && file_mtime_secs(m) == k.mtime)
                 .map(|_| (k.hash, k.len)),
             None => None,
         };
-        let (hash, len) = match known {
+        let (hash, len) = match by_given {
             Some(known) => known,
             None => {
-                let bytes = std::fs::read(real).ok()?;
-                let (hash, len) = (fnv1a64_bytes(&bytes), bytes.len());
+                let real = std::fs::canonicalize(icon_path).ok();
+                let real = real.as_deref().and_then(|p| p.to_str()).unwrap_or(icon_path);
+                let in_store = real.starts_with("/nix/store/");
+                // Known by its real path: a store file as it was; any other
+                // while its length and mtime stand (a stat).
+                let known = match self.hashes.get(real) {
+                    Some(k) if in_store => Some((k.hash, k.len)),
+                    Some(k) => std::fs::metadata(real)
+                        .ok()
+                        .filter(|m| m.len() as usize == k.len && file_mtime_secs(m) == k.mtime)
+                        .map(|_| (k.hash, k.len)),
+                    None => None,
+                };
                 let mtime = if in_store {
                     0
                 } else {
                     std::fs::metadata(real).map(|m| file_mtime_secs(&m)).unwrap_or(1).max(1)
                 };
-                self.hashes.insert(real.to_owned(), Known { hash, len, mtime });
+                let (hash, len) = match known {
+                    Some(known) => known,
+                    None => {
+                        let bytes = std::fs::read(real).ok()?;
+                        let known = (fnv1a64_bytes(&bytes), bytes.len());
+                        self.hashes.insert(real.to_owned(), Known { hash: known.0, len: known.1, mtime });
+                        known
+                    }
+                };
+                self.by_given.insert(icon_path.to_owned(), Known { hash, len, mtime });
                 self.hashes_dirty = true;
                 (hash, len)
             }
@@ -1644,16 +1689,24 @@ fn parse_resolutions(s: &str, fence: &str) -> Option<HashMap<String, Option<Stri
 /// configured theme or any nix store path in `XDG_DATA_DIRS` changes
 /// the string; either drops the resolution cache wholesale.
 fn fence(theme: &str) -> String {
-    let mut parts = format!("{theme}|{ICON_SIZE}");
+    format!("{:016x}", fnv1a64(&format!("{theme}|{ICON_SIZE}|{}", dirs_fence())))
+}
+
+/// What the icon directories ARE: each one's path, mtime and real path
+/// (a profile or system path keeps its name while the store directory
+/// behind it changes with every generation — the real path says so, where
+/// a store directory's mtime, always 1, never would), and the nix profile
+/// link's own mtime (`nix profile install/remove` rewrites the link).
+/// Under one value of this, a path names the same file.
+fn dirs_fence() -> String {
+    let mut parts = String::new();
     for dir in icon_dirs() {
-        parts.push_str(&format!("|{dir}:{}", mtime_secs(&dir)));
+        let real = std::fs::canonicalize(&dir)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        parts.push_str(&format!("|{dir}:{}:{real}", mtime_secs(&dir)));
     }
-    // The nix profile symlink's own mtime changes whenever `nix profile
-    // install/remove` runs (the symlink target is updated). Nix store
-    // directory mtimes are always 1 for reproducibility, so following the
-    // symlink would never detect a profile change; we must read the link
-    // itself. Including this in the fence ensures the on-disk resolution
-    // cache is dropped after any nix profile mutation.
     let home = std::env::var("HOME").unwrap_or_default();
     let profile = std::path::PathBuf::from(&home).join(".nix-profile");
     let profile_mtime = std::fs::symlink_metadata(&profile)
