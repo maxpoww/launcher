@@ -34,6 +34,20 @@ const SETTLE: Duration = Duration::from_millis(500);
 /// not show (a read of sysfs, no process), and a phone that would not open
 /// is asked again.
 const TICK: Duration = Duration::from_secs(3);
+/// The look at the bus while the kernel tells us what comes and goes
+/// (`usb_watch`): only behind it, for what a socket cannot promise.
+const SLOW_LOOK: Duration = Duration::from_secs(120);
+
+/// What wakes the watcher.
+#[derive(PartialEq, Eq)]
+enum Wake {
+    /// The volume service said something.
+    Service,
+    /// The kernel: a USB device or interface came or went.
+    Usb,
+    /// The service's monitor ended.
+    Gone,
+}
 /// How many times one phone is switched to file transfer for its owner.
 const NUDGES: u8 = 2;
 
@@ -615,9 +629,14 @@ pub(crate) fn spawn(results: Sender<Vec<Mounted>>) {
             let mut on_bus: Vec<UsbPhone>;
             let sysfs = Path::new("/sys/bus/usb/devices");
             let mut last: Option<Vec<Mounted>> = None;
+            let (tx, rx) = mpsc::channel::<Wake>();
+            let kernel_tells = {
+                let tx = tx.clone();
+                crate::usb_watch::listen(move || tx.send(Wake::Usb).is_ok())
+            };
             loop {
                 // The service's own account of changes, a line at a time.
-                let (tx, rx) = mpsc::channel::<()>();
+                let tx = tx.clone();
                 let mut cmd = Command::new("gio");
                 cmd.args(["mount", "-o"])
                     .stdin(Stdio::null())
@@ -647,10 +666,11 @@ pub(crate) fn spawn(results: Sender<Vec<Mounted>>) {
                 if let Some(out) = child.stdout.take() {
                     std::thread::spawn(move || {
                         for line in std::io::BufReader::new(out).lines() {
-                            if line.is_err() || tx.send(()).is_err() {
+                            if line.is_err() || tx.send(Wake::Service).is_err() {
                                 break;
                             }
                         }
+                        let _ = tx.send(Wake::Gone);
                     });
                 }
                 loop {
@@ -669,15 +689,25 @@ pub(crate) fn spawn(results: Sender<Vec<Mounted>>) {
                     }
                     // Until something changes — then let the burst finish.
                     // The service says nothing of a phone it does not show,
-                    // so the bus is looked at every `TICK` (sysfs only), and
-                    // a phone that would not open is asked again.
+                    // so the bus is looked at when the kernel says it changed
+                    // (sysfs only; every `TICK` where it cannot say, and every
+                    // `SLOW_LOOK` behind it), and a phone that would not open
+                    // is asked again every `TICK`.
                     let mut gone = false;
                     loop {
-                        match rx.recv_timeout(TICK) {
-                            Ok(()) => {
+                        let patience = if kernel_tells && refused.is_empty() { SLOW_LOOK } else { TICK };
+                        match rx.recv_timeout(patience) {
+                            Ok(first) => {
                                 std::thread::sleep(SETTLE);
-                                while rx.try_recv().is_ok() {}
-                                break;
+                                let mut service = first == Wake::Service;
+                                gone = first == Wake::Gone;
+                                while let Ok(more) = rx.try_recv() {
+                                    service |= more == Wake::Service;
+                                    gone |= more == Wake::Gone;
+                                }
+                                if gone || service || usb_phones(sysfs) != on_bus {
+                                    break;
+                                }
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 if !refused.is_empty() || usb_phones(sysfs) != on_bus {

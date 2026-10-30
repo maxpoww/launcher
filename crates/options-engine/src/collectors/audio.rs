@@ -498,10 +498,16 @@ async fn read_dump(probes: Option<&Probes>) -> Option<Vec<serde_json::Value>> {
 /// Run one probe to its end and return what it printed. Its pid is noted the
 /// moment it exists — before it can have reached PipeWire — so the watcher
 /// knows its echo.
+///
+/// What it prints goes to a file in memory, read once at its end: `pw-dump`
+/// writes a line at a time, and through a pipe each line woke this thread —
+/// some 6000 wake-ups for one dump, measured on a dock at rest 2026-10-30.
 async fn probe(mut cmd: Command, probes: Option<&Probes>) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut answer = memory_file()?;
     let child = cmd
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(answer.try_clone().ok()?))
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
@@ -511,7 +517,23 @@ async fn probe(mut cmd: Command, probes: Option<&Probes>) -> Option<Vec<u8>> {
         }
         kept.push_back(pid);
     }
-    Some(child.wait_with_output().await.ok()?.stdout)
+    let mut child = child;
+    child.wait().await.ok()?;
+    let mut out = Vec::new();
+    answer.seek(SeekFrom::Start(0)).ok()?;
+    answer.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// A nameless file in memory, gone when it is closed.
+fn memory_file() -> Option<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: a plain system call with a constant name; the descriptor it
+    // returns is ours alone and is handed to the `File` that will close it.
+    unsafe {
+        let fd = libc::memfd_create(c"golem-probe".as_ptr(), libc::MFD_CLOEXEC);
+        (fd >= 0).then(|| std::fs::File::from_raw_fd(fd))
+    }
 }
 
 /// The objects of a `pw-dump` (a JSON array); none when it is anything else.

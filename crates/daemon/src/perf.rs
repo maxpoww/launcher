@@ -102,10 +102,71 @@ pub(crate) fn mark(what: &'static str) {
     });
 }
 
-/// The marks since the last take (every tick takes them; a stall's line
-/// formats them with [`marks_line`]).
+/// The marks since the last take (every turn of the loop takes them; a
+/// stall's line formats them with [`marks_line`]).
 pub(crate) fn take_marks() -> Vec<(&'static str, std::time::Instant)> {
     MARKS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+
+thread_local! {
+    /// When the loop's poll last came back: this turn began then.
+    static TURN_BEGAN: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tells [`TURN_BEGAN`]: a source with no file descriptor and no events, only
+/// there for the loop's "the poll came back" call.
+pub(crate) struct TurnMeter;
+
+impl calloop::EventSource for TurnMeter {
+    type Event = ();
+    type Metadata = ();
+    type Ret = ();
+    type Error = std::convert::Infallible;
+
+    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
+
+    fn process_events<F>(
+        &mut self,
+        _: calloop::Readiness,
+        _: calloop::Token,
+        _: F,
+    ) -> Result<calloop::PostAction, Self::Error>
+    where
+        F: FnMut((), &mut ()),
+    {
+        Ok(calloop::PostAction::Continue)
+    }
+
+    fn register(&mut self, _: &mut calloop::Poll, _: &mut calloop::TokenFactory) -> calloop::Result<()> {
+        Ok(())
+    }
+
+    fn reregister(&mut self, _: &mut calloop::Poll, _: &mut calloop::TokenFactory) -> calloop::Result<()> {
+        Ok(())
+    }
+
+    fn unregister(&mut self, _: &mut calloop::Poll) -> calloop::Result<()> {
+        Ok(())
+    }
+
+    fn before_handle_events(&mut self, _: calloop::EventIterator<'_>) {
+        TURN_BEGAN.with(|t| t.set(Some(std::time::Instant::now())));
+    }
+}
+
+/// A turn of the loop is over: count it, and when it took long enough to be
+/// felt, say so (how long, and what the marks say it did).
+pub(crate) fn turn_ended() -> Option<(std::time::Duration, String)> {
+    const FELT: std::time::Duration = std::time::Duration::from_millis(30);
+    const WORTH_A_LINE: std::time::Duration = std::time::Duration::from_millis(100);
+    let began = TURN_BEGAN.with(std::cell::Cell::take)?;
+    let took = began.elapsed();
+    LOOP_TICKS.hit();
+    if took > FELT {
+        LOOP_LATE.record_nanos(took.as_nanos() as u64);
+    }
+    let marks = take_marks();
+    (took > WORTH_A_LINE).then(|| (took, marks_line(&marks, began)))
 }
 
 /// The marks, each with its ms from `since`.
@@ -116,7 +177,7 @@ pub(crate) fn marks_line(marks: &[(&'static str, std::time::Instant)], since: st
         .collect::<Vec<_>>()
         .join(", ")
 }
-/// The ticks themselves (how long the report covers, at 40 a second).
+/// The loop's turns (a dock at rest has very few).
 pub(crate) static LOOP_TICKS: Counter = Counter::new();
 /// A whole dock frame: animation step, scene build, render.
 pub(crate) static DOCK_DRAW: Counter = Counter::new();
@@ -210,7 +271,7 @@ pub(crate) fn report() -> String {
     let worst = LOOP_LATE.take_max_ms();
     let ticks = LOOP_TICKS.take().0;
     [
-        format!("loop {ticks} ticks, {stalls} stalls >30 ms ({late_ms:.0} ms late, worst {worst:.1})"),
+        format!("loop {ticks} turns, {stalls} stalls >30 ms ({late_ms:.0} ms in them, worst {worst:.1})"),
         timed("dock", &DOCK_DRAW),
         timed("desktop-reload", &DESKTOP_RELOAD),
         timed("desktop-draw", &DESKTOP_DRAW),

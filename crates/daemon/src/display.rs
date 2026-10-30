@@ -423,7 +423,7 @@ pub(crate) struct KeyboardChoice {
 
 /// `~/.config/golem/settings.json`: the owner's live settings. Only
 /// `displays` is this module's; the rest is carried through untouched.
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GolemSettings {
     /// Rule selector (`desc:…`) → the choice for that screen.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -483,8 +483,30 @@ pub(crate) fn golem_path(file_name: &str) -> PathBuf {
 impl GolemSettings {
     /// Read the file as it is now. Always fresh, never cached: other parts
     /// of Golem write their own keys to it.
+    /// The file as it stands. Read and parsed only when it has changed: the
+    /// shell asks for it all the time (`palette::choice`, the desktop's names
+    /// every 2 s…), which at rest was a read and a parse of the whole file on
+    /// the loop per question. One look at the file's identity (a save is a
+    /// new file: `persist::write_json` renames over it, so the inode says it)
+    /// tells whether what was read still stands, whoever wrote it.
     pub(crate) fn load() -> Self {
-        crate::persist::read_json(&golem_path("settings.json")).unwrap_or_default()
+        use std::os::unix::fs::MetadataExt;
+        type Stamp = (std::path::PathBuf, u64, i64, i64, u64);
+        static KEPT: std::sync::Mutex<Option<(Stamp, GolemSettings)>> = std::sync::Mutex::new(None);
+        let path = golem_path("settings.json");
+        let Ok(m) = std::fs::metadata(&path) else {
+            return Self::default();
+        };
+        let stamp = (path, m.ino(), m.mtime(), m.mtime_nsec(), m.len());
+        let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((was, settings)) = kept.as_ref() {
+            if *was == stamp {
+                return settings.clone();
+            }
+        }
+        let read: Self = crate::persist::read_json(&stamp.0).unwrap_or_default();
+        *kept = Some((stamp, read.clone()));
+        read
     }
 
     /// CHANGE the file: read it, let `f` alter and save it, with nobody

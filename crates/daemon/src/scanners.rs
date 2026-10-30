@@ -19,7 +19,8 @@
 //!
 //! WHEN it looks (a worker thread, asleep otherwise): a while after the dock
 //! starts (a scanner on the network, or plugged in before), whenever a new
-//! USB device appears (sysfs, every `TICK`), and every `NETWORK` for one that
+//! USB device appears (`usb_watch`: the kernel says; where it cannot, sysfs
+//! every `TICK`), and every `NETWORK` for one that
 //! comes onto the network later. HOW: `scanimage -L`, SANE's own list — the
 //! same backends every scanning app uses, so what it finds an app finds. A
 //! webcam is not a scanner (SANE's v4l backend lists them; and Golem's phone
@@ -40,7 +41,8 @@ use crate::App;
 
 /// The marker that it has been done (the app offered, or one already there).
 const OFFERED: &str = "scanner-app";
-/// How often the USB bus is looked at (sysfs only: a directory listing).
+/// How often the USB bus is looked at where the kernel cannot say (sysfs
+/// only: a directory listing).
 const TICK: Duration = Duration::from_secs(3);
 /// After the dock starts, before the first look.
 const FIRST: Duration = Duration::from_secs(90);
@@ -73,6 +75,8 @@ pub(crate) const SCAN_PROGRAMS: [&str; 6] = ["simple-scan", "skanpage", "skanlit
 static SEEN: Mutex<Option<(Vec<Scanner>, Instant)>> = Mutex::new(None);
 /// A look is wanted now (the Printers page found what it has old).
 static LOOK: AtomicBool = AtomicBool::new(false);
+/// Wakes the watcher for it (and for a USB device, from `usb_watch`).
+static WAKE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
 
 /// The scanners the last look found, and how long ago; `None` before the
 /// first look (or with no SANE on this machine).
@@ -83,6 +87,9 @@ pub(crate) fn known() -> Option<(Vec<Scanner>, Duration)> {
 /// Ask the watcher for a look at its next tick.
 pub(crate) fn look_now() {
     LOOK.store(true, Ordering::Relaxed);
+    if let Some(wake) = WAKE.lock().ok().and_then(|w| w.clone()) {
+        let _ = wake.send(());
+    }
 }
 
 /// A scanner SANE lists: its device name and what it says it is.
@@ -169,8 +176,20 @@ pub(crate) fn spawn(tx: calloop::channel::Sender<Vec<Scanner>>) {
         let mut known = usb_devices(sysfs);
         let mut due = Some(Instant::now() + first);
         let mut last_look = Instant::now();
+        let (wake, woken) = std::sync::mpsc::channel::<()>();
+        if let Ok(mut kept) = WAKE.lock() {
+            *kept = Some(wake.clone());
+        }
+        let kernel_tells = crate::usb_watch::listen(move || wake.send(()).is_ok());
         loop {
-            std::thread::sleep(TICK);
+            // Asleep until the next thing it has to do: only where the kernel
+            // cannot say what was plugged in does it wake to look.
+            let until_next = due
+                .map_or(NETWORK.saturating_sub(last_look.elapsed()), |at| {
+                    at.saturating_duration_since(Instant::now())
+                })
+                .max(Duration::from_millis(100));
+            let _ = woken.recv_timeout(if kernel_tells { until_next } else { until_next.min(TICK) });
             let now = usb_devices(sysfs);
             if now.difference(&known).next().is_some() {
                 due = Some(Instant::now() + SETTLE);

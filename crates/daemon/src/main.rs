@@ -164,6 +164,7 @@ mod residue;
 mod transition;
 mod trash;
 mod usage;
+mod usb_watch;
 mod visible;
 mod wall_follow;
 mod wall_tint;
@@ -1570,30 +1571,12 @@ fn main() -> anyhow::Result<()> {
     app.filer_folder_bell();
 
     info!("daemon up; try: waverunner-ctl toggle");
-    // The loop's lateness meter (perf::LOOP_LATE): a 25 ms tick that notes how
-    // late it was woken — every ms of lateness is a ms the shell was busy
-    // and answered nothing. `waverunner-ctl debug-perf` reads it.
-    {
-        const TICK: Duration = Duration::from_millis(25);
-        let _ = event_loop.handle().insert_source(
-            Timer::from_duration(TICK),
-            |deadline, _, _app: &mut App| {
-                let late = std::time::Instant::now().saturating_duration_since(deadline);
-                perf::LOOP_TICKS.hit();
-                if late > Duration::from_millis(30) {
-                    perf::LOOP_LATE.record_nanos(late.as_nanos() as u64);
-                }
-                // A stall the owner would feel gets a line of its own, so the
-                // log says WHEN, and the marks what the loop did meanwhile.
-                let marks = perf::take_marks();
-                if late > Duration::from_millis(100) {
-                    let marks = perf::marks_line(&marks, deadline - TICK);
-                    info!("loop: stalled {} ms (the shell answered nothing): {marks}", late.as_millis());
-                }
-                TimeoutAction::ToDuration(TICK)
-            },
-        );
-    }
+    // The loop's meter (perf::LOOP_LATE): how long each turn took, from the
+    // moment the poll came back to the moment it goes back to sleep — every
+    // ms of it a ms the shell answered nothing. `waverunner-ctl debug-perf`
+    // reads it. It asks for no wake-up of its own (it was a 25 ms timer until
+    // 2026-10-30: 40 wake-ups a second of a dock at rest, for a meter).
+    let _ = event_loop.handle().insert_source(perf::TurnMeter, |_, _, _app: &mut App| {});
     // The dock's own figures, rasterised ahead of the index (see
     // `apps::Figures`) — a moment on, past the GPU's and the surfaces' first
     // frames: made alongside them they slowed those (contention; the first
@@ -1614,6 +1597,11 @@ fn main() -> anyhow::Result<()> {
         if let Err(e) = event_loop.dispatch(None, &mut app) {
             error!("event loop: {e:#}; the dock ends");
             return Err(e).context("event loop dispatch");
+        }
+        // A stall the owner would feel gets a line of its own, so the log says
+        // WHEN, and the marks what the loop did meanwhile.
+        if let Some((took, marks)) = perf::turn_ended() {
+            info!("loop: stalled {} ms (the shell answered nothing): {marks}", took.as_millis());
         }
         hypr::snapshot_reset();
     }
