@@ -705,7 +705,11 @@ fn name_pool(searcher: &mut waverunner_core::Searcher, query: &str, pkgs: &[PkgE
 //   - no part (unless a program beside it owns it: docker's plugins), no build of a program found (vlc-bin), no offshoot far less
 //     used than its program (krita's plugin under krita), and a name typed
 //     whole but unused only after the others, never when it is a part.
-// Most used first, `ROW_MAX` at most; with none, the `FILL` best matches.
+// Most used first; with none, the `FILL` best matches. What is used broadly
+// is never cut (Max, 2026-10-30: "no queremos que packetes usados terminen en
+// more"): not for being far from the program named, not for the row being
+// long: it goes on to the next pages, up to `ROW_ALL`. Only what is used less
+// stops at `ROW_MAX`.
 // Everything else is "More": the names first, then the rest, used first.
 
 /// How widely each package is used, in parts per 10 000 machines, and the
@@ -725,6 +729,9 @@ const NEAR_TOP: u32 = 5;
 /// "…ing-").
 const WITHIN_FROM: usize = 4;
 const ROW_MAX: usize = 6;
+/// The row whole, what is used broadly included: its pages, with room left
+/// for More in the icons' `RANK_HITS_MAX` layers.
+const ROW_ALL: usize = 24;
 const FILL: usize = 3;
 
 /// A package's use: its share of machines, the other name it goes by, and
@@ -928,7 +935,7 @@ fn tiers(query: &str, pkgs: &[PkgEntry], uses: &[Used], pool: &[usize]) -> (Vec<
     // (Beside a used program typed whole, only what is near as used: "steam"
     // is steam, steamcmd waits.)
     let named_best = found.iter().filter(|f| f.1 == Fit::Exact && named.contains(&key(f.0))).map(|f| f.2).max().unwrap_or(0);
-    row.retain(|r| r.1 == Fit::Exact || u32::from(r.2) * NEAR_TOP >= u32::from(named_best));
+    row.retain(|r| r.1 == Fit::Exact || r.2 >= BROAD || u32::from(r.2) * NEAR_TOP >= u32::from(named_best));
     // (A build of a program found waits under More: vlc-bin under vlc.)
     let programs: Vec<String> = found.iter().filter(|f| f.2 >= KNOWN).map(|f| key(f.0)).collect();
     row.retain(|r| !programs.iter().any(|b| variant_of(&key(r.0), b)));
@@ -942,7 +949,7 @@ fn tiers(query: &str, pkgs: &[PkgEntry], uses: &[Used], pool: &[usize]) -> (Vec<
     let stems: Vec<(String, u16)> = row.iter().map(|r| (key(r.0), r.2)).collect();
     row.retain(|r| {
         let mine = key(r.0);
-        !stems.iter().any(|(n, share)| named_for(&mine, n) && u32::from(r.2) * NEAR_TOP < u32::from(*share))
+        r.2 >= BROAD || !stems.iter().any(|(n, share)| named_for(&mine, n) && u32::from(r.2) * NEAR_TOP < u32::from(*share))
     });
     let rank = |&(i, fit, share): &(usize, Fit, u16)| match fit {
         Fit::Exact if share >= KNOWN && !part(i) => 0,
@@ -951,7 +958,7 @@ fn tiers(query: &str, pkgs: &[PkgEntry], uses: &[Used], pool: &[usize]) -> (Vec<
         _ => 2,
     };
     row.sort_by(|a, b| rank(a).cmp(&rank(b)).then(b.2.cmp(&a.2)).then(pkgs[a.0].name.len().cmp(&pkgs[b.0].name.len())));
-    let mut main: Vec<usize> = row.iter().take(ROW_MAX).map(|r| r.0).collect();
+    let mut main: Vec<usize> = row.iter().enumerate().filter(|(at, r)| *at < ROW_MAX || r.2 >= BROAD).take(ROW_ALL).map(|(_, r)| r.0).collect();
     if main.is_empty() {
         main = found.iter().filter(|f| f.1 <= Fit::Word).take(FILL).map(|f| f.0).collect();
     }
@@ -2389,11 +2396,11 @@ mod tests {
             ("git-filter-repo", "git-filter-repo", "Quickly rewrite git repository history", 724),
         ];
         let (main, more) = row_and_more("git", &list);
-        assert_eq!(main, ["git", "git-lfs"], "the name whole first, then what is near as used");
-        assert_eq!(more, ["git-filter-repo", "gitg", "git-crypt"], "the less used after, used first");
+        assert_eq!(main, ["git", "git-lfs", "git-filter-repo"], "the name whole first, then what is used");
+        assert_eq!(more, ["gitg", "git-crypt"], "the less used after, used first");
         // Typed on the way to a name, what starts with it stands if used.
         let (main, _) = row_and_more("gi", &list);
-        assert_eq!(main, ["git", "git-lfs", "gitg"], "git's offshoot far less used still waits");
+        assert_eq!(main, ["git", "git-lfs", "git-filter-repo", "gitg"], "what starts with it, used, most used first");
     }
 
     #[test]
@@ -2598,6 +2605,29 @@ mod tests {
     }
 
     #[test]
+    fn what_is_used_is_never_left_in_more() {
+        // More than a page of used programs: all of them, most used first.
+        let list: Vec<(String, u16)> = (0..9).map(|n| (format!("web{n}"), 3000 - n * 100)).collect();
+        let list: Vec<(&str, &str, &str, u16)> = list.iter().map(|(a, s)| (a.as_str(), a.as_str(), "A web browser", *s)).collect();
+        let (main, _) = row_and_more_apps("browser", &list, &list.iter().map(|l| l.0).collect::<Vec<_>>());
+        assert_eq!(main.len(), 9, "{main:?}");
+        assert_eq!(main[0], "web0");
+        // Past the first page only what is used broadly goes on.
+        let list = [("a1", "a1", "A web browser", 900), ("a2", "a2", "A web browser", 800), ("a3", "a3", "A web browser", 700), ("a4", "a4", "A web browser", 650), ("a5", "a5", "A web browser", 600), ("a6", "a6", "A web browser", 550), ("a7", "a7", "A web browser", 520), ("a8", "a8", "A web browser", 200)];
+        let (main, more) = row_and_more_apps("browser", &list, &["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"]);
+        assert!(main.contains(&"a7".to_owned()) && more.contains(&"a8".to_owned()), "{main:?} / {more:?}");
+        // Beside a program typed whole: its used relatives come along, far
+        // from it or not, and the rest still waits.
+        let list = [("git", "git", "Version control", 9500), ("git-filter-repo", "git-filter-repo", "Rewrite history", 724), ("gitg", "gitg", "A viewer", 464), ("git-sizer", "git-sizer", "Measure repos", 20)];
+        let (main, more) = row_and_more("git", &list);
+        assert_eq!(main, ["git", "git-filter-repo"], "{more:?}");
+        // And a plugin under its program is still no program.
+        let list = [("krita", "krita", "Digital painting", 2257), ("krita-plugin-gmic", "krita-plugin-gmic", "GMic plugin for krita", 300)];
+        let (main, _) = row_and_more("krita", &list);
+        assert_eq!(main, ["krita"]);
+    }
+
+    #[test]
     fn more_puts_what_only_has_the_letters_last() {
         let list = [
             ("libnfnetlink", "libnfnetlink", "Low-level library for netfilter related kernel/userspace communication", 9000),
@@ -2658,7 +2688,22 @@ mod tests {
             let (main, more) = tiers(query, &pkgs, &uses, &pool);
             let took = started.elapsed();
             let names = |v: &[usize], n: usize| v.iter().take(n).map(|&i| format!("{}({})", pkgs[i].attr, uses[i].share)).collect::<Vec<_>>().join(" ");
-            eprintln!("{query:>14} {took:>9.2?}  ROW {}  | MORE {}: {}", names(&main, 6), more.len(), names(&more, 6));
+            eprintln!("{query:>14} {took:>9.2?}  ROW {}  | MORE {}: {}", names(&main, 24), more.len(), names(&more, 6));
+            // What Max asked never to find there (2026-10-30): a used program in
+            // More, among what the search is about (its letters somewhere in a
+            // description are not: "fire" is not file-roller).
+            let q = query.trim().to_lowercase();
+            let words: Vec<String> = q.split_whitespace().map(str::to_owned).collect();
+            let named = main.iter().any(|&i| fit_of(&q, &pkgs[i], uses[i]) == Fit::Exact);
+            let about = |i: usize| match fit_of(&q, &pkgs[i], uses[i]) {
+                Fit::Exact | Fit::Start | Fit::Word => true,
+                Fit::Within => !named && is_app(&pkgs[i]),
+                Fit::Loose => !named && if is_app(&pkgs[i]) { says_all(&pkgs[i], &words) } else { is_said(&pkgs[i], &words) },
+            };
+            let left: Vec<usize> = more.iter().copied().filter(|&i| uses[i].share >= BROAD && !is_part(&pkgs[i], &q) && about(i)).collect();
+            if !left.is_empty() {
+                eprintln!("{:>14} USED IN MORE: {}", "", names(&left, 12));
+            }
         }
     }
 

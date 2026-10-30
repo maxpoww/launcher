@@ -745,17 +745,6 @@ impl App {
         self.schedule_frame();
     }
 
-    /// How many of the row fit on the Install section's first page beside
-    /// `before` cells and the "More" plate (a full row pushed the plate to
-    /// the second page, out of sight).
-    fn install_room(&self, before: usize) -> usize {
-        if self.renderer.is_none() {
-            return usize::MAX;
-        }
-        let cap = self.layout_at(self.ui.extent_of(Target::Open)).sections[content::SECTION_INSTALL].cap;
-        cap.saturating_sub(before + 1).max(1)
-    }
-
     /// The "More" cell: the installer box with the word over it, how many
     /// wait under it for a name.
     fn push_pkg_more_cell(&mut self, waiting: usize) -> usize {
@@ -778,7 +767,7 @@ impl App {
     /// Install section: THE ROW, then the "More" cell — or, once it is
     /// open, everything the query found. `before`: the cells ahead of them
     /// (the webapps found).
-    pub(crate) fn pkg_results(&mut self, before: usize) -> Vec<usize> {
+    pub(crate) fn pkg_results(&mut self) -> Vec<usize> {
         self.pkg_more_cell = None;
         // Lazily load the index the first time the launcher card is actually
         // opened (not during the hidden-state refilters that run at startup and
@@ -817,15 +806,10 @@ impl App {
         // Already-installed packages drop out of the list — and leave their
         // place empty: with chrome installed, "chrome" is the More plate
         // alone, not three other programs with chrome in the name.
-        let mut main: Vec<nix::PkgEntry> = hits[..main_n].iter().filter(|p| !self.pkg_installed(p)).cloned().collect();
-        let mut more: Vec<nix::PkgEntry> = hits[main_n..].iter().filter(|p| !self.pkg_installed(p)).cloned().collect();
-        if !query.is_empty() {
-            let room = self.install_room(before);
-            if main.len() > room {
-                let over: Vec<nix::PkgEntry> = main.drain(room..).collect();
-                more.splice(0..0, over);
-            }
-        }
+        // (A row longer than the first page goes on to the next, the plate
+        // after it: what is used is never sent to More for want of room.)
+        let main: Vec<nix::PkgEntry> = hits[..main_n].iter().filter(|p| !self.pkg_installed(p)).cloned().collect();
+        let more: Vec<nix::PkgEntry> = hits[main_n..].iter().filter(|p| !self.pkg_installed(p)).cloned().collect();
         // (The package of the page up keeps its entry, shown or not: its icon.)
         let paged = self
             .page_package()

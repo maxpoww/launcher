@@ -5325,7 +5325,7 @@ impl App {
         // query storefront spreads the few recommendations among the programs.
         {
             let webapp_hits = std::mem::take(&mut visible[content::SECTION_INSTALL]);
-            let pkgs = self.pkg_results(webapp_hits.len());
+            let pkgs = self.pkg_results();
             visible[content::SECTION_INSTALL] = if searching {
                 let mut v = webapp_hits;
                 v.extend(pkgs);
@@ -5588,6 +5588,16 @@ impl App {
             // Entering / leaving the searched grid replaces the content
             // wholesale: start every section back at its first page.
             self.scroll.reset_sections();
+            // (More opened on a later page of the row: the selection, and the
+            // page it is on, stay; only the first page would hide it.)
+            if more_open && self.renderer.is_some() {
+                if let Some((s, cell)) = self.search.selected.and_then(|at| self.flat_to_pos(at)) {
+                    let settled = self.layout_at(self.ui.extent_of(Target::Open));
+                    let at = content::scroll_to_reveal(&settled.sections[s], cell);
+                    self.scroll.per[s].target = at;
+                    self.scroll.per[s].pos = at;
+                }
+            }
         } else {
             // A grid mutation (drop, rescan, box open/close, pin change)
             // must NOT yank the Apps view off the page the user is on —
