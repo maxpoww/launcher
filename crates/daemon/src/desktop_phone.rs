@@ -36,8 +36,22 @@ fn adb(serial: &str, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether a USB device with this serial number is plugged in.
+fn on_the_bus(serial: &str, sysfs: &std::path::Path) -> bool {
+    std::fs::read_dir(sysfs).is_ok_and(|devices| {
+        devices.flatten().any(|d| {
+            std::fs::read_to_string(d.path().join("serial")).is_ok_and(|s| s.trim() == serial)
+        })
+    })
+}
+
 /// Whether `adb` has `serial` as a phone that lets this computer in.
 pub(crate) fn ready(serial: &str) -> bool {
+    // Over USB only: asked of each phone kept in sync every minute, and most of
+    // the time it is not plugged in. The bus says so without starting a program.
+    if !on_the_bus(serial, std::path::Path::new("/sys/bus/usb/devices")) {
+        return false;
+    }
     Command::new("adb")
         .arg("devices")
         .stderr(Stdio::null())
@@ -730,6 +744,19 @@ pub(crate) fn parse_facts(said: &str) -> Vec<(&'static str, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_phone_on_the_bus_is_found_by_its_serial() {
+        let bus = std::env::temp_dir().join(format!("phone-bus-{}", std::process::id()));
+        let device = bus.join("3-9");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::create_dir_all(bus.join("usb3")).unwrap();
+        std::fs::write(device.join("serial"), "3A301FDJG000UW\n").unwrap();
+        assert!(super::on_the_bus("3A301FDJG000UW", &bus));
+        assert!(!super::on_the_bus("6XTFL18519000092", &bus));
+        assert!(!super::on_the_bus("3A301FDJG000UW", &bus.join("nothing")));
+        std::fs::remove_dir_all(&bus).unwrap();
+    }
+
     #[test]
     fn the_battery_is_read_from_what_the_phone_says() {
         let said = "Current Battery Service state:\n  AC powered: false\n  USB powered: true\n  status: 2\n  level: 66\n  scale: 100\n  temperature: 201\n";
