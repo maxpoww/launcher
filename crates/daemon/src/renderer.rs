@@ -816,6 +816,8 @@ impl Renderer {
         // the first renderer walks the adapter ladder and opens the device,
         // the others draw on it.
         let warm_pipes = warm.as_ref().and_then(|w| w.pipelines.clone());
+        let mut warm = warm;
+        let warm_icon = warm.as_mut().and_then(|w| w.icon_texture.take());
         // (One surface for the wl_surface: with a GPU opened ahead, its.)
         let reuse = if warm.is_some() { None } else { SHARED_GPU.with(|g| g.borrow().clone()) }.and_then(|g| {
             let surface = unsafe {
@@ -1052,7 +1054,7 @@ impl Renderer {
             t_pipelines.duration_since(t_device).as_millis(),
             t_pipelines.elapsed().as_millis()
         );
-        Ok(Self {
+        let mut renderer = Self {
             labels_linear: false,
             surface,
             device,
@@ -1110,7 +1112,13 @@ impl Renderer {
                 paths: v == "paths",
                 ..DamageCheck::default()
             }),
-        })
+        };
+        if let Some((texture, layers)) = warm_icon {
+            // The icon array made ahead: the dock's first frame skips its making.
+            renderer.icon_layer_cap = layers;
+            renderer.bind_icon_texture(texture, layers);
+        }
+        Ok(renderer)
     }
 
     /// Handle a compositor-driven buffer size change (output scale change;
@@ -1183,10 +1191,7 @@ impl Renderer {
         // New app set: previously shaped labels may be stale.
         self.label_cache.clear();
         self.label_fit.clear();
-        let reserved = crate::nix::RANK_HITS_MAX
-            + crate::nix::PENDING_INSTALL_CAP
-            + crate::thumbs::THUMB_CAP
-            + crate::minimized::MIN_THUMB_CAP;
+        let reserved = icon_reserved();
         // The array is made whole; the chains go in a few per frame. 183
         // apps are 64 MB of chains: written in one go they were one staging
         // flush and the loop deaf for 200–400 ms right as the shell came up
@@ -1196,6 +1201,11 @@ impl Renderer {
         const ICON_UPLOAD_NOW: usize = 32;
         let count = icons.len();
         self.icon_layer_cap = icon_layers(count + reserved);
+        if self.grow_whole {
+            // A whole array that fits (the one made ahead, say) is kept
+            // whatever the cap: the cap grows to it.
+            self.icon_layer_cap = self.icon_layer_cap.max(self.icon_layer_count);
+        }
         let had = self.icon_layer_count.min(self.icon_layer_cap);
         let layers = if self.grow_whole {
             // (GL: the whole tail now, once — see `grow_whole`.)
@@ -1315,22 +1325,7 @@ impl Renderer {
     }
 
     fn create_icon_texture(&self, layers: u32) -> wgpu::Texture {
-        self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("waverunner.icons"),
-            size: wgpu::Extent3d {
-                width: ICON_SIZE,
-                height: ICON_SIZE,
-                depth_or_array_layers: layers,
-            },
-            mip_level_count: ICON_MIPS,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        })
+        make_icon_texture(&self.device, layers)
     }
 
     fn bind_icon_texture(&mut self, texture: wgpu::Texture, layers: u32) {
@@ -2747,6 +2742,32 @@ const ICON_GROW_STEP: u32 = 16;
 ///   until a rescan hit a multiple of 6).
 ///
 /// A pad layer dodges each; harmless on Vulkan.
+/// The icon array texture: `layers` of `ICON_SIZE`² with the full mip chain.
+fn make_icon_texture(device: &wgpu::Device, layers: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("waverunner.icons"),
+        size: wgpu::Extent3d {
+            width: ICON_SIZE,
+            height: ICON_SIZE,
+            depth_or_array_layers: layers,
+        },
+        mip_level_count: ICON_MIPS,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+/// The layers every icon array keeps past the entries: the Install
+/// section's hits, the pending installs, Files' thumbnails, the minimized.
+fn icon_reserved() -> usize {
+    crate::nix::RANK_HITS_MAX + crate::nix::PENDING_INSTALL_CAP + crate::thumbs::THUMB_CAP + crate::minimized::MIN_THUMB_CAP
+}
+
 fn icon_layers(count: usize) -> u32 {
     let layers = count.max(2) as u32;
     if layers == 6 || (layers > 6 && layers.is_multiple_of(6)) {
@@ -3522,7 +3543,16 @@ pub(crate) struct WarmGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipelines: Option<Pipelines>,
+    /// The dock's icon array, made ahead on the GL backend (where it is
+    /// made whole and its making is 66–126 ms of the first frame on a
+    /// Haswell): the texture and its layers, enough for 200 entries; a
+    /// landing that needs more makes its own.
+    icon_texture: Option<(wgpu::Texture, u32)>,
 }
+
+/// The entries the icon array made ahead has room for (plus the reserved
+/// tail every array carries).
+const WARM_ICON_ENTRIES: usize = 200;
 
 /// The font system made ahead of the first renderer (`warm_fonts`), until
 /// `shared_text` takes it.
@@ -3590,12 +3620,18 @@ pub(crate) fn warm_gpu(
             let t_device = started.elapsed();
             let format = opened.surface.get_capabilities(&opened.adapter).formats.first().copied();
             let pipelines = format.map(|f| build_pipelines(&opened.device, f));
+            let t_pipes = started.elapsed();
+            let icon_texture = (opened.adapter.get_info().backend == wgpu::Backend::Gl).then(|| {
+                let layers = icon_layers(WARM_ICON_ENTRIES + icon_reserved());
+                (make_icon_texture(&opened.device, layers), layers)
+            });
 
             tracing::info!(
-                "renderer: the GPU opened ahead in {} ms (device {}, pipelines {})",
+                "renderer: the GPU opened ahead in {} ms (device {}, pipelines {}, icon array {})",
                 started.elapsed().as_millis(),
                 t_device.as_millis(),
-                started.elapsed().saturating_sub(t_device).as_millis()
+                t_pipes.saturating_sub(t_device).as_millis(),
+                started.elapsed().saturating_sub(t_pipes).as_millis()
             );
             Ok(WarmGpu {
                 surface_id,
@@ -3605,6 +3641,7 @@ pub(crate) fn warm_gpu(
                 device: opened.device,
                 queue: opened.queue,
                 pipelines,
+                icon_texture,
             })
         })
         .ok()
