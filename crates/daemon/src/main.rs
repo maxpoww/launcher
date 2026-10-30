@@ -710,6 +710,7 @@ fn main() -> anyhow::Result<()> {
         gpu_warm,
         gpu_waiting: Vec::new(),
         gpu_wait_timer: false,
+        renderer_turn: false,
         options_layer,
         options_renderer: None,
         options_size: (0, 0),
@@ -1637,6 +1638,11 @@ pub struct App {
     /// and whether the look for it is on.
     gpu_waiting: Vec<GpuWaiter>,
     gpu_wait_timer: bool,
+    /// A renderer was made in this turn of the loop: the next surface's
+    /// waits for the next turn. Four first frames on GL landed in one turn
+    /// on the 2013 MacBook Air — 195 ms deaf — when the GPU was already
+    /// open and every configure came at once (2026-10-30).
+    renderer_turn: bool,
     /// Fractional-scale state per surface (see `fractional.rs`); `None` when
     /// the compositor lacks the protocols (integer `render_scale` path).
     dock_fscale: Option<fractional::SurfaceScale>,
@@ -9308,7 +9314,29 @@ impl App {
     /// with twenty notifications queued (2026-10-29). True when waiting.
     fn gpu_not_ready(&mut self, who: GpuWaiter) -> bool {
         if self.gpu_warm.as_ref().is_none_or(|h| h.is_finished()) {
-            return false;
+            // The GPU is in. One renderer a turn: the first makes its own
+            // now and the turn is taken; the others queue for the next.
+            if !self.renderer_turn {
+                self.renderer_turn = true;
+                if !self.gpu_wait_timer {
+                    let armed = self.loop_handle.insert_source(Timer::immediate(), |_, _, app: &mut App| {
+                        app.gpu_wait_timer = false;
+                        app.renderer_turn = false;
+                        app.gpu_waited();
+                        TimeoutAction::Drop
+                    });
+                    if armed.is_ok() {
+                        self.gpu_wait_timer = true;
+                    } else {
+                        self.renderer_turn = false;
+                    }
+                }
+                return false;
+            }
+            if !self.gpu_waiting.contains(&who) {
+                self.gpu_waiting.push(who);
+            }
+            return true;
         }
         if !self.gpu_waiting.contains(&who) {
             self.gpu_waiting.push(who);
@@ -9320,6 +9348,7 @@ impl App {
                     return TimeoutAction::ToDuration(LOOK);
                 }
                 app.gpu_wait_timer = false;
+                app.renderer_turn = false;
                 app.gpu_waited();
                 TimeoutAction::Drop
             });
@@ -9355,6 +9384,7 @@ impl App {
         if !self.gpu_waiting.is_empty() && !self.gpu_wait_timer {
             let armed = self.loop_handle.insert_source(Timer::immediate(), |_, _, app: &mut App| {
                 app.gpu_wait_timer = false;
+                app.renderer_turn = false;
                 app.gpu_waited();
                 TimeoutAction::Drop
             });
