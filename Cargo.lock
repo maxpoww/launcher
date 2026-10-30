@@ -2712,6 +2712,7 @@ dependencies = [
  "freedesktop-desktop-entry",
  "nucleo-matcher",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "toml",
 ]
