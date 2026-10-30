@@ -1,0 +1,42 @@
+# nixpkgs attr <TAB> the names Debian (popcon) or Arch (pkgstats) give the same
+# program, where they differ from the attr and the pname. The first name is
+# also a name the Install search finds it by ("code" finds vscode). A name
+# with "!" is ANOTHER program's of that name (Arch's "graphite" is the font
+# engine on every machine, not the Graphite editor).
+vscode	code
+vscodium	codium
+code-cursor	cursor
+google-chrome	google-chrome-stable
+brave	brave-browser	brave-bin
+microsoft-edge	microsoft-edge-stable
+python3	python
+spotify	spotify-client	spotify-launcher
+zoom-us	zoom
+slack	slack-desktop
+zed-editor	zed
+sublime4	sublime-text	sublime-text-4
+docker	docker.io	docker-ce
+qemu	qemu-system-x86	qemu-full	qemu-desktop
+go	golang-go	golang
+libreoffice	libreoffice-core	libreoffice-fresh	libreoffice-still
+libreoffice-fresh	libreoffice-fresh	libreoffice-core
+libreoffice-still	libreoffice-still	libreoffice-core
+steam	steam-installer	steam-launcher
+tor-browser	torbrowser-launcher
+transmission_4-gtk	transmission-gtk
+transmission_4-qt	transmission-qt
+firefox	firefox	firefox-esr
+nodejs	node	nodejs
+openjdk	default-jdk	jdk-openjdk
+jdk	java	default-jdk	jdk-openjdk
+gnome-text-editor	gnome-text-editor
+neovim-qt	neovim-qt
+android-studio	android-studio
+jetbrains.idea-community	intellij-idea-community-edition
+discord	discord
+vesktop	vesktop
+teams-for-linux	teams-for-linux
+signal-desktop	signal-desktop
+telegram-desktop	telegram-desktop
+yt-dlp	yt-dlp
+graphite	!graphite
