@@ -6708,10 +6708,16 @@ impl App {
     /// region covers the *target* rect immediately so the dock/popup is
     /// interactive without waiting for the slide to finish.
     fn sync_surface_state(&mut self) {
-        if self.ui.target() == Target::Hidden {
-            // Fresh card next time it rises.
+        // A FRESH CARD NEXT TIME IT RISES — whenever the box closes, into the
+        // dock or off the screen (Max, 2026-10-30: "el dock se tiene que
+        // resetear cuando se cierra, siempre": an app's page was still up when
+        // the box came back from the dock).
+        if self.ui.target() != Target::Open {
             self.scroll.reset_sections();
-            self.hover = None;
+            // (The dock under the pointer keeps its hover through a configure.)
+            if self.ui.target() == Target::Hidden {
+                self.hover = None;
+            }
             self.search.open = false;
             // (An app Shift took to its row goes back to the box's own; Quick
             // Look of one of its recents goes with the box.)
@@ -6720,9 +6726,10 @@ impl App {
             // (A row Shift made — an app's or a file's — goes with the box.)
             let file_row = self.search.focus_file.take().is_some();
             let deep = self.search.deep.take().is_some();
-            // (An app's page goes with the box.)
+            // (An app's page goes with the box, and an Install "More" opened.)
             self.search.page = None;
             self.page_mix = 0.0;
+            self.search.pkg_more_for = None;
             if self.search.focus.take().is_some() || file_row || deep {
                 self.refilter();
             }
