@@ -180,16 +180,25 @@ fn newest(dir: &Path, depth: u32) -> u128 {
     best
 }
 
+/// A font system opens EVERY face flagged monospaced as it is made, to know the
+/// scripts each has for the fallback of a monospaced text: 104 files on the ASUS (the
+/// JetBrains families alone, 82), 5 s of a spinning disk that the dock's first frame
+/// waited for (2026-10-31). The flag stays only on the generic family and this one; a
+/// face asked for by name is found all the same.
+const MONO_FALLBACK: &str = "DejaVu Sans Mono";
+
 fn load(path: &Path, key: &str) -> Option<Database> {
     let index: Index = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     if index.format != FORMAT || index.key != key || index.faces.is_empty() {
         return None;
     }
+    let [serif, sans, cursive, fantasy, mono] = index.generic;
     let mut db = Database::new();
     for f in index.faces.iter().cloned() {
         let data: Arc<dyn AsRef<[u8]> + Sync + Send> = Arc::new(LazyFile::new(f.path.clone()));
         let mut families = f.families.into_iter();
         let first = families.next()?;
+        let monospaced = f.monospaced && (first == mono || first == MONO_FALLBACK);
         let families = std::iter::once((first, Language::English_UnitedStates))
             .chain(families.map(|n| (n, Language::Unknown)))
             .collect();
@@ -206,10 +215,9 @@ fn load(path: &Path, key: &str) -> Option<Database> {
             },
             weight: Weight(f.weight),
             stretch: stretch_from(f.stretch),
-            monospaced: f.monospaced,
+            monospaced,
         });
     }
-    let [serif, sans, cursive, fantasy, mono] = index.generic;
     db.set_serif_family(serif);
     db.set_sans_serif_family(sans);
     db.set_cursive_family(cursive);
@@ -356,7 +364,6 @@ mod tests {
                         f.families[0].0.clone(),
                         f.index,
                         f.weight.0,
-                        f.monospaced,
                         stretch_to(f.stretch),
                     )
                 })
@@ -373,6 +380,12 @@ mod tests {
                 "generic family {f:?}"
             );
         }
+        // A font system opens what is flagged monospaced: only these two families.
+        let mono = loaded.family_name(&Family::Monospace).to_owned();
+        assert!(loaded
+            .faces()
+            .filter(|f| f.monospaced)
+            .all(|f| f.families[0].0 == mono || f.families[0].0 == MONO_FALLBACK));
         // A face from the index reads its file on first use.
         let id = loaded.faces().next().expect("a face").id;
         assert!(loaded
