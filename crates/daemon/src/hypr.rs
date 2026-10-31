@@ -1437,6 +1437,12 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // A screen gone, with the lid shut and the built-in
                         // off: on again AT ONCE, not one screen left lit.
                         // (And a config read again forgets the built-in off.)
+                        // (A config read again forgets the lid's binds too: an
+                        // update's reload left the lid doing nothing till the
+                        // dock's next start.)
+                        if name == "configreloaded" {
+                            app.lid_binds();
+                        }
                         if name == "monitorremoved" || name == "configreloaded" {
                             app.monitors_lid();
                         }
