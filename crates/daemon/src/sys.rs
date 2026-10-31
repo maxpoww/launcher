@@ -4,7 +4,7 @@
 //! One worker thread, spawned the first time one of those pages opens, that
 //! polls only while a page is on screen ([`SysCommand::Watch`]). Everything is
 //! read from the kernel's own files (`/proc`, `/sys`) or from tools Golem
-//! already ships (`udevadm`, `lsblk`, `udisksctl`, `powerprofilesctl`); a
+//! already ships (`udevadm`, `lsblk`, `udisksctl`); a
 //! reading the machine does not offer is simply absent, and its row with it.
 //!
 //! The slow part — measuring what fills the home folder — runs on a thread of
@@ -55,7 +55,7 @@ pub(crate) struct Machine {
     pub(crate) mem_bytes: u64,
     pub(crate) os: String,
     pub(crate) cards: Vec<Card>,
-    /// `powerprofilesctl` is there to ask.
+    /// `power-profiles-daemon` answers.
     pub(crate) has_profiles: bool,
     /// Golem's own system cleaner (old versions, old logs) is installed.
     pub(crate) has_system_clean: bool,
@@ -335,7 +335,7 @@ fn run(events: &Sender<SysEvent>, rx: &mpsc::Receiver<SysCommand>) {
                 }
             }
             Some(SysCommand::Profile(p)) => {
-                run_quiet("powerprofilesctl", &["set", &p]);
+                crate::power_profiles::set(&p);
                 crate::power_mode::picked(&p);
             }
             Some(SysCommand::ChargeLimit(on)) => {
@@ -479,7 +479,7 @@ fn read_machine() -> Machine {
         mem_bytes: meminfo().get("MemTotal").copied().unwrap_or(0),
         os,
         cards: read_cards(),
-        has_profiles: out_of("powerprofilesctl", &["get"]).is_some(),
+        has_profiles: crate::power_profiles::active().is_some(),
         has_system_clean: out_of("systemctl", &["cat", SYSTEM_CLEAN_UNIT]).is_some(),
         video: out_of("vainfo", &[])
             .map(|s| parse_video(&s))
@@ -859,10 +859,8 @@ fn read_live(machine: &Machine, prev: &mut Prev, windows: &[(String, String, i32
     live.cards_awake = read_cards_awake();
     live.battery = read_battery();
     if machine.has_profiles {
-        live.profile = out_of("powerprofilesctl", &["get"]).map(|s| s.trim().to_owned());
-        live.profiles = out_of("powerprofilesctl", &["list"])
-            .map(|s| parse_profiles(&s))
-            .unwrap_or_default();
+        live.profile = crate::power_profiles::active();
+        live.profiles = crate::power_profiles::names().unwrap_or_default();
     }
     live.uptime_secs = read("/proc/uptime")
         .and_then(|s| s.split('.').next().and_then(|n| n.parse().ok()))
@@ -916,28 +914,6 @@ fn read_cards_awake() -> Vec<bool> {
     cards.sort_by(|a, b| a.1.cmp(&b.1));
     cards.sort_by_key(|c| !c.0);
     cards.into_iter().map(|c| c.2).collect()
-}
-
-/// The profile names out of `powerprofilesctl list`, slowest first.
-pub(crate) fn parse_profiles(list: &str) -> Vec<String> {
-    let mut names: Vec<String> = list
-        .lines()
-        .filter(|l| l.trim_end().ends_with(':') && !l.starts_with("    "))
-        .map(|l| {
-            l.trim()
-                .trim_start_matches('*')
-                .trim()
-                .trim_end_matches(':')
-                .to_owned()
-        })
-        .collect();
-    let rank = |n: &str| match n {
-        "power-saver" => 0,
-        "balanced" => 1,
-        _ => 2,
-    };
-    names.sort_by_key(|n| rank(n));
-    names
 }
 
 // --- storage -----------------------------------------------------------------
@@ -1539,15 +1515,6 @@ mod tests {
             "Intel Iris Xe"
         );
         assert_eq!(card_name("", "", "virtio"), "Graphics (virtio)");
-    }
-
-    #[test]
-    fn the_power_modes_come_out_slowest_first() {
-        let list = "  performance:\n    CpuDriver:\tintel_pstate\n\n* balanced:\n    CpuDriver:\tintel_pstate\n\n  power-saver:\n    CpuDriver:\tintel_pstate\n";
-        assert_eq!(
-            parse_profiles(list),
-            ["power-saver", "balanced", "performance"]
-        );
     }
 
     #[test]

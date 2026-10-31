@@ -6,7 +6,7 @@
 //! pills, the one in use lit. This module owns the other half — reading the
 //! machine into a [`ControlView`] and carrying out a pick — on its own
 //! thread, because most of it asks other programs (`wpctl`, `nmcli`,
-//! `powerprofilesctl`, `gsettings`…) and none of that may hold up a frame.
+//! `gsettings`…) and none of that may hold up a frame.
 //!
 //! The same three steps as the display settings wherever the compositor is
 //! involved: change it live (`hl.config` over the control socket), save the
@@ -2338,11 +2338,10 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             }
             view.groups.push(group(None, "keyboard", 170.0, choices));
         }
-        "Power mode" => match out("powerprofilesctl", &["list"]) {
-            Some(list) => {
-                let names = crate::sys::parse_profiles(&list);
-                let now = out("powerprofilesctl", &["get"]).unwrap_or_default();
-                let now = now.trim();
+        "Power mode" => match crate::power_profiles::names() {
+            Some(names) => {
+                let now = crate::power_profiles::active().unwrap_or_default();
+                let now = now.as_str();
                 let label = |n: &str| match n {
                     "power-saver" => tr("Saver"),
                     "balanced" => tr("Balanced"),
@@ -2682,7 +2681,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             }
         }
         "profile" => {
-            if run("powerprofilesctl", &["set", value]) {
+            if crate::power_profiles::set(value) {
                 crate::power_mode::picked(value);
             }
         }

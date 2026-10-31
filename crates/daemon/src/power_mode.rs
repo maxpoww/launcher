@@ -11,15 +11,15 @@
 //! then 2.26 s; all of them 6.58 s then 4.84 s; 44 C then 51 C at rest.
 //!
 //! The machine's own daemon (`power-profiles-daemon`) does the work and decides
-//! nothing about the source; it is asked through `powerprofilesctl`, off the
-//! loop. Without it nothing happens.
+//! nothing about the source; it is asked on the bus (`power_profiles.rs`), off
+//! the loop. Without it nothing happens.
 
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use tracing::{debug, info};
 
 use crate::display::GolemSettings;
+use crate::power_profiles;
 
 const UNKNOWN: u8 = 0;
 const CHARGER: u8 = 1;
@@ -59,21 +59,21 @@ pub(crate) fn follow(on_charger: bool) {
         return;
     }
     let spawned = std::thread::Builder::new().name("power-mode".into()).spawn(move || {
-        let Some(list) = ask(&["list"]) else {
+        let Some(names) = power_profiles::names() else {
             debug!("power mode: no daemon to ask");
             return;
         };
         let settings = GolemSettings::load();
         let picked = if on_charger { &settings.power_charger } else { &settings.power_battery };
-        let Some(mode) = wanted(on_charger, picked.as_deref(), &crate::sys::parse_profiles(&list)) else {
+        let Some(mode) = wanted(on_charger, picked.as_deref(), &names) else {
             return;
         };
-        if ask(&["get"]).is_some_and(|now| now.trim() == mode) {
+        if power_profiles::active().is_some_and(|now| now == mode) {
             return;
         }
         let source = if on_charger { "the charger" } else { "the battery" };
         info!("power mode: {mode}, on {source}");
-        if ask(&["set", &mode]).is_none() {
+        if !power_profiles::set(&mode) {
             debug!("power mode: {mode} was refused");
         }
     });
@@ -93,17 +93,6 @@ pub(crate) fn picked(mode: &str) {
         *kept = Some(mode.to_owned());
         s.store();
     });
-}
-
-fn ask(args: &[&str]) -> Option<String> {
-    let out = Command::new("powerprofilesctl")
-        .args(args)
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]

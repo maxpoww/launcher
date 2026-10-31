@@ -166,6 +166,7 @@ mod trash;
 mod usage;
 mod usb_watch;
 mod power_mode;
+mod power_profiles;
 mod visible;
 mod wall_follow;
 mod wall_tint;
