@@ -1442,6 +1442,10 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         // dock's next start.)
                         if name == "configreloaded" {
                             app.lid_binds();
+                            // (…and Stage's frame and dim, with the mode up.)
+                            if app.stage.is_on() {
+                                assert_stage_frame();
+                            }
                         }
                         if name == "monitorremoved" || name == "configreloaded" {
                             app.monitors_lid();

@@ -847,7 +847,7 @@ fn cli_tiles_from(
             // attr ≈ the package's main program (the banner's "run:").
             exec: format!(
                 "{} exec \"${{SHELL:-bash}}\"",
-                crate::launch::banner_cmd(&attr, None, &attr)
+                crate::launch::banner_cmd(&attr, None, &cli_commands(&attr))
             ),
             icon: Some("package-x-generic".to_owned()),
             startup_wm_class: None,
@@ -2267,8 +2267,55 @@ fn hue_to_rgb(hue: f32) -> (u8, u8, u8) {
     )
 }
 
+/// What to type for a command-line package: its name where that is a command, else
+/// what the package put on the owner's profile, whose links name it: `sfizz` is
+/// `sfizz_jack` and `sfizz_render`, `bluez` is `bluetoothctl`… The banner said
+/// "run: sfizz", a command that does not exist.
+fn cli_commands(attr: &str) -> String {
+    if crate::launch::on_path(attr) {
+        return attr.to_owned();
+    }
+    let user = std::env::var("USER").unwrap_or_default();
+    let links = std::fs::read_dir(format!("/etc/profiles/per-user/{user}/bin"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let target = std::fs::canonicalize(e.path()).ok()?;
+            Some((e.file_name().into_string().ok()?, target.to_string_lossy().into_owned()))
+        });
+    commands_of(attr, links)
+}
+
+/// The attr itself when no link names its package; else three commands at most, shortest first.
+fn commands_of(attr: &str, links: impl Iterator<Item = (String, String)>) -> String {
+    let package = format!("-{}-", attr.rsplit('.').next().unwrap_or(attr));
+    let mut found: Vec<String> =
+        links.filter(|(_, target)| target.contains(&package)).map(|(name, _)| name).collect();
+    found.sort_by_key(|name| (name.len(), name.clone()));
+    found.truncate(3);
+    if found.is_empty() {
+        attr.to_owned()
+    } else {
+        found.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_package_not_named_as_its_command_says_its_commands() {
+        let links = || {
+            [("sfizz_render", "/nix/store/a-sfizz-1.2/bin/sfizz_render"),
+             ("sfizz_jack", "/nix/store/a-sfizz-1.2/bin/sfizz_jack"),
+             ("fzf", "/nix/store/b-fzf-0.6/bin/fzf")]
+            .into_iter()
+            .map(|(n, t)| (n.to_owned(), t.to_owned()))
+        };
+        assert_eq!(super::commands_of("sfizz", links()), "sfizz_jack, sfizz_render");
+        assert_eq!(super::commands_of("nothing", links()), "nothing");
+    }
+
     use super::*;
 
     /// Fresh scratch cache dir plus a fake "icon" file inside it.
