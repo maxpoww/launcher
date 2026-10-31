@@ -2976,6 +2976,40 @@ struct Opened {
     queue: wgpu::Queue,
 }
 
+/// What a past start learned: this graphics stack and card have no Vulkan that
+/// can drive the GPU, GL is the way (`~/.cache/waverunner/gpu-gl-only`).
+struct GlOnly {
+    file: std::path::PathBuf,
+    stack: String,
+}
+
+impl GlOnly {
+    fn here() -> Option<Self> {
+        let mesa = std::fs::canonicalize("/run/opengl-driver").ok()?;
+        let card = crate::dmabuf::compositor_card()?;
+        Some(Self {
+            file: crate::apps::cache_base().join("waverunner").join("gpu-gl-only"),
+            stack: format!("{} {}", mesa.display(), card.display()),
+        })
+    }
+
+    fn known(&self) -> bool {
+        std::fs::read_to_string(&self.file).is_ok_and(|s| s.trim() == self.stack)
+    }
+
+    /// Note what this start's ladder ended on. Anything but GL takes the memory
+    /// back: Vulkan worked after all, or GL no longer does.
+    fn settle(&self, winner: &str) {
+        match (winner == "gl only", self.known()) {
+            (true, false) => crate::persist::write_text("gpu backend", &self.file, &self.stack),
+            (false, true) => {
+                let _ = std::fs::remove_file(&self.file);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Walk the adapter ladder for `window` on `display` and open the device.
 fn open_gpu(
     display: NonNull<std::ffi::c_void>,
@@ -3011,11 +3045,21 @@ fn open_gpu(
         ),
     ];
 
+    // A machine whose Vulkan cannot drive its GPU (all of pre-Skylake Intel) pays
+    // for the first rung at every start: 3.9 s of a spinning disk's login on the
+    // ASUS X550LC, before GL even begins (2026-10-31). Its answer is kept per
+    // graphics stack and card; another Mesa or card asks again.
+    let gl_only = GlOnly::here();
+    let mut winner = "";
     let mut chosen: Option<(wgpu::Surface<'static>, wgpu::Adapter)> = None;
     // The instance must outlive the surface it created; hold the winning
     // one until the device is built below.
     let mut _live_instance: Option<wgpu::Instance> = None;
     for (backends, force_fallback_adapter, label) in ATTEMPTS {
+        if label == "gpu" && gl_only.as_ref().is_some_and(GlOnly::known) {
+            tracing::info!("renderer: no Vulkan GPU on this stack (a past start found out): straight to GL");
+            continue;
+        }
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
             ..Default::default()
@@ -3060,11 +3104,15 @@ fn open_gpu(
                 }
                 tracing::info!("renderer: adapter via {label}: {:?}", adapter.get_info());
                 chosen = Some((surface, adapter));
+                winner = label;
                 _live_instance = Some(instance);
                 break;
             }
             None => tracing::warn!("renderer: no adapter via {label}"),
         }
+    }
+    if let Some(gl_only) = &gl_only {
+        gl_only.settle(winner);
     }
     let (surface, adapter) = chosen.ok_or_else(|| {
         anyhow!("no GPU or software adapter could present to the surface (is vulkan-loader on LD_LIBRARY_PATH?)")
