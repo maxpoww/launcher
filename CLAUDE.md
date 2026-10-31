@@ -253,6 +253,15 @@ Rig: `debug-desktop "power battery|charger"` (the next look at the machine puts 
 it is REAL on the machine's daemon. Measured on the dev box on the charger, balanced then performance: a small job right
 after idling 31.8 → 13.7 ms, one thread 3.20 → 2.26 s, all 6.58 → 4.84 s, a build of this crate 120.9 → 98.0 s; 44 → 51 C
 at rest.
+A SPINNING DISK (2026-10-31, the ASUS X550LC; the night's whole account is Golem's `docs/omarchy.md`): what counts is how many
+little files a start touches, each one seeks; `/sys/fs/cgroup/**/io.stat` says who reads, `strace -f -T -y` from the dock's first moment
+which files on which thread. What came out for the dock: a machine with no usable Vulkan remembers it per graphics stack and card
+(`renderer::GlOnly`, `~/.cache/waverunner/gpu-gl-only`; 3.9 s at each start); a font system opens EVERY face flagged monospaced, so
+`font_index::load` leaves the flag on the generic family and `MONO_FALLBACK` only (104 files, the first frame waited 5 s); the power modes
+are asked on the bus (`power_profiles.rs`): `powerprofilesctl` is Python, 1258 file opens at each start. Never add a Python tool to what
+the dock runs at start; ask its daemon. Golem's side: Mesa's shader cache as one file (session variables; the dock's GL shaders were 10 to 15 s
+at login). First frame 69 to 74 s → 53 to 56 s from the kernel's start, the dock's reads at start 205 → 113 MB. What is left on the loop
+after the first frame is the first surfaces (1.2 to 1.6 s each there).
 Numbers to keep (2026-10-29): dev box rss 263 → 153 MB, first turn 384 → ~110 ms, index 303 ms one pass,
 0 walked; MacBook (HD 5000, GL) boot-to-userspace 1m46 → 10 s, apps index 9.6 → ~1.3 s (pack close 885 → 24
 ms), first turn 1.6 s → a few turns under 400 ms, the icons landing before the home walk. (A MacBook boot at
