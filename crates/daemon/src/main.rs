@@ -5194,25 +5194,39 @@ impl App {
     /// The dock's figures, made off the loop after the index landed with
     /// blank layers for them (see `apps::Figures`): written into those layers.
     fn figures_fill(&mut self, made: apps::Figures) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        if let Some((can, lid)) = made.bin.as_ref() {
-            renderer.update_icon_layer(self.bin_layer, can);
-            renderer.update_icon_layer(self.bin_layer + 1, lid);
+        let mut chains: Vec<(u32, Vec<u8>)> = Vec::new();
+        if let Some((can, lid)) = made.bin {
+            chains.push((self.bin_layer, can));
+            chains.push((self.bin_layer + 1, lid));
         }
-        if let (Some(layer), Some(chain)) = (self.apps_stencil, made.stencil.as_ref()) {
-            renderer.update_icon_layer(layer, chain);
+        if let (Some(layer), Some(chain)) = (self.apps_stencil, made.stencil) {
+            chains.push((layer, chain));
         }
-        if let (Some(first), Some(figs)) = (self.files_layer, made.files.as_ref()) {
-            for (i, chain) in figs.iter().enumerate() {
-                renderer.update_icon_layer(first + i as u32, chain);
+        for (first, figs) in [(self.files_layer, made.files), (self.act_symbol_layer, made.actions)] {
+            if let (Some(first), Some(figs)) = (first, figs) {
+                chains.extend(figs.into_iter().enumerate().map(|(i, chain)| (first + i as u32, chain)));
             }
         }
-        if let (Some(first), Some(figs)) = (self.act_symbol_layer, made.actions.as_ref()) {
-            for (i, chain) in figs.iter().enumerate() {
-                renderer.update_icon_layer(first + i as u32, chain);
+        match (self.renderer.as_mut(), self.pending_icons.as_mut()) {
+            (Some(renderer), _) => {
+                for (layer, chain) in &chains {
+                    renderer.update_icon_layer(*layer, chain);
+                }
             }
+            // No GPU yet: they go into the set that waits for it. Dropped here,
+            // their layers stayed blank until the next index, which at a start
+            // is never: the 2013 MacBook Air's GPU opens over a second after
+            // the index lands, and its dock had a bin with no bin on it (Max,
+            // 2026-10-30), Golem Files with no folders, a lone app's actions
+            // with no symbols.
+            (None, Some(set)) => {
+                for (layer, chain) in chains {
+                    if let Some(slot) = set.get_mut(layer as usize) {
+                        *slot = chain;
+                    }
+                }
+            }
+            (None, None) => {}
         }
         self.schedule_frame();
     }

@@ -198,6 +198,10 @@ Design rules that came out of it (keep them):
   layer at a time and its owners re-request on eviction; notification pictures live in their files
   (`image_file`), the chain made off the loop; menu symbols are one map (`App::symbols`), from the 128²
   mip on; the loader's RAM cache keeps twelve tiles.
+- The figures (the bin, Golem Files' folders, the actions' symbols) made off the loop after the landing go into the
+  set still waiting for the GPU when there is no renderer yet (`figures_fill`, `pending_icons`): on a GPU that opens late,
+  as the MacBook's, dropping them left those tiles blank. Rig for that order: `WAVERUNNER_NO_FIGURES_AHEAD=1` and a sleep
+  at the top of `warm_gpu`.
 - The GPU (device + pipelines) and the fonts are opened on threads ahead of the first frame (`warm_gpu`,
   `warm_fonts`); a surface whose renderer is not there yet keeps its configure and runs it again, one surface
   a turn, when the GPU is in (`gpu_not_ready`/`gpu_waited`) — never a join on the loop.
