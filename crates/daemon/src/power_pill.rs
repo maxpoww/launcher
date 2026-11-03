@@ -30,7 +30,12 @@
 //! task pill's chips; once no window is left the machine restarts. Unlike
 //! hyprshutdown the session is never left (Golem has no log-out) and the
 //! banner stays to say what is happening. A dialog an app opens to ask is a
-//! window too: the restart waits for the owner to answer it.
+//! window too: the restart waits for the owner to answer it. The app named is
+//! brought forward once (macOS's way: its question may be on another
+//! workspace, or under other windows), and a click on the words does it again
+//! — an app whose question was already open when the restart came took the
+//! second close as "never mind" (the Text Editor on the test VM, 2026-11-03),
+//! and the owner closes it by its own X.
 //!
 //! THEY GO with a second press of the key (a restart waiting: cancelled), when
 //! the hand leaves after coming, or by themselves when it never comes
@@ -94,6 +99,9 @@ struct Closing {
     says: String,
     /// The machine has been told: nothing is left to choose.
     going: bool,
+    /// The window of the app named, and the apps already brought forward.
+    named: Option<String>,
+    shown: Vec<String>,
     /// Counts restarts, so the poll of a cancelled one stops.
     run: u32,
 }
@@ -431,7 +439,14 @@ impl App {
         p.open = false;
         p.visited = true;
         p.leaving = false;
-        p.closing = Some(Closing { since: Instant::now(), says: tr(CLOSING).to_owned(), going: false, run });
+        p.closing = Some(Closing {
+            since: Instant::now(),
+            says: tr(CLOSING).to_owned(),
+            going: false,
+            named: None,
+            shown: Vec::new(),
+            run,
+        });
         self.power_call_bar();
         if windows.is_empty() {
             return self.power_restart_now();
@@ -469,11 +484,25 @@ impl App {
                 }
             }
             let says = waiting_words(&apps);
+            let first = windows.first().map(|(addr, _)| addr.clone());
+            let mut bring = None;
             if let Some(c) = self.power.closing.as_mut() {
+                c.named.clone_from(&first);
+                // The app named comes forward, once: its question is what the
+                // owner has to see.
+                if let (Some(app), Some(addr)) = (apps.first(), &first) {
+                    if !c.shown.contains(app) {
+                        c.shown.push(app.clone());
+                        bring = Some(addr.clone());
+                    }
+                }
                 if c.says != says {
                     c.says = says;
                     self.power_say_measure();
                 }
+            }
+            if let Some(addr) = bring {
+                crate::hypr::focus_window(&addr);
             }
         }
         self.power_poll_soon(run);
@@ -536,6 +565,7 @@ impl App {
         let (Some(p), Some((_, rect))) = (self.options_ptr, self.power_pill_rects(0.0, self.options_pill_h()).first().copied()) else {
             return;
         };
+        let rect = Rect::new(rect.x, rect.y, self.power_say_w(), rect.h);
         // (Across only: the pointer is on the pill, so on the bar.)
         let on = |chip: Rect| p.0 >= chip.x && p.0 <= chip.x + chip.w;
         let (anyway, cancel) = self.power_chips(rect);
@@ -544,6 +574,8 @@ impl App {
             self.power_restart_now();
         } else if on(cancel) {
             self.power_restart_cancel();
+        } else if let Some(addr) = self.power.closing.as_ref().and_then(|c| c.named.clone()) {
+            crate::hypr::focus_window(&addr);
         }
     }
 
@@ -620,7 +652,14 @@ impl App {
                 p.open = false;
                 p.visited = true;
                 // (Its run is never polled: nothing is waited for.)
-                p.closing = Some(Closing { since: Instant::now(), says, going: false, run: p.runs });
+                p.closing = Some(Closing {
+                    since: Instant::now(),
+                    says,
+                    going: false,
+                    named: None,
+                    shown: Vec::new(),
+                    run: p.runs,
+                });
                 self.power_call_bar();
                 self.power_say_measure();
             }
@@ -650,7 +689,8 @@ impl App {
         } else {
             shown * ((p.out - 0.15) / 0.6).clamp(0.0, 1.0)
         };
-        if a <= 0.004 {
+        // (Sleep and restart are gone while the round pill is a message.)
+        if a <= 0.004 || (id != PillId::Power && p.closing.is_some()) {
             return;
         }
         let saying = id == PillId::Power && p.say > 0.01;
@@ -719,10 +759,18 @@ impl App {
         if words_a <= 0.004 {
             return;
         }
+        // Laid out at the message's whole width and uncovered as the pill
+        // grows (squeezed into the growing pill, the chips ran over the
+        // symbol on the way out).
         let ph = self.options_pill_h();
-        let (anyway, cancel) = self.power_chips(r);
-        let end = if c.going { r.x + r.w } else { anyway.x - WORDS_GAP };
-        let words = Rect::new(r.x + ph, r.y, (end - r.x - ph).max(0.0), r.h);
+        let whole = Rect::new(r.x, r.y, self.power_say_w(), r.h);
+        let seen = |q: Rect| {
+            let right = (q.x + q.w).min(r.x + r.w);
+            Rect::new(q.x, q.y, (right - q.x).max(0.0), q.h)
+        };
+        let (anyway, cancel) = self.power_chips(whole);
+        let end = if c.going { whole.x + whole.w } else { anyway.x - WORDS_GAP };
+        let words = seen(Rect::new(r.x + ph, r.y, (end - r.x - ph).max(0.0), r.h));
         scene.labels.push(Label {
             text: c.says.clone(),
             pos: (words.x, r.y + (r.h - LINE_PX * s) / 2.0),
@@ -743,9 +791,13 @@ impl App {
         let amber = crate::notif::amber();
         for (chip, text) in [(anyway, tr(ANYWAY)), (cancel, tr(CANCEL))] {
             let lit = ptr.is_some_and(|q| q.0 >= chip.x && q.0 <= chip.x + chip.w);
+            let shows = seen(chip);
+            if shows.w <= 0.5 {
+                continue;
+            }
             if lit {
                 scene.rects.push(RectInst {
-                    rect: chip,
+                    rect: shows,
                     radius: chip.h / 2.0,
                     color: [amber[0], amber[1], amber[2], 0.3 * words_a],
                     glass: 0.0,
@@ -764,7 +816,7 @@ impl App {
                 cache: true,
                 family: TEXT_FONT,
                 color: Some([tone[0], tone[1], tone[2], words_a]),
-                clip: Some(chip),
+                clip: Some(shows),
             });
         }
     }
