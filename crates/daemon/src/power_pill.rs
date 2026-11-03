@@ -7,7 +7,9 @@
 //!
 //! The key is the compositor's: Golem's hyprland.lua sends `waverunner-ctl
 //! power` when it is let go, and logind leaves the short press alone and powers
-//! the machine off on a long one.
+//! the machine off on a long one. Where the kernel's tiny power button driver
+//! owns the key instead, Golem sends the same verb from kbrequest.target
+//! (desktop/idle.nix).
 //!
 //! AT REST: one round pill right of the gear, HIBERNATE (the machine off,
 //! everything kept). What stands right of the gear moves over for it.
@@ -46,6 +48,9 @@ const GLYPH_RESTART: &str = "\u{f021}";
 
 /// How long the pills wait for a hand that never comes.
 const UNVISITED: Duration = Duration::from_secs(8);
+/// Asks closer than this are one press told twice (a machine whose key two
+/// kernel drivers report: the compositor's bind and Golem's kbrequest path).
+const ONE_PRESS: Duration = Duration::from_millis(400);
 /// What logind is given to say whether this machine can hibernate.
 const PATIENCE: Duration = Duration::from_secs(4);
 
@@ -66,6 +71,8 @@ pub(crate) struct PowerPills {
     leaving: bool,
     /// Counts the presses, so a wait armed for one is not acted on for another.
     asked: u32,
+    /// When the last press came.
+    asked_at: Option<Instant>,
     /// What logind said last (`None`: not asked yet — taken as yes).
     can_hibernate: Option<bool>,
     /// The banner was hidden (a fullscreen) and the key called it.
@@ -117,6 +124,10 @@ fn machine(verb: &'static str) {
 impl App {
     /// The power key's short press: the pills come, or go if they are there.
     pub(crate) fn power_pills_ask(&mut self) {
+        if self.power.asked_at.is_some_and(|t| t.elapsed() < ONE_PRESS) {
+            return;
+        }
+        self.power.asked_at = Some(Instant::now());
         if self.power.on {
             self.power_pills_away();
             return;
