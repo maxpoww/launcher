@@ -96,8 +96,9 @@ impl App {
     /// them the Apps' row when they fill more than one line
     /// (`content::files_take_apps_row`).
     pub(crate) fn apps_trim_target(&self) -> (f32, f32) {
-        // (Beside a side dock the sections stand side by side: nothing to trim.)
-        if self.control_panel || self.dock_side() != crate::launcher_prefs::Side::Bottom {
+        // (Beside a side dock the sections stand side by side: nothing to trim.
+        // The terminal takes the whole box.)
+        if self.control_panel || self.dock_side() != crate::launcher_prefs::Side::Bottom || self.term_on() {
             return (0.0, 0.0);
         }
         let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
@@ -281,7 +282,7 @@ impl App {
         // grid: that keeps its row's room.
         let bottom = !self.control_panel && layout.side == crate::launcher_prefs::Side::Bottom;
         let deep = self.search.deep.as_ref().filter(|_| bottom && centre_rows);
-        layout.apps_none = bottom && centre_rows && apps_cells == 0 && !self.box_in_grid() && deep.is_none();
+        layout.apps_none = bottom && centre_rows && apps_cells == 0 && !self.box_in_grid() && deep.is_none() && !self.term_on();
         if bottom && self.files_second > 0.0 {
             let extra = self.files_second * content::GRID_CELL_H * self.icon_scale();
             content::files_take_apps_row(&mut layout, extra, self.scroll.per[content::SECTION_FILES].pos);
@@ -867,12 +868,14 @@ impl App {
         // type at the bar's scale.
         let pill_scale = self.options_scale();
         let search_font = crate::options::FONT_PX * pill_scale;
+        // (The terminal's field: a password asked shows as dots.)
+        let field: String = self.term_field_text().unwrap_or_else(|| self.search.query.clone());
         let (query_px, search_label_px) = self
             .renderer
             .as_mut()
             .map(|r| {
                 (
-                    r.measure_text(&self.search.query, search_font, crate::options::TEXT_FONT),
+                    r.measure_text(&field, search_font, crate::options::TEXT_FONT),
                     r.measure_text(crate::i18n::tr("Search"), search_font, crate::options::TEXT_FONT),
                 )
             })
@@ -889,6 +892,20 @@ impl App {
             ),
             _ => (0.0, 0.0),
         };
+        // THE BOX'S TERMINAL (`term.rs`): its words measured (a cell's width,
+        // the tabs' words, the chip), its room in cells told to tmux.
+        let term_on = self.term_on();
+        let (term_font, term_line) = self.term_px();
+        let (term_words, term_lit) = if term_on { self.term_words() } else { (Vec::new(), 0) };
+        let mut term_chip_w = 0.0;
+        if term_on {
+            if let Some(r) = self.renderer.as_mut() {
+                self.term.words_w = term_words.iter().map(|w| r.measure_text(w, crate::deep_search::TAB_FONT_PX, crate::options::TEXT_FONT)).collect();
+                term_chip_w = r.measure_text(crate::i18n::tr("Terminal"), search_font, crate::options::TEXT_FONT);
+            }
+            self.term_fit(&layout);
+        }
+        let term_colours = if term_on { crate::palette::terminal_words() } else { [[0.0; 4]; 16] };
         let search_pill = content::SearchPill {
             scale: pill_scale,
             h: self.search_pill_h(),
@@ -1959,6 +1976,23 @@ impl App {
                     chip_w: deep_chip_w,
                     placeholder_w: deep_placeholder_w,
                 }),
+                term: if term_on {
+                    Some(content::TermDraw {
+                        lines: self.term.screen.as_ref().map_or(&[][..], |sc| &sc.lines[..]),
+                        cursor: self.term.screen.as_ref().and_then(|sc| sc.cursor),
+                        tabs: &term_words,
+                        tabs_w: &self.term.words_w,
+                        lit: term_lit,
+                        chip: crate::i18n::tr("Terminal"),
+                        chip_w: term_chip_w,
+                        cell_w: self.term.cell_w,
+                        font_px: term_font,
+                        line_px: term_line,
+                        colours: &term_colours,
+                    })
+                } else {
+                    None
+                },
                 stretch: self.agua_icons.pos,
                 dock_tooltip: if drag_frame.is_none() {
                     self.dock_tooltip()
@@ -1973,7 +2007,7 @@ impl App {
                 plate: icon_plate,
                 bounce,
                 dock_hop,
-                query: &self.search.query,
+                query: &field,
                 selected: self.search.selected.and_then(|i| self.flat_to_pos(i)),
                 selected_soft: !self.search.keyed,
                 search_expand: self.search.expand,

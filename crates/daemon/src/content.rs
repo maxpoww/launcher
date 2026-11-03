@@ -386,6 +386,39 @@ pub struct DeepDraw<'a> {
     pub placeholder_w: f32,
 }
 
+/// THE BOX'S TERMINAL (`term.rs`): the shown tab's screen in the sections'
+/// place (its runs of cells, the cursor), its tabs' words over the field (the
+/// deep search's words: the lit one in full ink and underlined), and the
+/// chip in the field ("Terminal").
+#[derive(Clone, Copy, Debug)]
+pub struct TermDraw<'a> {
+    pub lines: &'a [Vec<crate::term::Span>],
+    pub cursor: Option<(u16, u16)>,
+    pub tabs: &'a [String],
+    pub tabs_w: &'a [f32],
+    pub lit: usize,
+    pub chip: &'a str,
+    pub chip_w: f32,
+    /// A cell's width and a line's height, at the words' size.
+    pub cell_w: f32,
+    pub font_px: f32,
+    pub line_px: f32,
+    /// The palette's terminal sixteen (sRGB).
+    pub colours: &'a [[f32; 4]; 16],
+}
+
+/// The air between the terminal's tabs and the field, and their gap.
+pub const TERM_TABS_AIR: f32 = 8.0;
+const TERM_TABS_GAP: f32 = 26.0;
+
+/// Where the box's terminal stands: the sections' room, down to the tabs'
+/// row over the field (`tab_h` tall).
+pub fn term_area(l: &Layout, tab_h: f32) -> Rect {
+    let top = l.sections[SECTION_APPS].title_pos.1;
+    let bottom = l.search_box.y - tab_h - 2.0 * TERM_TABS_AIR;
+    Rect::new(l.card_x + 2.0 * GRID_PAD_X, top, (l.card_w - 4.0 * GRID_PAD_X).max(0.0), (bottom - top).max(0.0))
+}
+
 /// How far the chip in the search pill stands from the words typed after it.
 const PILL_CHIP_GAP: f32 = 8.0;
 
@@ -2329,6 +2362,8 @@ pub struct FrameInput<'a> {
     /// THE DEEP FILE SEARCH (`deep_search.rs`): what its shelves, chips and
     /// pill draw, while it is up.
     pub deep: Option<DeepDraw<'a>>,
+    /// THE BOX'S TERMINAL (`term.rs`), while "./" is typed.
+    pub term: Option<TermDraw<'a>>,
     /// FAST LAUNCH's bubble and icons, while it is up or fading.
     pub fast: Option<FastDraw<'a>>,
     pub quick: Option<QuickDraw<'a>>,
@@ -2716,6 +2751,7 @@ pub fn scene(
         more_cell,
         recent_title,
         deep,
+        term,
         fast,
         quick,
         stretch,
@@ -3682,8 +3718,10 @@ pub fn scene(
         // SEARCH_W_MIN, growing snugly with the shaped query (measured, not
         // estimated) plus caret room.
         let compact_w = (sp.label_px + 2.0 * pad).max(sp.h);
-        // (The deep search's chip stands before the words: "Files ›".)
-        let chip_room = deep.map_or(0.0, |d| d.chip_w + 2.0 * pad * 0.6 + PILL_CHIP_GAP);
+        // (The deep search's chip stands before the words: "Files ›"; the
+        // terminal's: "Terminal".)
+        let chip: Option<(&str, f32)> = deep.map(|d| (d.chip, d.chip_w)).or(term.map(|t| (t.chip, t.chip_w)));
+        let chip_room = chip.map_or(0.0, |(_, w)| w + 2.0 * pad * 0.6 + PILL_CHIP_GAP);
         let typed_px = match deep {
             Some(d) if query.is_empty() => d.placeholder_w,
             _ => query_px,
@@ -3722,9 +3760,9 @@ pub fn scene(
         };
         // The deep search's chip, at the pill's start: the words after it,
         // centred in what it leaves.
-        let text_cx = match deep.filter(|_| search_expand >= 0.5) {
-            Some(d) => {
-                let (cw, ch) = (d.chip_w + 2.0 * pad * 0.6, (sh - 6.0 * sp.scale).max(line));
+        let text_cx = match chip.filter(|_| search_expand >= 0.5) {
+            Some((chip_text, chip_w)) => {
+                let (cw, ch) = (chip_w + 2.0 * pad * 0.6, (sh - 6.0 * sp.scale).max(line));
                 let left = cx - (typed_px + chip_room) / 2.0;
                 let chip = Rect::new(left, cy - ch / 2.0, cw, ch);
                 sgrid.rects.push(RectInst {
@@ -3735,7 +3773,7 @@ pub fn scene(
                     border: 0.0,
                 });
                 sgrid.labels.push(Label {
-                    text: d.chip.to_string(),
+                    text: chip_text.to_string(),
                     pos: (chip.x + cw / 2.0, cy - line * k / 2.0),
                     max_w: cw,
                     font_px: font * k,
@@ -3802,8 +3840,8 @@ pub fn scene(
             });
             continue;
         }
-        // (A deep search's hidden shelf: nothing at all.)
-        if deep.is_some_and(|d| d.hidden[s]) {
+        // (A deep search's hidden shelf, or the terminal: nothing at all.)
+        if deep.is_some_and(|d| d.hidden[s]) || term.is_some() {
             scene.grids.push(GridContent { clip: reveal_clip(sec.viewport), ..Default::default() });
             continue;
         }
@@ -4554,6 +4592,9 @@ pub fn scene(
     // one, as on the boxes, and the same font"): the text font, the ones lit
     // in the full ink and UNDERLINED, the others at 55 %; the page's dots
     // under them.
+    if let (Some(t), false) = (term, panel) {
+        push_term(&mut scene, t, layout, dock_ink, dock_seen, reveal_clip);
+    }
     if let (Some(d), Some(row), false) = (deep, layout.tabs_row, panel) {
         // The pages slide: each tab where its page stands now, round the end
         // the nearer way, inside the row.
@@ -5279,6 +5320,96 @@ pub fn scene(
     crate::options::shell_halos(&mut scene);
 
     scene
+}
+
+/// THE BOX'S TERMINAL drawn (`term.rs`): each run of cells where its column
+/// stands (a cell's measured width), its ground where it has one, the cursor
+/// as a soft block; the tabs' words over the field.
+fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], seen: [f32; 4], reveal_clip: impl Fn(Rect) -> Rect) {
+    let tab_h = t.line_px.max(crate::deep_search::TAB_LINE_PX);
+    let area = term_area(layout, tab_h);
+    let clip = reveal_clip(area);
+    let mut g = GridContent { clip, ..Default::default() };
+    let colour = |c: crate::term::Colour, dflt: [f32; 4]| -> [f32; 4] {
+        match c {
+            crate::term::Colour::Default => dflt,
+            crate::term::Colour::Idx(i) => crate::term::xterm(i, t.colours),
+            crate::term::Colour::Rgb(r, gg, b) => [f32::from(r) / 255.0, f32::from(gg) / 255.0, f32::from(b) / 255.0, 1.0],
+        }
+    };
+    let rows = (area.h / t.line_px).floor().max(0.0) as usize;
+    // (More lines than room — the window not resized yet: the last ones.)
+    let skip = t.lines.len().saturating_sub(rows);
+    for (row, line) in t.lines.iter().skip(skip).enumerate() {
+        let y = area.y + row as f32 * t.line_px;
+        for span in line {
+            let x = area.x + f32::from(span.col) * t.cell_w;
+            let cells = span.text.chars().count() as f32;
+            if span.bg != crate::term::Colour::Default {
+                let bg = colour(span.bg, ink);
+                g.rects.push(RectInst { rect: Rect::new(x, y, cells * t.cell_w, t.line_px), radius: 0.0, color: bg, glass: 0.0, border: 0.0 });
+            }
+            if span.text.trim().is_empty() {
+                continue;
+            }
+            let mut fg = colour(span.fg, ink);
+            if span.dim {
+                fg = faded_on(fg, seen, 0.6, 3.0);
+            }
+            g.labels.push(Label {
+                text: span.text.clone(),
+                pos: (x, y),
+                max_w: cells * t.cell_w + t.cell_w,
+                font_px: t.font_px,
+                line_px: t.line_px,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: Some(crate::options::NERD),
+                color: Some(fg),
+                clip: Some(clip),
+            });
+        }
+    }
+    if let Some((cx, cy)) = t.cursor {
+        let row = usize::from(cy).checked_sub(skip);
+        if let Some(row) = row.filter(|r| *r < rows) {
+            let r = Rect::new(area.x + f32::from(cx) * t.cell_w, area.y + row as f32 * t.line_px, t.cell_w, t.line_px);
+            g.rects.push(RectInst { rect: r, radius: 1.5, color: [ink[0], ink[1], ink[2], 0.45], glass: 0.0, border: 0.0 });
+        }
+    }
+    // The tabs: centred words over the field, the lit one in full ink and
+    // underlined, the others quieter — the deep search's.
+    let total: f32 = t.tabs_w.iter().sum::<f32>() + TERM_TABS_GAP * t.tabs_w.len().saturating_sub(1) as f32;
+    let cx = layout.card_x + layout.card_w / 2.0;
+    let top = area.y + area.h + TERM_TABS_AIR;
+    let mut x = cx - total / 2.0;
+    let (font, line) = (crate::deep_search::TAB_FONT_PX, crate::deep_search::TAB_LINE_PX);
+    for (i, word) in t.tabs.iter().enumerate() {
+        let w = t.tabs_w.get(i).copied().unwrap_or(0.0);
+        let lit = i == t.lit;
+        let c = if lit { ink } else { faded_on(ink, seen, 0.55, 2.5) };
+        g.labels.push(Label {
+            text: word.clone(),
+            pos: (x + w / 2.0, top),
+            max_w: w + 4.0,
+            font_px: font,
+            line_px: line,
+            centered: true,
+            dim: false,
+            cache: true,
+            family: crate::options::TEXT_FONT,
+            color: Some(c),
+            clip: Some(reveal_clip(Rect::new(layout.card_x, top - 4.0, layout.card_w, line + 12.0))),
+        });
+        if lit {
+            g.rects.push(RectInst { rect: Rect::new(x, top + line + DEEP_UNDERLINE_GAP, w, 1.5), radius: 0.0, color: c, glass: 0.0, border: 0.0 });
+        }
+        x += w + TERM_TABS_GAP;
+    }
+    // (The words clip only to the box: the tabs stand under the screen's room.)
+    g.clip = reveal_clip(Rect::new(layout.card_x, area.y, layout.card_w, area.h + line + 2.0 * TERM_TABS_AIR + 8.0));
+    scene.grids.push(g);
 }
 
 #[cfg(test)]

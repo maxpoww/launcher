@@ -641,6 +641,24 @@ The big daemon files are cohesive but long — go straight to the function:
   `menu_act`), ← / Escape / Backspace back to the menu from a page. Rig: `phonepill fakehelp` (a
   phone whose USB debugging is off: the help rows), `phonepill key down|up|home|end|enter|left|right|
   escape|<letter>` (a fake phone turns pages and does nothing else).
+- `term.rs` — THE BOX'S TERMINAL (Max, 2026-11-03; look "A · Words" of https://claude.ai/artifact/TY3gvBZj6k3CqrHgt9AuKe):
+  `./` typed in the box makes it a TAB'S SCREEN (`term_on`: the query begins with `./`; `refilter` shows nothing
+  else). `./2 cmd` + Enter runs it in tab 2 and shows it, `./2` + Enter shows tab 2, `./cmd` runs in the tab shown
+  (`./configure` = that script when the tab's folder has it: `as_script`); a new number makes the tab. THE ENGINE is
+  tmux (`WAVERUNNER_TMUX`: the flake's wrapper, `waverunner-dev`'s out-link), its own server `-L golem` session
+  `golem`, a window a tab from 1, started as a user service (`systemd-run --unit golem-terminal`: the shells
+  outlive the dock and get the session's environment; a rig with `GOLEM_RIG` uses `-L golem-rig`, started
+  directly). THE BOX IS A VIEW: a control-mode client (`watch`) only says a pane printed / the windows changed;
+  the screen is read with `capture-pane -e` (SGR → `Span`s, `parse_line`; the palette's sixteen via
+  `palette::terminal_words`, the 256 cube, truecolour) on the engine's thread, at most every 33 ms, one at a
+  time; keys go with `send-keys` (text as hex bytes, `-H`). Drawn by `content::push_term` in the sections' room
+  (`term_area`; size in cells from a measured cell — `term_fit` → `resize-window`), the tabs as the deep search's
+  words over the field (lit = underlined), the field's chip "Terminal". A program on the WHOLE screen (tmux's
+  alternate screen: less, vim, htop) takes every key (`term_raw`, `key_name`), the field says so, Ctrl+Esc gives
+  the keys back; a PASSWORD asked on the cursor's line (`asks_password`) is typed in the field as dots.
+  Ctrl+C / Ctrl+D with nothing typed go to the tab. Rig: `debug-query "./2 cmd!"` (the trailing ! = Enter),
+  `debug-desktop "term key <tmux key>|text <words>|state"`; scratchpad `term-rig.sh`. Not built yet:
+  completion (Tab), history (↑), clicking the tabs, opening a tab in foot, scrolling back.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through

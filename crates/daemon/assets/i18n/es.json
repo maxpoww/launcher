@@ -1450,5 +1450,9 @@
  "Waiting for {app}": "Esperando a {app}",
  "Waiting for {app} and {n} more": "Esperando a {app} y {n} más",
  "Restarting…": "Reiniciando…",
- "Restart anyway": "Reiniciar igual"
+ "Restart anyway": "Reiniciar igual",
+ "Terminal": "Terminal",
+ "new": "nueva",
+ "{program} has the keys · Ctrl+Esc types here": "{program} tiene las teclas · Ctrl+Esc escribe acá",
+ "The terminal could not start: {why}": "El terminal no pudo arrancar: {why}"
 }

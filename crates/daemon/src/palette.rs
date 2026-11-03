@@ -3411,6 +3411,13 @@ fn signal_all(comm: &str, sig: libc::c_int) {
 /// ground, white the ink, bright black the quiet words ([`Theme::quiet`];
 /// base03, a ground, was invisible as the dim text programs print with it).
 /// One list for foot's file and for the live OSC, so the two never part.
+/// The terminal's sixteen for the box's terminal (`term.rs`): the palette's own,
+/// each readable on the shell's ground, as sRGB.
+pub(crate) fn terminal_words() -> [[f32; 4]; 16] {
+    let t = current();
+    terminal16(&t.c).map(|c| srgb(shell_words(c)))
+}
+
 fn terminal16(c: &[Rgb; 16]) -> [Rgb; 16] {
     // (The hues are words in a terminal: text-safe, 4.5:1 on its grounds.)
     let w = |i: usize| as_text(c, c[i]);

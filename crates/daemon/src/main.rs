@@ -151,6 +151,7 @@ mod sys;
 mod phone_pill;
 mod drive_pill;
 mod power_pill;
+mod term;
 mod task_pill;
 mod task_title;
 mod tasks;
@@ -817,6 +818,7 @@ fn main() -> anyhow::Result<()> {
         phone_pill: phone_pill::PhonePill::default(),
         drive_pills: drive_pill::DrivePills::default(),
         power: power_pill::PowerPills::default(),
+        term: term::TermState::default(),
         desktop_layer,
         veil_layer,
         desktop_renderer: None,
@@ -1891,6 +1893,8 @@ pub struct App {
     drive_pills: drive_pill::DrivePills,
     /// The power key's pills on the banner (`power_pill.rs`).
     power: power_pill::PowerPills,
+    /// THE BOX'S TERMINAL (`term.rs`): "./" typed in the box.
+    term: term::TermState,
     desktop_layer: Option<LayerSurface>,
     /// The Lighting's veil over the wallpaper (`veil.rs`).
     veil_layer: Option<veil::VeilLayer>,
@@ -3435,6 +3439,15 @@ impl App {
                 self.schedule_frame();
                 return;
             }
+            // ("./… !": the terminal's Enter too — `term.rs` without a keyboard.)
+            Command::DebugQuery(query) if query.starts_with("./") && query.ends_with('!') => {
+                self.search.open = true;
+                self.search.query = query.trim_end_matches('!').to_owned();
+                self.refilter();
+                self.term_key(Keysym::Return, None);
+                self.schedule_frame();
+                return;
+            }
             Command::DebugQuery(query) => {
                 self.search.open = !query.is_empty();
                 self.install_drag_reset = false;
@@ -3940,6 +3953,11 @@ impl App {
                 let _perf = perf::FILES_CMD.time();
                 let done = self.filer_command(&what);
                 info!("files: {done}");
+                return;
+            }
+            Command::DebugDesktop(what) if what.starts_with("term ") => {
+                let done = self.term_debug(&what["term ".len()..]);
+                info!("debug-desktop: {done}");
                 return;
             }
             Command::DebugDesktop(what) => {
@@ -5322,6 +5340,20 @@ impl App {
             .collect();
         // Drop the previous refilter's transient entries.
         self.truncate_transients();
+        // THE TERMINAL ("./", `term.rs`): the box is a tab's screen; nothing
+        // is searched.
+        if self.term_on() {
+            self.search.visible = Default::default();
+            self.search.controls.clear();
+            self.apps_slide.clear();
+            self.search.selected = None;
+            self.search.chosen = false;
+            self.scroll.reset_sections();
+            self.term_sync();
+            self.update_hover();
+            self.schedule_frame();
+            return;
+        }
 
         let searching = !self.search.query.is_empty();
         // The grid rests either on an empty query or while an icon is being
@@ -7400,6 +7432,11 @@ impl App {
             } else if !self.modifiers.ctrl {
                 self.gear_key(keysym, utf8);
             }
+            return;
+        }
+        // The terminal's own (`term.rs`): Enter sends, and a program on the
+        // whole screen takes every key (before the box's own Ctrl keys).
+        if self.term_key(keysym, utf8) {
             return;
         }
         // Ctrl+Plus/Minus cycles icon size through 4 levels.

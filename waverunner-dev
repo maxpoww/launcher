@@ -94,6 +94,13 @@ MPVPAPER="$(timeout $WAIT nix build --out-link "$STATE/mpvpaper" --print-out-pat
 if [ -n "$MPVPAPER" ]; then
   export WAVERUNNER_MPVPAPER="$MPVPAPER/bin/mpvpaper"
 fi
+# The box's terminal ("./", term.rs): tmux, from the flake's own nixpkgs,
+# rooted by its out-link as mpvpaper is.
+TMUXPKG="$(timeout $WAIT nix build --out-link "$STATE/tmux" --print-out-paths --inputs-from /home/max/launcher nixpkgs#tmux 2>/dev/null)"
+[ -z "$TMUXPKG" ] && [ -e "$STATE/tmux" ] && TMUXPKG="$STATE/tmux"
+if [ -n "$TMUXPKG" ]; then
+  export WAVERUNNER_TMUX="$TMUXPKG/bin/tmux"
+fi
 # What reads the frames of a moving wallpaper for its preview in the
 # wallpapers' box: ffmpeg, the same way (an installed Golem has it on the
 # PATH). `.bin`: the program alone; its out-link gets the output's name.

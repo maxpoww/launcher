@@ -272,7 +272,8 @@
               --set-default WAVERUNNER_DICT_ES ${dictionaries}/share/waverunner/dictionary-es.json \
               --set-default WAVERUNNER_WHISPER ${speech}/bin/whisper-cli \
               --set-default WAVERUNNER_WHISPER_MODEL ${speech}/share/waverunner/ggml-base.bin \
-              --set-default WAVERUNNER_TRANSLATE ${translate}/bin/translateLocally
+              --set-default WAVERUNNER_TRANSLATE ${translate}/bin/translateLocally \
+              --set-default WAVERUNNER_TMUX ${pkgs.tmux}/bin/tmux
           '';
         };
         waverunner-daemon = mkDaemon { };
