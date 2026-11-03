@@ -202,14 +202,17 @@ fn machine(verb: &'static str) {
 }
 
 /// The breath's red: the palette's own when it reads red (the menus' test,
-/// `desktop_menu::reads_red`), else Golem's.
+/// `desktop_menu::reads_red`), else Golem's — LINEAR, as a fill is drawn: an
+/// sRGB red given as it is came out salmon on the screen.
 fn breath_red() -> [f32; 4] {
-    let own = crate::palette::danger_fill_srgb();
-    let lin = std::array::from_fn(|i| if i == 3 { 1.0 } else { crate::options::srgb_to_linear(own[i]) });
-    if crate::desktop_menu::reads_red(lin) {
+    let linear = |c: [f32; 4]| -> [f32; 4] {
+        std::array::from_fn(|i| if i == 3 { 1.0 } else { crate::options::srgb_to_linear(c[i]) })
+    };
+    let own = linear(crate::palette::danger_fill_srgb());
+    if crate::desktop_menu::reads_red(own) {
         own
     } else {
-        GOLEM_RED
+        linear(GOLEM_RED)
     }
 }
 
