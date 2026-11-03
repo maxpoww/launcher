@@ -43,6 +43,12 @@
 //!
 //! A machine that cannot hibernate (no disk swap): the round pill is sleep and
 //! only restart comes out.
+//!
+//! THE ROUND PILL BREATHES RED while it stands there (Max, 2026-11-03: "agregá
+//! un breathing rojo al botón"): its ground swells toward the palette's red and
+//! back, on the dictating card pill's breath (`BREATH_PERIOD`, `BREATH_DEPTH`).
+//! The words of a restart's message do not breathe. Reduced motion: a steady
+//! half-way red.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -51,7 +57,7 @@ use calloop::timer::{TimeoutAction, Timer};
 use tracing::{info, warn};
 use zbus::Connection;
 
-use crate::animation::{self, ease_toward, lerp};
+use crate::animation::{self, ease_toward, lerp, lerp4};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::i18n::tr;
 use crate::options::{
@@ -85,6 +91,12 @@ const GIVE_UP: Duration = Duration::from_secs(20);
 /// task pill's.
 const WORDS_GAP: f32 = 10.0;
 const CHIP_GAP: f32 = 8.0;
+
+/// The round pill's breath: one in this many seconds, this far toward the
+/// red (the card pill's while it listens), the red this solid at the top.
+const BREATH_PERIOD: f32 = 1.8;
+const BREATH_DEPTH: f32 = 0.6;
+const BREATH_RED: f32 = 0.75;
 
 const CLOSING: &str = "Closing apps…";
 const RESTARTING: &str = "Restarting…";
@@ -125,6 +137,8 @@ pub(crate) struct PowerPills {
     asked: u32,
     /// When the last press came.
     asked_at: Option<Instant>,
+    /// When the round pill came: its breath counts from there.
+    breath_from: Option<Instant>,
     /// What logind said last (`None`: not asked yet — taken as yes).
     can_hibernate: Option<bool>,
     /// The banner was hidden (a fullscreen) and the key called it.
@@ -218,6 +232,7 @@ impl App {
         p.visited = false;
         p.leaving = false;
         p.asked = p.asked.wrapping_add(1);
+        p.breath_from = Some(Instant::now());
         self.power_call_bar();
         // (Asked each time: swap can come and go.)
         self.desktop_off_loop(can_hibernate, |app, can| {
@@ -281,6 +296,16 @@ impl App {
     /// started before it came.
     fn power_x(&self) -> f32 {
         EDGE_PAD + self.options_pill_h() + OPTION_GAP
+    }
+
+    /// How far toward the red the round pill is now: 0 → `BREATH_DEPTH` and
+    /// back, a cosine (no edge to see); held half-way under reduced motion.
+    fn power_breath(&self) -> f32 {
+        if animation::reduce_motion() {
+            return BREATH_DEPTH / 2.0;
+        }
+        let along = self.power.breath_from.map_or(0.0, |t| t.elapsed().as_secs_f32()) / BREATH_PERIOD;
+        BREATH_DEPTH * (0.5 - 0.5 * (along * std::f32::consts::TAU).cos())
     }
 
     /// A chip's height (the task pill's: one line of the bar's text).
@@ -614,9 +639,11 @@ impl App {
         let say_to = f32::from(u8::from(p.closing.is_some()));
         let (say, c) = ease_toward(p.say, say_to, dt, animation::MORPH_RATE, animation::settle_t(say_span));
         (p.t, p.out, p.say) = (t, out, say);
+        // (Breathing is motion too: frames for as long as the round pill stands.)
+        let breathing = p.on && p.closing.is_none() && !animation::reduce_motion();
         self.sync_options_input();
         self.draw_options();
-        if a || b || c {
+        if a || b || c || breathing {
             self.schedule_power_frame();
         } else {
             self.power.last = None;
@@ -710,6 +737,10 @@ impl App {
         } else {
             self.options_rest_wash()
         };
+        if id == PillId::Power && !saying {
+            let red = crate::palette::danger_srgb();
+            wash = lerp4(wash, [red[0], red[1], red[2], BREATH_RED], self.power_breath());
+        }
         wash[3] *= a;
         scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: wash, glass: 0.0, border: 0.0 });
         // The symbols are drawn in one late pass, over every pill: one coming
