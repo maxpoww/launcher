@@ -46,7 +46,8 @@
 //!
 //! THE ROUND PILL BREATHES RED while it stands there (Max, 2026-11-03: "agregá
 //! un breathing rojo al botón"): its ground swells toward the palette's red
-//! (Golem's where the palette's does not read red) and back, on the dictating card pill's breath (`BREATH_PERIOD`), deeper.
+//! (Golem's where the palette's does not read red) and back, on the dictating
+//! card pill's breath (`BREATH_PERIOD`); a tint, not a red ground ("too red").
 //! The words of a restart's message do not breathe. Reduced motion: a steady
 //! half-way red.
 
@@ -95,8 +96,9 @@ const CHIP_GAP: f32 = 8.0;
 /// The round pill's breath: one in this many seconds (the card pill's while
 /// it listens), this far toward the red, the red this solid at the top.
 const BREATH_PERIOD: f32 = 1.8;
-const BREATH_DEPTH: f32 = 0.8;
-const BREATH_RED: f32 = 0.85;
+// (Max, 2026-11-03: 0.8 and 0.85 were "too red".)
+const BREATH_DEPTH: f32 = 0.5;
+const BREATH_RED: f32 = 0.6;
 /// Golem's own red (its palette's, the shell's red before palettes, #e05252):
 /// the breath's where the palette's is no red to the eye (Iris's dark red is a
 /// pastel pink, #fba0ad).
