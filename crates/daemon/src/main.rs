@@ -150,6 +150,7 @@ mod surface;
 mod sys;
 mod phone_pill;
 mod drive_pill;
+mod power_pill;
 mod task_pill;
 mod task_title;
 mod tasks;
@@ -815,6 +816,7 @@ fn main() -> anyhow::Result<()> {
         zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
         drive_pills: drive_pill::DrivePills::default(),
+        power: power_pill::PowerPills::default(),
         desktop_layer,
         veil_layer,
         desktop_renderer: None,
@@ -1887,6 +1889,8 @@ pub struct App {
     phone_pill: phone_pill::PhonePill,
     /// The bar's pills of the plugged-in sticks and cards (`drive_pill.rs`).
     drive_pills: drive_pill::DrivePills,
+    /// The power key's pills on the banner (`power_pill.rs`).
+    power: power_pill::PowerPills,
     desktop_layer: Option<LayerSurface>,
     /// The Lighting's veil over the wallpaper (`veil.rs`).
     veil_layer: Option<veil::VeilLayer>,
@@ -3941,6 +3945,11 @@ impl App {
             Command::DebugDesktop(what) => {
                 let done = self.desktop_debug(&what);
                 info!("debug-desktop: {done}");
+                return;
+            }
+            Command::Power(what) => {
+                let done = self.power_command(&what);
+                info!("power: {done}");
                 return;
             }
             Command::Card(what) => {

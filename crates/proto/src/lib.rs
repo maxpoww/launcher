@@ -256,6 +256,10 @@ pub enum Command {
     /// Super+H: the quick controls — fast launch for the control panel's
     /// settings; Enter opens the one in front in a box mid-screen.
     FastControls,
+    /// The power key's short press (Golem binds it to this): the pills by the
+    /// banner's gear — hibernate, and sleep and restart behind it — come, or go.
+    /// `open`, `shut`, `away`, `state` show them without a pointer.
+    Power(String),
 }
 
 impl fmt::Display for Command {
@@ -320,6 +324,8 @@ impl fmt::Display for Command {
             Command::WindowPlaced(a) => write!(f, "window-placed {a}"),
             Command::FastLaunch => f.write_str("fast-launch"),
             Command::FastControls => f.write_str("fast-controls"),
+            Command::Power(w) if w.is_empty() => f.write_str("power"),
+            Command::Power(w) => write!(f, "power {w}"),
         }
     }
 }
@@ -373,6 +379,7 @@ impl FromStr for Command {
             ("min-add", Command::MinAdd as fn(String) -> Command),
             ("min-del", Command::MinDel as fn(String) -> Command),
             ("window-placed", Command::WindowPlaced as fn(String) -> Command),
+            ("power", Command::Power as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
                 // `verb` alone (or `verb ` + text) — anything else is a
@@ -461,6 +468,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "card [toggle [addr]|all|add text <…>|add file <path>|remove <n>|clear|state]",
     "options-trigger <id>",
     "control-panel",
+    "power [open|shut|away|state]",
     "modules [name]",
     "overview-on",
     "overview-off",
@@ -607,7 +615,8 @@ mod tests {
                 | Command::MinDel(_)
                 | Command::WindowPlaced(_)
                 | Command::FastLaunch
-                | Command::FastControls => (),
+                | Command::FastControls
+                | Command::Power(_) => (),
             }
         }
         vec![
@@ -669,6 +678,8 @@ mod tests {
             Command::MinDel("0x5c351e2e7660".into()),
             Command::WindowPlaced("0x5c351e2e7660".into()),
             Command::FastLaunch,
+            Command::Power(String::new()),
+            Command::Power("open".into()),
         ]
     }
 

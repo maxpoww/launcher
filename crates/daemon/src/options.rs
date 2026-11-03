@@ -591,6 +591,8 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         | PillId::CavaNow
         | PillId::CavaOut => PillGroup::Mind,
         PillId::Settings | PillId::SettingsStats => PillGroup::Settings,
+        // The power pills stand by the gear, which never re-flows.
+        PillId::Power | PillId::PowerSleep | PillId::PowerRestart => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
         // The task pill stands by the bell and, like it, is led by nothing.
         PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone | PillId::Drive(_) => PillGroup::Notif,
@@ -901,6 +903,11 @@ fn draw_z(id: PillId) -> u8 {
         PillId::ClipboardBox => 10,
         PillId::ClipCopyLink => 10,
         PillId::Clipboard => 11,
+        // The round power pill over the two that come out from behind it, the
+        // first over the second; all under the gear's readout.
+        PillId::Power => 11,
+        PillId::PowerSleep => 10,
+        PillId::PowerRestart => 9,
         // The readout slides out from BEHIND the gear and over the clipboard
         // cluster while it is out, so it draws above that cluster and below the
         // gear itself — the same stacking the clipboard box uses under its own
@@ -977,6 +984,12 @@ pub(crate) enum PillId {
     /// Listed as a pill so hovering it holds itself open — crossing from the
     /// gear onto the readout is transit, not departure.
     SettingsStats,
+    /// What the power key's short press brings, right of the gear
+    /// (`power_pill.rs`): the round pill (hibernate)…
+    Power,
+    /// …and, out from behind it on hover, sleep and restart.
+    PowerSleep,
+    PowerRestart,
     /// The clipboard OPTION's small fixed pill: a clipboard glyph, a gap right
     /// of the settings gear. The preview/history box slides out to its right
     /// from behind it — the left-side mirror of the bell + its box (see
@@ -1537,6 +1550,12 @@ fn presence(id: PillId) -> Presence {
             overview: true,
             stage: true,
         },
+        // The power key is pressed wherever one is.
+        PillId::Power | PillId::PowerSleep | PillId::PowerRestart => Presence {
+            desktop: true,
+            overview: true,
+            stage: true,
+        },
         // Context controls act on the focused app — meaningless over the map.
         PillId::Option(_) => DESKTOP_ONLY,
         // A control for the mode, present exactly as long as the mode is.
@@ -1943,6 +1962,11 @@ impl App {
             family: Some(NERD),
             glyph_color: None,
         });
+        // The power key's pills (`power_pill.rs`) stand right of the gear, and
+        // what stands there begins after them (`options_left_start`).
+        for (id, rect) in self.power_pill_rects(y, ph) {
+            pills.push(Pill { id, rect, text: String::new(), family: None, glyph_color: None });
+        }
         let left_start = self.options_left_start();
 
         // Clipboard OPTION: the left-edge mirror of the notification cluster.
@@ -2679,7 +2703,7 @@ impl App {
     /// invisible drift waiting for the next pill on this edge — which is exactly
     /// what the gear was.
     pub(crate) fn options_left_start(&self) -> f32 {
-        EDGE_PAD + self.options_pill_h() + OPTION_GAP
+        EDGE_PAD + self.options_pill_h() + OPTION_GAP + self.power_room()
     }
 
     /// The clock pill's current left edge — where it is RIGHT NOW, mid-date-
@@ -3998,6 +4022,10 @@ impl App {
                 self.push_drive_pill(scene, pill.rect, i);
                 continue;
             }
+            if matches!(pill.id, PillId::Power | PillId::PowerSleep | PillId::PowerRestart) {
+                self.push_power_pill(scene, pill.rect, pill.id);
+                continue;
+            }
             // The clipboard box draws itself (slides out from behind the small
             // pill); the small glyph pill draws on top of it, with its own
             // fresh-clip beat (like the bell's muted-arrival blink).
@@ -5242,7 +5270,7 @@ impl App {
 
     /// Conceal the revealed bar after the grace period (unless the pointer came
     /// back or fullscreen ended).
-    fn schedule_options_hide(&mut self) {
+    pub(crate) fn schedule_options_hide(&mut self) {
         let deadline = Instant::now() + HIDE_GRACE;
         self.options_hide_deadline = Some(deadline);
         let timer = Timer::from_duration(HIDE_GRACE);
@@ -5505,6 +5533,7 @@ impl App {
                     self.task_box_close(); // and the task pill's
                     self.phone_pill_close(); // and the phone pill's long one
                     self.drive_pills_close(); // and a drive pill's
+                    self.update_power_hover(); // the power pills go, once visited
                     self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.update_clip_hit(); // drop any clip row hover (ptr gone)
@@ -5824,7 +5853,10 @@ impl App {
         self.update_stats_reveal();
         self.update_cava_reveal();
         // (The task pill's chips light under the pointer: a move on it redraws.)
-        let on_task = self.update_task_hover() | self.update_phone_hover() | self.update_drive_hover();
+        let on_task = self.update_task_hover()
+            | self.update_phone_hover()
+            | self.update_drive_hover()
+            | self.update_power_hover();
         // The hit target (card / control / footer) moves within the same box, so
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
@@ -5854,6 +5886,10 @@ impl App {
         // pill, listed after it).
         if id == PillId::ClipCopyLink {
             return self.clip_link_t() > 0.5;
+        }
+        // Sleep and restart rest behind the round power pill until they are out.
+        if matches!(id, PillId::Power | PillId::PowerSleep | PillId::PowerRestart) {
+            return self.power_pill_reachable(id);
         }
         if self.pin_rests(id) {
             return true;
@@ -6944,6 +6980,7 @@ impl App {
             Some(PillId::Task) => self.task_pill_click(),
             Some(PillId::Phone) => self.phone_pill_click(),
             Some(PillId::Drive(i)) => self.drive_pill_click(i),
+            Some(id @ (PillId::Power | PillId::PowerSleep | PillId::PowerRestart)) => self.power_pill_click(id),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the
             // small pill at rest (a scrollable history box will split these in a

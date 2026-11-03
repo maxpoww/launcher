@@ -641,6 +641,14 @@ The big daemon files are cohesive but long — go straight to the function:
   `menu_act`), ← / Escape / Backspace back to the menu from a page. Rig: `phonepill fakehelp` (a
   phone whose USB debugging is off: the help rows), `phonepill key down|up|home|end|enter|left|right|
   escape|<letter>` (a fake phone turns pages and does nothing else).
+- `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
+  release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
+  right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through
+  `options_left_start`); the pointer on it brings SLEEP and RESTART out from behind it to its right
+  (`PowerSleep`, `PowerRestart`); a click does it at once, the pills gone first. They go with a second press, a
+  moment after the hand leaves once it came, or after `UNVISITED` (8 s) with no hand; over a fullscreen the key
+  calls the banner, which goes back after. No hibernation (logind's CanHibernate, asked at each press): the round
+  pill is sleep and only restart is behind. Rig: `power [open|shut|away|state]` (never a click: it is real).
 - `desktop_menu.rs` + `glyphs.rs` — THE ONE MENU (Max, 2026-10-21, mockups v50/v52 "All menus":
   "Build all of it"): EVERY right-click — Files' file / folder / several / archive / app shortcut /
   empty space / bin item / bin / sidebar place, the desktop's wallpaper and what stands on it, a
