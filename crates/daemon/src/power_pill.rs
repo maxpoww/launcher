@@ -46,7 +46,7 @@
 //!
 //! THE ROUND PILL BREATHES RED while it stands there (Max, 2026-11-03: "agregá
 //! un breathing rojo al botón"): its ground swells toward the palette's red and
-//! back, on the dictating card pill's breath (`BREATH_PERIOD`, `BREATH_DEPTH`).
+//! back, on the dictating card pill's breath (`BREATH_PERIOD`), deeper.
 //! The words of a restart's message do not breathe. Reduced motion: a steady
 //! half-way red.
 
@@ -92,11 +92,11 @@ const GIVE_UP: Duration = Duration::from_secs(20);
 const WORDS_GAP: f32 = 10.0;
 const CHIP_GAP: f32 = 8.0;
 
-/// The round pill's breath: one in this many seconds, this far toward the
-/// red (the card pill's while it listens), the red this solid at the top.
+/// The round pill's breath: one in this many seconds (the card pill's while
+/// it listens), this far toward the red, the red this solid at the top.
 const BREATH_PERIOD: f32 = 1.8;
-const BREATH_DEPTH: f32 = 0.6;
-const BREATH_RED: f32 = 0.75;
+const BREATH_DEPTH: f32 = 0.8;
+const BREATH_RED: f32 = 0.85;
 
 const CLOSING: &str = "Closing apps…";
 const RESTARTING: &str = "Restarting…";
@@ -738,7 +738,7 @@ impl App {
             self.options_rest_wash()
         };
         if id == PillId::Power && !saying {
-            let red = crate::palette::danger_srgb();
+            let red = crate::palette::danger_fill_srgb();
             wash = lerp4(wash, [red[0], red[1], red[2], BREATH_RED], self.power_breath());
         }
         wash[3] *= a;

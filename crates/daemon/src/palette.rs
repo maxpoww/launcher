@@ -1522,6 +1522,12 @@ pub(crate) fn danger_srgb() -> [f32; 4] {
     let t = signals();
     srgb(shell_words(t.as_text(t.c[0x08])))
 }
+/// The palette's red as it is, for a FILL (the round power pill's breath):
+/// the words' red is lifted to read on the ground, which on a dark look
+/// turned a red ground pink.
+pub(crate) fn danger_fill_srgb() -> [f32; 4] {
+    srgb(signals().c[0x08])
+}
 
 /// HOW DARK A WINDOW OUT OF FOCUS GOES (Hyprland's `dim_strength`; Max,
 /// 2026-10-23, after the legibility audit showed 0.3 taking almost every
