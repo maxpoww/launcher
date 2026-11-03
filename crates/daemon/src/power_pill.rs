@@ -103,6 +103,9 @@ const BREATH_RED: f32 = 0.6;
 /// the breath's where the palette's is no red to the eye (Iris's dark red is a
 /// pastel pink, #fba0ad).
 const GOLEM_RED: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
+/// How much white is in the breath's red (Max, 2026-11-03: "a little more
+/// pastel").
+const PASTEL: f32 = 0.35;
 
 const CLOSING: &str = "Closing apps…";
 const RESTARTING: &str = "Restarting…";
@@ -204,18 +207,15 @@ fn machine(verb: &'static str) {
 }
 
 /// The breath's red: the palette's own when it reads red (the menus' test,
-/// `desktop_menu::reads_red`), else Golem's — LINEAR, as a fill is drawn: an
-/// sRGB red given as it is came out salmon on the screen.
+/// `desktop_menu::reads_red`), else Golem's; made `PASTEL` (part white), then
+/// LINEAR, as a fill is drawn (an sRGB red given as it is came out salmon).
 fn breath_red() -> [f32; 4] {
     let linear = |c: [f32; 4]| -> [f32; 4] {
         std::array::from_fn(|i| if i == 3 { 1.0 } else { crate::options::srgb_to_linear(c[i]) })
     };
-    let own = linear(crate::palette::danger_fill_srgb());
-    if crate::desktop_menu::reads_red(own) {
-        own
-    } else {
-        linear(GOLEM_RED)
-    }
+    let own = crate::palette::danger_fill_srgb();
+    let red = if crate::desktop_menu::reads_red(linear(own)) { own } else { GOLEM_RED };
+    linear(lerp4(red, [1.0, 1.0, 1.0, 1.0], PASTEL))
 }
 
 /// What a restart waiting on `apps` (each named once, the first the one most
