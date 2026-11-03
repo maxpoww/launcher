@@ -1445,5 +1445,10 @@
  "Takes its colours from the screen": "Toma sus colores de la pantalla",
  "Pages keep their own colours at 0%": "En 0% las páginas tienen sus colores",
  "Icons are only light or dark": "Los íconos son solo claros u oscuros",
- "Off while Reduce transparency is on": "Apagado: Reducir transparencia está activo"
+ "Off while Reduce transparency is on": "Apagado: Reducir transparencia está activo",
+ "Closing apps…": "Cerrando apps…",
+ "Waiting for {app}": "Esperando a {app}",
+ "Waiting for {app} and {n} more": "Esperando a {app} y {n} más",
+ "Restarting…": "Reiniciando…",
+ "Restart anyway": "Reiniciar igual"
 }

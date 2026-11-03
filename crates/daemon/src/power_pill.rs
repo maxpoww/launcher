@@ -18,11 +18,23 @@
 //! as the minimize comes out of the close; what stands right of them steps
 //! aside with them.
 //!
-//! A CLICK does it at once: the key was the question. The pills are gone
-//! before the machine goes, so they do not greet the owner on the way back.
+//! A CLICK on hibernate or sleep does it at once: the key was the question,
+//! and the apps stay open through either. The pills are gone before the
+//! machine goes, so they do not greet the owner on the way back.
 //!
-//! THEY GO with a second press of the key, when the hand leaves after coming,
-//! or by themselves when it never comes (`UNVISITED`).
+//! RESTART closes the apps first, the way their own X does, so each can ask
+//! to keep what is not saved (Max, 2026-11-03, after reading Hyprland's
+//! hyprshutdown: "hacelo como tenga sentido, y el aviso tendría que estar en
+//! una píldora, como mensaje"). The round pill grows into a MESSAGE — "Closing
+//! apps…", then "Waiting for Seam" — with "Restart anyway" and "Cancel" as the
+//! task pill's chips; once no window is left the machine restarts. Unlike
+//! hyprshutdown the session is never left (Golem has no log-out) and the
+//! banner stays to say what is happening. A dialog an app opens to ask is a
+//! window too: the restart waits for the owner to answer it.
+//!
+//! THEY GO with a second press of the key (a restart waiting: cancelled), when
+//! the hand leaves after coming, or by themselves when it never comes
+//! (`UNVISITED`).
 //!
 //! A machine that cannot hibernate (no disk swap): the round pill is sleep and
 //! only restart comes out.
@@ -36,7 +48,10 @@ use zbus::Connection;
 
 use crate::animation::{self, ease_toward, lerp};
 use crate::content::{Label, Rect, RectInst, Scene};
-use crate::options::{hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, FONT_PX, LINE_PX, NERD, OPTION_GAP};
+use crate::i18n::tr;
+use crate::options::{
+    hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, FONT_PX, LINE_PX, NERD, OPTION_GAP, TEXT_FONT,
+};
 use crate::App;
 
 /// fa-power-off: off, everything kept (hibernate).
@@ -53,6 +68,35 @@ const UNVISITED: Duration = Duration::from_secs(8);
 const ONE_PRESS: Duration = Duration::from_millis(400);
 /// What logind is given to say whether this machine can hibernate.
 const PATIENCE: Duration = Duration::from_secs(4);
+/// How often a restart looks at what is still open.
+const POLL: Duration = Duration::from_millis(300);
+/// How long "Closing apps…" stands before an app still open is named (most
+/// close in less; naming each on its way out would flicker).
+const NAME_AFTER: Duration = Duration::from_secs(1);
+/// A restart told to the machine that has not happened by then failed (an
+/// inhibitor, a refusal): the pills go and the desktop is the owner's again.
+const GIVE_UP: Duration = Duration::from_secs(20);
+/// Between the message's words and its chips, and between the chips: the
+/// task pill's.
+const WORDS_GAP: f32 = 10.0;
+const CHIP_GAP: f32 = 8.0;
+
+const CLOSING: &str = "Closing apps…";
+const RESTARTING: &str = "Restarting…";
+const ANYWAY: &str = "Restart anyway";
+const CANCEL: &str = "Cancel";
+
+/// A restart under way.
+#[derive(Debug)]
+struct Closing {
+    since: Instant,
+    /// The message: closing, waiting for an app, restarting.
+    says: String,
+    /// The machine has been told: nothing is left to choose.
+    going: bool,
+    /// Counts restarts, so the poll of a cancelled one stops.
+    run: u32,
+}
 
 /// The pills' state.
 #[derive(Debug, Default)]
@@ -77,6 +121,16 @@ pub(crate) struct PowerPills {
     can_hibernate: Option<bool>,
     /// The banner was hidden (a fullscreen) and the key called it.
     called_bar: bool,
+    /// A restart waiting for the apps to close.
+    closing: Option<Closing>,
+    runs: u32,
+    /// 0 (the round pill) → 1 (the message out of it).
+    say: f32,
+    /// The message's words and the chips' words, measured as they last read.
+    says_w: f32,
+    anyway_w: f32,
+    cancel_w: f32,
+    measured: String,
     last: Option<Instant>,
     frame_pending: bool,
 }
@@ -121,13 +175,31 @@ fn machine(verb: &'static str) {
     }
 }
 
+/// What a restart waiting on `apps` (each named once, the first the one most
+/// in the way) says.
+fn waiting_words(apps: &[String]) -> String {
+    match apps {
+        [] => tr(CLOSING).to_owned(),
+        [one] => crate::i18n::fill(tr("Waiting for {app}"), &[("app", one)]),
+        [one, rest @ ..] => crate::i18n::fill(
+            tr("Waiting for {app} and {n} more"),
+            &[("app", one), ("n", &rest.len().to_string())],
+        ),
+    }
+}
+
 impl App {
-    /// The power key's short press: the pills come, or go if they are there.
+    /// The power key's short press: the pills come, or go if they are there
+    /// (a restart waiting is cancelled).
     pub(crate) fn power_pills_ask(&mut self) {
         if self.power.asked_at.is_some_and(|t| t.elapsed() < ONE_PRESS) {
             return;
         }
         self.power.asked_at = Some(Instant::now());
+        if self.power.closing.as_ref().is_some_and(|c| !c.going) {
+            self.power_restart_cancel();
+            return;
+        }
         if self.power.on {
             self.power_pills_away();
             return;
@@ -138,12 +210,7 @@ impl App {
         p.visited = false;
         p.leaving = false;
         p.asked = p.asked.wrapping_add(1);
-        // Over a fullscreen the banner is away: the key calls it, and it goes
-        // back as it came when the pills do.
-        if self.options_hidden {
-            self.power.called_bar = true;
-            self.set_options_hidden(false);
-        }
+        self.power_call_bar();
         // (Asked each time: swap can come and go.)
         self.desktop_off_loop(can_hibernate, |app, can| {
             if app.power.can_hibernate != Some(can) {
@@ -162,9 +229,19 @@ impl App {
         self.schedule_power_frame();
     }
 
-    /// The pills go (eased).
+    /// Over a fullscreen the banner is away: the key calls it, and it goes
+    /// back as it came when the pills do.
+    fn power_call_bar(&mut self) {
+        if self.options_hidden {
+            self.power.called_bar = true;
+            self.set_options_hidden(false);
+        }
+    }
+
+    /// The pills go (eased). Not while a restart waits: only its Cancel, a
+    /// press of the key or the restart itself end that.
     fn power_pills_away(&mut self) {
-        if !self.power.on {
+        if !self.power.on || self.power.closing.is_some() {
             return;
         }
         let p = &mut self.power;
@@ -198,6 +275,25 @@ impl App {
         EDGE_PAD + self.options_pill_h() + OPTION_GAP
     }
 
+    /// A chip's height (the task pill's: one line of the bar's text).
+    fn power_chip_h(&self) -> f32 {
+        LINE_PX * self.options_scale()
+    }
+
+    /// The message pill's whole width: the round pill's room for the symbol,
+    /// the words, and the chips while there is a choice.
+    fn power_say_w(&self) -> f32 {
+        let ph = self.options_pill_h();
+        let edge = (ph - self.power_chip_h()) / 2.0;
+        let p = &self.power;
+        let chips = if p.closing.as_ref().is_some_and(|c| !c.going) {
+            WORDS_GAP + p.anyway_w + CHIP_GAP + p.cancel_w
+        } else {
+            0.0
+        };
+        ph + p.says_w + chips + edge.max(crate::options::PILL_PAD_X / 2.0)
+    }
+
     /// How much of the banner right of the gear the pills take now (what
     /// stands there moves over by it).
     pub(crate) fn power_room(&self) -> f32 {
@@ -205,16 +301,18 @@ impl App {
         let p = &self.power;
         p.t.clamp(0.0, 1.0) * (ph + OPTION_GAP)
             + self.power_behind().len() as f32 * p.out.clamp(0.0, 1.0) * (ph + BOND_GAP)
+            + p.say.clamp(0.0, 1.0) * (self.power_say_w() - ph).max(0.0)
     }
 
-    /// The pills on the banner now: the round one first, then the ones behind
-    /// it, each as far out as they are.
+    /// The pills on the banner now: the round one first (as long as its
+    /// message makes it), then the ones behind it, each as far out as they are.
     pub(crate) fn power_pill_rects(&self, y: f32, ph: f32) -> Vec<(PillId, Rect)> {
         if self.power.t <= 0.01 {
             return Vec::new();
         }
         let x = self.power_x();
-        let mut rects = vec![(PillId::Power, Rect::new(x, y, ph, ph))];
+        let w = ph + self.power.say.clamp(0.0, 1.0) * (self.power_say_w() - ph).max(0.0);
+        let mut rects = vec![(PillId::Power, Rect::new(x, y, w, ph))];
         for (k, id) in self.power_behind().iter().enumerate() {
             let to = x + (k as f32 + 1.0) * (ph + BOND_GAP);
             rects.push((*id, Rect::new(lerp(x, to, self.power.out), y, ph, ph)));
@@ -245,12 +343,16 @@ impl App {
     }
 
     /// The pointer moved on the banner (or left it): the pills open under it,
-    /// and go a moment after it leaves them, once it has come.
+    /// and go a moment after it leaves them, once it has come. A restart's
+    /// message stays whatever the hand does (its chips light under it).
     pub(crate) fn update_power_hover(&mut self) -> bool {
         if !self.power.on {
             return false;
         }
         let on = self.power_ptr_on();
+        if self.power.closing.is_some() {
+            return on;
+        }
         if on {
             self.power.visited = true;
             self.power.leaving = false;
@@ -280,12 +382,20 @@ impl App {
         on
     }
 
-    /// A click on one of the pills: it is done, the pills gone first.
+    /// A click on one of the pills: hibernate and sleep are done at once, the
+    /// pills gone first; restart closes the apps first. On a restart's
+    /// message, its chips.
     pub(crate) fn power_pill_click(&mut self, id: PillId) {
+        if self.power.closing.is_some() {
+            if id == PillId::Power {
+                self.power_chip_click();
+            }
+            return;
+        }
         let verb = match id {
             PillId::Power if self.power_hibernates() => "hibernate",
             PillId::Power | PillId::PowerSleep => "suspend",
-            PillId::PowerRestart => "reboot",
+            PillId::PowerRestart => return self.power_restart(),
             _ => return,
         };
         let p = &mut self.power;
@@ -302,35 +412,192 @@ impl App {
         machine(verb);
     }
 
+    /// Restart: every window is asked to close as its X would, and the round
+    /// pill becomes the message while they go.
+    fn power_restart(&mut self) {
+        let Some(windows) = crate::hypr::open_windows() else {
+            // (The compositor did not answer: nothing can be asked to close.)
+            warn!("power: no window list, restarting as asked");
+            return self.power_restart_now();
+        };
+        info!("power: restart, closing {} windows", windows.len());
+        for (addr, _) in &windows {
+            crate::hypr::close_window(addr);
+        }
+        self.power.runs = self.power.runs.wrapping_add(1);
+        let run = self.power.runs;
+        let p = &mut self.power;
+        p.on = true;
+        p.open = false;
+        p.visited = true;
+        p.leaving = false;
+        p.closing = Some(Closing { since: Instant::now(), says: tr(CLOSING).to_owned(), going: false, run });
+        self.power_call_bar();
+        if windows.is_empty() {
+            return self.power_restart_now();
+        }
+        self.power_say_measure();
+        self.power_poll_soon(run);
+    }
+
+    fn power_poll_soon(&mut self, run: u32) {
+        let _ = self.loop_handle.insert_source(Timer::from_duration(POLL), move |_, _, app: &mut App| {
+            app.power_poll(run);
+            TimeoutAction::Drop
+        });
+    }
+
+    /// One look at what is still open: nothing → the restart; else the
+    /// message names who it is waiting for.
+    fn power_poll(&mut self, run: u32) {
+        let Some(c) = self.power.closing.as_ref().filter(|c| c.run == run && !c.going) else {
+            return;
+        };
+        let since = c.since;
+        let Some(windows) = crate::hypr::open_windows() else {
+            return self.power_poll_soon(run);
+        };
+        if windows.is_empty() {
+            return self.power_restart_now();
+        }
+        if since.elapsed() >= NAME_AFTER {
+            let mut apps: Vec<String> = Vec::new();
+            for (_, class) in &windows {
+                let name = self.power_app_name(class);
+                if !apps.contains(&name) {
+                    apps.push(name);
+                }
+            }
+            let says = waiting_words(&apps);
+            if let Some(c) = self.power.closing.as_mut() {
+                if c.says != says {
+                    c.says = says;
+                    self.power_say_measure();
+                }
+            }
+        }
+        self.power_poll_soon(run);
+    }
+
+    /// The app a window belongs to, by the name the dock knows it by.
+    fn power_app_name(&self, class: &str) -> String {
+        let key = class.to_lowercase();
+        self.entries
+            .iter()
+            .zip(&self.kinds)
+            .find(|(entry, kind)| Self::app_match_keys(entry, **kind).contains(&key))
+            .map_or_else(|| crate::task_title::groom("", Some(class), None), |(entry, _)| entry.name.clone())
+    }
+
+    /// Now: whatever is still open is ended by the restart itself.
+    fn power_restart_now(&mut self) {
+        let run = self.power.runs;
+        if let Some(c) = self.power.closing.as_mut() {
+            c.going = true;
+            c.says = tr(RESTARTING).to_owned();
+        }
+        self.power_say_measure();
+        machine("reboot");
+        let _ = self.loop_handle.insert_source(Timer::from_duration(GIVE_UP), move |_, _, app: &mut App| {
+            if app.power.closing.as_ref().is_some_and(|c| c.run == run && c.going) {
+                warn!("power: the restart did not happen");
+                app.power.closing = None;
+                app.power_pills_away();
+            }
+            TimeoutAction::Drop
+        });
+    }
+
+    /// The restart is off: what was closed stays closed, the rest is as it was.
+    fn power_restart_cancel(&mut self) {
+        if self.power.closing.take().is_some() {
+            info!("power: restart cancelled");
+        }
+        self.power_pills_away();
+    }
+
+    /// The message's chips, as laid out in the pill `rect`.
+    fn power_chips(&self, rect: Rect) -> (Rect, Rect) {
+        let ph = self.options_pill_h();
+        let chip_h = self.power_chip_h();
+        let edge = (ph - chip_h) / 2.0;
+        let y = rect.y + (rect.h - chip_h) / 2.0;
+        let (aw, cw) = (self.power.anyway_w, self.power.cancel_w);
+        let cancel = Rect::new(rect.x + rect.w - edge - cw, y, cw, chip_h);
+        let anyway = Rect::new(cancel.x - CHIP_GAP - aw, y, aw, chip_h);
+        (anyway, cancel)
+    }
+
+    /// A click on the message: its chips.
+    fn power_chip_click(&mut self) {
+        if self.power.closing.as_ref().is_none_or(|c| c.going) {
+            return;
+        }
+        let (Some(p), Some((_, rect))) = (self.options_ptr, self.power_pill_rects(0.0, self.options_pill_h()).first().copied()) else {
+            return;
+        };
+        // (Across only: the pointer is on the pill, so on the bar.)
+        let on = |chip: Rect| p.0 >= chip.x && p.0 <= chip.x + chip.w;
+        let (anyway, cancel) = self.power_chips(rect);
+        if on(anyway) {
+            info!("power: restart anyway");
+            self.power_restart_now();
+        } else if on(cancel) {
+            self.power_restart_cancel();
+        }
+    }
+
+    /// Measure the message and its chips as they read now.
+    fn power_say_measure(&mut self) {
+        let says = self.power.closing.as_ref().map(|c| c.says.clone()).unwrap_or_default();
+        if says != self.power.measured {
+            let font_px = FONT_PX * self.options_scale();
+            if let Some(r) = self.options_renderer.as_mut() {
+                self.power.says_w = r.measure_text(&says, font_px, TEXT_FONT);
+                self.power.anyway_w = r.measure_text(tr(ANYWAY), font_px, TEXT_FONT) + 12.0;
+                self.power.cancel_w = r.measure_text(tr(CANCEL), font_px, TEXT_FONT) + 12.0;
+                self.power.measured = says;
+            }
+        }
+        self.schedule_power_frame();
+        self.draw_options();
+    }
+
     fn schedule_power_frame(&mut self) {
         self.schedule_tick(|a| (&mut a.power.frame_pending, &mut a.power.last), App::tick_power);
     }
 
-    /// One frame of their coming, opening and going.
+    /// One frame of their coming, opening, growing into a message and going.
     fn tick_power(&mut self) {
         let now = Instant::now();
         let dt = self.power.last.map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
         self.power.last = Some(now);
         let ph = self.options_pill_h();
         let span = self.power_behind().len() as f32 * (ph + BOND_GAP);
+        let say_span = (self.power_say_w() - ph).max(1.0);
         let p = &mut self.power;
         let (t, a) = ease_toward(p.t, f32::from(u8::from(p.on)), dt, animation::MORPH_RATE, animation::settle_t(ph + OPTION_GAP));
-        let out_to = f32::from(u8::from(p.on && p.open));
+        let out_to = f32::from(u8::from(p.on && p.open && p.closing.is_none()));
         let (out, b) = ease_toward(p.out, out_to, dt, animation::MORPH_RATE, animation::settle_t(span.max(1.0)));
-        (p.t, p.out) = (t, out);
+        let say_to = f32::from(u8::from(p.closing.is_some()));
+        let (say, c) = ease_toward(p.say, say_to, dt, animation::MORPH_RATE, animation::settle_t(say_span));
+        (p.t, p.out, p.say) = (t, out, say);
         self.sync_options_input();
         self.draw_options();
-        if a || b {
+        if a || b || c {
             self.schedule_power_frame();
         } else {
             self.power.last = None;
         }
     }
 
-    /// `waverunner-ctl power [open|shut|away|state]`: alone, the key's press;
-    /// the rest show the pills without a pointer (never a click: it is real).
+    /// `waverunner-ctl power [open|shut|away|say <app>|cancel|state]`: alone,
+    /// the key's press; the rest show the pills without a pointer (never a
+    /// click: it is real). `say` stands a restart's message up as if it waited
+    /// for that app, closing and restarting nothing; `cancel` takes it down.
     pub(crate) fn power_command(&mut self, what: &str) -> String {
-        match what.trim() {
+        let (verb, arg) = what.trim().split_once(' ').unwrap_or((what.trim(), ""));
+        match verb {
             "" => self.power_pills_ask(),
             "open" => {
                 if !self.power.on {
@@ -345,17 +612,36 @@ impl App {
                 self.schedule_power_frame();
             }
             "away" => self.power_pills_away(),
+            "say" => {
+                self.power.runs = self.power.runs.wrapping_add(1);
+                let says = if arg.is_empty() { tr(CLOSING).to_owned() } else { waiting_words(&[arg.to_owned()]) };
+                let p = &mut self.power;
+                p.on = true;
+                p.open = false;
+                p.visited = true;
+                // (Its run is never polled: nothing is waited for.)
+                p.closing = Some(Closing { since: Instant::now(), says, going: false, run: p.runs });
+                self.power_call_bar();
+                self.power_say_measure();
+            }
+            "cancel" => self.power_restart_cancel(),
             _ => {}
         }
         let p = &self.power;
         format!(
-            "on={} t={:.2} open={} out={:.2} hibernate={:?}",
-            p.on, p.t, p.open, p.out, p.can_hibernate
+            "on={} t={:.2} open={} out={:.2} say={:.2} hibernate={:?} closing={:?}",
+            p.on,
+            p.t,
+            p.open,
+            p.out,
+            p.say,
+            p.can_hibernate,
+            p.closing.as_ref().map(|c| (&c.says, c.going))
         )
     }
 
     /// Draw one of the pills: every pill's ground, lifted under the pointer,
-    /// its symbol on it.
+    /// its symbol on it; the round one, grown, its message and chips.
     pub(crate) fn push_power_pill(&self, scene: &mut Scene, rect: Rect, id: PillId) {
         let p = &self.power;
         let shown = ((p.t - 0.15) / 0.6).clamp(0.0, 1.0);
@@ -367,13 +653,16 @@ impl App {
         if a <= 0.004 {
             return;
         }
+        let saying = id == PillId::Power && p.say > 0.01;
         let glyph = match id {
+            _ if saying => GLYPH_RESTART,
             PillId::Power if self.power_hibernates() => GLYPH_HIBERNATE,
             PillId::Power | PillId::PowerSleep => GLYPH_SLEEP,
             _ => GLYPH_RESTART,
         };
         let bright = self.options_bar_is_bright();
-        let hovered = self.options_hover == Some(id);
+        // (A message is not a button: no lift; its chips light instead.)
+        let hovered = self.options_hover == Some(id) && !saying;
         let r = if hovered { hover_grow(rect) } else { rect };
         push_neumorph(scene, r, r.h / 2.0, bright, a);
         let mut wash = if hovered {
@@ -398,10 +687,12 @@ impl App {
         };
         let ink = self.options_text_color();
         let s = self.options_scale();
+        // The symbol keeps the round pill's place as the message grows.
+        let at = if saying { Rect::new(r.x, r.y, ph, r.h) } else { r };
         scene.labels.push(Label {
             text: glyph.to_owned(),
-            pos: (r.x + r.w / 2.0, r.y + (r.h - LINE_PX * s) / 2.0),
-            max_w: r.w + 4.0,
+            pos: (at.x + at.w / 2.0, at.y + (at.h - LINE_PX * s) / 2.0),
+            max_w: at.w + 4.0,
             font_px: FONT_PX * s,
             line_px: LINE_PX * s,
             centered: true,
@@ -411,5 +702,82 @@ impl App {
             color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
             clip: Some(clip),
         });
+        if saying {
+            self.push_power_message(scene, r, ink, a);
+        }
+    }
+
+    /// A restart's message in the grown pill: the words after the symbol, the
+    /// chips at its end (the task pill's: the accent's word, its tint under
+    /// the pointer).
+    fn push_power_message(&self, scene: &mut Scene, r: Rect, ink: [f32; 4], a: f32) {
+        let Some(c) = self.power.closing.as_ref() else {
+            return;
+        };
+        let s = self.options_scale();
+        let words_a = a * ((self.power.say - 0.4) / 0.5).clamp(0.0, 1.0);
+        if words_a <= 0.004 {
+            return;
+        }
+        let ph = self.options_pill_h();
+        let (anyway, cancel) = self.power_chips(r);
+        let end = if c.going { r.x + r.w } else { anyway.x - WORDS_GAP };
+        let words = Rect::new(r.x + ph, r.y, (end - r.x - ph).max(0.0), r.h);
+        scene.labels.push(Label {
+            text: c.says.clone(),
+            pos: (words.x, r.y + (r.h - LINE_PX * s) / 2.0),
+            max_w: 4096.0,
+            font_px: FONT_PX * s,
+            line_px: LINE_PX * s,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: TEXT_FONT,
+            color: Some([ink[0], ink[1], ink[2], ink[3] * words_a]),
+            clip: Some(words),
+        });
+        if c.going {
+            return;
+        }
+        let ptr = self.options_ptr.filter(|_| self.options_hover == Some(PillId::Power));
+        let amber = crate::notif::amber();
+        for (chip, text) in [(anyway, tr(ANYWAY)), (cancel, tr(CANCEL))] {
+            let lit = ptr.is_some_and(|q| q.0 >= chip.x && q.0 <= chip.x + chip.w);
+            if lit {
+                scene.rects.push(RectInst {
+                    rect: chip,
+                    radius: chip.h / 2.0,
+                    color: [amber[0], amber[1], amber[2], 0.3 * words_a],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            let tone = if lit { ink } else { amber };
+            scene.labels.push(Label {
+                text: text.to_owned(),
+                pos: (chip.x + chip.w / 2.0, chip.y + (chip.h - LINE_PX * s) / 2.0),
+                max_w: chip.w + 4.0,
+                font_px: FONT_PX * s,
+                line_px: LINE_PX * s,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: TEXT_FONT,
+                color: Some([tone[0], tone[1], tone[2], words_a]),
+                clip: Some(chip),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restart_names_who_it_waits_for() {
+        assert_eq!(waiting_words(&[]), CLOSING);
+        assert_eq!(waiting_words(&["Seam".into()]), "Waiting for Seam");
+        assert_eq!(waiting_words(&["Seam".into(), "Foot".into(), "GIMP".into()]), "Waiting for Seam and 2 more");
     }
 }

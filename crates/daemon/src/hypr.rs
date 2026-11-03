@@ -651,6 +651,24 @@ pub fn close_window(addr: &str) {
     ));
 }
 
+/// Every window there is — on any workspace, minimized ones too — as its
+/// address and class: what a restart asks to close, then waits for. `None`
+/// when the compositor did not answer, which is NOT "no windows".
+pub fn open_windows() -> Option<Vec<(String, String)>> {
+    let clients = reply_json("j/clients")?;
+    Some(
+        clients
+            .as_array()?
+            .iter()
+            .filter(|c| c["mapped"].as_bool().unwrap_or(true))
+            .filter_map(|c| {
+                let addr = c["address"].as_str()?.to_owned();
+                Some((addr, c["class"].as_str().unwrap_or_default().to_owned()))
+            })
+            .collect(),
+    )
+}
+
 /// Address (`0x…`) of the currently-focused window, if any.
 pub fn active_window() -> Option<String> {
     let json = reply_json("j/activewindow")?;
