@@ -45,8 +45,8 @@
 //! only restart comes out.
 //!
 //! THE ROUND PILL BREATHES RED while it stands there (Max, 2026-11-03: "agregá
-//! un breathing rojo al botón"): its ground swells toward the palette's red and
-//! back, on the dictating card pill's breath (`BREATH_PERIOD`), deeper.
+//! un breathing rojo al botón"): its ground swells toward the palette's red
+//! (Golem's where the palette's does not read red) and back, on the dictating card pill's breath (`BREATH_PERIOD`), deeper.
 //! The words of a restart's message do not breathe. Reduced motion: a steady
 //! half-way red.
 
@@ -97,6 +97,10 @@ const CHIP_GAP: f32 = 8.0;
 const BREATH_PERIOD: f32 = 1.8;
 const BREATH_DEPTH: f32 = 0.8;
 const BREATH_RED: f32 = 0.85;
+/// Golem's own red (its palette's, the shell's red before palettes, #e05252):
+/// the breath's where the palette's is no red to the eye (Iris's dark red is a
+/// pastel pink, #fba0ad).
+const GOLEM_RED: [f32; 4] = [0.878, 0.322, 0.322, 1.0];
 
 const CLOSING: &str = "Closing apps…";
 const RESTARTING: &str = "Restarting…";
@@ -194,6 +198,18 @@ fn machine(verb: &'static str) {
     });
     if let Err(e) = spawned {
         warn!("power: no thread for {verb}: {e}");
+    }
+}
+
+/// The breath's red: the palette's own when it reads red (the menus' test,
+/// `desktop_menu::reads_red`), else Golem's.
+fn breath_red() -> [f32; 4] {
+    let own = crate::palette::danger_fill_srgb();
+    let lin = std::array::from_fn(|i| if i == 3 { 1.0 } else { crate::options::srgb_to_linear(own[i]) });
+    if crate::desktop_menu::reads_red(lin) {
+        own
+    } else {
+        GOLEM_RED
     }
 }
 
@@ -738,7 +754,7 @@ impl App {
             self.options_rest_wash()
         };
         if id == PillId::Power && !saying {
-            let red = crate::palette::danger_fill_srgb();
+            let red = breath_red();
             wash = lerp4(wash, [red[0], red[1], red[2], BREATH_RED], self.power_breath());
         }
         wash[3] *= a;
