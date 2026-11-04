@@ -717,6 +717,14 @@ The big daemon files are cohesive but long — go straight to the function:
   `list-sessions`; that session gone → `Req::Unpop`: manual + the box's size again; `resize_all` leaves popped ones
   alone; `%sessions-changed` re-reads the tabs). Pointer without a pointer: `debug-desktop "term at|pick|cpick
   <x> <y> [<x2> <y2>]"`. Rig rounds: scratchpad `term-rig4.sh`…`term-rig11.sh`. Not built: tmux panes.
+- `term_pill.rs` — THE TERMINAL'S PILL on the banner (Max, 2026-11-04): right of the card's pill (`term_pill_x`:
+  the card pill grown for a dictation, the copy-link as far as it is out; the Mind band after `term_pill_room`), a
+  round pill with the terminal's symbol while a tab of the box's terminal runs something (`term_pill_on`); the
+  pointer on it → the symbol becomes + and the tabs come out to its right as words (`PillId::TermTab(k)`, measured
+  in `term_pill_sync` on every `Ev::Tabs`; running ones in full ink, idle quieter), as the power pills' do; a click
+  on + opens the box as the terminal on a new tab, on a word on that tab (`term_pill_click` → `Command::Terminal`
+  + `term_open_new/on`). The dock watches the tabs from its start when their server is up (`term_watch_if_up`:
+  has-session only, none started). `debug-desktop "term pill"` logs its rects.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through

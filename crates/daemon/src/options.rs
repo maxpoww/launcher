@@ -594,6 +594,8 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         // The power pills stand by the gear, which never re-flows.
         PillId::Power | PillId::PowerSleep | PillId::PowerRestart => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
+        // (The terminal's pill stands with the card's.)
+        PillId::TermPill | PillId::TermTab(_) => PillGroup::Clipboard,
         // The task pill stands by the bell and, like it, is led by nothing.
         PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone | PillId::Drive(_) => PillGroup::Notif,
         PillId::Clock => PillGroup::Clock,
@@ -908,6 +910,9 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Power => 11,
         PillId::PowerSleep => 10,
         PillId::PowerRestart => 9,
+        // The terminal's round pill over its tabs coming out from behind it.
+        PillId::TermPill => 11,
+        PillId::TermTab(_) => 10,
         // The readout slides out from BEHIND the gear and over the clipboard
         // cluster while it is out, so it draws above that cluster and below the
         // gear itself — the same stacking the clipboard box uses under its own
@@ -990,6 +995,11 @@ pub(crate) enum PillId {
     /// …and, out from behind it on hover, sleep and restart.
     PowerSleep,
     PowerRestart,
+    /// The box's terminal's pill (`term_pill.rs`), right of the card's pill
+    /// while a tab runs something…
+    TermPill,
+    /// …and, out from behind it on hover, the tabs (by their place).
+    TermTab(u8),
     /// The clipboard OPTION's small fixed pill: a clipboard glyph, a gap right
     /// of the settings gear. The preview/history box slides out to its right
     /// from behind it — the left-side mirror of the bell + its box (see
@@ -1556,6 +1566,12 @@ fn presence(id: PillId) -> Presence {
             overview: true,
             stage: true,
         },
+        // What runs in the terminal is worth seeing wherever one is.
+        PillId::TermPill | PillId::TermTab(_) => Presence {
+            desktop: true,
+            overview: true,
+            stage: true,
+        },
         // Context controls act on the focused app — meaningless over the map.
         PillId::Option(_) => DESKTOP_ONLY,
         // A control for the mode, present exactly as long as the mode is.
@@ -2032,11 +2048,12 @@ impl App {
             // being constant. The band travels with the pill that displaces it,
             // on the animation already happening, rather than jumping when it
             // appears.
-            let cluster_start = left_start
-                + ph
-                + dictating
-                + OPTION_GAP
-                + self.clip_link_t().clamp(0.0, 1.0) * (ph + crate::clipboard::LINK_GAP);
+            // (Then the terminal's pill and its tabs, `term_pill.rs`: the band
+            // after them, as far as they take now.)
+            for (id, rect) in self.term_pill_rects(self.term_pill_x(), y, ph) {
+                pills.push(Pill { id, rect, text: String::new(), family: None, glyph_color: None });
+            }
+            let cluster_start = self.term_pill_x() + self.term_pill_room();
             // (index, glyph, warning?) — a privacy/safety warning pill washes
             // amber and is a passive indicator, not a button.
             let glyphs: Vec<(u8, &'static str, bool)> = self
@@ -2702,6 +2719,18 @@ impl App {
     /// than reading the drawn pill, so an anchor spelled out twice is an
     /// invisible drift waiting for the next pill on this edge — which is exactly
     /// what the gear was.
+    /// Where the terminal's round pill stands (`term_pill.rs`): right of
+    /// the card's pill — grown for a dictation — and of the copy-link as far
+    /// as it is out.
+    pub(crate) fn term_pill_x(&self) -> f32 {
+        let ph = self.options_pill_h();
+        self.options_left_start()
+            + ph
+            + self.card_dictate_extra()
+            + OPTION_GAP
+            + self.clip_link_t().clamp(0.0, 1.0) * (ph + crate::clipboard::LINK_GAP)
+    }
+
     pub(crate) fn options_left_start(&self) -> f32 {
         EDGE_PAD + self.options_pill_h() + OPTION_GAP + self.power_room()
     }
@@ -4024,6 +4053,10 @@ impl App {
             }
             if matches!(pill.id, PillId::Power | PillId::PowerSleep | PillId::PowerRestart) {
                 self.push_power_pill(scene, pill.rect, pill.id);
+                continue;
+            }
+            if matches!(pill.id, PillId::TermPill | PillId::TermTab(_)) {
+                self.push_term_pill(scene, pill.rect, pill.id);
                 continue;
             }
             // The clipboard box draws itself (slides out from behind the small
@@ -5534,6 +5567,7 @@ impl App {
                     self.phone_pill_close(); // and the phone pill's long one
                     self.drive_pills_close(); // and a drive pill's
                     self.update_power_hover(); // the power pills go, once visited
+                    self.update_term_pill_hover(); // the terminal's tabs go back behind it
                     self.update_cava_reveal(); // tuck the cava children back
                     self.update_notif_hit(); // drop any card/control hover (ptr gone)
                     self.update_clip_hit(); // drop any clip row hover (ptr gone)
@@ -5856,7 +5890,8 @@ impl App {
         let on_task = self.update_task_hover()
             | self.update_phone_hover()
             | self.update_drive_hover()
-            | self.update_power_hover();
+            | self.update_power_hover()
+            | self.update_term_pill_hover();
         // The hit target (card / control / footer) moves within the same box, so
         // redraw on a hit change too — not just when the pill changes.
         let hit_changed = self.update_notif_hit();
@@ -5890,6 +5925,10 @@ impl App {
         // Sleep and restart rest behind the round power pill until they are out.
         if matches!(id, PillId::Power | PillId::PowerSleep | PillId::PowerRestart) {
             return self.power_pill_reachable(id);
+        }
+        // The terminal's tabs rest behind its round pill until they are out.
+        if matches!(id, PillId::TermPill | PillId::TermTab(_)) {
+            return self.term_pill_reachable(id);
         }
         if self.pin_rests(id) {
             return true;
@@ -6981,6 +7020,7 @@ impl App {
             Some(PillId::Phone) => self.phone_pill_click(),
             Some(PillId::Drive(i)) => self.drive_pill_click(i),
             Some(id @ (PillId::Power | PillId::PowerSleep | PillId::PowerRestart)) => self.power_pill_click(id),
+            Some(id @ (PillId::TermPill | PillId::TermTab(_))) => self.term_pill_click(id),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the
             // small pill at rest (a scrollable history box will split these in a

@@ -153,6 +153,7 @@ mod drive_pill;
 mod power_pill;
 mod sleep_timer;
 mod term;
+mod term_pill;
 mod task_pill;
 mod task_title;
 mod tasks;
@@ -821,6 +822,7 @@ fn main() -> anyhow::Result<()> {
         power: power_pill::PowerPills::default(),
         sleep_timer: sleep_timer::SleepTimer::default(),
         term: term::TermState::default(),
+        term_pill: term_pill::TermPill::default(),
         desktop_layer,
         veil_layer,
         desktop_renderer: None,
@@ -1183,6 +1185,9 @@ fn main() -> anyhow::Result<()> {
     // Own the newest clip up front so it's pasteable from a fresh session (our
     // data-control source releases the selection when the previous daemon exits).
     app.serve_newest_clip();
+    // Tabs of the box's terminal left running: watched at once, for the
+    // banner's pill (`term_pill.rs`).
+    app.term_watch_if_up();
     // A sleep timer set before the dock started (`sleep_timer.rs`).
     app.sleep_timer_restore();
 
@@ -1901,6 +1906,8 @@ pub struct App {
     sleep_timer: sleep_timer::SleepTimer,
     /// THE BOX'S TERMINAL (`term.rs`): "./" typed in the box.
     term: term::TermState,
+    /// The banner's pill for the terminal (`term_pill.rs`).
+    term_pill: term_pill::TermPill,
     desktop_layer: Option<LayerSurface>,
     /// The Lighting's veil over the wallpaper (`veil.rs`).
     veil_layer: Option<veil::VeilLayer>,

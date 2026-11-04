@@ -1577,6 +1577,11 @@ fn dirs_file() -> PathBuf {
     tabs_file().with_file_name(if socket() == "golem" { "term-dirs" } else { "term-dirs-rig" })
 }
 
+/// Whether the tabs' server is up (asked quietly).
+fn run_quiet_tabs() -> bool {
+    tmux().args(["has-session", "-t", SESSION]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
 /// The tabs as they are, kept (only when that changed).
 fn save_tabs(tabs: &[Tab], saved: &mut String) {
     let text: String = tabs.iter().map(|t| format!("{}\t{}\n", t.n, t.path)).collect();
@@ -2266,6 +2271,8 @@ impl App {
                 self.term_went(&tabs);
                 self.term_tick();
                 self.term.tabs = tabs;
+                // (The banner's pill says what runs.)
+                self.term_pill_sync();
                 self.term_capture();
                 self.schedule_frame();
             }
@@ -2369,6 +2376,7 @@ impl App {
                 self.term.to_completer = None;
                 self.term.to_loop = None;
                 self.term.tabs.clear();
+                self.term_pill_sync();
                 self.term.capturing = false;
                 // (Not the tabs ending: what went wrong, on the screen.)
                 self.term.screen = self.term.failed.then(|| Screen {
@@ -3401,6 +3409,30 @@ impl App {
         }
     }
 
+    /// The box just opened as the terminal from the banner's pill: on tab
+    /// `n`, or on a new tab.
+    pub(crate) fn term_open_on(&mut self, n: u32) {
+        self.term_show(n);
+    }
+
+    pub(crate) fn term_open_new(&mut self) {
+        self.term_new_tab();
+    }
+
+    /// The dock started: when the tabs' server is up already (tabs left
+    /// running), they are watched at once — the banner's pill says what runs
+    /// in them before the box is ever opened. (No server: none is started.)
+    pub(crate) fn term_watch_if_up(&mut self) {
+        self.desktop_off_loop(
+            run_quiet_tabs,
+            |app, up| {
+                if up && app.term.to_engine.is_none() {
+                    app.term_ask(Req::Tabs);
+                }
+            },
+        );
+    }
+
     /// The next tab (`back`: the one before), round.
     fn term_step(&mut self, back: bool) {
         let tabs: Vec<u32> = self.term.tabs.iter().map(|t| t.n).collect();
@@ -3802,6 +3834,8 @@ impl App {
                 self.term_prefixed(k, false);
             }
             "click" => self.term_click(arg.parse().unwrap_or(0)),
+            // The banner's pill (`term_pill.rs`): where its round pill stands.
+            "pill" => info!("term: pill at x {:.0}, room {:.0}, rects {:?}", self.term_pill_x(), self.term_pill_room(), self.term_pill_rects(self.term_pill_x(), 0.0, self.options_pill_h())),
             // The pointer's targets on the tabs' row and the rows, in order:
             // the words, the rows, the words' ×.
             "rects" => {
