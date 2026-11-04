@@ -206,6 +206,25 @@ fn machine(verb: &'static str) {
     }
 }
 
+/// How far toward the red a breath begun at `from` is now: 0 → `BREATH_DEPTH`
+/// and back, a cosine (no edge to see); held half-way under reduced motion.
+fn breath_since(from: Instant) -> f32 {
+    if animation::reduce_motion() {
+        return BREATH_DEPTH / 2.0;
+    }
+    let along = from.elapsed().as_secs_f32() / BREATH_PERIOD;
+    BREATH_DEPTH * (0.5 - 0.5 * (along * std::f32::consts::TAU).cos())
+}
+
+/// The breath of a button that has no moment of its own (the gear box's
+/// power button): its red, `alpha` as faded, for a fill over its ground.
+/// One clock for all of them, from the first asked.
+pub(crate) fn breath_fill(alpha: f32) -> [f32; 4] {
+    static FROM: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let red = breath_red();
+    [red[0], red[1], red[2], BREATH_RED * breath_since(*FROM.get_or_init(Instant::now)) * alpha]
+}
+
 /// The breath's red: the palette's own when it reads red (the menus' test,
 /// `desktop_menu::reads_red`), else Golem's; made `PASTEL` (part white), then
 /// LINEAR, as a fill is drawn (an sRGB red given as it is came out salmon).
@@ -300,7 +319,7 @@ impl App {
     }
 
     /// Hibernate there, or sleep where it cannot.
-    fn power_hibernates(&self) -> bool {
+    pub(crate) fn power_hibernates(&self) -> bool {
         self.power.can_hibernate != Some(false)
     }
 
@@ -319,14 +338,10 @@ impl App {
         EDGE_PAD + self.options_pill_h() + OPTION_GAP
     }
 
-    /// How far toward the red the round pill is now: 0 → `BREATH_DEPTH` and
-    /// back, a cosine (no edge to see); held half-way under reduced motion.
+    /// How far toward the red the round pill is now, its breath counted from
+    /// when it came.
     fn power_breath(&self) -> f32 {
-        if animation::reduce_motion() {
-            return BREATH_DEPTH / 2.0;
-        }
-        let along = self.power.breath_from.map_or(0.0, |t| t.elapsed().as_secs_f32()) / BREATH_PERIOD;
-        BREATH_DEPTH * (0.5 - 0.5 * (along * std::f32::consts::TAU).cos())
+        self.power.breath_from.map_or(0.0, breath_since)
     }
 
     /// A chip's height (the task pill's: one line of the bar's text).
@@ -464,6 +479,12 @@ impl App {
         self.sync_options_input();
         self.draw_options();
         machine(verb);
+    }
+
+    /// Restart asked from elsewhere (the gear box's power button, the update's
+    /// "restart to finish"): the banner's own restart, apps closed first.
+    pub(crate) fn power_restart_gracefully(&mut self) {
+        self.power_restart();
     }
 
     /// Restart: every window is asked to close as its X would, and the round

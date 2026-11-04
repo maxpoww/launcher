@@ -17,7 +17,7 @@ use std::process::{Child, Command, Stdio};
 use tracing::{info, warn};
 
 use crate::drives::{DriveCommand, DriveEvent, DriveHandle, Target};
-use crate::gear::{btn, Extra, Hit, Item, PageKind, Tone, Trail, View};
+use crate::gear::{btn, Btn, Extra, Hit, Item, PageKind, Tone, Trail, View};
 use crate::sys::{
     AppUse, Disk, Drive, Junk, Live, Machine, SysCommand, SysEvent, SysHandle, SysPage,
 };
@@ -73,8 +73,8 @@ pub(crate) enum SysHit {
     Sleep,
     AskRestart,
     DoRestart,
-    AskOff,
-    DoOff,
+    AskHibernate,
+    DoHibernate,
     // apps (processor, memory, battery)
     App(String),
     AppClose(String),
@@ -1361,14 +1361,34 @@ impl App {
         ));
         View {
             items,
-            footer: vec![
-                btn(sys(SysHit::Lock), G_LOCK),
-                btn(sys(SysHit::Sleep), G_MOON),
-                btn(sys(SysHit::AskRestart), G_REFRESH),
-                btn(sys(SysHit::AskOff), G_POWER),
-            ],
+            footer: vec![btn(sys(SysHit::Lock), G_LOCK), self.power_btn()],
             zebra: true,
             ..View::default()
+        }
+    }
+
+    /// The power button (Max, 2026-11-03): hibernate, asked once, breathing red
+    /// as the banner's power pill does; sleep and restart come out of it to its
+    /// right while the pointer is on it. Where the machine cannot hibernate it
+    /// is sleep, and only restart is behind it.
+    fn power_btn(&self) -> Btn {
+        let hibernates = self.power_hibernates();
+        let (hit, glyph) = if hibernates {
+            (sys(SysHit::AskHibernate), G_POWER)
+        } else {
+            (sys(SysHit::Sleep), G_MOON)
+        };
+        let mut behind = Vec::new();
+        if hibernates {
+            behind.push(btn(sys(SysHit::Sleep), G_MOON));
+        }
+        behind.push(btn(sys(SysHit::AskRestart), G_REFRESH));
+        Btn {
+            hit,
+            glyph,
+            behind,
+            breathes: true,
+            ..Default::default()
         }
     }
 
@@ -1978,9 +1998,17 @@ impl App {
                 run_detached("systemctl", vec!["suspend".into()]);
             }
             SysHit::AskRestart => self.gear_arm(tr("Restart now? Click again"), sys(SysHit::DoRestart)),
-            SysHit::DoRestart => run_detached("systemctl", vec!["reboot".into()]),
-            SysHit::AskOff => self.gear_arm(tr("Power off? Click again"), sys(SysHit::DoOff)),
-            SysHit::DoOff => run_detached("systemctl", vec!["poweroff".into()]),
+            // The banner's own restart: the apps closed first, as their X does,
+            // the message on the banner's power pill.
+            SysHit::DoRestart => {
+                self.set_stats_box(false);
+                self.power_restart_gracefully();
+            }
+            SysHit::AskHibernate => self.gear_arm(tr("Hibernate now? Click again"), sys(SysHit::DoHibernate)),
+            SysHit::DoHibernate => {
+                self.set_stats_box(false);
+                run_detached("systemctl", vec!["hibernate".into()]);
+            }
             SysHit::App(key) => self.page_view(PView::App(key)),
             SysHit::AppClose(key) => {
                 if let Some(a) = self.app(&key) {
