@@ -8,13 +8,13 @@
 //! introducir el tiempo manualmente"): minutes ("45"), hours and minutes
 //! ("1:30", "1h30", "2h"); Enter with nothing typed sets nothing. The words
 //! say "turn off" (Max: "only the words, we want it to hibernate"). While it
-//! runs its symbol is an X — a click cancels ("que el reloj esté siempre en
-//! cancelar cuando el tiempo esté corriendo") — and the COUNTDOWN stands
-//! close beside it ("15:05"), words on the box, no pill ("no usemos una
-//! píldora"); a click on it opens the field with the whole minutes written,
-//! no seconds, to edit (Max: "no secs when editing"). (Gone, by Max's word:
-//! the 15 → 30 → 60 → 90 → off cycle of the first cut, a "+15" beside the
-//! countdown, a "(15)" default, the X only under the pointer.)
+//! runs the COUNTDOWN ("15:05") and an X that cancels stand ON THE BANNER,
+//! out of the box (`timer_pill.rs`; Max: "que el tiempo y la x estén en el
+//! banner (afuera de la caja) cuando está corriendo"); the box keeps its
+//! hourglass, whose click then opens the field with the whole minutes
+//! written, no seconds, to edit (Max: "no secs when editing"). (Gone, by
+//! Max's word: the 15 → 30 → 60 → 90 → off cycle of the first cut, a "+15"
+//! beside the countdown, a "(15)" default, the countdown and X in the box.)
 //!
 //! THE SYSTEM KEEPS IT: a transient user timer (`systemd-run --user
 //! --on-active`, unit `golem-sleep-timer`) hibernates (or, where the machine
@@ -219,11 +219,13 @@ impl App {
                     let _ = std::fs::remove_file(state_file());
                 }
                 app.gear_changed();
+                app.timer_pill_sync();
             },
         );
         self.sleep_timer_notice_due();
         self.gear_changed();
-        // (The minutes on the button go down: the box drawn again as they do.)
+        self.timer_pill_sync();
+        // (The countdown on the banner goes down: drawn again as it does.)
         self.sleep_timer_tick();
     }
 
@@ -240,6 +242,7 @@ impl App {
         info!("sleep timer: still running, {} s left", at - now());
         self.sleep_timer.deadline = Some(at);
         self.sleep_timer_notice_due();
+        self.timer_pill_sync();
         self.sleep_timer_tick();
     }
 
@@ -285,11 +288,8 @@ impl App {
     /// How often the countdown is drawn again: each second while the gear box
     /// shows it, else each half minute (nothing on screen counts down).
     fn sleep_timer_every(&self) -> Duration {
-        if self.gear_page() == Some(crate::gear::PageKind::Gear) {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_secs(30)
-        }
+        // (The banner shows its seconds wherever one is.)
+        Duration::from_secs(1)
     }
 
     /// While it runs: the box drawn again as the countdown goes.
@@ -302,11 +302,15 @@ impl App {
                 if app.sleep_timer.run == run {
                     app.sleep_timer.deadline = None;
                     let _ = std::fs::remove_file(state_file());
+                    app.timer_pill_sync();
                 }
                 app.gear_changed();
                 return TimeoutAction::Drop;
             }
-            app.gear_changed();
+            app.timer_pill_sync();
+            if app.gear_page() == Some(crate::gear::PageKind::Gear) {
+                app.gear_changed();
+            }
             TimeoutAction::ToDuration(app.sleep_timer_every())
         });
     }

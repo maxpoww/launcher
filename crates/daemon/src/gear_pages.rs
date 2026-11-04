@@ -1377,22 +1377,13 @@ impl App {
         }
     }
 
-    /// The sleep timer's button: an hourglass (a click: the field, to type the
-    /// time); running, an X — a click cancels; always, not only under the
-    /// pointer (Max, 2026-11-04: "que el reloj esté siempre en cancelar cuando
-    /// el tiempo esté corriendo") — with the countdown close beside it, words,
-    /// no pill; a click on them edits the minutes.
+    /// The sleep timer's button: an hourglass — a click: the field, to type
+    /// the time, or while it runs to edit it. The countdown and the X that
+    /// cancels are on the banner while it runs (`timer_pill.rs`; Max,
+    /// 2026-11-04: "que el tiempo y la x estén en el banner (afuera de la
+    /// caja)").
     fn timer_btn(&self) -> Btn {
-        let Some(left) = self.sleep_timer_left() else {
-            return btn(sys(SysHit::SleepTimer), G_TIMER);
-        };
-        Btn {
-            hit: sys(SysHit::SleepTimer),
-            glyph: G_TIMES,
-            label: Some(crate::sleep_timer::countdown(left)),
-            label_hit: Some(sys(SysHit::SleepTimerEdit)),
-            ..Default::default()
-        }
+        btn(sys(SysHit::SleepTimer), G_TIMER)
     }
 
     /// The sleep timer's question, in the footer's field.
@@ -2031,11 +2022,7 @@ impl App {
                 self.set_stats_box(false);
                 crate::hypr::dispatch("hl.dsp.exec_cmd(\"hyprlock\")");
             }
-            SysHit::SleepTimer if self.sleep_timer_left().is_some() => self.sleep_timer_cancel(),
-            SysHit::SleepTimer => {
-                self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, String::new());
-            }
-            SysHit::SleepTimerEdit => {
+            SysHit::SleepTimer | SysHit::SleepTimerEdit => {
                 // (The whole minutes, no seconds: Max, 2026-11-04.)
                 let text = self.sleep_timer_left().map(|s| crate::sleep_timer::whole_minutes(s).to_string()).unwrap_or_default();
                 self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, text);

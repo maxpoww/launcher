@@ -151,6 +151,7 @@ mod sys;
 mod phone_pill;
 mod drive_pill;
 mod power_pill;
+mod timer_pill;
 mod sleep_timer;
 mod term;
 mod term_pill;
@@ -820,6 +821,7 @@ fn main() -> anyhow::Result<()> {
         phone_pill: phone_pill::PhonePill::default(),
         drive_pills: drive_pill::DrivePills::default(),
         power: power_pill::PowerPills::default(),
+        timer_pill: timer_pill::TimerPill::default(),
         sleep_timer: sleep_timer::SleepTimer::default(),
         term: term::TermState::default(),
         term_pill: term_pill::TermPill::default(),
@@ -1902,6 +1904,8 @@ pub struct App {
     drive_pills: drive_pill::DrivePills,
     /// The power key's pills on the banner (`power_pill.rs`).
     power: power_pill::PowerPills,
+    /// The sleep timer's countdown and X on the banner (`timer_pill.rs`).
+    timer_pill: timer_pill::TimerPill,
     /// The gear box's sleep timer (`sleep_timer.rs`).
     sleep_timer: sleep_timer::SleepTimer,
     /// THE BOX'S TERMINAL (`term.rs`): "./" typed in the box.
