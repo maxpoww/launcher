@@ -416,6 +416,22 @@ pub struct TermDraw<'a> {
     pub typed: &'a str,
     pub comp_sel: usize,
     pub comp_hover: Option<usize>,
+    /// Ctrl+R: the rows are the history searched (their found letters lit).
+    pub searching: bool,
+    /// The suggestion after what is typed (faint) and its width; where the
+    /// caret stands, as the width before it (`None`: at the end).
+    pub ghost: &'a str,
+    pub ghost_w: f32,
+    pub caret_px: Option<f32>,
+    /// The text picked (column, screen line — from, to) and how far back in
+    /// the tab's history the screen is read.
+    pub sel: Option<((u16, usize), (u16, usize))>,
+    pub scrolled: u32,
+    /// The tabs' words with a dot: printed out of sight (1), its command
+    /// failed out of sight (2: red).
+    pub dots: &'a [u8],
+    /// Ctrl+F's finds in sight: line, column, length, the one picked.
+    pub found: &'a [(usize, u16, u16, bool)],
 }
 
 /// The air between the terminal's tabs and the field, and their gap.
@@ -441,6 +457,21 @@ pub fn term_tab_rects(l: &Layout, tab_h: f32, tabs_w: &[f32]) -> Vec<Rect> {
             r
         })
         .collect()
+}
+
+/// What of a tab's screen stands in the terminal's room: the room, the
+/// first line shown and how many — the last ones when there are more than
+/// it holds, and with `n_comps` rows over the field the lines up to the
+/// `used` ones go up over them (none hidden under a row).
+pub fn term_view(l: &Layout, tab_h: f32, line_px: f32, n_lines: usize, used: usize, n_comps: usize) -> (Rect, usize, usize) {
+    let area = term_area(l, tab_h);
+    let mut rows = (area.h / line_px).floor().max(0.0) as usize;
+    let mut skip = n_lines.saturating_sub(rows);
+    if let Some(top) = term_comp_rects(l, tab_h, line_px, n_comps).last().map(|r| r.y) {
+        rows = ((top - 4.0 - area.y) / line_px).floor().max(0.0) as usize;
+        skip = skip.max(used.saturating_sub(rows));
+    }
+    (area, skip, rows)
 }
 
 /// The completions' rows, `n` of them over the tabs, the first nearest
@@ -3768,9 +3799,12 @@ pub fn scene(
         // terminal's: "Terminal".)
         let chip: Option<(&str, f32)> = deep.map(|d| (d.chip, d.chip_w)).or(term.map(|t| (t.chip, t.chip_w)));
         let chip_room = chip.map_or(0.0, |(_, w)| w + 2.0 * pad * 0.6 + PILL_CHIP_GAP);
+        // (The terminal's suggestion stands after what is typed, the two
+        // centred together.)
+        let ghost_w = term.map_or(0.0, |t| t.ghost_w);
         let typed_px = match deep {
             Some(d) if query.is_empty() => d.placeholder_w,
-            _ => query_px,
+            _ => query_px + ghost_w,
         };
         let content_w = (typed_px + chip_room + 2.0 * pad + 8.0)
             .max(SEARCH_W_MIN)
@@ -3835,9 +3869,25 @@ pub fn scene(
             }
             None => cx,
         };
+        let q_left = text_cx - ghost_w / 2.0 - query_px / 2.0;
+        if let Some(t) = term.filter(|t| !t.ghost.is_empty() && search_expand >= 0.5) {
+            sgrid.labels.push(Label {
+                text: t.ghost.to_string(),
+                pos: (q_left + query_px, cy - line * k / 2.0),
+                max_w: (draw_rect.x + sw - pad - (q_left + query_px)).max(0.0),
+                font_px: font * k,
+                line_px: line * k,
+                centered: false,
+                dim: false,
+                cache: (k - 1.0).abs() < 0.001,
+                family: crate::options::TEXT_FONT,
+                color: Some(faded_on(dock_ink, dock_seen, 0.3, 1.6)),
+                clip: Some(reveal_clip(draw_rect)),
+            });
+        }
         sgrid.labels.push(Label {
             text,
-            pos: (text_cx, cy - line * k / 2.0),
+            pos: (text_cx - ghost_w / 2.0, cy - line * k / 2.0),
             max_w: sw - 2.0 * pad,
             font_px: font * k,
             line_px: line * k,
@@ -3856,8 +3906,10 @@ pub fn scene(
         if search_expand >= 0.5 && (!query.is_empty() || deep.is_some()) && search_expand > 0.9 {
             let caret_x = if deep.is_some() && query.is_empty() {
                 text_cx - typed_px / 2.0 - 1.0
+            } else if let Some(at) = term.and_then(|t| t.caret_px) {
+                q_left + at + 1.0
             } else {
-                text_cx + query_px / 2.0 + 3.0
+                q_left + query_px + 3.0
             }
             .min(draw_rect.x + sw - 8.0);
             let t = dock_ink;
@@ -5384,21 +5436,52 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         }
     };
     let comp_rects = term_comp_rects(layout, tab_h, t.line_px, t.comps.len());
-    let mut rows = (area.h / t.line_px).floor().max(0.0) as usize;
-    // (More lines than room — the window not resized yet: the last ones.)
-    let mut skip = t.lines.len().saturating_sub(rows);
-    // The completions stand over the screen's foot: the lines up to the
-    // cursor's go up over them (none hidden under a row), the top ones
-    // out of sight meanwhile.
-    if let Some(top) = comp_rects.last().map(|r| r.y) {
-        rows = ((top - 4.0 - area.y) / t.line_px).floor().max(0.0) as usize;
-        let used = t
-            .lines
-            .iter()
-            .rposition(|l| l.iter().any(|s| !s.text.trim().is_empty()))
-            .max(t.cursor.map(|(_, y)| usize::from(y)))
-            .map_or(0, |i| i + 1);
-        skip = skip.max(used.saturating_sub(rows));
+    // (More lines than room — the window not resized yet: the last ones;
+    // the completions over the screen's foot: the lines go up over them.)
+    let used = crate::term::used_lines(t.lines, t.cursor);
+    let (_, skip, rows) = term_view(layout, tab_h, t.line_px, t.lines.len(), used, t.comps.len());
+    // The text picked: a soft ground under its cells, line by line.
+    if let Some(((ac, al), (bc, bl))) = t.sel {
+        let ((ac, al), (bc, bl)) = if (al, ac) <= (bl, bc) { ((ac, al), (bc, bl)) } else { ((bc, bl), (ac, al)) };
+        let white = ink[0] + ink[1] + ink[2] > 1.5;
+        for l in al..=bl {
+            let Some(row) = l.checked_sub(skip).filter(|r| *r < rows) else {
+                continue;
+            };
+            let cols = t.lines.get(l).map_or(0, |x| crate::term::line_cells(x).len());
+            let from = if l == al { usize::from(ac) } else { 0 };
+            let to = if l == bl { usize::from(bc) + 1 } else { cols.max(from + 1) };
+            let r = Rect::new(area.x + from as f32 * t.cell_w, area.y + row as f32 * t.line_px, (to.saturating_sub(from)) as f32 * t.cell_w, t.line_px);
+            g.rects.push(RectInst { rect: r, radius: 2.0, color: crate::options::wash(white, 0.22), glass: 0.0, border: 0.0 });
+        }
+    }
+    // Ctrl+F: each find under a soft ground, the one picked stronger.
+    let white = ink[0] + ink[1] + ink[2] > 1.5;
+    for &(l, c, n, picked) in t.found {
+        let Some(row) = l.checked_sub(skip).filter(|r| *r < rows) else {
+            continue;
+        };
+        let r = Rect::new(area.x + f32::from(c) * t.cell_w, area.y + row as f32 * t.line_px, f32::from(n) * t.cell_w, t.line_px);
+        g.rects.push(RectInst { rect: r, radius: 2.0, color: crate::options::wash(white, if picked { 0.42 } else { 0.18 }), glass: 0.0, border: 0.0 });
+    }
+    // Read back: how far, faint in the room's corner.
+    if t.scrolled > 0 {
+        let k = t.line_px / crate::term::LINE_PX;
+        let note_px = TERM_NOTE_PX * k;
+        let text = format!("↑ {}", t.scrolled);
+        g.labels.push(Label {
+            text,
+            pos: (area.x + area.w - 6.0 * note_px, area.y),
+            max_w: 6.0 * note_px,
+            font_px: note_px,
+            line_px: note_px * 1.3,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: crate::options::TEXT_FONT,
+            color: Some(faded_on(ink, seen, 0.55, 2.5)),
+            clip: Some(clip),
+        });
     }
     for (row, line) in t.lines.iter().skip(skip).take(rows).enumerate() {
         let y = area.y + row as f32 * t.line_px;
@@ -5460,15 +5543,25 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         let x0 = r.x + pad;
         let y = r.y + (r.h - t.line_px) / 2.0;
         let room = (r.w - 2.0 * pad - note_w - 16.0 * k).max(0.0);
-        let same = c.text.chars().zip(t.typed.chars()).take_while(|(a, b)| a == b).count();
-        let (typed, rest) = c.text.split_at(c.text.char_indices().nth(same).map_or(c.text.len(), |(b, _)| b));
         let row_clip = clip.intersect(&Rect::new(x0, r.y, room, r.h));
-        for (text, x, colour) in [(typed, x0, ink), (rest, x0 + same as f32 * t.cell_w, quiet)] {
-            if text.is_empty() {
+        // (What was typed — the start, or searching the letters found — in
+        // full ink: runs of the one or the other, a cell each.)
+        let marks = if c.kind == crate::term::CompKind::Help { vec![true; c.text.chars().count()] } else { crate::term::marks(t.typed, &c.text, t.searching) };
+        let chars: Vec<char> = c.text.chars().collect();
+        let mut runs: Vec<(usize, bool, String)> = Vec::new();
+        for (i, (ch, on)) in chars.iter().zip(marks.iter().chain(std::iter::repeat(&false))).enumerate() {
+            match runs.last_mut() {
+                Some((_, was, text)) if was == on => text.push(*ch),
+                _ => runs.push((i, *on, ch.to_string())),
+            }
+        }
+        for (at, on, text) in runs {
+            let (x, colour) = (x0 + at as f32 * t.cell_w, if on { ink } else { quiet });
+            if text.trim().is_empty() {
                 continue;
             }
             g.labels.push(Label {
-                text: text.to_owned(),
+                text,
                 pos: (x, y),
                 max_w: room,
                 font_px: t.font_px,
@@ -5526,6 +5619,14 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         });
         if lit {
             g.rects.push(RectInst { rect: Rect::new(x, top + line + DEEP_UNDERLINE_GAP, w, 1.5), radius: 0.0, color: c, glass: 0.0, border: 0.0 });
+        }
+        // (Printed out of sight: a small dot over the word's end.)
+        match t.dots.get(i).copied().unwrap_or(0) {
+            0 => {}
+            dot => {
+                let colour = if dot == 2 { crate::term::xterm(9, t.colours) } else { c };
+                g.rects.push(RectInst { rect: Rect::new(x + w + 2.0, top + 2.0, 4.0, 4.0), radius: 2.0, color: colour, glass: 0.0, border: 0.0 });
+            }
         }
     }
     // (The words clip only to the box: the tabs stand under the screen's room.)

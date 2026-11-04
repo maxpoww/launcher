@@ -671,8 +671,36 @@ The big daemon files are cohesive but long — go straight to the function:
   (tab 0 = `term_new_tab`). tmux's PREFIX: Ctrl+B (the chip says "Ctrl+B") then 1-9/0, n, p, l (`last`), c; Ctrl+B
   twice = the program's. Rig: `debug-query "./2 cmd!"` (the trailing ! = Enter), `debug-desktop "term key <tmux
   key>|text <words>|press up|down|tab|stab|esc|enter|prefix <c>|click <i>|state"`; scratchpad `term-rig3.sh` (its
-  own zsh: `ZDOTDIR` + `HISTFILE` in the scratchpad, never Max's history) and `rig-down.sh`. Not built yet:
-  opening a tab in foot, scrolling back.
+  own zsh: `ZDOTDIR` + `HISTFILE` in the scratchpad, never Max's history) and `rig-down.sh`.
+  THE POWER NIGHT (2026-11-04, Max: "a powerhouse, it is for experts"; studied iTerm2/Warp/Windows Terminal/
+  PSReadLine/kitty/WezTerm/fish/fzf/atuin/zoxide/tmux plugins): THE FIELD edits like a shell (`term_line_key`:
+  a caret `caret_back`, Left/Right/Home/End, Ctrl+A/E/W/U/K, Alt+B/F/D, Ctrl/Alt+BackSpace, Delete; Ctrl+C clears
+  what is typed; `term_paste`: several lines or a program on the screen → `Req::Paste`, tmux's bracketed
+  `paste-buffer -p`), fish's GHOST (`ghost`: the newest history line going on from what is typed, faint after it;
+  Right/End/Ctrl+E take it, Alt+F/Ctrl+Right a word), Ctrl+R (`searching`: the whole history, every word, `fuzzy`
+  + `marks` lighting the letters found). THE SCREEN: scrollback (`scroll` lines back, `Req::Capture` with
+  `-S/-E`, pinned while the tab prints, "↑ n" in the corner; wheel — Up/Down keys to a program on the alternate
+  screen —, PageUp/Down, Shift+Home/End, Esc back), a pick with the pointer (`term_press/drag/release`, copied
+  on release; double click = the word; Ctrl+Shift+C/V), Ctrl+click opens a link or a path (`link_at`, xdg-open),
+  Ctrl+F (`find`, `Req::Find` over `capture-pane -S - -E -`, Enter/Up older, Down newer, finds lit),
+  `content::term_view` = the ONE mapping of screen lines to rows (drawing and the pointer). THE TABS:
+  `./* cmd`, `./1,3 cmd`, `./+ cmd` (`Many`), Alt+1…9, Ctrl+Tab/Ctrl+Shift+Tab, Ctrl+PageUp/Down, Ctrl+B ← →,
+  Ctrl+B x/& and middle click close (`closing` asks when something runs), Ctrl+B , names (`renaming`;
+  `#{?automatic-rename,,1}` + `window_name`), a dot on a word that printed out of sight (`busy`), red when its
+  command failed (`failed_tabs`), Ctrl+B y copies what the last command printed (`sent_at` = history line when
+  sent → `Req::CopyOutput`), Ctrl+B ? lists the keys (`help`, `help_rows`), the tabs' folders kept
+  (`term-tabs`) and the tabs made again in them when the server comes up new. THE SHELL HOOK (`HOOK_ZSHENV`,
+  kitty/ghostty's way: ZDOTDIR → our .zshenv gives the user's ZDOTDIR back, then precmd/preexec write
+  "status start end line" to `term-status/<pane>`; only a zsh `SHELL`): `term_ran` tells a command that ended out
+  of sight after ≥ 10 s (`notify`: notify-send → OPTIONS, "cargo build failed · tab 2", "It ran 3 min"); no hook
+  → what the box saw run. COMPLETION: its own thread (`completer`, only the newest ask) — programs/paths at once,
+  then for an argument ZSH'S OWN completion with descriptions (`Zsh`: `COMPLETE_ZSH` in a zsh -d -i on a tmux
+  server OF ITS OWN `-L <socket>-complete -f /dev/null` — ⚠ never the tabs' server: its `new-session` started that
+  server without our conf once and the tabs counted from 0; request/answer files + Ctrl+G, `compadd` wrapped,
+  `zle -C` widget so nothing lists), words the screen shows (`CompKind::Screen`), folders gone to for `cd`
+  (`term_went` / `term_frequent`: count × freshness, `term-dirs`). `waverunner-ctl terminal [words]` opens the box
+  as the terminal (`Command::Terminal`). Rig rounds: scratchpad `term-rig4.sh`…`term-rig7.sh`. Not built: a tab
+  in foot, tmux panes.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through

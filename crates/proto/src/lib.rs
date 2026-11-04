@@ -260,6 +260,9 @@ pub enum Command {
     /// banner's gear — hibernate, and sleep and restart behind it — come, or go.
     /// `open`, `shut`, `away`, `state` show them without a pointer.
     Power(String),
+    /// The box opened as its TERMINAL (`./`), with what follows typed after
+    /// it (`terminal 2 htop` → `./2 htop`, not run): a key binding's way in.
+    Terminal(String),
 }
 
 impl fmt::Display for Command {
@@ -326,6 +329,8 @@ impl fmt::Display for Command {
             Command::FastControls => f.write_str("fast-controls"),
             Command::Power(w) if w.is_empty() => f.write_str("power"),
             Command::Power(w) => write!(f, "power {w}"),
+            Command::Terminal(w) if w.is_empty() => f.write_str("terminal"),
+            Command::Terminal(w) => write!(f, "terminal {w}"),
         }
     }
 }
@@ -380,6 +385,7 @@ impl FromStr for Command {
             ("min-del", Command::MinDel as fn(String) -> Command),
             ("window-placed", Command::WindowPlaced as fn(String) -> Command),
             ("power", Command::Power as fn(String) -> Command),
+            ("terminal", Command::Terminal as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
                 // `verb` alone (or `verb ` + text) — anything else is a
@@ -469,6 +475,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "options-trigger <id>",
     "control-panel",
     "power [open|shut|away|state]",
+    "terminal [words]",
     "modules [name]",
     "overview-on",
     "overview-off",
@@ -616,7 +623,8 @@ mod tests {
                 | Command::WindowPlaced(_)
                 | Command::FastLaunch
                 | Command::FastControls
-                | Command::Power(_) => (),
+                | Command::Power(_)
+                | Command::Terminal(_) => (),
             }
         }
         vec![
@@ -629,6 +637,8 @@ mod tests {
             Command::DebugClipDetail,
             Command::DebugClipSearch("shot".into()),
             Command::DebugQuery("audio".into()),
+            Command::Terminal(String::new()),
+            Command::Terminal("2 htop".into()),
             Command::DebugEmoji("happy".into()),
             Command::DebugNotif,
             Command::DebugSticky,

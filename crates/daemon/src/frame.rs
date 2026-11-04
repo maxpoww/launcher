@@ -925,6 +925,18 @@ impl App {
             _ => None,
         };
         let n_words = term_words.len();
+        let term_dots = if term_on { self.term_dots() } else { Vec::new() };
+        let term_found = if term_on { self.term_found() } else { Vec::new() };
+        // The field's suggestion and caret, measured in the field's words.
+        let (term_caret, term_ghost) = self.term_field_caret();
+        let term_ghost = term_ghost.to_owned();
+        let (mut term_ghost_w, mut term_caret_px) = (0.0, None);
+        if term_on {
+            if let Some(r) = self.renderer.as_mut() {
+                term_ghost_w = if term_ghost.is_empty() { 0.0 } else { r.measure_text(&term_ghost, search_font, crate::options::TEXT_FONT) };
+                term_caret_px = term_caret.map(|at| r.measure_text(&self.search.query[..at], search_font, crate::options::TEXT_FONT));
+            }
+        }
         let term_colours = if term_on { crate::palette::terminal_words() } else { [[0.0; 4]; 16] };
         let search_pill = content::SearchPill {
             scale: pill_scale,
@@ -2016,6 +2028,14 @@ impl App {
                         typed: parse_cmd(&self.search.query),
                         comp_sel: self.term.comp_sel,
                         comp_hover: term_hover.and_then(|i| i.checked_sub(n_words)),
+                        searching: self.term.searching,
+                        ghost: &term_ghost,
+                        ghost_w: term_ghost_w,
+                        caret_px: term_caret_px,
+                        sel: self.term.sel,
+                        scrolled: self.term.scroll,
+                        dots: &term_dots,
+                        found: &term_found,
                     })
                 } else {
                     None

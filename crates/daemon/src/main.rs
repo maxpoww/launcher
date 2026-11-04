@@ -3970,6 +3970,17 @@ impl App {
                 info!("power: {done}");
                 return;
             }
+            // The box as its terminal (`term.rs`): opened, `./` typed.
+            Command::Terminal(what) => {
+                if self.ui.target() != Target::Open {
+                    self.handle_command(Command::Expand);
+                }
+                self.search.open = true;
+                self.search.query = format!("./{what}");
+                self.refilter();
+                self.schedule_frame();
+                return;
+            }
             Command::Card(what) => {
                 let done = self.card_command(&what);
                 // (A slide arrives many times a second and says nothing.)
@@ -7163,6 +7174,10 @@ impl App {
     /// the grid (down = next, up = previous) and never collapses the
     /// popup — dismissal is Escape / pointer-leave / toggle only.
     fn on_scroll(&mut self, value: f64) {
+        // The box's terminal (`term.rs`): back in the tab's history.
+        if self.ui.target() == Target::Open && self.term_wheel(value) {
+            return;
+        }
         // FAST LAUNCH spans the whole surface: a scroll anywhere is not a
         // reach for the dock.
         if self.fast.open {
@@ -7688,6 +7703,10 @@ impl App {
     /// query, exactly like typing.
     fn on_paste(&mut self, text: &str) {
         info!("paste: {} chars", text.chars().count());
+        // The terminal's (`term.rs`): at the caret, or to the tab.
+        if self.term_paste(text) {
+            return;
+        }
         let printable: String = text.chars().filter(|c| !c.is_control()).collect();
         if printable.is_empty() {
             return;
@@ -8640,6 +8659,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 if app.control_panel && app.gesture.press_pos.is_some() {
                     app.panel_drag(pos);
                 }
+                // The box's terminal: a pick of its text follows the pointer.
+                app.term_drag(pos);
                 if let Some(from) = app.fast.slide_from {
                     app.slider_to(from, pos, true);
                 }
@@ -8876,6 +8897,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         app.gesture.pressed = app.hover;
                         app.gesture.press_pos = app.pointer_pos;
                         app.gesture.press_serial = serial;
+                        // The box's terminal: a press on its screen picks text
+                        // (Ctrl: opens the link under it).
+                        if let Some(p) = app.pointer_pos.filter(|_| app.hover.is_none() && app.ui.target() == Target::Open) {
+                            app.term_press(p);
+                        }
                         // (A press on a screen of the Monitors page takes it in the hand.)
                         if let Some(p) = app.pointer_pos.filter(|_| app.control_panel) {
                             app.panel.screen_press(p);
@@ -8884,7 +8910,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
                         let slide_from = app.gesture.press_pos.filter(|&f| app.control_panel && app.panel.on_slider(f));
                         app.gesture.press_pos = None;
-                        if app.box_drag.is_some() {
+                        if app.term_release() {
+                            // (The terminal's pick of text, let go: copied.)
+                        } else if app.box_drag.is_some() {
                             app.drop_box_drag();
                         } else if app.gesture.dragging.is_some() {
                             let drag = app.gesture.dragging.take().unwrap();
@@ -8960,6 +8988,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // Middle-click a dock/grid app: force a fresh instance even
                 // if it is already running (Linux-native "new window").
                 app.update_hover();
+                // (The terminal's tab word: that tab closes.)
+                if let Some(Hit::Control(i)) = app.hover.filter(|_| app.term_on()) {
+                    app.term_middle(i);
+                }
                 if let Some(hit @ (Hit::DockIcon(_) | Hit::GridCell(..))) = app.hover {
                     app.force_new_instance = true;
                     app.activate_hit(hit);
