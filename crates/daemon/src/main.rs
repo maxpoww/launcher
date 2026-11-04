@@ -151,6 +151,7 @@ mod sys;
 mod phone_pill;
 mod drive_pill;
 mod power_pill;
+mod sleep_timer;
 mod term;
 mod task_pill;
 mod task_title;
@@ -818,6 +819,7 @@ fn main() -> anyhow::Result<()> {
         phone_pill: phone_pill::PhonePill::default(),
         drive_pills: drive_pill::DrivePills::default(),
         power: power_pill::PowerPills::default(),
+        sleep_timer: sleep_timer::SleepTimer::default(),
         term: term::TermState::default(),
         desktop_layer,
         veil_layer,
@@ -1181,6 +1183,8 @@ fn main() -> anyhow::Result<()> {
     // Own the newest clip up front so it's pasteable from a fresh session (our
     // data-control source releases the selection when the previous daemon exits).
     app.serve_newest_clip();
+    // A sleep timer set before the dock started (`sleep_timer.rs`).
+    app.sleep_timer_restore();
 
     let socket_path = waverunner_proto::socket_path();
     let _socket_guard = ipc::listen(&event_loop.handle(), &socket_path)?;
@@ -1893,6 +1897,8 @@ pub struct App {
     drive_pills: drive_pill::DrivePills,
     /// The power key's pills on the banner (`power_pill.rs`).
     power: power_pill::PowerPills,
+    /// The gear box's sleep timer (`sleep_timer.rs`).
+    sleep_timer: sleep_timer::SleepTimer,
     /// THE BOX'S TERMINAL (`term.rs`): "./" typed in the box.
     term: term::TermState,
     desktop_layer: Option<LayerSurface>,
