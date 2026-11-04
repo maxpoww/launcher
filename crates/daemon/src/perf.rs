@@ -213,6 +213,8 @@ pub(crate) static OPTIONS_DRAW: Counter = Counter::new();
 pub(crate) static DECK_DRAW: Counter = Counter::new();
 /// `Renderer::render` on any surface (inside the three above).
 pub(crate) static RENDER: Counter = Counter::new();
+/// The box's terminal: each request its engine thread ran (`term.rs`).
+pub(crate) static TERM_REQ: Counter = Counter::new();
 /// …of which: waiting for a swapchain image, the submit, the present.
 pub(crate) static RENDER_ACQUIRE: Counter = Counter::new();
 pub(crate) static RENDER_SUBMIT: Counter = Counter::new();
@@ -290,6 +292,7 @@ pub(crate) fn report() -> String {
         timed("options", &OPTIONS_DRAW),
         timed("deck", &DECK_DRAW),
         timed("render", &RENDER),
+        timed("term-req", &TERM_REQ),
         timed("acquire", &RENDER_ACQUIRE),
         timed("submit", &RENDER_SUBMIT),
         timed("present", &RENDER_PRESENT),

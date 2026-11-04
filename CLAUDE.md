@@ -717,6 +717,18 @@ The big daemon files are cohesive but long — go straight to the function:
   `list-sessions`; that session gone → `Req::Unpop`: manual + the box's size again; `resize_all` leaves popped ones
   alone; `%sessions-changed` re-reads the tabs). Pointer without a pointer: `debug-desktop "term at|pick|cpick
   <x> <y> [<x2> <y2>]"`. Rig rounds: scratchpad `term-rig4.sh`…`term-rig11.sh`. Not built: tmux panes.
+  SPEED (2026-11-04, Max: "slow to open, close, it blinks when resizing"): (1) the engine's tmux calls go over the
+  CONTROL CLIENT (`Ctl`, thread-local to the engine; `run` → `ctl_run`: each command of a list a line, single-quoted
+  args — a quote or line break falls back to a tmux process —, replies matched by `%begin`/`%end` time+number in
+  `watch`); was a process each (16 ms a request, ~0.5 s an opening; now ~1 ms). (2) Sizes the box asks for are taken
+  once they HOLD 300 ms (`term_want`, `SETTLE`): the opening squashed and stretched the room every frame — 14
+  resizes an opening, each a prompt redrawn (the blink); and only while the box is Open. (3) `%output` floods are
+  coalesced: the watcher marks panes in `Dirty` (`Printed`), waking the loop only when nothing is marked and it is
+  not polling; the loop then looks every `POLL_PRINTED` (20 ms) while output keeps coming (1500 wakes/s → ~170).
+  (4) Closing AS THE TERMINAL keeps it drawn until the box is down (`term_fade_start/_check`: the generic "search
+  only while open" cleared the query first and the box swapped to the apps' grid on its way down; an 800 ms beat
+  empties the field when frames stop). `debug-desktop "term screen"` logs the screen's text; scratchpad
+  `term-regress.sh` = 27 PASS/FAIL checks of every feature, `term-perf*.sh`/`term-close.sh` time and film.
 - `term_pill.rs` — THE TERMINAL'S PILL on the banner (Max, 2026-11-04): right of the card's pill (`term_pill_x`:
   the card pill grown for a dictation, the copy-link as far as it is out; the Mind band after `term_pill_room`), a
   round pill with the terminal's symbol while the box's terminal has tabs (`term_pill_on`; only-while-running hid it:

@@ -35,7 +35,7 @@
 //! Ctrl+B then a number, n, p, l (the last one), c (a new one), Ctrl+B again
 //! for the program's own.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -63,6 +63,8 @@ const UNIT: &str = "golem-terminal";
 const SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "dash", "nu", "ksh", "tcsh", "elvish", "xonsh"];
 /// The quickest a tab's screen is read again while it prints.
 const CAPTURE_EVERY: Duration = Duration::from_millis(33);
+/// How long a size the box's room asks for must hold before tmux is told.
+const SETTLE: Duration = Duration::from_millis(300);
 /// The most completions shown at once (and the history's, searched).
 const MAX_COMPS: usize = 5;
 const MAX_SEARCH: usize = 8;
@@ -479,6 +481,20 @@ pub(crate) fn hints_in(lines: &[Vec<Span>], from: usize, to: usize, cols: usize)
     found
 }
 
+/// The panes that printed since the loop last looked (the watcher adds,
+/// the loop takes them all), and whether the loop is looking again on a
+/// beat of its own (`POLL_PRINTED`) — the watcher wakes it only when not:
+/// a flood woke it 1500 times a second.
+#[derive(Default)]
+pub(crate) struct Printed {
+    panes: Vec<String>,
+    polling: bool,
+}
+pub(crate) type Dirty = std::sync::Arc<std::sync::Mutex<Printed>>;
+
+/// How often the loop looks at what printed while output keeps coming.
+const POLL_PRINTED: Duration = Duration::from_millis(20);
+
 /// What the box asks the engine's thread.
 enum Req {
     /// The server up (made if it is not), the watcher on, the tabs read.
@@ -514,8 +530,10 @@ enum Req {
 enum Ev {
     Tabs(Vec<Tab>),
     Screen(Screen),
-    /// A pane printed.
-    Printed(String),
+    /// Panes printed: which, in the shared set (`Dirty`) — one wake while
+    /// any wait, however much they print (a flood's every chunk a message
+    /// held the screen's own behind them: 4 frames a second).
+    Printed,
     /// The windows changed (made, closed, renamed).
     Changed,
     /// The server is gone (every tab ended), or could not be started.
@@ -533,6 +551,8 @@ enum Ev {
 #[derive(Default)]
 pub(crate) struct TermState {
     to_engine: Option<mpsc::Sender<Req>>,
+    /// The panes that printed, shared with the watcher (`Ev::Printed`).
+    dirty: Dirty,
     to_completer: Option<mpsc::Sender<Req>>,
     to_loop: Option<calloop::channel::Sender<Ev>>,
     pub tabs: Vec<Tab>,
@@ -583,6 +603,13 @@ pub(crate) struct TermState {
     was_shown: u32,
     /// The completions' notes' widths, as last drawn.
     pub notes_w: Vec<f32>,
+    /// The box is going down as the terminal: it stays drawn until it is
+    /// down (`term_fade_check`).
+    pub fading: bool,
+    /// A size the box's room asks for, since when (taken once it holds
+    /// still: `term_want`), and its timer armed.
+    want: Option<((u16, u16), Instant)>,
+    want_timer: bool,
     /// The caret: how many characters before the end of what is typed.
     pub caret_back: usize,
     /// Ctrl+R: the rows are the whole history searched for what is typed
@@ -1488,6 +1515,11 @@ fn tmux() -> Command {
 
 /// Run tmux with `args`; its output when it ended well.
 fn run(args: &[&str]) -> Option<String> {
+    // (On the engine's thread, over its control client when it has one: no
+    // tmux process each time.)
+    if let Some(answer) = ctl_run(args) {
+        return answer;
+    }
     let out = tmux().args(args).stdin(Stdio::null()).stderr(Stdio::piped()).output().ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -1498,6 +1530,83 @@ fn run(args: &[&str]) -> Option<String> {
         }
         None
     }
+}
+
+/// THE CONTROL CLIENT AS THE ENGINE'S WAY TO TMUX (iTerm2's): its commands
+/// written to the control client's input, each answered in order between
+/// `%begin` and `%end` — instead of a tmux process each (16 ms a capture on
+/// the rig, half a second of them an opening; Max: "it is slow").
+struct Ctl {
+    input: std::process::ChildStdin,
+    /// What the watcher reads between a command's `%begin` and its `%end`
+    /// (`Err`: its `%error`).
+    replies: mpsc::Receiver<Result<String, String>>,
+}
+
+thread_local! {
+    /// The engine thread's control client (no other thread has one).
+    static CTL: std::cell::RefCell<Option<Ctl>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A tmux command line of `args`, each quoted for tmux's parser (single
+/// quotes: nothing in them is read); `None` when one cannot be (a quote or
+/// a line break in it — a tmux process takes those).
+fn ctl_line(args: &[&str]) -> Option<String> {
+    let mut line = String::new();
+    for a in args {
+        if a.contains(['\'', '\n', '\r']) {
+            return None;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push('\'');
+        line.push_str(a);
+        line.push('\'');
+    }
+    Some(line)
+}
+
+/// `args` over the control client, when this thread has one and they can be
+/// written so: each command of the list (split at ";") a line, their outputs
+/// one after the other, as a tmux process prints them (`Some(None)`: tmux
+/// said no). `None`: not asked so (a tmux process is, then).
+fn ctl_run(args: &[&str]) -> Option<Option<String>> {
+    let lines: Vec<String> = args.split(|a| *a == ";").map(ctl_line).collect::<Option<_>>()?;
+    CTL.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let ctl = slot.as_mut()?;
+        let mut broken = false;
+        for line in &lines {
+            if writeln!(ctl.input, "{line}").is_err() {
+                broken = true;
+            }
+        }
+        if broken || ctl.input.flush().is_err() {
+            *slot = None;
+            return None;
+        }
+        let mut out = String::new();
+        let mut ok = true;
+        for _ in &lines {
+            match ctl.replies.recv_timeout(Duration::from_secs(2)) {
+                Ok(Ok(text)) => out.push_str(&text),
+                Ok(Err(e)) => {
+                    ok = false;
+                    if !e.trim().is_empty() {
+                        warn!("term: tmux {}: {}", args.first().unwrap_or(&""), e.trim());
+                    }
+                }
+                // (No answer: the client is gone or stuck; a process from now.)
+                Err(_) => {
+                    warn!("term: the control client did not answer");
+                    *slot = None;
+                    return None;
+                }
+            }
+        }
+        Some(ok.then_some(out))
+    })
 }
 
 fn conf_path() -> PathBuf {
@@ -1794,37 +1903,51 @@ fn resize_all(cols: u16, rows: u16) {
 
 /// The control-mode client: only what tmux tells (a pane printed, the
 /// windows changed, the server ended); its replies are skipped.
-fn watch(to_loop: calloop::channel::Sender<Ev>) {
-    let child = tmux().args(["-C", "attach", "-t", SESSION]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = to_loop.send(Ev::Gone(format!("no control client: {e}")));
-            return;
-        }
-    };
-    // (Its stdin is held open for as long as it runs: control mode ends on
-    // its end of file.)
-    let _stdin = child.stdin.take();
+fn watch(mut child: std::process::Child, replies: mpsc::Sender<Result<String, String>>, to_loop: calloop::channel::Sender<Ev>, dirty: Dirty) {
     let Some(out) = child.stdout.take() else {
         return;
     };
-    let mut in_block = false;
-    for line in BufReader::new(out).lines() {
-        let Ok(line) = line else { break };
-        if line.starts_with("%begin") {
-            in_block = true;
+    // A command's answer: its lines from `%begin <time> <number> <flags>` to
+    // the `%end` (or `%error`) with the same time and number — a line of a
+    // screen that reads "%end" is no end.
+    let mut block: Option<(String, String)> = None;
+    let mut reader = BufReader::new(out);
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&raw);
+        let line = line.trim_end_matches(['\n', '\r']);
+        let key = |l: &str| l.split(' ').skip(1).take(2).collect::<Vec<_>>().join(" ");
+        if let Some((open, text)) = block.as_mut() {
+            let closes = (line.starts_with("%end ") || line.starts_with("%error ")) && key(line) == *open;
+            if !closes {
+                text.push_str(line);
+                text.push('\n');
+                continue;
+            }
+            let text = std::mem::take(text);
+            let answer = if line.starts_with("%end ") { Ok(text) } else { Err(text) };
+            block = None;
+            let _ = replies.send(answer);
             continue;
         }
-        if line.starts_with("%end") || line.starts_with("%error") {
-            in_block = false;
-            continue;
-        }
-        if in_block {
+        if line.starts_with("%begin ") {
+            block = Some((key(line), String::new()));
             continue;
         }
         let ev = if let Some(rest) = line.strip_prefix("%output ") {
-            rest.split(' ').next().map(|p| Ev::Printed(p.to_owned()))
+            // (Marked; the loop woken only when nothing was marked yet.)
+            let pane = rest.split(' ').next().unwrap_or("").to_owned();
+            let mut set = dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let wake = set.panes.is_empty() && !set.polling;
+            if !set.panes.contains(&pane) {
+                set.panes.push(pane);
+            }
+            wake.then_some(Ev::Printed)
         } else if line.starts_with("%window-add")
             || line.starts_with("%window-close")
             || line.starts_with("%unlinked-window")
@@ -1849,12 +1972,44 @@ fn watch(to_loop: calloop::channel::Sender<Ev>) {
     let _ = to_loop.send(Ev::Gone("the tabs ended".into()));
 }
 
+/// The control client up, its input the engine's (this thread's `CTL`), its
+/// output read by a watcher thread; the answer to its own attach waited for.
+fn start_watch(to_loop: &calloop::channel::Sender<Ev>, dirty: Dirty) {
+    let child = tmux().args(["-C", "attach", "-t", SESSION]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = to_loop.send(Ev::Gone(format!("no control client: {e}")));
+            return;
+        }
+    };
+    // (Its input is held open for as long as it runs: control mode ends at
+    // its end of file.)
+    let Some(input) = child.stdin.take() else {
+        return;
+    };
+    let (tx, replies) = mpsc::channel();
+    let to_loop = to_loop.clone();
+    if std::thread::Builder::new().name("term-watch".into()).spawn(move || watch(child, tx, to_loop, dirty)).is_err() {
+        return;
+    }
+    // (The attach is a command too: its answer comes first.)
+    if replies.recv_timeout(Duration::from_secs(2)).is_err() {
+        warn!("term: the control client did not answer its attach; tmux processes it is");
+        return;
+    }
+    CTL.with(|c| *c.borrow_mut() = Some(Ctl { input, replies }));
+}
+
 /// The engine's thread: one request at a time, in order.
-fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>) {
+fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>, dirty: Dirty) {
     let mut watching = false;
     let mut saved = String::new();
     let mut hist_read: Option<(PathBuf, std::time::SystemTime, u64)> = None;
     while let Ok(req) = rx.recv() {
+        // (A request that took long is said: the box waits on these.)
+        let began = Instant::now();
+        let what = req_name(&req);
         match req {
             Req::Start { cols, rows } => {
                 if let Err(e) = ensure_server(cols, rows) {
@@ -1865,8 +2020,7 @@ fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>) {
                 }
                 if !watching {
                     watching = true;
-                    let tx = to_loop.clone();
-                    let _ = std::thread::Builder::new().name("term-watch".into()).spawn(move || watch(tx));
+                    start_watch(&to_loop, dirty.clone());
                 }
                 if let Some(tabs) = read_tabs() {
                     let _ = to_loop.send(Ev::Tabs(tabs));
@@ -1957,6 +2111,31 @@ fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>) {
                 }
             }
         }
+        let took = began.elapsed();
+        crate::perf::TERM_REQ.record_nanos(took.as_nanos() as u64);
+        if took > Duration::from_millis(40) {
+            info!("term: {what} took {} ms", took.as_millis());
+        }
+    }
+}
+
+/// A request's name, for the log.
+fn req_name(req: &Req) -> &'static str {
+    match req {
+        Req::Start { .. } => "start",
+        Req::Tabs => "tabs",
+        Req::Capture { .. } => "capture",
+        Req::Keys { .. } => "keys",
+        Req::Resize { .. } => "resize",
+        Req::Complete { .. } => "complete",
+        Req::History => "history",
+        Req::Paste { .. } => "paste",
+        Req::Close { .. } => "close",
+        Req::Rename { .. } => "rename",
+        Req::CopyOutput { .. } => "copy-output",
+        Req::Find { .. } => "find",
+        Req::Pop { .. } => "pop",
+        Req::Unpop { .. } => "unpop",
     }
 }
 
@@ -1990,7 +2169,8 @@ impl App {
                 return;
             }
             let (tx, rx) = mpsc::channel();
-            if let Err(e) = std::thread::Builder::new().name("term".into()).spawn(move || engine(rx, to_loop)) {
+            let dirty = self.term.dirty.clone();
+            if let Err(e) = std::thread::Builder::new().name("term".into()).spawn(move || engine(rx, to_loop, dirty)) {
                 warn!("term: no thread: {e}");
                 return;
             }
@@ -2306,38 +2486,7 @@ impl App {
                     self.term_capture();
                 }
             }
-            Ev::Printed(pane) => {
-                let shown = self.term_on() && self.term_tab(self.term_shown()).is_some_and(|t| t.pane == pane);
-                if shown {
-                    self.term_capture();
-                } else if let Some(n) = self.term.tabs.iter().find(|t| t.pane == pane).map(|t| t.n) {
-                    // Out of sight: its word gets a dot.
-                    if self.term.busy.insert(n) && self.term_on() {
-                        self.schedule_frame();
-                    }
-                }
-                // (What runs in the tabs, read again now and then as they
-                // print: a command started or ended.)
-                // (At most each second; one owed meanwhile comes at its end:
-                // the prompt coming back is the last output.)
-                match self.term.tabs_read.map(|t| t.elapsed()) {
-                    Some(e) if e < Duration::from_secs(1) => {
-                        if !self.term.tabs_owed {
-                            self.term.tabs_owed = true;
-                            let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(Duration::from_secs(1) - e), |_, _, app: &mut App| {
-                                app.term.tabs_owed = false;
-                                app.term.tabs_read = Some(Instant::now());
-                                app.term_ask(Req::Tabs);
-                                calloop::timer::TimeoutAction::Drop
-                            });
-                        }
-                    }
-                    _ => {
-                        self.term.tabs_read = Some(Instant::now());
-                        self.term_ask(Req::Tabs);
-                    }
-                }
-            }
+            Ev::Printed => self.term_printed(),
             Ev::Changed => self.term_ask(Req::Tabs),
             Ev::Failed => self.term.failed = true,
             Ev::Found { needle, hits } => {
@@ -2564,6 +2713,57 @@ impl App {
         self.schedule_frame();
     }
 
+    /// Panes printed (the watcher's set, taken whole): the shown tab read
+    /// again, the others' words dotted, the tabs read now and then; and a
+    /// look again in a moment while output keeps coming.
+    fn term_printed(&mut self) {
+        let panes = {
+            let mut set = self.term.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if set.panes.is_empty() {
+                set.polling = false;
+                return;
+            }
+            set.polling = true;
+            std::mem::take(&mut set.panes)
+        };
+        let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(POLL_PRINTED), |_, _, app: &mut App| {
+            app.term_printed();
+            calloop::timer::TimeoutAction::Drop
+        });
+        for pane in panes {
+            let shown = self.term_on() && self.term_tab(self.term_shown()).is_some_and(|t| t.pane == pane);
+            if shown {
+                self.term_capture();
+            } else if let Some(n) = self.term.tabs.iter().find(|t| t.pane == pane).map(|t| t.n) {
+                // Out of sight: its word gets a dot.
+                if self.term.busy.insert(n) && self.term_on() {
+                    self.schedule_frame();
+                }
+            }
+        }
+        // (What runs in the tabs, read again now and then as they
+        // print: a command started or ended.)
+        // (At most each second; one owed meanwhile comes at its end:
+        // the prompt coming back is the last output.)
+        match self.term.tabs_read.map(|t| t.elapsed()) {
+            Some(e) if e < Duration::from_secs(1) => {
+                if !self.term.tabs_owed {
+                    self.term.tabs_owed = true;
+                    let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(Duration::from_secs(1) - e), |_, _, app: &mut App| {
+                        app.term.tabs_owed = false;
+                        app.term.tabs_read = Some(Instant::now());
+                        app.term_ask(Req::Tabs);
+                        calloop::timer::TimeoutAction::Drop
+                    });
+                }
+            }
+            _ => {
+                self.term.tabs_read = Some(Instant::now());
+                self.term_ask(Req::Tabs);
+            }
+        }
+    }
+
     /// The words' size in the box (the box's own zoom), a line's height.
     pub(crate) fn term_px(&self) -> (f32, f32) {
         let k = self.icon_scale().clamp(0.8, 1.6);
@@ -2584,8 +2784,91 @@ impl App {
         if self.term.cell_w > 0.0 && area.w > 0.0 {
             let cols = (area.w / self.term.cell_w).floor().clamp(10.0, 500.0) as u16;
             let rows = (area.h / line).floor().clamp(3.0, 200.0) as u16;
-            self.term_resize(cols, rows);
+            self.term_want(cols, rows);
         }
+    }
+
+    /// The box began going down as the terminal: drawn as it goes, the field
+    /// emptied once it is down — by the frame that finds it so, or this
+    /// beat (frames stop with the box hidden: the next Super would have
+    /// opened straight into the terminal).
+    pub(crate) fn term_fade_start(&mut self) {
+        if self.term.fading {
+            return;
+        }
+        self.term.fading = true;
+        let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(Duration::from_millis(800)), |_, _, app: &mut App| {
+            if app.term.fading && app.ui.target() != crate::state::Target::Open {
+                app.term.fading = false;
+                app.term.want = None;
+                app.search.query.clear();
+                app.search.open = false;
+                app.refilter();
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+
+    /// The box going down as the terminal: once it is down the field
+    /// empties (the search lives only while the box is open); opened again
+    /// meanwhile, it stays the terminal.
+    pub(crate) fn term_fade_check(&mut self) {
+        if !self.term.fading {
+            return;
+        }
+        if self.ui.target() == crate::state::Target::Open {
+            self.term.fading = false;
+            return;
+        }
+        if self.ui.is_animating() {
+            return;
+        }
+        self.term.fading = false;
+        self.term.want = None;
+        self.search.query.clear();
+        self.search.open = false;
+        self.refilter();
+    }
+
+    /// A size the box's room asks for, taken once it has held still
+    /// (`SETTLE`): the box opening squashes and stretches its room on every
+    /// frame, and each size given to tmux has every tab's shell draw its
+    /// prompt again (14 an opening: Max, "it blinks"). Before the server is
+    /// up, at once (it is made at that size).
+    fn term_want(&mut self, cols: u16, rows: u16) {
+        if (cols, rows) == self.term.size {
+            self.term.want = None;
+            return;
+        }
+        if self.term.size == (0, 0) || self.term.to_engine.is_none() {
+            self.term_resize(cols, rows);
+            return;
+        }
+        if self.term.want.map(|(s, _)| s) == Some((cols, rows)) {
+            return;
+        }
+        self.term.want = Some(((cols, rows), Instant::now()));
+        if self.term.want_timer {
+            return;
+        }
+        self.term.want_timer = true;
+        let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(SETTLE), |_, _, app: &mut App| {
+            let Some(((cols, rows), since)) = app.term.want else {
+                app.term.want_timer = false;
+                return calloop::timer::TimeoutAction::Drop;
+            };
+            let held = since.elapsed();
+            if held < SETTLE {
+                return calloop::timer::TimeoutAction::ToDuration(SETTLE - held);
+            }
+            app.term.want = None;
+            app.term.want_timer = false;
+            // (The box went down meanwhile: nothing is told.)
+            if app.term_on() && app.ui.target() == crate::state::Target::Open && !app.term.fading {
+                app.term_resize(cols, rows);
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// The box's terminal room changed size (in cells): every tab follows.
@@ -2594,6 +2877,7 @@ impl App {
             return;
         }
         self.term.size = (cols, rows);
+        info!("term: size {cols}x{rows}");
         if self.term.to_engine.is_some() {
             self.term_ask(Req::Resize { cols, rows });
             self.term_capture();
@@ -3839,6 +4123,11 @@ impl App {
                 self.term_prefixed(k, false);
             }
             "click" => self.term_click(arg.parse().unwrap_or(0)),
+            // What the shown tab's screen says, its lines joined by "|".
+            "screen" => {
+                let text: Vec<String> = self.term.screen.iter().flat_map(|s| s.lines.iter()).map(|l| cells_text(&line_cells(l)).trim_end().to_owned()).collect();
+                info!("term: screen {}", text.join("|"));
+            }
             // The banner's pill (`term_pill.rs`): where its round pill stands.
             "pill" => info!("term: pill at x {:.0}, room {:.0}, rects {:?}", self.term_pill_x(), self.term_pill_room(), self.term_pill_rects(self.term_pill_x(), 0.0, self.options_pill_h())),
             // The pointer's targets on the tabs' row and the rows, in order:
@@ -3881,11 +4170,14 @@ impl App {
         let sc = self.term.screen.as_ref();
         let tab = self.term_shown();
         format!(
-            "term: query {:?} caret-back {} ghost {:?} searching {}, rows {:?}, sel {} walk {:?}, shown {tab}, tabs {:?}, size {:?}, cell {:.1}, screen {} lines alt={} raw={} secret={} cursor={:?}",
+            "term: query {:?} caret-back {} ghost {:?} searching {} scroll {} find {:?} hints {}, rows {:?}, sel {} walk {:?}, shown {tab}, tabs {:?}, size {:?}, cell {:.1}, screen {} lines alt={} raw={} secret={} cursor={:?}",
             self.search.query,
             self.term.caret_back,
             self.term.ghost,
             self.term.searching,
+            self.term.scroll,
+            self.term.find.as_ref().map(|f| (f.needle.clone(), f.at, f.hits.len())),
+            self.term.hints.as_ref().map_or(0, |(h, _)| h.len()),
             self.term.comps.iter().map(|c| format!("{} · {}", c.text, c.note())).collect::<Vec<_>>(),
             self.term.comp_sel,
             self.term.hist_at,

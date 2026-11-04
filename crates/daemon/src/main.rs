@@ -6869,11 +6869,18 @@ impl App {
             // open_at is set only when expand was triggered by a scroll gesture
             // (in on_scroll), so keyboard Toggle has no cooldown.
         }
-        // The search only lives while the popup is open.
+        // The search only lives while the popup is open. (The box's terminal
+        // stays drawn while the box goes down — it swapped to the apps' grid
+        // on the way: Max, "it blinks" — and empties once it is down:
+        // `term_fade_check`.)
         if self.ui.target() != Target::Open && !self.search.query.is_empty() {
-            self.search.query.clear();
-            self.search.open = false;
-            self.refilter();
+            if self.term_on() {
+                self.term_fade_start();
+            } else {
+                self.search.query.clear();
+                self.search.open = false;
+                self.refilter();
+            }
         }
         // FAST LAUNCH holds the keyboard whatever the dock does under it (a
         // dock auto-hiding mid-launch released it: the typing went to the
@@ -7569,9 +7576,13 @@ impl App {
                     self.panel_search();
                     return;
                 }
-                self.search.query.clear();
-                self.search.open = false;
-                self.refilter();
+                // (The box's terminal stays drawn while the box goes down,
+                // `term_fade_check`: its field empties once it is.)
+                if !self.term_on() {
+                    self.search.query.clear();
+                    self.search.open = false;
+                    self.refilter();
+                }
                 self.dismiss();
             }
             Keysym::Return | Keysym::KP_Enter => {

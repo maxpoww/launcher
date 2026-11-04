@@ -914,6 +914,7 @@ impl App {
         };
         // THE BOX'S TERMINAL (`term.rs`): its words measured (a cell's width,
         // the tabs' words, the chip), its room in cells told to tmux.
+        self.term_fade_check();
         let term_on = self.term_on();
         let (term_font, term_line) = self.term_px();
         let (term_words, term_lit) = if term_on { self.term_words() } else { (Vec::new(), 0) };
@@ -927,7 +928,11 @@ impl App {
                 self.term.notes_w = term_notes.iter().map(|n| r.measure_text(n, note_px, crate::options::TEXT_FONT)).collect();
                 term_chip_w = r.measure_text(term_chip, search_font, crate::options::TEXT_FONT);
             }
-            self.term_fit(&layout);
+            // (Sized only while the box is open: a box going down asks for
+            // nothing.)
+            if self.ui.target() == crate::state::Target::Open {
+                self.term_fit(&layout);
+            }
         }
         // (The pointer on a tab's word, or on a completion past them.)
         let term_hover = match self.hover {
