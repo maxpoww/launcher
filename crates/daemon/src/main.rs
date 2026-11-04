@@ -3983,10 +3983,16 @@ impl App {
                 info!("power: {done}");
                 return;
             }
-            // The box as its terminal (`term.rs`): opened, `./` typed.
+            // The box as its terminal (`term.rs`): opened, `./` typed. (As
+            // Super opens it — from the dock hidden too: `Expand` only opens
+            // it from the dock showing, and the banner's terminal pill did
+            // nothing over a hidden one. The first toggle may only close what
+            // was open instead.)
             Command::Terminal(what) => {
-                if self.ui.target() != Target::Open {
-                    self.handle_command(Command::Expand);
+                for _ in 0..2 {
+                    if self.ui.target() != Target::Open {
+                        self.handle_command(Command::Toggle);
+                    }
                 }
                 self.search.open = true;
                 self.search.query = format!("./{what}");
