@@ -4,11 +4,13 @@
 //!
 //! The gear box's footer is [timer, lock, power]: the power button's two
 //! behind it (sleep, restart) come out over the lock and the timer. A click
-//! sets it to 15 minutes; while it runs the button grows to the left with the
-//! COUNTDOWN beside its hourglass (Max, 2026-11-04: "quiero ver la cuenta
-//! regresiva al lado del símbolo"), and the pointer on it turns the hourglass
-//! into an X — a click cancels — and brings a "+15" out to its left, which
-//! adds a quarter of an hour. (The first cut stepped 15 → 30 → 60 → 90 → off
+//! opens the footer's field to TYPE the time (Max, 2026-11-04: "quiero
+//! introducir el tiempo manualmente"): minutes ("45"), hours and minutes
+//! ("1:30", "1h30", "2h"); Enter with nothing typed is 15. While it runs the
+//! COUNTDOWN stands beside its hourglass, words on the box, no pill ("no
+//! usemos una píldora"), and the pointer on it turns the hourglass into an X —
+//! a click cancels — and brings a "+15" out to its left, which adds a quarter
+//! of an hour. (The first cut stepped 15 → 30 → 60 → 90 → off
 //! as a television's sleep button: cancelling took up to four clicks.)
 //!
 //! THE SYSTEM KEEPS IT: a transient user timer (`systemd-run --user
@@ -58,6 +60,24 @@ fn state_file() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let state = std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
     state.join("waverunner").join("sleep-timer")
+}
+
+/// The time typed in the field, in minutes: "45", "1:30", "1h30", "2h",
+/// "90m"; nothing typed is `STEP`. `None`: not a time (or 0).
+pub(crate) fn parse_minutes(text: &str) -> Option<i64> {
+    let t: String = text.trim().to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if t.is_empty() {
+        return Some(STEP);
+    }
+    let num = |s: &str| -> Option<i64> { if s.is_empty() { Some(0) } else { s.parse::<i64>().ok() } };
+    let minutes = if let Some((h, m)) = t.split_once(':') {
+        num(h)? * 60 + num(m)?
+    } else if let Some((h, m)) = t.split_once('h') {
+        num(h)? * 60 + num(m.trim_end_matches("min").trim_end_matches('m'))?
+    } else {
+        num(t.trim_end_matches("min").trim_end_matches('m'))?
+    };
+    (minutes > 0).then_some(minutes.min(LONGEST))
 }
 
 /// The countdown as the button shows it: minutes and seconds ("14:32",
@@ -133,11 +153,18 @@ impl App {
         (left > 0).then_some(left)
     }
 
-    /// A click on the timer: set it (`STEP` minutes), or — running, its X —
-    /// cancel it.
-    pub(crate) fn sleep_timer_click(&mut self) {
-        let until = self.sleep_timer_left().is_none().then(|| now() + STEP * 60);
-        self.sleep_timer_set(until);
+    /// Running: the X — cancel it.
+    pub(crate) fn sleep_timer_cancel(&mut self) {
+        self.sleep_timer_set(None);
+    }
+
+    /// The field's time, typed: set it. Whether it read as a time.
+    pub(crate) fn sleep_timer_typed(&mut self, text: &str) -> bool {
+        let Some(minutes) = parse_minutes(text) else {
+            return false;
+        };
+        self.sleep_timer_set(Some(now() + minutes * 60));
+        true
     }
 
     /// "+15": a quarter of an hour more.
@@ -287,6 +314,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_time_reads_as_minutes() {
+        assert_eq!(parse_minutes(""), Some(STEP));
+        assert_eq!(parse_minutes("45"), Some(45));
+        assert_eq!(parse_minutes(" 45 min "), Some(45));
+        assert_eq!(parse_minutes("90m"), Some(90));
+        assert_eq!(parse_minutes("1:30"), Some(90));
+        assert_eq!(parse_minutes("1h30"), Some(90));
+        assert_eq!(parse_minutes("2h"), Some(120));
+        assert_eq!(parse_minutes("0"), None);
+        assert_eq!(parse_minutes("soon"), None);
+        assert_eq!(parse_minutes("100000"), Some(LONGEST));
+    }
 
     #[test]
     fn the_countdown_reads_as_a_clock() {

@@ -286,6 +286,8 @@ struct FormatDraft {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PField {
     FastApp,
+    /// The sleep timer's time (`sleep_timer::parse_minutes`).
+    SleepMinutes,
     DriveName(usize),
     DrivePassword(usize),
     FormatName,
@@ -1375,9 +1377,10 @@ impl App {
         }
     }
 
-    /// The sleep timer's button: an hourglass; running, lit with the
-    /// countdown beside it, and the pointer on it turns the hourglass into an
-    /// X (a click cancels) and brings "+15" out to its left (Max, 2026-11-04).
+    /// The sleep timer's button: an hourglass (a click: the field, to type the
+    /// time); running, the countdown beside it — words, no pill — and the
+    /// pointer on it turns the hourglass into an X (a click cancels) and brings
+    /// "+15" out to its left (Max, 2026-11-04).
     fn timer_btn(&self) -> Btn {
         let Some(left) = self.sleep_timer_left() else {
             return btn(sys(SysHit::SleepTimer), G_TIMER);
@@ -1386,10 +1389,10 @@ impl App {
         Btn {
             hit: sys(SysHit::SleepTimer),
             glyph: G_TIMER,
-            lit: true,
             label: Some(crate::sleep_timer::countdown(left)),
             hover_glyph: Some(G_TIMES),
             behind: vec![Btn { hit: sys(SysHit::SleepTimerMore), label: Some(more), ..Default::default() }],
+            ..Default::default()
         }
     }
 
@@ -2019,7 +2022,15 @@ impl App {
                 self.set_stats_box(false);
                 crate::hypr::dispatch("hl.dsp.exec_cmd(\"hyprlock\")");
             }
-            SysHit::SleepTimer => self.sleep_timer_click(),
+            SysHit::SleepTimer if self.sleep_timer_left().is_some() => self.sleep_timer_cancel(),
+            SysHit::SleepTimer => {
+                let prompt = if self.power_hibernates() {
+                    tr("Hibernate in how many minutes? (15)")
+                } else {
+                    tr("Sleep in how many minutes? (15)")
+                };
+                self.gear_ask(PField::SleepMinutes, prompt, G_TIMER, false, String::new());
+            }
             SysHit::SleepTimerMore => self.sleep_timer_more(),
             SysHit::Sleep => {
                 self.set_stats_box(false);
@@ -3063,6 +3074,11 @@ impl App {
         let trimmed = text.trim().to_owned();
         match what {
             PField::FastApp => self.pages_add_fast_app(&trimmed),
+            PField::SleepMinutes => {
+                if !self.sleep_timer_typed(&trimmed) {
+                    warn!("sleep timer: {trimmed:?} is not a time");
+                }
+            }
             PField::DriveName(_) => {
                 // (By its kernel name, found again: see `FormatDraft::kname`.)
                 let k = self.gear.pages.rename_kname.take().unwrap_or_default();

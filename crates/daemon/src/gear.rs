@@ -2743,7 +2743,15 @@ impl App {
             if over || b.lit {
                 let mut base = self.options_hover_wash();
                 base[3] *= alpha;
-                scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
+                // (Words beside a symbol are not part of the button's ground:
+                // the wash is the symbol's circle alone — no pill; Max,
+                // 2026-11-04.)
+                let ground = if b.label.is_some() && !b.glyph.is_empty() {
+                    Rect::new(br.x + br.w - br.h, br.y, br.h, br.h)
+                } else {
+                    br
+                };
+                scene.rects.push(RectInst { rect: ground, radius, color: base, glass: 0.0, border: 0.0 });
             }
             let end = upto.unwrap_or(f32::MAX).min(br.x + br.w + 4.0);
             let clip = Rect::new(br.x - 4.0, br.y - 4.0, (end - br.x + 4.0).max(0.0), br.h + 8.0);

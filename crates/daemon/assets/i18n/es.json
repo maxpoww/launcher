@@ -580,6 +580,8 @@
  "Resolution": "Resolución",
  "Restart now? Click again": "¿Reiniciar ahora? Clic otra vez",
  "Hibernate now? Click again": "¿Hibernar ahora? Clic otra vez",
+ "Hibernate in how many minutes? (15)": "¿Hibernar en cuántos minutos? (15)",
+ "Sleep in how many minutes? (15)": "¿Suspender en cuántos minutos? (15)",
  "Restart to finish updating": "Reinicia para terminar de actualizar",
  "Role": "Función",
  "Router": "Router",
