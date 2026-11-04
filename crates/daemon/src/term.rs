@@ -23,6 +23,17 @@
 //! screen (vim, htop, less: tmux's alternate screen) takes every key until it
 //! ends, Ctrl+Escape giving the keys back to the field; a password asked
 //! (sudo's) is typed in the field as dots.
+//!
+//! COMPLETIONS AND HISTORY (Max: "add autocompletion and history next and
+//! make the tabs clickeable and i guess the tmux binds also"): what is typed
+//! shows rows over the tabs, the best nearest the field — commands typed
+//! before (the shell's history file) that begin so, the programs on the
+//! shell's PATH for the first word, the tab folder's folders and files for
+//! the others; Up and Down pick, Tab takes the one picked, Escape hides them.
+//! With nothing typed, Up and Down walk the history. The tabs' words take a
+//! click, a "+" after them makes a tab, and tmux's prefix works as in tmux:
+//! Ctrl+B then a number, n, p, l (the last one), c (a new one), Ctrl+B again
+//! for the program's own.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -52,6 +63,14 @@ const UNIT: &str = "golem-terminal";
 const SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "dash", "nu", "ksh", "tcsh", "elvish", "xonsh"];
 /// The quickest a tab's screen is read again while it prints.
 const CAPTURE_EVERY: Duration = Duration::from_millis(33);
+/// The most completions shown at once.
+const MAX_COMPS: usize = 5;
+/// The most commands of the history kept.
+const MAX_HISTORY: usize = 20_000;
+/// How long the PATH's programs are trusted before they are read again.
+const PROGRAMS_FOR: Duration = Duration::from_secs(60);
+/// Words that take a command after them: what follows them is a program.
+const RUNNERS: &[&str] = &["sudo", "doas", "run0", "pkexec", "env", "nohup", "time", "watch", "exec", "command", "nice", "strace"];
 /// The terminal's words: the box's size for a line of them.
 pub(crate) const FONT_PX: f32 = 13.5;
 pub(crate) const LINE_PX: f32 = 21.0;
@@ -136,6 +155,46 @@ pub(crate) enum Key {
     Name(String),
 }
 
+/// What a completion is: a command typed before (when), a program, a
+/// script of the tab's folder, a folder, a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompKind {
+    History(i64),
+    Program,
+    Script,
+    Folder,
+    File,
+}
+
+/// One completion: the whole command it makes of what is typed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Comp {
+    pub text: String,
+    pub kind: CompKind,
+}
+
+impl Comp {
+    /// Its note at the row's end: "history · 3 h", "program", "folder".
+    pub(crate) fn note(&self) -> String {
+        use crate::i18n::tr;
+        match self.kind {
+            CompKind::History(when) => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+                let ago = crate::deep_search::ago(when as f64, now);
+                if ago.is_empty() {
+                    tr("history").to_string()
+                } else {
+                    format!("{} · {ago}", tr("history"))
+                }
+            }
+            CompKind::Program => tr("program").to_string(),
+            CompKind::Script => tr("script").to_string(),
+            CompKind::Folder => tr("folder").to_string(),
+            CompKind::File => tr("file").to_string(),
+        }
+    }
+}
+
 /// What the box asks the engine's thread.
 enum Req {
     /// The server up (made if it is not), the watcher on, the tabs read.
@@ -145,6 +204,11 @@ enum Req {
     /// Keys for tab `tab` (made first when it is not there yet, in `dir`).
     Keys { tab: u32, keys: Vec<Key>, dir: Option<String> },
     Resize { cols: u16, rows: u16 },
+    /// What completes `cmd` in the folder `dir` (`all`: asked with Tab, the
+    /// folder's files even for no word yet).
+    Complete { cmd: String, dir: String, all: bool },
+    /// The shell's history file, when it changed since it was last read.
+    History,
 }
 
 /// What the engine's thread tells the box.
@@ -159,6 +223,8 @@ enum Ev {
     Gone(String),
     /// The server could not be started: why (a `Gone` follows).
     Failed,
+    Completions { cmd: String, rows: Vec<Comp> },
+    History(Vec<(i64, String)>),
 }
 
 /// The terminal's state on the loop.
@@ -186,6 +252,33 @@ pub(crate) struct TermState {
     pub words_w: Vec<f32>,
     /// The engine said it could not start (its `Gone` is a failure).
     failed: bool,
+    /// The commands typed before, oldest first, with when (0: not known):
+    /// the shell's history file, then what the box sent since.
+    hist: Vec<(i64, String)>,
+    sent: Vec<(i64, String)>,
+    /// Walking the history: how far back, what was typed before the walk,
+    /// and the field as the walk left it (anything else typed ends it).
+    hist_at: Option<usize>,
+    hist_typed: String,
+    hist_query: Option<String>,
+    /// The completions shown (the best first: nearest the field), the
+    /// engine's for `engine_for`, the one picked and whether by hand.
+    pub comps: Vec<Comp>,
+    engine_comps: Vec<Comp>,
+    engine_for: String,
+    pub comp_sel: usize,
+    comp_moved: bool,
+    /// Escape hid the completions of the field as it was.
+    comps_hidden: Option<String>,
+    /// Tab asked for every completion of the field as it was.
+    comps_all: Option<String>,
+    /// Ctrl+B pressed: the next key is a tab's (tmux's prefix).
+    pub prefix: bool,
+    /// The tab shown before (Ctrl+B l), and the one shown.
+    last: u32,
+    was_shown: u32,
+    /// The completions' notes' widths, as last drawn.
+    pub notes_w: Vec<f32>,
 }
 
 /// What `./…` asks: a tab (none: the one shown) and a command (none: show it).
@@ -289,6 +382,25 @@ pub(crate) fn key_name(keysym: Keysym, ctrl: bool, alt: bool, utf8: Option<&str>
         return None;
     }
     Some(Key::Text(text.to_owned()))
+}
+
+/// A key that is only a modifier (Ctrl, Shift…): never a key of its own.
+fn is_modifier(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::Shift_L
+            | Keysym::Shift_R
+            | Keysym::Control_L
+            | Keysym::Control_R
+            | Keysym::Alt_L
+            | Keysym::Alt_R
+            | Keysym::Super_L
+            | Keysym::Super_R
+            | Keysym::Meta_L
+            | Keysym::Meta_R
+            | Keysym::ISO_Level3_Shift
+            | Keysym::Caps_Lock
+    )
 }
 
 // ------------------------------------------------------------ the screen
@@ -406,6 +518,197 @@ pub(crate) fn xterm(i: u8, sixteen: &[[f32; 4]; 16]) -> [f32; 4] {
     }
     let g = (8.0 + 10.0 * f32::from(i - 232)) / 255.0;
     [g, g, g, 1.0]
+}
+
+// ------------------------------------------------------------ history
+
+/// The shell's history file: `HISTFILE` when it is given, else zsh's
+/// (Golem's, in the state folder, or the classic one) or bash's, the one
+/// written last.
+fn history_file() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("HISTFILE").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(h);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let state = std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
+    [state.join("zsh/history"), home.join(".zsh_history"), home.join(".bash_history")]
+        .into_iter()
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+}
+
+/// A history file's commands, oldest first, with when: zsh's extended lines
+/// (": 1793750145:0;btop", its bytes "metafied"), bash's plain ones (a
+/// "#1793750145" before each when it keeps the time). A command of several
+/// lines is left out: the field is one line.
+pub(crate) fn parse_history(bytes: &[u8]) -> Vec<(i64, String)> {
+    // (zsh writes the bytes from 0x83 up as 0x83 and the byte xor 0x20.)
+    let mut raw = Vec::with_capacity(bytes.len());
+    let mut it = bytes.iter();
+    while let Some(&b) = it.next() {
+        if b == 0x83 {
+            if let Some(&n) = it.next() {
+                raw.push(n ^ 0x20);
+            }
+        } else {
+            raw.push(b);
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let mut out = Vec::new();
+    let mut skipping = false;
+    let mut bash_when = 0;
+    for line in text.lines() {
+        let more = line.ends_with('\\');
+        if skipping || more {
+            skipping = more;
+            continue;
+        }
+        if let Some(t) = line.strip_prefix('#').filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())) {
+            bash_when = t.parse().unwrap_or(0);
+            continue;
+        }
+        let (when, cmd) = match line.strip_prefix(": ").and_then(|r| r.split_once(';')) {
+            Some((meta, cmd)) => (meta.split(':').next().and_then(|t| t.trim().parse().ok()).unwrap_or(0), cmd),
+            None => (std::mem::take(&mut bash_when), line),
+        };
+        if !cmd.trim().is_empty() {
+            out.push((when, cmd.to_owned()));
+        }
+    }
+    let extra = out.len().saturating_sub(MAX_HISTORY);
+    out.drain(..extra);
+    out
+}
+
+// ------------------------------------------------------------ completion
+
+/// A name as the shell reads it: its spaces and signs escaped.
+fn escape(name: &str) -> String {
+    let mut s = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_whitespace() || "'\"\\()&;$`!*?[]{}<>|#~".contains(c) {
+            s.push('\\');
+        }
+        s.push(c);
+    }
+    s
+}
+
+/// What is typed, as the name it means: its escapes undone.
+fn unescape(word: &str) -> String {
+    let mut s = String::with_capacity(word.len());
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() {
+                s.push(n);
+            }
+        } else {
+            s.push(c);
+        }
+    }
+    s
+}
+
+fn is_exec(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// The programs on the tabs' PATH (the server's own), each name once.
+fn programs() -> Vec<String> {
+    let path = run(&["show-environment", "-g", "PATH"])
+        .and_then(|l| l.trim().strip_prefix("PATH=").map(str::to_owned))
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    let mut names = std::collections::BTreeSet::new();
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !names.contains(&name) && is_exec(&e.path()) {
+                names.insert(name);
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// What completes `cmd` in the folder `dir`: its first word (or the one
+/// after `sudo`) a program or a script of the folder, any other a folder or
+/// a file (`all`: the folder's even with no word typed yet).
+pub(crate) fn complete(cmd: &str, dir: &str, programs: &[String], all: bool) -> Vec<Comp> {
+    let start = cmd.char_indices().rev().find(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8());
+    let (head, word) = cmd.split_at(start);
+    let first = head.split_whitespace().last().is_none_or(|w| RUNNERS.contains(&w));
+    let mut out = Vec::new();
+    if word.is_empty() && (first || !all) {
+        return out;
+    }
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    if first && !word.contains('/') {
+        let mut found: Vec<&String> = programs.iter().filter(|p| p.starts_with(word) && p.as_str() != word).collect();
+        found.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+        out.extend(found.into_iter().take(MAX_COMPS).map(|p| Comp { text: format!("{head}{} ", escape(p)), kind: CompKind::Program }));
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let want = unescape(word);
+            let mut scripts: Vec<String> = entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&want) && n != &want && (want.starts_with('.') || !n.starts_with('.')))
+                .filter(|n| is_exec(&Path::new(dir).join(n)))
+                .collect();
+            scripts.sort();
+            let room = MAX_COMPS.saturating_sub(out.len()).max(2);
+            out.splice(0..0, scripts.into_iter().take(room).map(|n| Comp { text: format!("{head}{} ", escape(&n)), kind: CompKind::Script }));
+        }
+        out.truncate(MAX_COMPS);
+        return out;
+    }
+    // A path: the folder typed (from /, ~/ or the tab's folder) and the
+    // start of a name in it.
+    let cut = word.rfind('/').map_or(0, |i| i + 1);
+    let (typed_dir, base) = word.split_at(cut);
+    let plain_dir = unescape(typed_dir);
+    let look = if plain_dir.starts_with('/') {
+        PathBuf::from(&plain_dir)
+    } else if let Some(r) = plain_dir.strip_prefix("~/") {
+        home.join(r)
+    } else {
+        Path::new(dir).join(&plain_dir)
+    };
+    let base = unescape(base);
+    let Ok(entries) = std::fs::read_dir(&look) else {
+        return out;
+    };
+    let names: Vec<(bool, String)> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| base.starts_with('.') || !n.starts_with('.'))
+        .map(|n| (look.join(&n).is_dir(), n))
+        .collect();
+    let pick = |exact: bool| -> Vec<&(bool, String)> {
+        let lower = base.to_lowercase();
+        names
+            .iter()
+            .filter(|(_, n)| if exact { n.starts_with(&base) } else { n.to_lowercase().starts_with(&lower) })
+            .filter(|(d, n)| *d || n != &base)
+            .collect()
+    };
+    let mut found = pick(true);
+    if found.is_empty() {
+        found = pick(false);
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    out.extend(found.into_iter().take(MAX_COMPS).map(|(d, n)| Comp {
+        text: format!("{head}{typed_dir}{}{}", escape(n), if *d { "/" } else { " " }),
+        kind: if *d { CompKind::Folder } else { CompKind::File },
+    }));
+    out
 }
 
 // ------------------------------------------------------------ the engine
@@ -630,6 +933,8 @@ fn watch(to_loop: calloop::channel::Sender<Ev>) {
 /// The engine's thread: one request at a time, in order.
 fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>) {
     let mut watching = false;
+    let mut progs: Option<(Instant, Vec<String>)> = None;
+    let mut hist_read: Option<(PathBuf, std::time::SystemTime, u64)> = None;
     while let Ok(req) = rx.recv() {
         match req {
             Req::Start { cols, rows } => {
@@ -664,6 +969,29 @@ fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>) {
                 }
             }
             Req::Resize { cols, rows } => resize_all(cols, rows),
+            Req::Complete { cmd, dir, all } => {
+                if progs.as_ref().is_none_or(|(t, _)| t.elapsed() > PROGRAMS_FOR) {
+                    progs = Some((Instant::now(), programs()));
+                }
+                let rows = complete(&cmd, &dir, progs.as_ref().map_or(&[][..], |(_, p)| &p[..]), all);
+                let _ = to_loop.send(Ev::Completions { cmd, rows });
+            }
+            Req::History => {
+                let Some(file) = history_file() else {
+                    continue;
+                };
+                let Ok(meta) = std::fs::metadata(&file) else {
+                    continue;
+                };
+                let stamp = (file.clone(), meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
+                if hist_read.as_ref() == Some(&stamp) {
+                    continue;
+                }
+                if let Ok(bytes) = std::fs::read(&file) {
+                    hist_read = Some(stamp);
+                    let _ = to_loop.send(Ev::History(parse_history(&bytes)));
+                }
+            }
         }
     }
 }
@@ -725,6 +1053,15 @@ impl App {
             self.term.screen = None;
             self.term.keys_to_field = false;
         }
+        if shown != self.term.was_shown {
+            self.term.last = self.term.was_shown;
+            self.term.was_shown = shown;
+        }
+        // (Typing anything but what the walk put there ends the walk.)
+        if self.term.hist_query.as_deref().is_some_and(|q| q != self.search.query) {
+            self.term.hist_at = None;
+            self.term.hist_query = None;
+        }
         if self.term.to_engine.is_none() {
             // (The size first: a tab made at another size wraps its first
             // lines there.)
@@ -733,9 +1070,84 @@ impl App {
                 self.term_fit(&layout);
             }
             self.term_ask(Req::Tabs);
-            return;
+        } else {
+            self.term_capture();
         }
-        self.term_capture();
+        // (The file read again only when it changed: commands typed in
+        // other terminals come in too.)
+        self.term_ask(Req::History);
+        self.term_complete();
+    }
+
+    /// The command typed after `./N`, and what stands before it.
+    fn term_typed(&self) -> (String, String) {
+        let q = &self.search.query;
+        let cmd = parse(q).map(|a| a.cmd).unwrap_or_default();
+        (q[..q.len() - cmd.len()].to_owned(), cmd)
+    }
+
+    /// The completions for what is typed: the engine asked, the rows made
+    /// of what is known now.
+    fn term_complete(&mut self) {
+        let (_, cmd) = self.term_typed();
+        self.term.comp_sel = 0;
+        self.term.comp_moved = false;
+        let wanted = !cmd.is_empty() && !self.term_raw() && !self.term_secret() && self.term.hist_at.is_none();
+        if wanted && cmd != self.term.engine_for {
+            let all = self.term.comps_all.as_deref() == Some(self.search.query.as_str());
+            let dir = self.term_tab(self.term_shown()).or_else(|| self.term_tab(self.term.current)).map(|t| t.path.clone());
+            let dir = dir.unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
+            self.term_ask(Req::Complete { cmd: cmd.clone(), dir, all });
+        }
+        self.term_rows();
+    }
+
+    /// The rows shown: the history's that begin with what is typed (newest
+    /// first), the engine's that still fit it; the pick kept when it stays.
+    fn term_rows(&mut self) {
+        let (_, cmd) = self.term_typed();
+        let hidden = self.term.comps_hidden.as_deref() == Some(self.search.query.as_str());
+        let mut rows: Vec<Comp> = Vec::new();
+        if !cmd.is_empty() && !hidden && !self.term_raw() && !self.term_secret() && self.term.hist_at.is_none() {
+            let mut seen = std::collections::HashSet::new();
+            let hist: Vec<Comp> = self
+                .term
+                .hist
+                .iter()
+                .chain(&self.term.sent)
+                .rev()
+                .filter(|(_, h)| h.starts_with(&cmd) && *h != cmd)
+                .filter(|(_, h)| seen.insert(h.clone()))
+                .take(MAX_COMPS)
+                .map(|(when, h)| Comp { text: h.clone(), kind: CompKind::History(*when) })
+                .collect();
+            let exact = self.term.engine_for == cmd;
+            let others: Vec<Comp> = self
+                .term
+                .engine_comps
+                .iter()
+                .filter(|c| exact || (c.text.starts_with(&cmd) && c.text != cmd))
+                .filter(|c| !seen.contains(&c.text))
+                .cloned()
+                .collect();
+            let from_hist = hist.len().min(MAX_COMPS.saturating_sub(others.len()).max(3));
+            rows.extend(hist.into_iter().take(from_hist));
+            rows.extend(others);
+            rows.truncate(MAX_COMPS);
+        }
+        // (The engine's rows coming in keep the one picked where it went.)
+        let picked = self.term.comps.get(self.term.comp_sel).map(|c| c.text.clone());
+        match picked.and_then(|t| rows.iter().position(|c| c.text == t)) {
+            Some(i) => self.term.comp_sel = i,
+            None => {
+                self.term.comp_sel = 0;
+                self.term.comp_moved = false;
+            }
+        }
+        if rows != self.term.comps {
+            self.term.comps = rows;
+            self.schedule_frame();
+        }
     }
 
     /// Read the shown tab's screen again (one read at a time; one wanted
@@ -796,6 +1208,20 @@ impl App {
             }
             Ev::Changed => self.term_ask(Req::Tabs),
             Ev::Failed => self.term.failed = true,
+            Ev::Completions { cmd, rows } => {
+                self.term.engine_for = cmd;
+                self.term.engine_comps = rows;
+                self.term_rows();
+            }
+            Ev::History(hist) => {
+                self.term.hist = hist;
+                // (What the box sent is in the file now, when the shell
+                // writes it as it goes: kept only when it is not.)
+                let tail: std::collections::HashSet<&String> = self.term.hist.iter().rev().take(200).map(|(_, h)| h).collect();
+                let sent: Vec<(i64, String)> = self.term.sent.iter().filter(|(_, h)| !tail.contains(h)).cloned().collect();
+                self.term.sent = sent;
+                self.term_rows();
+            }
             Ev::Gone(why) => {
                 info!("term: {why}");
                 self.term.to_engine = None;
@@ -866,6 +1292,21 @@ impl App {
         }
         let (ctrl, alt) = (self.modifiers.ctrl, self.modifiers.alt);
         let shown = self.term_shown();
+        if is_modifier(keysym) {
+            return false;
+        }
+        // tmux's prefix: Ctrl+B, then the tab's key.
+        if self.term.prefix {
+            self.term.prefix = false;
+            self.term_prefixed(keysym, ctrl);
+            self.schedule_frame();
+            return true;
+        }
+        if ctrl && !alt && matches!(keysym, Keysym::b | Keysym::B) {
+            self.term.prefix = true;
+            self.schedule_frame();
+            return true;
+        }
         if self.term_raw() {
             // Ctrl+Escape: the keys back to the field.
             if ctrl && keysym == Keysym::Escape {
@@ -878,9 +1319,61 @@ impl App {
             }
             return true;
         }
+        let rows = !self.term.comps.is_empty();
         match keysym {
             Keysym::Return | Keysym::KP_Enter => {
+                // (A row picked by hand runs; else what is typed.)
+                if rows && self.term.comp_moved {
+                    self.term_take(self.term.comp_sel);
+                }
                 self.term_enter();
+                true
+            }
+            Keysym::Tab if rows => {
+                self.term_take(self.term.comp_sel);
+                true
+            }
+            // Tab with no rows: every completion, the folder's files too.
+            Keysym::Tab => {
+                self.term.comps_hidden = None;
+                self.term.comps_all = Some(self.search.query.clone());
+                self.term.engine_for.clear();
+                self.term_complete();
+                true
+            }
+            // (The best row stands nearest the field: Up goes away from it.)
+            Keysym::Up | Keysym::ISO_Left_Tab if rows => {
+                self.term.comp_sel = (self.term.comp_sel + 1).min(self.term.comps.len() - 1);
+                self.term.comp_moved = true;
+                self.schedule_frame();
+                true
+            }
+            Keysym::Down if rows => {
+                self.term.comp_sel = self.term.comp_sel.saturating_sub(1);
+                self.term.comp_moved = true;
+                self.schedule_frame();
+                true
+            }
+            Keysym::Up => {
+                self.term_walk(true);
+                true
+            }
+            Keysym::Down => {
+                self.term_walk(false);
+                true
+            }
+            Keysym::Escape if rows => {
+                self.term.comps_hidden = Some(self.search.query.clone());
+                self.term_rows();
+                true
+            }
+            // Escape on a walk: what was typed back.
+            Keysym::Escape if self.term.hist_at.is_some() => {
+                let (head, _) = self.term_typed();
+                self.term.hist_at = None;
+                self.term.hist_query = None;
+                self.search.query = format!("{head}{}", self.term.hist_typed);
+                self.refilter();
                 true
             }
             // Ctrl+C and Ctrl+D with nothing typed after `./N`: the tab's.
@@ -889,9 +1382,140 @@ impl App {
                 self.term_ask(Req::Keys { tab: shown, keys: vec![Key::Name(format!("C-{c}"))], dir: None });
                 true
             }
-            // (Tab completes, later; it never walks the box meanwhile.)
-            Keysym::Tab | Keysym::ISO_Left_Tab | Keysym::Up | Keysym::Down => true,
+            // (Never the box's own walk while it is the terminal.)
+            Keysym::ISO_Left_Tab => true,
             _ => false,
+        }
+    }
+
+    /// The key after Ctrl+B, as tmux's: a number shows that tab, n and p
+    /// the next and previous, l the last one shown, c a new one; Ctrl+B
+    /// again is the program's own.
+    fn term_prefixed(&mut self, keysym: Keysym, ctrl: bool) {
+        let tabs: Vec<u32> = self.term.tabs.iter().map(|t| t.n).collect();
+        let shown = self.term_shown();
+        let at = tabs.iter().position(|&n| n == shown);
+        let to = match keysym.key_char() {
+            Some('b' | 'B') if ctrl => {
+                self.term_ask(Req::Keys { tab: shown, keys: vec![Key::Name("C-b".into())], dir: None });
+                None
+            }
+            Some(d @ '0'..='9') => {
+                let n = d.to_digit(10).map_or(0, |d| if d == 0 { 10 } else { d });
+                tabs.contains(&n).then_some(n)
+            }
+            Some('n') if !tabs.is_empty() => Some(at.map_or(tabs[0], |i| tabs[(i + 1) % tabs.len()])),
+            Some('p') if !tabs.is_empty() => Some(at.map_or(tabs[tabs.len() - 1], |i| tabs[(i + tabs.len() - 1) % tabs.len()])),
+            Some('l') => tabs.contains(&self.term.last).then_some(self.term.last),
+            Some('c') => {
+                self.term_new_tab();
+                None
+            }
+            _ => None,
+        };
+        if let Some(n) = to {
+            self.term_show(n);
+        }
+    }
+
+    /// Show tab `n`: the field keeps what is typed, without a tab named.
+    fn term_show(&mut self, n: u32) {
+        let (_, cmd) = self.term_typed();
+        self.term.current = n;
+        self.term.engine_for.clear();
+        self.search.query = format!("./{cmd}");
+        self.refilter();
+    }
+
+    /// A new tab, the next number free, in the shown tab's folder.
+    fn term_new_tab(&mut self) {
+        let n = self.term_next_free();
+        let dir = self.term_tab(self.term_shown()).map(|t| t.path.clone());
+        self.term_ask(Req::Keys { tab: n, keys: Vec::new(), dir });
+        self.term_show(n);
+    }
+
+    fn term_next_free(&self) -> u32 {
+        self.term.tabs.iter().map(|t| t.n).chain([self.term_shown()]).max().unwrap_or(0) + 1
+    }
+
+    /// Row `i`'s completion into the field.
+    fn term_take(&mut self, i: usize) {
+        let Some(c) = self.term.comps.get(i).cloned() else {
+            return;
+        };
+        let (head, _) = self.term_typed();
+        self.term.comps_hidden = None;
+        self.term.comps_all = None;
+        self.term.comp_moved = false;
+        self.search.query = format!("{head}{}", c.text);
+        self.refilter();
+    }
+
+    /// Up (`back`) or Down with no rows shown: the commands typed before
+    /// that begin with what was typed, newest first.
+    fn term_walk(&mut self, back: bool) {
+        let (head, cmd) = self.term_typed();
+        if self.term.hist_at.is_none() {
+            if !back {
+                return;
+            }
+            self.term.hist_typed = cmd;
+        }
+        let typed = self.term.hist_typed.clone();
+        let mut seen = std::collections::HashSet::new();
+        let found: Vec<&String> = self
+            .term
+            .hist
+            .iter()
+            .chain(&self.term.sent)
+            .rev()
+            .map(|(_, h)| h)
+            .filter(|h| h.starts_with(&typed) && **h != typed && seen.insert(*h))
+            .collect();
+        let at = match (self.term.hist_at, back) {
+            (None, _) => 0,
+            (Some(i), true) => (i + 1).min(found.len().saturating_sub(1)),
+            (Some(0), false) => {
+                // (Down past the newest: what was typed back.)
+                self.term.hist_at = None;
+                self.term.hist_query = None;
+                self.search.query = format!("{head}{typed}");
+                self.refilter();
+                return;
+            }
+            (Some(i), false) => i - 1,
+        };
+        let Some(entry) = found.get(at).map(|s| (*s).clone()) else {
+            return;
+        };
+        self.term.hist_at = Some(at);
+        self.search.query = format!("{head}{entry}");
+        self.term.hist_query = Some(self.search.query.clone());
+        self.refilter();
+    }
+
+    /// A click on the tabs' row: word `i` (the last one the "+"), or on a
+    /// completion's row past them.
+    pub(crate) fn term_click(&mut self, i: usize) {
+        let tabs = self.term_tab_list();
+        if let Some(&(n, _)) = tabs.get(i) {
+            if n == 0 {
+                self.term_new_tab();
+            } else {
+                self.term_show(n);
+            }
+            return;
+        }
+        self.term_take(i - tabs.len());
+    }
+
+    /// The chip in the field: "Terminal", or tmux's prefix waiting.
+    pub(crate) fn term_chip(&self) -> &'static str {
+        if self.term.prefix {
+            "Ctrl+B"
+        } else {
+            crate::i18n::tr("Terminal")
         }
     }
 
@@ -913,8 +1537,17 @@ impl App {
             keys.push(Key::Name("Enter".into()));
         }
         info!("term: tab {tab}{}", if keys.is_empty() { "" } else { ", a command" });
+        if !ask.cmd.is_empty() && !self.term_secret() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            self.term.sent.push((now, ask.cmd.clone()));
+        }
+        self.term.hist_at = None;
+        self.term.hist_query = None;
+        self.term.comps_hidden = None;
+        self.term.comps_all = None;
         self.term.current = tab;
         self.term_ask(Req::Keys { tab, keys, dir });
+        self.term_ask(Req::History);
         self.search.query = "./".into();
         self.refilter();
     }
@@ -943,11 +1576,34 @@ impl App {
         match verb {
             "key" => self.term_ask(Req::Keys { tab, keys: vec![Key::Name(arg.to_owned())], dir: None }),
             "text" => self.term_ask(Req::Keys { tab, keys: vec![Key::Text(arg.to_owned())], dir: None }),
+            // The box's own keys: "press up|down|tab|stab|esc|enter".
+            "press" => {
+                let k = match arg {
+                    "up" => Keysym::Up,
+                    "down" => Keysym::Down,
+                    "tab" => Keysym::Tab,
+                    "stab" => Keysym::ISO_Left_Tab,
+                    "esc" => Keysym::Escape,
+                    _ => Keysym::Return,
+                };
+                self.term_key(k, None);
+            }
+            // tmux's prefix and a key after it: "prefix 2", "prefix n".
+            "prefix" => {
+                let k = arg.chars().next().map_or(Keysym::Escape, Keysym::from_char);
+                self.term_prefixed(k, false);
+            }
+            "click" => self.term_click(arg.parse().unwrap_or(0)),
             _ => {}
         }
         let sc = self.term.screen.as_ref();
+        let tab = self.term_shown();
         format!(
-            "term: shown {tab}, tabs {:?}, size {:?}, cell {:.1}, screen {} lines alt={} raw={} secret={} cursor={:?}",
+            "term: query {:?}, rows {:?}, sel {} walk {:?}, shown {tab}, tabs {:?}, size {:?}, cell {:.1}, screen {} lines alt={} raw={} secret={} cursor={:?}",
+            self.search.query,
+            self.term.comps.iter().map(|c| format!("{} · {}", c.text, c.note())).collect::<Vec<_>>(),
+            self.term.comp_sel,
+            self.term.hist_at,
             self.term.tabs.iter().map(|t| format!("{}:{}", t.n, t.name())).collect::<Vec<_>>(),
             self.term.size,
             self.term.cell_w,
@@ -959,15 +1615,24 @@ impl App {
         )
     }
 
-    /// The words of the tabs for the field's row: "1 launcher", "2 Golem";
-    /// a tab named but not made yet stands as "3 new". With the one lit.
-    pub(crate) fn term_words(&self) -> (Vec<String>, usize) {
+    /// The tabs' words, each with its tab: "1 launcher", "2 Golem"; a tab
+    /// named but not made yet stands as "3 new"; last a "+" (tab 0) for a
+    /// new one.
+    fn term_tab_list(&self) -> Vec<(u32, String)> {
         let shown = self.term_shown();
         let mut words: Vec<(u32, String)> = self.term.tabs.iter().map(|t| (t.n, format!("{} {}", t.n, t.name()))).collect();
         if !words.iter().any(|(n, _)| *n == shown) {
             words.push((shown, format!("{shown} {}", crate::i18n::tr("new"))));
             words.sort_by_key(|(n, _)| *n);
         }
+        words.push((0, "+".into()));
+        words
+    }
+
+    /// The words of the tabs for the field's row, with the one lit.
+    pub(crate) fn term_words(&self) -> (Vec<String>, usize) {
+        let shown = self.term_shown();
+        let words = self.term_tab_list();
         let lit = words.iter().position(|(n, _)| *n == shown).unwrap_or(0);
         (words.into_iter().map(|(_, w)| w).collect(), lit)
     }
@@ -1034,6 +1699,40 @@ mod tests {
         assert_eq!(xterm(16, &sixteen), [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(xterm(231, &sixteen), [1.0, 1.0, 1.0, 1.0]);
         assert!((xterm(232, &sixteen)[0] - 8.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_history_file_reads_as_commands() {
+        let zsh = b": 1793750145:0;btop\n: 1793750173:0;claude code\n: 1793750200:0;echo a \\\nb\n: 1793750300:0;ls\n";
+        assert_eq!(
+            parse_history(zsh),
+            vec![(1793750145, "btop".into()), (1793750173, "claude code".into()), (1793750300, "ls".into())]
+        );
+        // (zsh's metafied bytes: "ñ" is c3 b1, b1 written as 83 91.)
+        assert_eq!(parse_history(b": 1:0;echo \xc3\x83\x91\n"), vec![(1, "echo ñ".into())]);
+        assert_eq!(parse_history(b"#1700000000\ngit pull\nls -la\n"), vec![(1700000000, "git pull".into()), (0, "ls -la".into())]);
+    }
+
+    #[test]
+    fn completions_are_programs_then_paths() {
+        let dir = std::env::temp_dir().join(format!("term-comp-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src/bin")).unwrap();
+        std::fs::create_dir_all(dir.join("My Docs")).unwrap();
+        std::fs::write(dir.join("setup.sh"), "").unwrap();
+        std::fs::write(dir.join(".hidden"), "").unwrap();
+        let d = dir.to_string_lossy();
+        let progs: Vec<String> = ["nix", "nix-store", "nixos-rebuild", "nl"].map(String::from).to_vec();
+        let texts = |c: Vec<Comp>| c.into_iter().map(|c| c.text).collect::<Vec<_>>();
+        assert_eq!(texts(complete("nix", &d, &progs, false)), ["nix-store ", "nixos-rebuild "]);
+        assert_eq!(texts(complete("sudo nixo", &d, &progs, false)), ["sudo nixos-rebuild "]);
+        assert_eq!(texts(complete("ls s", &d, &progs, false)), ["ls src/", "ls setup.sh "]);
+        assert_eq!(texts(complete("cd src/", &d, &progs, false)), ["cd src/bin/"]);
+        assert_eq!(texts(complete("cd my", &d, &progs, false)), ["cd My\\ Docs/"]);
+        // (No word yet: nothing, but for Tab; the hidden ones only asked.)
+        assert!(complete("ls ", &d, &progs, false).is_empty());
+        assert_eq!(texts(complete("ls ", &d, &progs, true)), ["ls My\\ Docs/", "ls src/", "ls setup.sh "]);
+        assert_eq!(texts(complete("cat .h", &d, &progs, false)), ["cat .hidden "]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

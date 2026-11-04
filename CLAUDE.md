@@ -656,9 +656,23 @@ The big daemon files are cohesive but long — go straight to the function:
   words over the field (lit = underlined), the field's chip "Terminal". A program on the WHOLE screen (tmux's
   alternate screen: less, vim, htop) takes every key (`term_raw`, `key_name`), the field says so, Ctrl+Esc gives
   the keys back; a PASSWORD asked on the cursor's line (`asks_password`) is typed in the field as dots.
-  Ctrl+C / Ctrl+D with nothing typed go to the tab. Rig: `debug-query "./2 cmd!"` (the trailing ! = Enter),
-  `debug-desktop "term key <tmux key>|text <words>|state"`; scratchpad `term-rig.sh`. Not built yet:
-  completion (Tab), history (↑), clicking the tabs, opening a tab in foot, scrolling back.
+  Ctrl+C / Ctrl+D with nothing typed go to the tab. COMPLETIONS (stage 2, 2026-11-04): rows over the tabs, the
+  best NEAREST the field (`content::term_comp_rects`; the screen's lines up to the cursor go up over them, nothing
+  hidden under a row) — the shell history's commands that begin with what is typed (`term_rows`, newest first,
+  "history · 3 h"), then the engine's (`Req::Complete` → `complete`): programs on the SERVER's PATH
+  (`show-environment -g PATH`, cached 60 s) for the first word or the one after `sudo`/`env`… (`RUNNERS`), the
+  folder's scripts, else folders/files of the tab's cwd (`~/`, `/`, escapes; case-blind fallback; Tab with no rows
+  lists the folder even for no word, `comps_all`). Up/Down pick (`comp_moved`: Enter then runs the pick), Tab
+  takes it, Escape hides them (`comps_hidden`). HISTORY: the newest of `HISTFILE` / Golem's
+  `$XDG_STATE_HOME/zsh/history` / `~/.zsh_history` / `~/.bash_history` (`parse_history`: zsh extended + metafied,
+  bash `#ts`; several-line commands left out), re-read only when it changed (`Req::History` on every sync), plus
+  what the box `sent`; with no rows Up/Down WALK it (`term_walk`, prefix = what was typed, Escape gives it back).
+  TABS take a click (`layout.controls` = the words, then the rows → `Hit::Control` → `term_click`), a "+" last
+  (tab 0 = `term_new_tab`). tmux's PREFIX: Ctrl+B (the chip says "Ctrl+B") then 1-9/0, n, p, l (`last`), c; Ctrl+B
+  twice = the program's. Rig: `debug-query "./2 cmd!"` (the trailing ! = Enter), `debug-desktop "term key <tmux
+  key>|text <words>|press up|down|tab|stab|esc|enter|prefix <c>|click <i>|state"`; scratchpad `term-rig3.sh` (its
+  own zsh: `ZDOTDIR` + `HISTFILE` in the scratchpad, never Max's history) and `rig-down.sh`. Not built yet:
+  opening a tab in foot, scrolling back.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through

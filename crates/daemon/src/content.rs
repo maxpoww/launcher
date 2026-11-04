@@ -405,11 +405,57 @@ pub struct TermDraw<'a> {
     pub line_px: f32,
     /// The palette's terminal sixteen (sRGB).
     pub colours: &'a [[f32; 4]; 16],
+    /// The tab word under the pointer.
+    pub hover_tab: Option<usize>,
+    /// The completions over the tabs (the best nearest the field), their
+    /// notes ("history · 3 h") and the notes' widths, what is typed of
+    /// them, the one picked and the one under the pointer.
+    pub comps: &'a [crate::term::Comp],
+    pub notes: &'a [String],
+    pub notes_w: &'a [f32],
+    pub typed: &'a str,
+    pub comp_sel: usize,
+    pub comp_hover: Option<usize>,
 }
 
 /// The air between the terminal's tabs and the field, and their gap.
 pub const TERM_TABS_AIR: f32 = 8.0;
-const TERM_TABS_GAP: f32 = 26.0;
+pub const TERM_TABS_GAP: f32 = 26.0;
+/// The completions' gap, their words' air inside them, the notes' size.
+const TERM_COMP_GAP: f32 = 2.0;
+const TERM_COMP_PAD_X: f32 = 14.0;
+pub const TERM_NOTE_PX: f32 = 12.5;
+
+/// The terminal's tab words where they stand: centred over the field,
+/// each `tabs_w` wide.
+pub fn term_tab_rects(l: &Layout, tab_h: f32, tabs_w: &[f32]) -> Vec<Rect> {
+    let area = term_area(l, tab_h);
+    let total: f32 = tabs_w.iter().sum::<f32>() + TERM_TABS_GAP * tabs_w.len().saturating_sub(1) as f32;
+    let top = area.y + area.h + TERM_TABS_AIR;
+    let mut x = l.card_x + l.card_w / 2.0 - total / 2.0;
+    tabs_w
+        .iter()
+        .map(|&w| {
+            let r = Rect::new(x, top, w, crate::deep_search::TAB_LINE_PX);
+            x += w + TERM_TABS_GAP;
+            r
+        })
+        .collect()
+}
+
+/// The completions' rows, `n` of them over the tabs, the first nearest
+/// the field: three quarters of the terminal's width, centred.
+pub fn term_comp_rects(l: &Layout, tab_h: f32, line_px: f32, n: usize) -> Vec<Rect> {
+    let area = term_area(l, tab_h);
+    let h = line_px * (1.0 + 2.0 / 3.0);
+    let w = area.w * 0.75;
+    let x = area.x + (area.w - w) / 2.0;
+    let bottom = area.y + area.h - 2.0;
+    (0..n)
+        .map(|i| Rect::new(x, bottom - (i + 1) as f32 * h - i as f32 * TERM_COMP_GAP, w, h))
+        .filter(|r| r.y >= area.y)
+        .collect()
+}
 
 /// Where the box's terminal stands: the sections' room, down to the tabs'
 /// row over the field (`tab_h` tall).
@@ -5337,10 +5383,24 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
             crate::term::Colour::Rgb(r, gg, b) => [f32::from(r) / 255.0, f32::from(gg) / 255.0, f32::from(b) / 255.0, 1.0],
         }
     };
-    let rows = (area.h / t.line_px).floor().max(0.0) as usize;
+    let comp_rects = term_comp_rects(layout, tab_h, t.line_px, t.comps.len());
+    let mut rows = (area.h / t.line_px).floor().max(0.0) as usize;
     // (More lines than room — the window not resized yet: the last ones.)
-    let skip = t.lines.len().saturating_sub(rows);
-    for (row, line) in t.lines.iter().skip(skip).enumerate() {
+    let mut skip = t.lines.len().saturating_sub(rows);
+    // The completions stand over the screen's foot: the lines up to the
+    // cursor's go up over them (none hidden under a row), the top ones
+    // out of sight meanwhile.
+    if let Some(top) = comp_rects.last().map(|r| r.y) {
+        rows = ((top - 4.0 - area.y) / t.line_px).floor().max(0.0) as usize;
+        let used = t
+            .lines
+            .iter()
+            .rposition(|l| l.iter().any(|s| !s.text.trim().is_empty()))
+            .max(t.cursor.map(|(_, y)| usize::from(y)))
+            .map_or(0, |i| i + 1);
+        skip = skip.max(used.saturating_sub(rows));
+    }
+    for (row, line) in t.lines.iter().skip(skip).take(rows).enumerate() {
         let y = area.y + row as f32 * t.line_px;
         for span in line {
             let x = area.x + f32::from(span.col) * t.cell_w;
@@ -5378,17 +5438,79 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
             g.rects.push(RectInst { rect: r, radius: 1.5, color: [ink[0], ink[1], ink[2], 0.45], glass: 0.0, border: 0.0 });
         }
     }
+    // The completions: what is typed in full ink, the rest quieter, the
+    // note at the row's end; the one picked on a faint ground.
+    let k = t.line_px / crate::term::LINE_PX;
+    let quiet = faded_on(ink, seen, 0.55, 2.5);
+    for (i, (r, c)) in comp_rects.iter().zip(t.comps).enumerate() {
+        let ground = if i == t.comp_sel {
+            0.12
+        } else if t.comp_hover == Some(i) {
+            0.07
+        } else {
+            0.0
+        };
+        if ground > 0.0 {
+            // (`wash`: the fraction as it shows, a white one gamma-corrected.)
+            let white = ink[0] + ink[1] + ink[2] > 1.5;
+            g.rects.push(RectInst { rect: *r, radius: 10.0 * k, color: crate::options::wash(white, ground), glass: 0.0, border: 0.0 });
+        }
+        let pad = TERM_COMP_PAD_X * k;
+        let note_w = t.notes_w.get(i).copied().unwrap_or(0.0);
+        let x0 = r.x + pad;
+        let y = r.y + (r.h - t.line_px) / 2.0;
+        let room = (r.w - 2.0 * pad - note_w - 16.0 * k).max(0.0);
+        let same = c.text.chars().zip(t.typed.chars()).take_while(|(a, b)| a == b).count();
+        let (typed, rest) = c.text.split_at(c.text.char_indices().nth(same).map_or(c.text.len(), |(b, _)| b));
+        let row_clip = clip.intersect(&Rect::new(x0, r.y, room, r.h));
+        for (text, x, colour) in [(typed, x0, ink), (rest, x0 + same as f32 * t.cell_w, quiet)] {
+            if text.is_empty() {
+                continue;
+            }
+            g.labels.push(Label {
+                text: text.to_owned(),
+                pos: (x, y),
+                max_w: room,
+                font_px: t.font_px,
+                line_px: t.line_px,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: Some(crate::options::NERD),
+                color: Some(colour),
+                clip: Some(row_clip),
+            });
+        }
+        if let Some(note) = t.notes.get(i) {
+            let note_px = TERM_NOTE_PX * k;
+            g.labels.push(Label {
+                text: note.clone(),
+                pos: (r.x + r.w - pad - note_w, r.y + (r.h - note_px * 1.3) / 2.0),
+                max_w: note_w + 4.0,
+                font_px: note_px,
+                line_px: note_px * 1.3,
+                centered: false,
+                dim: false,
+                cache: true,
+                family: crate::options::TEXT_FONT,
+                color: Some(quiet),
+                clip: Some(clip),
+            });
+        }
+    }
     // The tabs: centred words over the field, the lit one in full ink and
     // underlined, the others quieter — the deep search's.
-    let total: f32 = t.tabs_w.iter().sum::<f32>() + TERM_TABS_GAP * t.tabs_w.len().saturating_sub(1) as f32;
-    let cx = layout.card_x + layout.card_w / 2.0;
-    let top = area.y + area.h + TERM_TABS_AIR;
-    let mut x = cx - total / 2.0;
     let (font, line) = (crate::deep_search::TAB_FONT_PX, crate::deep_search::TAB_LINE_PX);
-    for (i, word) in t.tabs.iter().enumerate() {
-        let w = t.tabs_w.get(i).copied().unwrap_or(0.0);
+    for (i, (word, r)) in t.tabs.iter().zip(term_tab_rects(layout, tab_h, t.tabs_w)).enumerate() {
+        let (x, w, top) = (r.x, r.w, r.y);
         let lit = i == t.lit;
-        let c = if lit { ink } else { faded_on(ink, seen, 0.55, 2.5) };
+        let c = if lit {
+            ink
+        } else if t.hover_tab == Some(i) {
+            faded_on(ink, seen, 0.78, 2.5)
+        } else {
+            quiet
+        };
         g.labels.push(Label {
             text: word.clone(),
             pos: (x + w / 2.0, top),
@@ -5405,7 +5527,6 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         if lit {
             g.rects.push(RectInst { rect: Rect::new(x, top + line + DEEP_UNDERLINE_GAP, w, 1.5), radius: 0.0, color: c, glass: 0.0, border: 0.0 });
         }
-        x += w + TERM_TABS_GAP;
     }
     // (The words clip only to the box: the tabs stand under the screen's room.)
     g.clip = reveal_clip(Rect::new(layout.card_x, area.y, layout.card_w, area.h + line + 2.0 * TERM_TABS_AIR + 8.0));

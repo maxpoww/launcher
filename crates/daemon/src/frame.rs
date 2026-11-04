@@ -404,6 +404,16 @@ impl App {
             layout.tabs_page = (page, pages);
             layout.tabs_slide = d.slide;
         }
+        // THE BOX'S TERMINAL: its tabs' words and its completions take the
+        // pointer (`term_click`), the words a little round them.
+        if self.term_on() {
+            let line = self.term_px().1;
+            let tab_h = line.max(deep_search::TAB_LINE_PX);
+            let g = content::TERM_TABS_GAP;
+            let words = content::term_tab_rects(&layout, tab_h, &self.term.words_w);
+            let rows = content::term_comp_rects(&layout, tab_h, line, self.term.comps.len());
+            layout.controls = words.into_iter().map(|r| content::Rect::new(r.x - g / 2.0, r.y - 4.0, r.w + g, r.h + 8.0)).chain(rows).collect();
+        }
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
         // directory opened with the card up) opens in the Apps grid.
@@ -898,13 +908,23 @@ impl App {
         let (term_font, term_line) = self.term_px();
         let (term_words, term_lit) = if term_on { self.term_words() } else { (Vec::new(), 0) };
         let mut term_chip_w = 0.0;
+        let term_chip = self.term_chip();
+        let term_notes: Vec<String> = if term_on { self.term.comps.iter().map(crate::term::Comp::note).collect() } else { Vec::new() };
         if term_on {
+            let note_px = content::TERM_NOTE_PX * term_line / crate::term::LINE_PX;
             if let Some(r) = self.renderer.as_mut() {
                 self.term.words_w = term_words.iter().map(|w| r.measure_text(w, crate::deep_search::TAB_FONT_PX, crate::options::TEXT_FONT)).collect();
-                term_chip_w = r.measure_text(crate::i18n::tr("Terminal"), search_font, crate::options::TEXT_FONT);
+                self.term.notes_w = term_notes.iter().map(|n| r.measure_text(n, note_px, crate::options::TEXT_FONT)).collect();
+                term_chip_w = r.measure_text(term_chip, search_font, crate::options::TEXT_FONT);
             }
             self.term_fit(&layout);
         }
+        // (The pointer on a tab's word, or on a completion past them.)
+        let term_hover = match self.hover {
+            Some(content::Hit::Control(i)) if term_on => Some(i),
+            _ => None,
+        };
+        let n_words = term_words.len();
         let term_colours = if term_on { crate::palette::terminal_words() } else { [[0.0; 4]; 16] };
         let search_pill = content::SearchPill {
             scale: pill_scale,
@@ -1983,12 +2003,19 @@ impl App {
                         tabs: &term_words,
                         tabs_w: &self.term.words_w,
                         lit: term_lit,
-                        chip: crate::i18n::tr("Terminal"),
+                        chip: term_chip,
                         chip_w: term_chip_w,
                         cell_w: self.term.cell_w,
                         font_px: term_font,
                         line_px: term_line,
                         colours: &term_colours,
+                        hover_tab: term_hover.filter(|&i| i < n_words),
+                        comps: &self.term.comps,
+                        notes: &term_notes,
+                        notes_w: &self.term.notes_w,
+                        typed: parse_cmd(&self.search.query),
+                        comp_sel: self.term.comp_sel,
+                        comp_hover: term_hover.and_then(|i| i.checked_sub(n_words)),
                     })
                 } else {
                     None
@@ -2469,4 +2496,9 @@ fn ask_frame(
         *pending = true;
         *asked = Some(Instant::now());
     }
+}
+
+/// The command typed after `./N` (what the completions' rows show of it).
+fn parse_cmd(query: &str) -> &str {
+    crate::term::parse(query).map_or("", |a| &query[query.len() - a.cmd.len()..])
 }

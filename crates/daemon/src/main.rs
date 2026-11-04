@@ -6514,6 +6514,7 @@ impl App {
                     self.activate(entry_idx, LaunchFrom::Box);
                 }
             }
+            Hit::Control(i) if self.term_on() => self.term_click(i),
             Hit::Control(i) if self.search.deep.is_some() => self.deep_tab(i),
             Hit::Control(i) => {
                 if let Some(&(label, _)) = self.search.controls.get(i) {
