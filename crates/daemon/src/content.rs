@@ -471,7 +471,10 @@ pub fn term_tab_rects(l: &Layout, tab_h: f32, tabs_w: &[f32]) -> Vec<Rect> {
 pub fn term_view(l: &Layout, tab_h: f32, line_px: f32, n_lines: usize, used: usize, n_comps: usize) -> (Rect, usize, usize) {
     let area = term_area(l, tab_h);
     let mut rows = (area.h / line_px).floor().max(0.0) as usize;
-    let mut skip = n_lines.saturating_sub(rows);
+    // (Down to the last line in use: a tab sized for the room without the
+    // field shows its top while the field still stands, its foot once the
+    // lines reach it.)
+    let mut skip = n_lines.saturating_sub(rows).min(used.saturating_sub(rows));
     if let Some(top) = term_comp_rects(l, tab_h, line_px, n_comps).last().map(|r| r.y) {
         rows = ((top - 4.0 - area.y) / line_px).floor().max(0.0) as usize;
         skip = skip.max(used.saturating_sub(rows));
@@ -503,8 +506,18 @@ pub fn term_comp_rects(l: &Layout, tab_h: f32, line_px: f32, n: usize) -> Vec<Re
 /// Where the box's terminal stands: the sections' room, down to the tabs'
 /// row over the field (`tab_h` tall).
 pub fn term_area(l: &Layout, tab_h: f32) -> Rect {
+    term_room(l, tab_h, l.term_low)
+}
+
+/// The terminal's room with the field (its tabs over it) or without (`low`:
+/// the tabs where the field's middle is).
+pub fn term_room(l: &Layout, tab_h: f32, low: bool) -> Rect {
     let top = l.sections[SECTION_APPS].title_pos.1;
-    let bottom = l.search_box.y - tab_h - 2.0 * TERM_TABS_AIR;
+    let bottom = if low {
+        l.search_box.y + l.search_box.h / 2.0 - tab_h / 2.0 - TERM_TABS_AIR
+    } else {
+        l.search_box.y - tab_h - 2.0 * TERM_TABS_AIR
+    };
     Rect::new(l.card_x + 2.0 * GRID_PAD_X, top, (l.card_w - 4.0 * GRID_PAD_X).max(0.0), (bottom - top).max(0.0))
 }
 
@@ -1136,6 +1149,10 @@ pub struct Layout {
     pub tabs_words: Vec<f32>,
     pub tabs_scales: Vec<f32>,
     pub tabs_slide: f32,
+    /// The box's terminal shows no field (after its first command): its
+    /// tabs take the field's place, its screen the room down to them, and
+    /// the search pill is not drawn.
+    pub term_low: bool,
     /// The screen's edge the dock stands on (the Launcher page's Position):
     /// at the bottom a row the box rises from; on a side a column, the box
     /// growing out of that edge with the dock riding its far side
@@ -1612,6 +1629,7 @@ pub fn layout(
         tabs_words: Vec::new(),
         tabs_scales: Vec::new(),
         tabs_slide: 0.0,
+        term_low: false,
         side: Side::Bottom,
         dock_band: Rect::new(0.0, card_top, w, (dock_hit_bottom - card_top).max(0.0)),
     }
@@ -2024,6 +2042,7 @@ fn layout_side(
         tabs_words: Vec::new(),
         tabs_scales: Vec::new(),
         tabs_slide: 0.0,
+        term_low: false,
         side: if left { Side::Left } else { Side::Right },
         dock_band,
     }
@@ -3785,8 +3804,10 @@ pub fn scene(
     let mut search_grid: Option<GridContent> = None;
     // The search pill belongs to both views: it stays through the push.
     // (Beside a side dock: once any of the box shows; the clip does the rest.)
-    if (sideways && reveal_rect.w > 1.0)
-        || (!sideways && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale)
+    // (Not while the box's terminal has no field: its tabs stand there.)
+    if !layout.term_low
+        && ((sideways && reveal_rect.w > 1.0)
+            || (!sideways && layout.search_box.y >= layout.card_top + config.window.input_bar_height as f32 * icon_scale))
     {
         let mut sgrid = GridContent {
             clip: reveal_rect,

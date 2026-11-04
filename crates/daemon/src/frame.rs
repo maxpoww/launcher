@@ -405,7 +405,9 @@ impl App {
             layout.tabs_slide = d.slide;
         }
         // THE BOX'S TERMINAL: its tabs' words and its completions take the
-        // pointer (`term_click`), the words a little round them.
+        // pointer (`term_click`), the words a little round them; after its
+        // first command no field, the tabs in its place (`term_direct`).
+        layout.term_low = self.term_direct();
         if self.term_on() {
             let line = self.term_px().1;
             let tab_h = line.max(deep_search::TAB_LINE_PX);

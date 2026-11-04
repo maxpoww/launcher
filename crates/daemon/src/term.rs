@@ -569,6 +569,15 @@ pub(crate) struct TermState {
     capture_timer: bool,
     /// The keys go to the field even though a program holds the screen.
     pub keys_to_field: bool,
+    /// After the first command (Enter in the field) the field is gone: the
+    /// tab's screen and its tabs stay, every key goes to the tab's shell, as
+    /// in any terminal (Max, 2026-11-04: "lo único que quiero sacar después
+    /// del primer comando es el input de la caja, pero la terminal queda
+    /// ahí"). Until the box closes; Ctrl+Esc brings the field back.
+    pub direct: bool,
+    /// `debug-desktop "term direct off"` (the rig): the field stays after a
+    /// command, as before — the checks written for it run on it.
+    pub field_always: bool,
     /// The cell's width at the terminal's size, measured.
     pub cell_w: f32,
     pub cell_for: f32,
@@ -2463,7 +2472,8 @@ impl App {
                     return;
                 }
                 if screen.tab == self.term_shown() {
-                    if !screen.alternate {
+                    // (A program left the screen: the keys back as they were.)
+                    if !screen.alternate && self.term.screen.as_ref().is_some_and(|s| s.alternate && s.tab == screen.tab) {
                         self.term.keys_to_field = false;
                     }
                     // Read back, the view stays on what it shows as the tab
@@ -2780,7 +2790,11 @@ impl App {
                 self.term.cell_for = font;
             }
         }
-        let area = crate::content::term_area(layout, line.max(crate::deep_search::TAB_LINE_PX));
+        // (Sized for the room without the field from the start: the field
+        // going after the first command changes nothing for the tab — no
+        // resize, no prompt drawn again; with the field the screen's top
+        // lines wait under the room's top until they are needed.)
+        let area = crate::content::term_room(layout, line.max(crate::deep_search::TAB_LINE_PX), true);
         if self.term.cell_w > 0.0 && area.w > 0.0 {
             let cols = (area.w / self.term.cell_w).floor().clamp(10.0, 500.0) as u16;
             let rows = (area.h / line).floor().clamp(3.0, 200.0) as u16;
@@ -2884,9 +2898,19 @@ impl App {
         }
     }
 
-    /// Whether a program holds the shown tab's screen and the keys are its.
+    /// Whether the keys are the shown tab's: after the first command
+    /// (`direct`), or while a program holds its screen.
     pub(crate) fn term_raw(&self) -> bool {
-        self.term_on() && !self.term.keys_to_field && self.term.screen.as_ref().is_some_and(|s| s.alternate && s.tab == self.term_shown())
+        self.term_on()
+            && !self.term.keys_to_field
+            && (self.term.direct || self.term.screen.as_ref().is_some_and(|s| s.alternate && s.tab == self.term_shown()))
+    }
+
+    /// Whether the box shows no field: the keys go straight to the tab
+    /// (`direct`), and nothing asks the field for words (finding, naming a
+    /// tab).
+    pub(crate) fn term_direct(&self) -> bool {
+        self.term_on() && self.term.direct && !self.term.keys_to_field && self.term.find.is_none() && self.term.renaming.is_none()
     }
 
     /// Whether the shown tab asks for a password (the field shows dots).
@@ -2942,6 +2966,9 @@ impl App {
                 if typed.chars().any(|c| c.is_ascii_uppercase()) {
                     self.copy_text(&take);
                     self.term_flash(crate::i18n::tr("Copied"));
+                } else if self.term.direct && !self.term.keys_to_field {
+                    // (No field: into the tab's line, where its keys go.)
+                    self.term_ask(Req::Keys { tab: shown, keys: vec![Key::Text(format!("{take} "))], dir: None });
                 } else {
                     let at = self.term_caret();
                     let start = self.term_typed().0.len();
@@ -3065,11 +3092,22 @@ impl App {
             }
         }
         if self.term_raw() {
-            // Ctrl+Escape: the keys back to the field.
+            // Ctrl+Escape: the keys back to the field (no field: it comes
+            // back, until the next command).
             if ctrl && keysym == Keysym::Escape {
-                self.term.keys_to_field = true;
+                if self.term.direct && !self.term.screen.as_ref().is_some_and(|s| s.alternate && s.tab == shown) {
+                    self.term.direct = false;
+                    self.term_rows();
+                } else {
+                    self.term.keys_to_field = true;
+                }
                 self.schedule_frame();
                 return true;
+            }
+            // Escape at the shell's prompt (no program holds the screen):
+            // the box's own — it closes, as it does everywhere.
+            if keysym == Keysym::Escape && !alt && !self.term.screen.as_ref().is_some_and(|s| s.alternate && s.tab == shown) {
+                return false;
             }
             if let Some(key) = key_name(keysym, ctrl, alt, utf8) {
                 self.term_ask(Req::Keys { tab: shown, keys: vec![key], dir: None });
@@ -3974,6 +4012,7 @@ impl App {
             }
             self.term.caret_back = 0;
             self.term.searching = false;
+            self.term_go_direct();
             self.search.query = "./".into();
             self.refilter();
             return;
@@ -4025,8 +4064,29 @@ impl App {
                 calloop::timer::TimeoutAction::Drop
             });
         }
+        self.term_go_direct();
         self.search.query = "./".into();
         self.refilter();
+    }
+
+    /// The first command went: the field goes, the keys are the tab's.
+    fn term_go_direct(&mut self) {
+        if self.term.field_always {
+            return;
+        }
+        if !self.term.direct || self.term.keys_to_field {
+            info!("term: the field gone, the keys straight to the tab");
+        }
+        self.term.direct = true;
+        self.term.keys_to_field = false;
+        self.term.comps.clear();
+        self.term.ghost.clear();
+    }
+
+    /// `debug-query "./…!"`: what is typed in the field sent, as its Enter
+    /// would — also once the field is gone (the rig has no keyboard).
+    pub(crate) fn term_field_enter(&mut self) {
+        self.term_enter();
     }
 
     /// What the field shows: what is typed, or — a password asked — its
@@ -4103,12 +4163,15 @@ impl App {
                 };
                 let text = (name.chars().count() == 1 && !self.modifiers.ctrl && !self.modifiers.alt).then_some(name);
                 if !self.term_key(k, text) {
-                    // (What the box would do with it: typed at the end.)
+                    // (What the box would do with it: typed at the end;
+                    // Escape, the box's own.)
                     if let Some(t) = text {
                         self.search.query.push_str(t);
                         self.refilter();
                     } else if k == Keysym::BackSpace && self.search.query.pop().is_some() {
                         self.refilter();
+                    } else if k == Keysym::Escape {
+                        self.handle_key_event(k, None);
                     }
                 }
                 self.modifiers = was;
@@ -4123,6 +4186,14 @@ impl App {
                 self.term_prefixed(k, false);
             }
             "click" => self.term_click(arg.parse().unwrap_or(0)),
+            // "direct off": the field stays after a command (the field's
+            // checks); "direct on": it goes, as it does for Max.
+            "direct" => {
+                self.term.field_always = arg == "off";
+                if self.term.field_always {
+                    self.term.direct = false;
+                }
+            }
             // What the shown tab's screen says, its lines joined by "|".
             "screen" => {
                 let text: Vec<String> = self.term.screen.iter().flat_map(|s| s.lines.iter()).map(|l| cells_text(&line_cells(l)).trim_end().to_owned()).collect();
@@ -4170,7 +4241,7 @@ impl App {
         let sc = self.term.screen.as_ref();
         let tab = self.term_shown();
         format!(
-            "term: query {:?} caret-back {} ghost {:?} searching {} scroll {} find {:?} hints {}, rows {:?}, sel {} walk {:?}, shown {tab}, tabs {:?}, size {:?}, cell {:.1}, screen {} lines alt={} raw={} secret={} cursor={:?}",
+            "term: query {:?} caret-back {} ghost {:?} searching {} scroll {} find {:?} hints {}, rows {:?}, sel {} walk {:?}, shown {tab}, tabs {:?}, size {:?}, cell {:.1}, screen {} lines alt={} raw={} direct={} secret={} cursor={:?}",
             self.search.query,
             self.term.caret_back,
             self.term.ghost,
@@ -4187,6 +4258,7 @@ impl App {
             sc.map_or(0, |s| s.lines.len()),
             sc.is_some_and(|s| s.alternate),
             self.term_raw(),
+            self.term_direct(),
             self.term_secret(),
             sc.and_then(|s| s.cursor),
         )

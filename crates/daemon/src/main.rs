@@ -3457,7 +3457,13 @@ impl App {
                 self.search.open = true;
                 self.search.query = query.trim_end_matches('!').to_owned();
                 self.refilter();
-                self.term_key(Keysym::Return, None);
+                // (No field once a command went: what is typed sent as the
+                // field's Enter would have.)
+                if self.term.direct {
+                    self.term_field_enter();
+                } else {
+                    self.term_key(Keysym::Return, None);
+                }
                 self.schedule_frame();
                 return;
             }
@@ -5371,7 +5377,10 @@ impl App {
         // Drop the previous refilter's transient entries.
         self.truncate_transients();
         // THE TERMINAL ("./", `term.rs`): the box is a tab's screen; nothing
-        // is searched.
+        // is searched. (Left: the next `./` begins with the field again.)
+        if !self.term_on() {
+            self.term.direct = false;
+        }
         if self.term_on() {
             self.search.visible = Default::default();
             self.search.controls.clear();
