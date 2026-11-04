@@ -3460,13 +3460,18 @@ impl App {
         self.schedule_frame();
     }
 
-    fn term_close_now(&mut self, n: u32) {
+    pub(crate) fn term_close_now(&mut self, n: u32) {
         info!("term: tab {n} closed");
-        // (The tab shown goes: the one beside it is shown.)
+        // (The tab shown goes: the one beside it is shown — the field left
+        // alone when the box is not the terminal: a close from the banner.)
         if self.term_shown() == n {
             let tabs: Vec<u32> = self.term.tabs.iter().map(|t| t.n).filter(|&t| t != n).collect();
             let next = tabs.iter().copied().filter(|&t| t < n).max().or_else(|| tabs.first().copied()).unwrap_or(1);
-            self.term_show(next);
+            if self.term_on() {
+                self.term_show(next);
+            } else {
+                self.term.current = next;
+            }
         }
         self.term.busy.remove(&n);
         self.term.running.remove(&n);

@@ -723,7 +723,9 @@ The big daemon files are cohesive but long — go straight to the function:
   Max "i dont see it"); the
   pointer on it → the symbol becomes + and the tabs come out to its right as words (`PillId::TermTab(k)`, measured
   in `term_pill_sync` on every `Ev::Tabs`; running ones in full ink, idle quieter), as the power pills' do; a click
-  on + opens the box as the terminal on a new tab, on a word on that tab (`term_pill_click` → `Command::Terminal`
+  on + opens the box as the terminal on a new tab, on a word on that tab, on the × at a word's right (`TermTabClose(k)`,
+  listed BEFORE its tab: the pointer takes the first pill under it) that tab closes, the box left shut (asked —
+  red, a second click — when something runs) (`term_pill_click` → `Command::Terminal`
   + `term_open_new/on`). The dock watches the tabs from its start when their server is up (`term_watch_if_up`:
   has-session only, none started). `debug-desktop "term pill"` logs its rects.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's

@@ -16,7 +16,10 @@
 //! theirs.
 //!
 //! A CLICK on the + opens the box as the terminal on a new tab; on a tab's
-//! word, on that tab.
+//! word, on that tab; on the × at a tab's right (Max: "agrega la x en cada
+//! pill para poder cerrar las tabs desde el banner sin tener que abrir la
+//! caja"), that tab closes — asked first (the × red, a second click) when
+//! something runs in it, as the box's own ×.
 
 use std::time::Instant;
 
@@ -29,6 +32,11 @@ use crate::App;
 const GLYPH: &str = "\u{f120}";
 /// fa-plus: a new tab.
 const GLYPH_NEW: &str = "\u{f067}";
+/// A tab's ×, and the room it takes at its pill's right (of the pill's
+/// height), and the air after it.
+const CLOSE: &str = "×";
+const CLOSE_W: f32 = 0.8;
+const CLOSE_AIR: f32 = 0.4;
 
 /// The pill's state.
 #[derive(Debug, Default)]
@@ -69,9 +77,16 @@ impl App {
         self.schedule_term_pill_frame();
     }
 
-    /// A tab's pill's width: its word and the pill's air round it.
+    /// A tab's pill's width: its word, its × and the pill's air round them.
     fn term_pill_word_w(&self, k: usize) -> f32 {
-        self.term_pill.words_w.get(k).copied().unwrap_or(24.0) + 2.0 * PILL_PAD_X * self.options_scale()
+        let pad = PILL_PAD_X * self.options_scale();
+        pad + self.term_pill.words_w.get(k).copied().unwrap_or(24.0) + CLOSE_W * self.options_pill_h() + CLOSE_AIR * pad
+    }
+
+    /// Where a tab's × stands in its pill `r`.
+    fn term_pill_close_rect(&self, r: Rect) -> Rect {
+        let w = CLOSE_W * r.h;
+        Rect::new(r.x + r.w - w - CLOSE_AIR * PILL_PAD_X * self.options_scale(), r.y, w, r.h)
     }
 
     /// How much of the banner right of the card's pill it takes now (what
@@ -93,7 +108,10 @@ impl App {
         let mut to = x + ph + BOND_GAP;
         for k in 0..self.term_pill.words.len() {
             let w = self.term_pill_word_w(k);
-            rects.push((PillId::TermTab(k as u8), Rect::new(lerp(x, to, self.term_pill.out), y, w, ph)));
+            let tab = Rect::new(lerp(x, to, self.term_pill.out), y, w, ph);
+            // (Its × first: the pointer finds the first pill under it.)
+            rects.push((PillId::TermTabClose(k as u8), self.term_pill_close_rect(tab)));
+            rects.push((PillId::TermTab(k as u8), tab));
             to += w + BOND_GAP;
         }
         rects
@@ -127,6 +145,11 @@ impl App {
         let on = self.term_pill_ptr_on();
         if on != self.term_pill.open {
             self.term_pill.open = on;
+            // (Gone from under the hand: a × asking for a second click asks
+            // no more — unless the box, as the terminal, asks it too.)
+            if !on && !self.term_on() {
+                self.term.closing = None;
+            }
             self.schedule_term_pill_frame();
         }
         on
@@ -135,6 +158,20 @@ impl App {
     /// A click: the + opens the box as the terminal on a new tab; a tab's
     /// word, on that tab.
     pub(crate) fn term_pill_click(&mut self, id: PillId) {
+        // A tab's ×: that tab closes, here (the box stays as it is).
+        if let PillId::TermTabClose(k) = id {
+            if let Some(n) = self.term_pill.words.get(usize::from(k)).map(|(n, _, _)| *n) {
+                if self.term.closing == Some(n) {
+                    self.term.closing = None;
+                    self.term_close_now(n);
+                } else {
+                    self.term_close(n);
+                }
+            }
+            self.draw_options();
+            return;
+        }
+        self.term.closing = None;
         let tab = match id {
             PillId::TermTab(k) => self.term_pill.words.get(usize::from(k)).map(|(n, _, _)| *n),
             _ => None,
@@ -182,8 +219,37 @@ impl App {
         if a <= 0.004 {
             return;
         }
+        // A tab's ×, on its tab's pill: quiet, in full ink under the hand,
+        // red asking for a second click.
+        if let PillId::TermTabClose(k) = id {
+            let n = p.words.get(usize::from(k)).map(|(n, _, _)| *n);
+            let ink = self.options_text_color();
+            let c = if n.is_some() && self.term.closing == n {
+                crate::palette::terminal_words()[9]
+            } else if self.options_hover == Some(id) {
+                ink
+            } else {
+                [ink[0], ink[1], ink[2], ink[3] * 0.55]
+            };
+            let s = self.options_scale();
+            scene.labels.push(Label {
+                text: CLOSE.to_owned(),
+                pos: (rect.x + rect.w / 2.0, rect.y + (rect.h - LINE_PX * s) / 2.0),
+                max_w: rect.w + 4.0,
+                font_px: FONT_PX * s,
+                line_px: LINE_PX * s,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: TEXT_FONT,
+                color: Some([c[0], c[1], c[2], c[3] * a]),
+                clip: Some(rect),
+            });
+            return;
+        }
         let bright = self.options_bar_is_bright();
-        let hovered = self.options_hover == Some(id);
+        // (A tab's pill lifts under the hand on its × too.)
+        let hovered = self.options_hover == Some(id) || matches!((id, self.options_hover), (PillId::TermTab(k), Some(PillId::TermTabClose(j))) if k == j);
         let r = if hovered { hover_grow(rect) } else { rect };
         push_neumorph(scene, r, r.h / 2.0, bright, a);
         let mut wash = if hovered { self.options_hover_wash() } else { self.options_rest_wash() };
@@ -192,7 +258,10 @@ impl App {
         // (Labels are drawn in one late pass, over every pill: a tab coming out
         // keeps its word off the pill it comes from behind.)
         let ph = rect.h;
-        let rects = self.term_pill_rects(self.term_pill_x(), rect.y, ph);
+        // (The pills it comes from behind: the round one and the tabs before
+        // it — never a ×, which stands inside its own tab.)
+        let rects: Vec<(PillId, Rect)> =
+            self.term_pill_rects(self.term_pill_x(), rect.y, ph).into_iter().filter(|(i, _)| !matches!(i, PillId::TermTabClose(_))).collect();
         let before = rects.iter().position(|(i, _)| *i == id).and_then(|k| k.checked_sub(1)).map(|k| rects[k].1.x + rects[k].1.w);
         let clip = match before {
             Some(edge) if edge > r.x => Rect::new(edge, r.y, (r.x + r.w - edge).max(0.0), r.h),
@@ -209,9 +278,14 @@ impl App {
             }
             _ => ((if p.open { GLYPH_NEW } else { GLYPH }).to_owned(), Some(NERD), ink),
         };
+        // (A tab's word stands in what its × leaves.)
+        let centre = match id {
+            PillId::TermTab(k) => r.x + PILL_PAD_X * s + p.words_w.get(usize::from(k)).copied().unwrap_or(0.0) / 2.0,
+            _ => r.x + r.w / 2.0,
+        };
         scene.labels.push(Label {
             text,
-            pos: (r.x + r.w / 2.0, r.y + (r.h - LINE_PX * s) / 2.0),
+            pos: (centre, r.y + (r.h - LINE_PX * s) / 2.0),
             max_w: r.w + 4.0,
             font_px: FONT_PX * s,
             line_px: LINE_PX * s,
