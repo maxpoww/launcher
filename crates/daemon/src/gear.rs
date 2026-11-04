@@ -270,6 +270,13 @@ pub(crate) struct Btn {
     /// it, over what stands there — which steps away meanwhile (the power
     /// button: sleep, restart, over the lock; Max, 2026-11-03).
     pub(crate) behind: Vec<Btn>,
+    /// Words beside the symbol (the sleep timer's countdown): the button grows
+    /// to the LEFT, its symbol where it was. With no symbol, the words alone
+    /// in the circle ("+15").
+    pub(crate) label: Option<String>,
+    /// The symbol while the pointer is on the button or what came out of it
+    /// (the running timer's X).
+    pub(crate) hover_glyph: Option<&'static str>,
 }
 
 pub(crate) fn btn(hit: Hit, glyph: &'static str) -> Btn {
@@ -303,8 +310,9 @@ pub(crate) struct Layout {
     footer: Vec<Rect>,
     /// Each footer button's buttons behind it, as far out as they are.
     footer_behind: Vec<Vec<Rect>>,
-    /// The footer buttons those come out over (they step away meanwhile).
-    footer_covered: Vec<bool>,
+    /// The footer buttons those come out over (they step away meanwhile): the
+    /// index of the button whose buttons cover each.
+    footer_covered: Vec<Option<usize>>,
     field: Option<Rect>,
     total_h: f32,
 }
@@ -405,10 +413,12 @@ pub(crate) struct GearState {
     /// A thing that cannot be undone, asked once: what the footer says, and
     /// what a second click does.
     pub(crate) arm: Option<(String, Hit)>,
-    /// The pointer is on a footer button with buttons behind it (or on them):
-    /// they come out, 0 → 1.
-    power_open: bool,
-    power_out: f32,
+    /// The footer button (its index) the pointer is on, with buttons behind
+    /// it, or on those; the one whose buttons are out or going (`behind_ix`),
+    /// and how far, 0 → 1. One at a time.
+    behind_open: Option<usize>,
+    behind_ix: Option<usize>,
+    behind_out: f32,
 }
 
 impl GearState {
@@ -1891,26 +1901,29 @@ impl App {
         let fy = rect.y + rect.h - foot_h + (foot_h - d) / 2.0;
         let n = view.footer.len() as f32;
         let row_w = n * d + (n - 1.0).max(0.0) * FOOTER_GAP * s;
-        let footer: Vec<Rect> = (0..view.footer.len())
-            .map(|i| {
-                Rect::new(
-                    rect.x + (rect.w - row_w) / 2.0 + i as f32 * (d + FOOTER_GAP * s),
-                    fy,
-                    d,
-                    d,
-                )
+        // The row is centred on the round buttons; one with words grows to the
+        // left from its circle, which stays where it was (under the hand).
+        let footer: Vec<Rect> = view
+            .footer
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let x = rect.x + (rect.w - row_w) / 2.0 + i as f32 * (d + FOOTER_GAP * s);
+                let more = self.gear_btn_words_w(b, d);
+                Rect::new(x - more, fy, d + more, d)
             })
             .collect();
         // (Out to the LEFT of their button, which keeps its place, into the
         // places of the buttons there, which step away: nothing moves under
         // the hand as they come.)
-        let out = self.gear.power_out.clamp(0.0, 1.0);
         let step = d + FOOTER_GAP * s;
         let footer_behind: Vec<Vec<Rect>> = view
             .footer
             .iter()
             .zip(&footer)
-            .map(|(b, r): (&Btn, &Rect)| {
+            .enumerate()
+            .map(|(i, (b, r))| {
+                let out = if self.gear.behind_ix == Some(i) { self.gear.behind_out.clamp(0.0, 1.0) } else { 0.0 };
                 (0..b.behind.len())
                     .map(|k| Rect::new(lerp(r.x, r.x - (k as f32 + 1.0) * step, out), r.y, d, d))
                     .collect()
@@ -1919,7 +1932,7 @@ impl App {
         let footer_covered = footer
             .iter()
             .map(|q: &Rect| {
-                view.footer.iter().zip(&footer).any(|(b, r)| {
+                view.footer.iter().zip(&footer).position(|(b, r)| {
                     let reach = r.x - b.behind.len() as f32 * step;
                     !b.behind.is_empty() && q.x < r.x && q.x + q.w > reach + 0.5
                 })
@@ -2017,16 +2030,21 @@ impl App {
                 return Hit::Field;
             }
         } else {
-            let out = self.gear.power_out > 0.5;
-            for (((b, r), behind), covered) in
-                view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).zip(&lay.footer_covered)
+            let out = self.gear.behind_ix.filter(|_| self.gear.behind_out > 0.5);
+            for (i, (((b, r), behind), covered)) in view
+                .footer
+                .iter()
+                .zip(&lay.footer)
+                .zip(&lay.footer_behind)
+                .zip(&lay.footer_covered)
+                .enumerate()
             {
-                if out {
+                if out == Some(i) {
                     if let Some((bb, _)) = b.behind.iter().zip(behind).find(|(_, br)| br.contains(p)) {
                         return bb.hit.clone();
                     }
                 }
-                if r.contains(p) && !(out && *covered) {
+                if r.contains(p) && !(out.is_some() && *covered == out) {
                     return b.hit.clone();
                 }
             }
@@ -2057,28 +2075,46 @@ impl App {
         let changed = hit != self.gear.hit;
         self.gear.hit = hit;
         let open = self.gear_behind_ptr_on();
-        if open != self.gear.power_open {
-            self.gear.power_open = open;
+        if open != self.gear.behind_open {
+            self.gear.behind_open = open;
+            // (Another button's: its own come out from nothing.)
+            if open.is_some() && open != self.gear.behind_ix {
+                self.gear.behind_ix = open;
+                self.gear.behind_out = 0.0;
+            }
             self.schedule_stats_frame();
+            return true;
         }
         changed
     }
 
-    /// Whether the pointer is on a footer button with buttons behind it, or on
+    /// Which footer button with buttons behind it the pointer is on, or on
     /// those — the gaps between included, so crossing them is not leaving.
-    fn gear_behind_ptr_on(&self) -> bool {
+    fn gear_behind_ptr_on(&self) -> Option<usize> {
         let (Some(p), Some(_)) = (self.options_ptr, self.gear_page()) else {
-            return false;
+            return None;
         };
         if self.gear.field.is_some() || self.gear.arm.is_some() || self.stats_open_t() < 0.5 {
-            return false;
+            return None;
         }
         let view = self.gear_view();
         let lay = self.gear_layout(&view, self.gear_rect());
-        view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).any(|((b, r), behind)| {
+        view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).position(|((b, r), behind)| {
             let left = behind.iter().map(|x| x.x).fold(r.x, f32::min);
             !b.behind.is_empty() && p.1 >= r.y && p.1 <= r.y + r.h && p.0 >= left && p.0 <= r.x + r.w
         })
+    }
+
+    /// How much wider than its circle a footer button is for its words.
+    fn gear_btn_words_w(&self, b: &Btn, d: f32) -> f32 {
+        match (&b.label, b.glyph.is_empty()) {
+            (Some(words), false) => {
+                // (Estimated, as the page's rows are: the layout has no
+                // renderer to measure with; a clock's digits are even.)
+                est_w(words, FONT_PX * self.options_scale()) * 1.1 + 0.3 * d
+            }
+            _ => 0.0,
+        }
     }
 
     pub(crate) fn gear_hit_clickable(&self) -> bool {
@@ -2695,7 +2731,7 @@ impl App {
         // `upto`: a button coming out from behind another (leftward) keeps its
         // symbol off that one (symbols are drawn in one late pass, over every
         // fill).
-        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, upto: Option<f32>| {
+        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, upto: Option<f32>, hovered: bool| {
             if r.y + r.h > bottom || alpha <= 0.01 {
                 return;
             }
@@ -2710,10 +2746,37 @@ impl App {
                 scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
             }
             let end = upto.unwrap_or(f32::MAX).min(br.x + br.w + 4.0);
+            let clip = Rect::new(br.x - 4.0, br.y - 4.0, (end - br.x + 4.0).max(0.0), br.h + 8.0);
+            let ink = [glyph_ink[0], glyph_ink[1], glyph_ink[2], glyph_ink[3] * alpha];
+            // The words: beside the symbol, which keeps the circle at the
+            // right end; alone, centred and a size down.
+            if let Some(words) = &b.label {
+                let alone = b.glyph.is_empty();
+                let px = if alone { r.h * 0.36 } else { FONT_PX * s };
+                let at = if alone { br.x + br.w / 2.0 } else { br.x + 0.3 * r.h };
+                scene.labels.push(Label {
+                    text: words.clone(),
+                    pos: (at, br.y + (br.h - px * 1.2) / 2.0),
+                    max_w: br.w,
+                    font_px: px,
+                    line_px: px * 1.2,
+                    centered: alone,
+                    dim: false,
+                    cache: false,
+                    family: None,
+                    color: Some(ink),
+                    clip: Some(clip),
+                });
+                if alone {
+                    return;
+                }
+            }
+            let glyph = if hovered { b.hover_glyph.unwrap_or(b.glyph) } else { b.glyph };
+            let circle = Rect::new(br.x + br.w - br.h, br.y, br.h, br.h);
             let gpx = r.h * 0.56;
             scene.labels.push(Label {
-                text: b.glyph.to_owned(),
-                pos: (br.x + br.w / 2.0, br.y + (br.h - gpx * 1.2) / 2.0),
+                text: glyph.to_owned(),
+                pos: (circle.x + circle.w / 2.0, circle.y + (circle.h - gpx * 1.2) / 2.0),
                 max_w: br.w + 16.0,
                 font_px: gpx,
                 line_px: gpx * 1.2,
@@ -2721,17 +2784,12 @@ impl App {
                 dim: false,
                 cache: true,
                 family: Some(NERD),
-                color: Some([
-                    glyph_ink[0],
-                    glyph_ink[1],
-                    glyph_ink[2],
-                    glyph_ink[3] * alpha,
-                ]),
-                clip: Some(Rect::new(br.x - 4.0, br.y - 4.0, (end - br.x + 4.0).max(0.0), br.h + 8.0)),
+                color: Some(ink),
+                clip: Some(clip),
             });
         };
         for (b, r) in view.strip.iter().zip(&lay.strip) {
-            round(scene, b, *r, pen.a, None);
+            round(scene, b, *r, pen.a, None, false);
         }
         let t = if self.gear.arm.is_some() {
             1.0
@@ -2740,19 +2798,27 @@ impl App {
         } else {
             0.0
         };
-        let out = ((self.gear.power_out - 0.15) / 0.6).clamp(0.0, 1.0);
-        for (((b, r), behind), covered) in
-            view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).zip(&lay.footer_covered)
+        let out = ((self.gear.behind_out - 0.15) / 0.6).clamp(0.0, 1.0);
+        for (i, (((b, r), behind), covered)) in view
+            .footer
+            .iter()
+            .zip(&lay.footer)
+            .zip(&lay.footer_behind)
+            .zip(&lay.footer_covered)
+            .enumerate()
         {
+            let mine = self.gear.behind_ix == Some(i);
             // What they come out over steps away as they come.
-            let own = if *covered { 1.0 - out } else { 1.0 };
+            let own = if covered.is_some() && *covered == self.gear.behind_ix { 1.0 - out } else { 1.0 };
             // The ones behind first: their button covers them as they come out.
             let mut edge = r.x;
             for (bb, br) in b.behind.iter().zip(behind) {
-                round(scene, bb, *br, pen.a * (1.0 - t) * out, Some(edge));
+                let a = if mine { out } else { 0.0 };
+                round(scene, bb, *br, pen.a * (1.0 - t) * a, Some(edge), false);
                 edge = br.x;
             }
-            round(scene, b, *r, pen.a * (1.0 - t) * own, None);
+            let hovered = self.gear.behind_open == Some(i) || b.hit == *hit;
+            round(scene, b, *r, pen.a * (1.0 - t) * own, None, hovered);
         }
         if let (Some(fr), Some((text, _))) = (lay.field, &self.gear.arm) {
             if fr.y + fr.h <= bottom {
@@ -2945,9 +3011,9 @@ impl App {
             self.gear.field_t = t;
             moving |= m;
         }
-        let behind_to = f32::from(u8::from(self.gear.power_open));
-        let (o, m) = ease_toward(self.gear.power_out, behind_to, dt, MORPH_RATE, settle_t(2.0 * self.gear_footer_d()));
-        self.gear.power_out = o;
+        let behind_to = f32::from(u8::from(self.gear.behind_open.is_some() && self.gear.behind_open == self.gear.behind_ix));
+        let (o, m) = ease_toward(self.gear.behind_out, behind_to, dt, MORPH_RATE, settle_t(2.0 * self.gear_footer_d()));
+        self.gear.behind_out = o;
         moving |= m;
         let (sc, m) = ease_toward(
             self.gear.scroll,
@@ -3690,8 +3756,20 @@ impl App {
             "timer-notice" => self.sleep_timer_notice_now(),
             // The footer's buttons behind a button out (`behind off`: in), as
             // the pointer on it would have them; the next pointer move decides.
+            // (`behind timer`: the first footer button with buttons behind it;
+            // alone, the last — the power button.)
             "behind" => {
-                self.gear.power_open = arg != "off";
+                let view = self.gear_view();
+                let with: Vec<usize> =
+                    view.footer.iter().enumerate().filter(|(_, b)| !b.behind.is_empty()).map(|(i, _)| i).collect();
+                self.gear.behind_open = match arg {
+                    "off" => None,
+                    "timer" => with.first().copied(),
+                    _ => with.last().copied(),
+                };
+                if self.gear.behind_open.is_some() {
+                    self.gear.behind_ix = self.gear.behind_open;
+                }
                 self.schedule_stats_frame();
             }
             "fake-off" => {

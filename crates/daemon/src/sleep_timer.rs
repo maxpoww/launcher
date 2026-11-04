@@ -3,10 +3,13 @@
 //! HIBERNATE when it runs out: nothing is lost, Golem's own "off").
 //!
 //! The gear box's footer is [timer, lock, power]: the power button's two
-//! behind it (sleep, restart) come out over the lock and the timer. Each
-//! click on the timer steps it as a television's sleep button does — 15 →
-//! 30 → 60 → 90 minutes → off —, the button lit and showing the minutes
-//! left while it runs.
+//! behind it (sleep, restart) come out over the lock and the timer. A click
+//! sets it to 15 minutes; while it runs the button grows to the left with the
+//! COUNTDOWN beside its hourglass (Max, 2026-11-04: "quiero ver la cuenta
+//! regresiva al lado del símbolo"), and the pointer on it turns the hourglass
+//! into an X — a click cancels — and brings a "+15" out to its left, which
+//! adds a quarter of an hour. (The first cut stepped 15 → 30 → 60 → 90 → off
+//! as a television's sleep button: cancelling took up to four clicks.)
 //!
 //! THE SYSTEM KEEPS IT: a transient user timer (`systemd-run --user
 //! --on-active`, unit `golem-sleep-timer`) hibernates (or, where the machine
@@ -28,8 +31,10 @@ use tracing::{info, warn};
 use crate::App;
 use crate::i18n::tr;
 
-/// The steps a click goes through, in minutes; past the last: off.
-const STEPS: [u32; 4] = [15, 30, 60, 90];
+/// What a click sets, and what "+15" adds, in minutes.
+pub(crate) const STEP: i64 = 15;
+/// No timer runs longer than this (a "+15" held down…).
+const LONGEST: i64 = 12 * 60;
 /// The user unit that does it.
 const UNIT: &str = "golem-sleep-timer";
 /// How long before the end the notice comes.
@@ -55,20 +60,16 @@ fn state_file() -> PathBuf {
     state.join("waverunner").join("sleep-timer")
 }
 
-/// The next step after `left` minutes shown: the first longer one, or off.
-pub(crate) fn next_step(left: Option<u32>) -> Option<u32> {
-    match left {
-        None => Some(STEPS[0]),
-        Some(m) => STEPS.iter().copied().find(|&s| s > m),
+/// The countdown as the button shows it: minutes and seconds ("14:32",
+/// "89:59"), with hours from 100 minutes on ("2:05:00").
+pub(crate) fn countdown(secs: i64) -> String {
+    let secs = secs.max(0);
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if secs >= 100 * 60 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{}:{s:02}", secs / 60)
     }
-}
-
-/// A number as a button's glyph (the buttons hold `&'static str`): made
-/// once each.
-pub(crate) fn minutes_glyph(m: u32) -> &'static str {
-    static GLYPHS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    let glyphs = GLYPHS.get_or_init(|| (0..=99).map(|n: u32| &*Box::leak(n.to_string().into_boxed_str())).collect());
-    glyphs[m.min(99) as usize]
 }
 
 /// A notice with a Cancel button, on the session's notification server;
@@ -126,22 +127,31 @@ fn user_systemctl(args: &[&str]) -> bool {
 }
 
 impl App {
-    /// The minutes left (rounded up), while it runs.
-    pub(crate) fn sleep_timer_left(&self) -> Option<u32> {
+    /// The seconds left, while it runs.
+    pub(crate) fn sleep_timer_left(&self) -> Option<i64> {
         let left = self.sleep_timer.deadline? - now();
-        (left > 0).then(|| ((left + 59) / 60) as u32)
+        (left > 0).then_some(left)
     }
 
-    /// A click on the timer: its next step (the last one: off).
-    pub(crate) fn sleep_timer_step(&mut self) {
-        let next = next_step(self.sleep_timer_left());
-        self.sleep_timer_set(next);
+    /// A click on the timer: set it (`STEP` minutes), or — running, its X —
+    /// cancel it.
+    pub(crate) fn sleep_timer_click(&mut self) {
+        let until = self.sleep_timer_left().is_none().then(|| now() + STEP * 60);
+        self.sleep_timer_set(until);
     }
 
-    /// Set to run out in `minutes` (none: off), in the system.
-    pub(crate) fn sleep_timer_set(&mut self, minutes: Option<u32>) {
+    /// "+15": a quarter of an hour more.
+    pub(crate) fn sleep_timer_more(&mut self) {
+        if let Some(at) = self.sleep_timer.deadline.filter(|_| self.sleep_timer_left().is_some()) {
+            self.sleep_timer_set(Some((at + STEP * 60).min(now() + LONGEST * 60)));
+        }
+    }
+
+    /// Set to run out at `until` (unix seconds; none: off), in the system.
+    pub(crate) fn sleep_timer_set(&mut self, until: Option<i64>) {
         self.sleep_timer.run = self.sleep_timer.run.wrapping_add(1);
-        self.sleep_timer.deadline = minutes.map(|m| now() + i64::from(m) * 60);
+        self.sleep_timer.deadline = until;
+        let secs = until.map(|at| (at - now()).max(1));
         let file = state_file();
         match self.sleep_timer.deadline {
             Some(at) => {
@@ -159,16 +169,16 @@ impl App {
         }
         // (Hibernate where the machine can; else sleep.)
         let action = if self.power_hibernates() { "hibernate" } else { "suspend" };
-        info!("sleep timer: {}", minutes.map_or_else(|| "off".to_owned(), |m| format!("{action} in {m} min")));
+        info!("sleep timer: {}", secs.map_or_else(|| "off".to_owned(), |s| format!("{action} in {}", countdown(s))));
         // The system's own timer, made again each time (on a thread: these
         // ask the user manager).
         self.desktop_off_loop(
             move || {
                 user_systemctl(&["stop", &format!("{UNIT}.timer")]);
                 user_systemctl(&["reset-failed", &format!("{UNIT}.timer"), &format!("{UNIT}.service")]);
-                minutes.is_none_or(|m| {
+                secs.is_none_or(|s| {
                     Command::new("systemd-run")
-                        .args(["--user", "--quiet", "--collect", "--unit", UNIT, "--on-active", &format!("{m}m")])
+                        .args(["--user", "--quiet", "--collect", "--unit", UNIT, "--on-active", &format!("{s}s")])
                         .args(["--timer-property=AccuracySec=1s", "--description", "Golem: the sleep timer", "systemctl", action])
                         .stdin(Stdio::null())
                         .status()
@@ -244,11 +254,21 @@ impl App {
         );
     }
 
-    /// While it runs: the box drawn again each half minute (the minutes on
-    /// the button).
+    /// How often the countdown is drawn again: each second while the gear box
+    /// shows it, else each half minute (nothing on screen counts down).
+    fn sleep_timer_every(&self) -> Duration {
+        if self.gear_page() == Some(crate::gear::PageKind::Gear) {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(30)
+        }
+    }
+
+    /// While it runs: the box drawn again as the countdown goes.
     fn sleep_timer_tick(&mut self) {
         let run = self.sleep_timer.run;
-        let _ = self.loop_handle.insert_source(Timer::from_duration(Duration::from_secs(30)), move |_, _, app: &mut App| {
+        let every = self.sleep_timer_every();
+        let _ = self.loop_handle.insert_source(Timer::from_duration(every), move |_, _, app: &mut App| {
             if app.sleep_timer.run != run || app.sleep_timer_left().is_none() {
                 // (Ran out: the machine went and came back; nothing to keep.)
                 if app.sleep_timer.run == run {
@@ -259,7 +279,7 @@ impl App {
                 return TimeoutAction::Drop;
             }
             app.gear_changed();
-            TimeoutAction::ToDuration(Duration::from_secs(30))
+            TimeoutAction::ToDuration(app.sleep_timer_every())
         });
     }
 }
@@ -269,12 +289,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_click_steps_as_a_tvs_sleep_button() {
-        assert_eq!(next_step(None), Some(15));
-        assert_eq!(next_step(Some(15)), Some(30));
-        assert_eq!(next_step(Some(12)), Some(15));
-        assert_eq!(next_step(Some(60)), Some(90));
-        assert_eq!(next_step(Some(90)), None);
-        assert_eq!(minutes_glyph(30), "30");
+    fn the_countdown_reads_as_a_clock() {
+        assert_eq!(countdown(14 * 60 + 32), "14:32");
+        assert_eq!(countdown(59), "0:59");
+        assert_eq!(countdown(89 * 60 + 59), "89:59");
+        assert_eq!(countdown(125 * 60), "2:05:00");
+        assert_eq!(countdown(-3), "0:00");
     }
 }
