@@ -8,12 +8,13 @@
 //! introducir el tiempo manualmente"): minutes ("45"), hours and minutes
 //! ("1:30", "1h30", "2h"); Enter with nothing typed sets nothing. The words
 //! say "turn off" (Max: "only the words, we want it to hibernate"). While it
-//! runs the COUNTDOWN stands close beside its hourglass ("15:05"), words on
-//! the box, no pill ("no usemos una píldora"); a click on it opens the field
-//! with the whole minutes written, no seconds, to edit (Max: "no secs when
-//! editing"); the pointer on the hourglass turns it into an X — a click
-//! cancels. (Gone, by Max's word: the 15 → 30 → 60 → 90 → off cycle of the
-//! first cut, a "+15" beside the countdown, a "(15)" default.)
+//! runs its symbol is an X — a click cancels ("que el reloj esté siempre en
+//! cancelar cuando el tiempo esté corriendo") — and the COUNTDOWN stands
+//! close beside it ("15:05"), words on the box, no pill ("no usemos una
+//! píldora"); a click on it opens the field with the whole minutes written,
+//! no seconds, to edit (Max: "no secs when editing"). (Gone, by Max's word:
+//! the 15 → 30 → 60 → 90 → off cycle of the first cut, a "+15" beside the
+//! countdown, a "(15)" default, the X only under the pointer.)
 //!
 //! THE SYSTEM KEEPS IT: a transient user timer (`systemd-run --user
 //! --on-active`, unit `golem-sleep-timer`) hibernates (or, where the machine

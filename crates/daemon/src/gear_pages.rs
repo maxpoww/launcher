@@ -1378,19 +1378,19 @@ impl App {
     }
 
     /// The sleep timer's button: an hourglass (a click: the field, to type the
-    /// time); running, the countdown close beside it — words, no pill; a click
-    /// on it edits the minutes — and the pointer on the hourglass turns it into
-    /// an X: a click cancels (Max, 2026-11-04).
+    /// time); running, an X — a click cancels; always, not only under the
+    /// pointer (Max, 2026-11-04: "que el reloj esté siempre en cancelar cuando
+    /// el tiempo esté corriendo") — with the countdown close beside it, words,
+    /// no pill; a click on them edits the minutes.
     fn timer_btn(&self) -> Btn {
         let Some(left) = self.sleep_timer_left() else {
             return btn(sys(SysHit::SleepTimer), G_TIMER);
         };
         Btn {
             hit: sys(SysHit::SleepTimer),
-            glyph: G_TIMER,
+            glyph: G_TIMES,
             label: Some(crate::sleep_timer::countdown(left)),
             label_hit: Some(sys(SysHit::SleepTimerEdit)),
-            hover_glyph: Some(G_TIMES),
             ..Default::default()
         }
     }

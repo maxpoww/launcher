@@ -278,9 +278,6 @@ pub(crate) struct Btn {
     /// to the LEFT, its symbol where it was. With no symbol, the words alone
     /// in the circle ("+15").
     pub(crate) label: Option<String>,
-    /// The symbol while the pointer is on the button or what came out of it
-    /// (the running timer's X).
-    pub(crate) hover_glyph: Option<&'static str>,
     /// The words beside the symbol answer a click of their own (the running
     /// timer's minutes: edited), underlined under the pointer.
     pub(crate) label_hit: Option<Hit>,
@@ -2749,7 +2746,7 @@ impl App {
         // `upto`: a button coming out from behind another (leftward) keeps its
         // symbol off that one (symbols are drawn in one late pass, over every
         // fill).
-        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, upto: Option<f32>, hovered: bool| {
+        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, upto: Option<f32>| {
             if r.y + r.h > bottom || alpha <= 0.01 {
                 return;
             }
@@ -2809,11 +2806,10 @@ impl App {
                     return;
                 }
             }
-            let glyph = if hovered { b.hover_glyph.unwrap_or(b.glyph) } else { b.glyph };
             let circle = Rect::new(br.x + br.w - br.h, br.y, br.h, br.h);
             let gpx = r.h * 0.56;
             scene.labels.push(Label {
-                text: glyph.to_owned(),
+                text: b.glyph.to_owned(),
                 pos: (circle.x + circle.w / 2.0, circle.y + (circle.h - gpx * 1.2) / 2.0),
                 max_w: br.w + 16.0,
                 font_px: gpx,
@@ -2827,7 +2823,7 @@ impl App {
             });
         };
         for (b, r) in view.strip.iter().zip(&lay.strip) {
-            round(scene, b, *r, pen.a, None, false);
+            round(scene, b, *r, pen.a, None);
         }
         let t = if self.gear.arm.is_some() {
             1.0
@@ -2852,11 +2848,10 @@ impl App {
             let mut edge = r.x;
             for (bb, br) in b.behind.iter().zip(behind) {
                 let a = if mine { out } else { 0.0 };
-                round(scene, bb, *br, pen.a * (1.0 - t) * a, Some(edge), false);
+                round(scene, bb, *br, pen.a * (1.0 - t) * a, Some(edge));
                 edge = br.x;
             }
-            let hovered = self.gear.behind_open == Some(i) || b.hit == *hit;
-            round(scene, b, *r, pen.a * (1.0 - t) * own, None, hovered);
+            round(scene, b, *r, pen.a * (1.0 - t) * own, None);
         }
         if let (Some(fr), Some((text, _))) = (lay.field, &self.gear.arm) {
             if fr.y + fr.h <= bottom {
