@@ -811,7 +811,7 @@ fn help_rows() -> Vec<Comp> {
         ("Ctrl+B n p · Ctrl+Tab", tr("the next tab, the one before")),
         ("Ctrl+B l", tr("the tab shown last")),
         ("Ctrl+B c · ./+", tr("a new tab")),
-        ("Ctrl+B x · middle click", tr("close the tab")),
+        ("Ctrl+B x · ×", tr("close the tab")),
         ("Ctrl+B ,", tr("name the tab")),
         ("Ctrl+B o", tr("the tab in a window of its own")),
         ("Ctrl+B y", tr("copy what the last command printed")),
@@ -3420,13 +3420,6 @@ impl App {
         self.term_ask(Req::Close { tab: n });
     }
 
-    /// A middle click on the tabs' row: that tab closes (as a browser's).
-    pub(crate) fn term_middle(&mut self, i: usize) {
-        if let Some(&(n, _)) = self.term_tab_list().get(i).filter(|(n, _)| *n != 0) {
-            self.term_close(n);
-        }
-    }
-
     /// Show tab `n`: the field keeps what is typed, without a tab named.
     fn term_show(&mut self, n: u32) {
         let (_, cmd) = self.term_typed();
@@ -3518,6 +3511,21 @@ impl App {
     /// completion's row past them.
     pub(crate) fn term_click(&mut self, i: usize) {
         let tabs = self.term_tab_list();
+        let rows = self.term_row_rects();
+        // A word's ×: that tab closes (asked first — a second click — when
+        // something runs in it).
+        if let Some(&(n, _)) = i.checked_sub(tabs.len() + rows).and_then(|w| tabs.get(w)).filter(|(n, _)| *n != 0) {
+            if self.term.closing == Some(n) {
+                self.term.closing = None;
+                self.term_close_now(n);
+            } else {
+                self.term_close(n);
+            }
+            self.schedule_frame();
+            return;
+        }
+        // (Anything else clicked: no tab is asked to close any more.)
+        self.term.closing = None;
         if let Some(&(n, _)) = tabs.get(i) {
             if n == 0 {
                 self.term_new_tab();
@@ -3527,6 +3535,24 @@ impl App {
             return;
         }
         self.term_take(i - tabs.len());
+    }
+
+    /// How many completion rows take the pointer now (as many as stand).
+    fn term_row_rects(&self) -> usize {
+        let line = self.term_px().1;
+        crate::content::term_comp_rects(&self.current_layout(), line.max(crate::deep_search::TAB_LINE_PX), line, self.term.comps.len()).len()
+    }
+
+    /// Which tab words can close (a made tab's; not the "+", not a tab
+    /// named but not made yet).
+    pub(crate) fn term_closable(&self) -> Vec<bool> {
+        self.term_tab_list().iter().map(|(n, _)| *n != 0 && self.term_tab(*n).is_some()).collect()
+    }
+
+    /// The word of the tab asked to close, if one is.
+    pub(crate) fn term_closing_word(&self) -> Option<usize> {
+        let n = self.term.closing?;
+        self.term_tab_list().iter().position(|(t, _)| *t == n)
     }
 
     /// A word in the chip for a moment.
@@ -3678,7 +3704,7 @@ impl App {
         }
         if let Some(n) = self.term.closing {
             let program = self.term_tab(n).map(|t| t.command.clone()).unwrap_or_default();
-            return Some(crate::i18n::fill(crate::i18n::tr("{program} is running · Enter closes the tab, Esc keeps it"), &[("program", &program)]));
+            return Some(crate::i18n::fill(crate::i18n::tr("{program} is running · × again or Enter closes the tab, Esc keeps it"), &[("program", &program)]));
         }
         // (A program holds the keys: which, and the way back to the field.)
         if self.term_raw() {
@@ -3755,6 +3781,12 @@ impl App {
                 self.term_prefixed(k, false);
             }
             "click" => self.term_click(arg.parse().unwrap_or(0)),
+            // The pointer's targets on the tabs' row and the rows, in order:
+            // the words, the rows, the words' ×.
+            "rects" => {
+                let rects: Vec<String> = self.current_layout().controls.iter().map(|r| format!("{:.0},{:.0},{:.0},{:.0}", r.x, r.y, r.w, r.h)).collect();
+                info!("term: rects {}", rects.join(" "));
+            }
             // The pointer on the screen without one: "at <x> <y>" says the
             // cell and the link there; "pick <x> <y> [<x2> <y2>]" presses
             // there and lets go there (or at the second place); "cpick" the

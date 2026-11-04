@@ -430,6 +430,9 @@ pub struct TermDraw<'a> {
     /// The tabs' words with a dot: printed out of sight (1), its command
     /// failed out of sight (2: red).
     pub dots: &'a [u8],
+    /// Each tab word's ×: none (0 — the "+", a tab not made yet), there
+    /// (1), the pointer on it (2), asking for a second click (3: red).
+    pub closes: &'a [u8],
     /// Ctrl+F's finds in sight: line, column, length, the one picked.
     pub found: &'a [(usize, u16, u16, bool)],
     /// The hints: line, column, length, the letters that take it.
@@ -438,7 +441,7 @@ pub struct TermDraw<'a> {
 
 /// The air between the terminal's tabs and the field, and their gap.
 pub const TERM_TABS_AIR: f32 = 8.0;
-pub const TERM_TABS_GAP: f32 = 26.0;
+pub const TERM_TABS_GAP: f32 = 30.0;
 /// The completions' gap, their words' air inside them, the notes' size.
 const TERM_COMP_GAP: f32 = 2.0;
 const TERM_COMP_PAD_X: f32 = 14.0;
@@ -474,6 +477,13 @@ pub fn term_view(l: &Layout, tab_h: f32, line_px: f32, n_lines: usize, used: usi
         skip = skip.max(used.saturating_sub(rows));
     }
     (area, skip, rows)
+}
+
+/// Each tab word's × (Max: "i need a way to close the tabs with my
+/// mouse", "i want an X at the right of each tab"): in the gap after the
+/// word, as tall as the word and a little more.
+pub fn term_close_rects(l: &Layout, tab_h: f32, tabs_w: &[f32]) -> Vec<Rect> {
+    term_tab_rects(l, tab_h, tabs_w).into_iter().map(|r| Rect::new(r.x + r.w + 4.0, r.y - 2.0, TERM_TABS_GAP / 2.0 - 4.0, r.h + 4.0)).collect()
 }
 
 /// The completions' rows, `n` of them over the tabs, the first nearest
@@ -5670,8 +5680,34 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         if lit {
             g.rects.push(RectInst { rect: Rect::new(x, top + line + DEEP_UNDERLINE_GAP, w, 1.5), radius: 0.0, color: c, glass: 0.0, border: 0.0 });
         }
-        // (Printed out of sight: a small dot over the word's end.)
+        // The × at the word's right, always: quiet, in full ink under the
+        // pointer, red asking for a second click.
+        let close = t.closes.get(i).copied().unwrap_or(0);
+        if close > 0 {
+            let colour = match close {
+                3 => crate::term::xterm(9, t.colours),
+                2 => ink,
+                _ => faded_on(ink, seen, 0.5, 2.0),
+            };
+            let at = Rect::new(x + w + 4.0, top - 2.0, TERM_TABS_GAP / 2.0 - 4.0, line + 4.0);
+            g.labels.push(Label {
+                text: "×".into(),
+                pos: (at.x + at.w / 2.0, top),
+                max_w: at.w + 4.0,
+                font_px: font,
+                line_px: line,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: crate::options::TEXT_FONT,
+                color: Some(colour),
+                clip: Some(reveal_clip(Rect::new(layout.card_x, top - 4.0, layout.card_w, line + 12.0))),
+            });
+        }
+        // (Printed out of sight: a small dot over the word's end — the ×
+        // in its place while it shows.)
         match t.dots.get(i).copied().unwrap_or(0) {
+            _ if close > 0 => {}
             0 => {}
             dot => {
                 let colour = if dot == 2 { crate::term::xterm(9, t.colours) } else { c };

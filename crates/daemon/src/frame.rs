@@ -412,7 +412,17 @@ impl App {
             let g = content::TERM_TABS_GAP;
             let words = content::term_tab_rects(&layout, tab_h, &self.term.words_w);
             let rows = content::term_comp_rects(&layout, tab_h, line, self.term.comps.len());
-            layout.controls = words.into_iter().map(|r| content::Rect::new(r.x - g / 2.0, r.y - 4.0, r.w + g, r.h + 8.0)).chain(rows).collect();
+            // (Then each word's ×, after the rows; a word that cannot close —
+            // the "+", a tab not made yet — has none. A word's own room ends
+            // where its × begins.)
+            let closable = self.term_closable();
+            let closes: Vec<content::Rect> = content::term_close_rects(&layout, tab_h, &self.term.words_w)
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| if closable.get(i).copied().unwrap_or(false) { r } else { content::Rect::new(0.0, 0.0, 0.0, 0.0) })
+                .collect();
+            layout.controls =
+                words.into_iter().map(|r| content::Rect::new(r.x - g / 2.0, r.y - 4.0, r.w + g / 2.0 + 4.0, r.h + 8.0)).chain(rows).chain(closes).collect();
         }
         // Place the open box. A dock stack floats over its dock icon
         // (`content::row_box`); a grid box (and a dock folder or pinned
@@ -925,6 +935,24 @@ impl App {
             _ => None,
         };
         let n_words = term_words.len();
+        // (The pointer on a word, a row, or a word's ×: the rows counted as
+        // they stand.)
+        let n_rows = content::term_comp_rects(&layout, term_line.max(crate::deep_search::TAB_LINE_PX), term_line, self.term.comps.len()).len();
+        let term_closes: Vec<u8> = if term_on {
+            let closing = self.term_closing_word();
+            self.term_closable()
+                .iter()
+                .enumerate()
+                .map(|(i, &can)| match term_hover {
+                    _ if !can => 0,
+                    _ if closing == Some(i) => 3,
+                    Some(h) if h == n_words + n_rows + i => 2,
+                    _ => 1,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let term_dots = if term_on { self.term_dots() } else { Vec::new() };
         let term_found = if term_on { self.term_found() } else { Vec::new() };
         let term_hints = if term_on { self.term_hint_marks() } else { Vec::new() };
@@ -2028,7 +2056,7 @@ impl App {
                         notes_w: &self.term.notes_w,
                         typed: parse_cmd(&self.search.query),
                         comp_sel: self.term.comp_sel,
-                        comp_hover: term_hover.and_then(|i| i.checked_sub(n_words)),
+                        comp_hover: term_hover.and_then(|i| i.checked_sub(n_words)).filter(|&r| r < n_rows),
                         searching: self.term.searching,
                         ghost: &term_ghost,
                         ghost_w: term_ghost_w,
@@ -2036,6 +2064,7 @@ impl App {
                         sel: self.term.sel,
                         scrolled: self.term.scroll,
                         dots: &term_dots,
+                        closes: &term_closes,
                         found: &term_found,
                         hints: &term_hints,
                     })

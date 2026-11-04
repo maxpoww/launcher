@@ -8988,10 +8988,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 // Middle-click a dock/grid app: force a fresh instance even
                 // if it is already running (Linux-native "new window").
                 app.update_hover();
-                // (The terminal's tab word: that tab closes.)
-                if let Some(Hit::Control(i)) = app.hover.filter(|_| app.term_on()) {
-                    app.term_middle(i);
-                }
                 if let Some(hit @ (Hit::DockIcon(_) | Hit::GridCell(..))) = app.hover {
                     app.force_new_instance = true;
                     app.activate_hit(hit);

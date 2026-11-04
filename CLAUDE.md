@@ -685,7 +685,9 @@ The big daemon files are cohesive but long — go straight to the function:
   Ctrl+F (`find`, `Req::Find` over `capture-pane -S - -E -`, Enter/Up older, Down newer, finds lit),
   `content::term_view` = the ONE mapping of screen lines to rows (drawing and the pointer). THE TABS:
   `./* cmd`, `./1,3 cmd`, `./+ cmd` (`Many`), Alt+1…9, Ctrl+Tab/Ctrl+Shift+Tab, Ctrl+PageUp/Down, Ctrl+B ← →,
-  Ctrl+B x/& and middle click close (`closing` asks when something runs), Ctrl+B , names (`renaming`;
+  Ctrl+B x/& and the × at each tab word's right close — Max: "no middle click, i want an X at the right of each
+  tab" (`term_close_rects`, after the rows in `layout.controls`; `closing` asks — a second click — when something
+  runs), Ctrl+B , names (`renaming`;
   `#{?automatic-rename,,1}` + `window_name`), a dot on a word that printed out of sight (`busy`), red when its
   command failed (`failed_tabs`), Ctrl+B y copies what the last command printed (`sent_at` = history line when
   sent → `Req::CopyOutput`), Ctrl+B ? lists the keys (`help`, `help_rows`), the tabs' folders kept

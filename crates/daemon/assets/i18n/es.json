@@ -1481,7 +1481,7 @@
  "the keys back from a program": "recuperar las teclas de un programa",
  "{program} ended · tab {n}": "{program} terminó · pestaña {n}",
  "It ran {time}": "Corrió {time}",
- "{program} is running · Enter closes the tab, Esc keeps it": "{program} está corriendo · Enter cierra la pestaña, Esc la deja",
+ "{program} is running · × again or Enter closes the tab, Esc keeps it": "{program} está corriendo · × de nuevo o Enter cierra la pestaña, Esc la deja",
  "script": "script",
  "{program} has the keys · Ctrl+Esc types here": "{program} tiene las teclas · Ctrl+Esc escribe acá",
  "The terminal could not start: {why}": "El terminal no pudo arrancar: {why}"
