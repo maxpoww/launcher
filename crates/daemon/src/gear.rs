@@ -260,19 +260,24 @@ pub(crate) enum Item {
     Note(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Btn {
     pub(crate) hit: Hit,
     pub(crate) glyph: &'static str,
     /// Drawn pressed-in: the state it switches is on.
     pub(crate) lit: bool,
+    /// Buttons tucked behind this one, out to its right while the pointer is
+    /// on it (the power button: sleep, restart — the banner's power pills).
+    pub(crate) behind: Vec<Btn>,
+    /// Its ground breathes red, as the banner's power pill does.
+    pub(crate) breathes: bool,
 }
 
 pub(crate) fn btn(hit: Hit, glyph: &'static str) -> Btn {
     Btn {
         hit,
         glyph,
-        lit: false,
+        ..Default::default()
     }
 }
 
@@ -297,6 +302,8 @@ pub(crate) struct Layout {
     items: Vec<Rect>,
     strip: Vec<Rect>,
     footer: Vec<Rect>,
+    /// Each footer button's buttons behind it, as far out as they are.
+    footer_behind: Vec<Vec<Rect>>,
     field: Option<Rect>,
     total_h: f32,
 }
@@ -397,6 +404,10 @@ pub(crate) struct GearState {
     /// A thing that cannot be undone, asked once: what the footer says, and
     /// what a second click does.
     pub(crate) arm: Option<(String, Hit)>,
+    /// The pointer is on a footer button with buttons behind it (or on them):
+    /// they come out, 0 → 1.
+    power_open: bool,
+    power_out: f32,
 }
 
 impl GearState {
@@ -1226,6 +1237,7 @@ impl App {
                     hit: Hit::Hotspot,
                     glyph: G_HOTSPOT,
                     lit: snap.hotspot_on || snap.bt_share_on,
+                    ..Default::default()
                 },
                 btn(Hit::Airplane, G_PLANE),
             ],
@@ -1261,12 +1273,14 @@ impl App {
                 hit: Hit::NetShare,
                 glyph: G_QR,
                 lit: g.share,
+                ..Default::default()
             });
             if g.share {
                 strip.push(Btn {
                     hit: Hit::NetShowPw,
                     glyph: G_EYE,
                     lit: g.show_pw,
+                    ..Default::default()
                 });
             }
         }
@@ -1492,6 +1506,7 @@ impl App {
                     hit: Hit::HsEye,
                     glyph: G_EYE,
                     lit: g.show_pw,
+                    ..Default::default()
                 },
             ],
             items,
@@ -1631,17 +1646,20 @@ impl App {
                     hit: Hit::BtScan,
                     glyph: G_REFRESH,
                     lit: snap.discovering,
+                    ..Default::default()
                 },
                 Btn {
                     hit: Hit::BtVisible,
                     glyph: G_EYE,
                     lit: snap.discoverable,
+                    ..Default::default()
                 },
                 btn(Hit::BtFiles, G_SEND),
                 Btn {
                     hit: Hit::Hotspot,
                     glyph: G_HOTSPOT,
                     lit: g.net_snap.bt_share_on || g.net_snap.hotspot_on,
+                    ..Default::default()
                 },
                 btn(Hit::Airplane, G_PLANE),
             ],
@@ -1882,6 +1900,23 @@ impl App {
                 )
             })
             .collect();
+        // (Out to the right of their button, which keeps its place: the row
+        // is centred on what stands there at rest, so nothing moves under
+        // the hand as they come.)
+        let out = self.gear.power_out.clamp(0.0, 1.0);
+        let footer_behind = view
+            .footer
+            .iter()
+            .zip(&footer)
+            .map(|(b, r): (&Btn, &Rect)| {
+                (0..b.behind.len())
+                    .map(|k| {
+                        let to = r.x + (k as f32 + 1.0) * (d + FOOTER_GAP * s);
+                        Rect::new(lerp(r.x, to, out), r.y, d, d)
+                    })
+                    .collect()
+            })
+            .collect();
         let field = (has_field || armed).then(|| {
             let full = Rect::new(
                 rect.x + FIELD_PAD * s,
@@ -1915,6 +1950,7 @@ impl App {
             items,
             strip,
             footer,
+            footer_behind,
             field,
             total_h: y + self.gear.scroll - content.y,
         }
@@ -1972,7 +2008,12 @@ impl App {
                 return Hit::Field;
             }
         } else {
-            for (b, r) in view.footer.iter().zip(&lay.footer) {
+            for ((b, r), behind) in view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind) {
+                if self.gear.power_out > 0.5 {
+                    if let Some((bb, _)) = b.behind.iter().zip(behind).find(|(_, br)| br.contains(p)) {
+                        return bb.hit.clone();
+                    }
+                }
                 if r.contains(p) {
                     return b.hit.clone();
                 }
@@ -2003,7 +2044,29 @@ impl App {
         let hit = self.gear_hit_at();
         let changed = hit != self.gear.hit;
         self.gear.hit = hit;
+        let open = self.gear_behind_ptr_on();
+        if open != self.gear.power_open {
+            self.gear.power_open = open;
+            self.schedule_stats_frame();
+        }
         changed
+    }
+
+    /// Whether the pointer is on a footer button with buttons behind it, or on
+    /// those — the gaps between included, so crossing them is not leaving.
+    fn gear_behind_ptr_on(&self) -> bool {
+        let (Some(p), Some(_)) = (self.options_ptr, self.gear_page()) else {
+            return false;
+        };
+        if self.gear.field.is_some() || self.gear.arm.is_some() || self.stats_open_t() < 0.5 {
+            return false;
+        }
+        let view = self.gear_view();
+        let lay = self.gear_layout(&view, self.gear_rect());
+        view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).any(|((b, r), behind)| {
+            let right = behind.iter().map(|x| x.x + x.w).fold(r.x + r.w, f32::max);
+            !b.behind.is_empty() && p.1 >= r.y && p.1 <= r.y + r.h && p.0 >= r.x && p.0 <= right
+        })
     }
 
     pub(crate) fn gear_hit_clickable(&self) -> bool {
@@ -2617,7 +2680,9 @@ impl App {
         // palette, or Off in Light) over a wallpaper of the other kind left
         // them white on a light box (the Acer, 2026-10-17).
         let glyph_ink = pen.ink;
-        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32| {
+        // `from`: a button coming out from behind another keeps its symbol off
+        // that one (symbols are drawn in one late pass, over every fill).
+        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, from: Option<f32>| {
             if r.y + r.h > bottom || alpha <= 0.01 {
                 return;
             }
@@ -2631,6 +2696,11 @@ impl App {
                 base[3] *= alpha;
                 scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
             }
+            if b.breathes {
+                let red = crate::power_pill::breath_fill(alpha);
+                scene.rects.push(RectInst { rect: br, radius, color: red, glass: 0.0, border: 0.0 });
+            }
+            let edge = from.unwrap_or(f32::MIN).max(br.x - 4.0);
             let gpx = r.h * 0.56;
             scene.labels.push(Label {
                 text: b.glyph.to_owned(),
@@ -2648,11 +2718,11 @@ impl App {
                     glyph_ink[2],
                     glyph_ink[3] * alpha,
                 ]),
-                clip: Some(Rect::new(br.x - 4.0, br.y - 4.0, br.w + 8.0, br.h + 8.0)),
+                clip: Some(Rect::new(edge, br.y - 4.0, (br.x + br.w + 4.0 - edge).max(0.0), br.h + 8.0)),
             });
         };
         for (b, r) in view.strip.iter().zip(&lay.strip) {
-            round(scene, b, *r, pen.a);
+            round(scene, b, *r, pen.a, None);
         }
         let t = if self.gear.arm.is_some() {
             1.0
@@ -2661,8 +2731,15 @@ impl App {
         } else {
             0.0
         };
-        for (b, r) in view.footer.iter().zip(&lay.footer) {
-            round(scene, b, *r, pen.a * (1.0 - t));
+        let out = ((self.gear.power_out - 0.15) / 0.6).clamp(0.0, 1.0);
+        for ((b, r), behind) in view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind) {
+            // The ones behind first: their button covers them as they come out.
+            let mut edge = r.x + r.w;
+            for (bb, br) in b.behind.iter().zip(behind) {
+                round(scene, bb, *br, pen.a * (1.0 - t) * out, Some(edge));
+                edge = br.x + br.w;
+            }
+            round(scene, b, *r, pen.a * (1.0 - t), None);
         }
         if let (Some(fr), Some((text, _))) = (lay.field, &self.gear.arm) {
             if fr.y + fr.h <= bottom {
@@ -2855,6 +2932,15 @@ impl App {
             self.gear.field_t = t;
             moving |= m;
         }
+        let behind_to = f32::from(u8::from(self.gear.power_open));
+        let (o, m) = ease_toward(self.gear.power_out, behind_to, dt, MORPH_RATE, settle_t(2.0 * self.gear_footer_d()));
+        self.gear.power_out = o;
+        moving |= m;
+        // A breathing button is motion: frames while one stands in the footer.
+        moving |= !crate::animation::reduce_motion()
+            && self.gear.arm.is_none()
+            && self.gear.field.is_none()
+            && self.gear_view().footer.iter().any(|b| b.breathes);
         let (sc, m) = ease_toward(
             self.gear.scroll,
             self.gear.scroll_target,
@@ -3591,6 +3677,12 @@ impl App {
                 self.gear.debug_hold = false;
                 self.set_stats_box(false);
                 self.update_stats_reveal();
+            }
+            // The footer's buttons behind a button out (`behind off`: in), as
+            // the pointer on it would have them; the next pointer move decides.
+            "behind" => {
+                self.gear.power_open = arg != "off";
+                self.schedule_stats_frame();
             }
             "fake-off" => {
                 // A picture of the compact page; the next poll puts it right.
