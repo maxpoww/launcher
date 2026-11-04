@@ -138,7 +138,22 @@ pub(crate) fn used_lines(lines: &[Vec<Span>], cursor: Option<(u16, u16)>) -> usi
     lines.iter().rposition(|l| l.iter().any(|s| !s.text.trim().is_empty())).max(cursor.map(|(_, y)| usize::from(y))).map_or(0, |i| i + 1)
 }
 
-/// A screen line as its cells (a character each, spaces where nothing is).
+/// How many cells a character takes, as tmux counts them: two for an emoji
+/// or a CJK one, none for a mark that joins the one before.
+pub(crate) fn cell_width(c: char) -> u16 {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16
+}
+
+/// A run's cells.
+pub(crate) fn text_cells(text: &str) -> u16 {
+    text.chars().map(cell_width).sum()
+}
+
+/// What a wide character's second cell holds in `line_cells`.
+pub(crate) const WIDE: char = '\u{0}';
+
+/// A screen line as its cells (a character each — a wide one then `WIDE`
+/// —, spaces where nothing is).
 pub(crate) fn line_cells(line: &[Span]) -> Vec<char> {
     let mut cells: Vec<char> = Vec::new();
     for span in line {
@@ -147,9 +162,20 @@ pub(crate) fn line_cells(line: &[Span]) -> Vec<char> {
             cells.resize(at, ' ');
         }
         cells.truncate(at);
-        cells.extend(span.text.chars());
+        for c in span.text.chars() {
+            match cell_width(c) {
+                0 => {}
+                1 => cells.push(c),
+                _ => cells.extend([c, WIDE]),
+            }
+        }
     }
     cells
+}
+
+/// Cells as text again (a wide character's second cell left out).
+pub(crate) fn cells_text(cells: &[char]) -> String {
+    cells.iter().filter(|&&c| c != WIDE).collect()
 }
 
 /// The word round cell `col` of a line, as columns (a double click's).
@@ -173,7 +199,7 @@ fn word_at(cells: &[char], col: usize) -> Option<(usize, usize)> {
 /// there (from the tab's folder `dir`; a ":12:3" after it left out).
 pub(crate) fn link_at(cells: &[char], col: usize, dir: &str) -> Option<String> {
     let (a, b) = word_at(cells, col)?;
-    let word: String = cells[a..=b].iter().collect();
+    let word = cells_text(&cells[a..=b]);
     let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"']);
     if ["http://", "https://", "file://"].iter().any(|p| word.starts_with(p)) {
         return Some(word.to_owned());
@@ -349,6 +375,108 @@ pub(crate) fn find_in(lines: &[&str], needle: &str) -> Vec<(u64, u16, u16)> {
     hits
 }
 
+/// HINTS (kitty's hints, WezTerm's quick select, tmux-fingers): what can be
+/// taken off the screen — a link, a path, a hash, a number, an address —
+/// with the letters that take it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Hint {
+    pub line: usize,
+    pub col: u16,
+    pub len: u16,
+    pub text: String,
+    pub label: String,
+}
+
+/// Whether a word of the screen is worth a hint: a link, a path, a hash, a
+/// number of three digits or more, an address (IP, e-mail).
+pub(crate) fn worth_a_hint(w: &str) -> bool {
+    if ["http://", "https://", "file://", "ftp://", "www."].iter().any(|p| w.starts_with(p)) {
+        return w.len() > 8;
+    }
+    let alnum = w.chars().filter(char::is_ascii_alphanumeric).count();
+    if w.contains('/') && w.len() >= 3 && alnum >= 2 {
+        return true;
+    }
+    let hex = w.len() >= 7 && w.len() <= 64 && w.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    if hex && w.bytes().any(|b| b.is_ascii_digit()) && w.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return true;
+    }
+    if w.len() >= 3 && w.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    let ip = w.split('.').count() == 4 && w.split('.').all(|p| !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()));
+    ip || (w.contains('@') && w.contains('.') && alnum >= 4)
+}
+
+/// The hints of the screen's lines `from..to` (`cols` wide: a word that
+/// reaches the edge goes on at the next line's start), the lowest (the
+/// newest output) with the shortest letters: one each while there are few,
+/// two each past the alphabet.
+pub(crate) fn hints_in(lines: &[Vec<Span>], from: usize, to: usize, cols: usize) -> Vec<Hint> {
+    const KEYS: &str = "asdfghjklqwertyuiopzxcvbnm";
+    let mut found = Vec::new();
+    // (The line before ended in a word that went on here.)
+    let mut wrapped = false;
+    for (l, line) in lines.iter().enumerate().take(to).skip(from) {
+        let cells = line_cells(line);
+        let goes_on = std::mem::take(&mut wrapped);
+        let mut c = 0;
+        if goes_on {
+            while c < cells.len() && !cells[c].is_whitespace() {
+                c += 1;
+            }
+        }
+        while c < cells.len() {
+            if cells[c].is_whitespace() {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < cells.len() && !cells[c].is_whitespace() {
+                c += 1;
+            }
+            // (The word without what wraps it: quotes, brackets, a full stop.)
+            let (mut a, mut b) = (start, c);
+            while a < b && "([{<'\"`".contains(cells[a]) {
+                a += 1;
+            }
+            while b > a && ")]}>'\"`.,;:!?".contains(cells[b - 1]) {
+                b -= 1;
+            }
+            let mut word = cells_text(&cells[a..b]);
+            // (Up to the edge: what goes on at the next line's start is the
+            // same word.)
+            if c >= cols && b == c {
+                if let Some(next) = lines.get(l + 1) {
+                    let more = line_cells(next);
+                    let end = more.iter().position(|ch| ch.is_whitespace()).unwrap_or(more.len());
+                    let mut tail = end;
+                    while tail > 0 && ")]}>'\"`.,;:!?".contains(more[tail - 1]) {
+                        tail -= 1;
+                    }
+                    word.push_str(&cells_text(&more[..tail]));
+                    wrapped = true;
+                }
+            }
+            if worth_a_hint(&word) && !found.iter().any(|h: &Hint| h.text == word) {
+                found.push(Hint { line: l, col: a as u16, len: (b - a) as u16, text: word, label: String::new() });
+            }
+        }
+    }
+    let keys: Vec<char> = KEYS.chars().collect();
+    let two = found.len() > keys.len();
+    let n = found.len();
+    for (i, h) in found.iter_mut().enumerate() {
+        // (Counted from the bottom.)
+        let k = n - 1 - i;
+        h.label = if two { format!("{}{}", keys[(k / keys.len()) % keys.len()], keys[k % keys.len()]) } else { keys[k].to_string() };
+    }
+    if two {
+        found.truncate(keys.len() * keys.len());
+    }
+    found
+}
+
 /// What the box asks the engine's thread.
 enum Req {
     /// The server up (made if it is not), the watcher on, the tabs read.
@@ -484,6 +612,13 @@ pub(crate) struct TermState {
     pub help: bool,
     /// Ctrl+F: the tab's history searched.
     pub find: Option<Find>,
+    /// Ctrl+B f / Ctrl+Shift+Space: the hints on the screen (held still
+    /// meanwhile), and the letters typed of one.
+    pub hints: Option<(Vec<Hint>, String)>,
+    /// The last command each tab ran, as its hook said: its status, its line.
+    last_run: std::collections::HashMap<u32, (i32, String)>,
+    /// A tick each second while a tab runs something (its word says how long).
+    ticking: bool,
     /// What runs in each tab and since when (its end out of sight, after a
     /// while, is told).
     running: std::collections::HashMap<u32, (String, Instant)>,
@@ -627,6 +762,18 @@ pub(crate) fn key_name(keysym: Keysym, ctrl: bool, alt: bool, utf8: Option<&str>
     Some(Key::Text(text.to_owned()))
 }
 
+/// How long, as short as a tab's word wants it: "12s", "4m", "2h".
+fn short_time(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{}h", s / 3600)
+    }
+}
+
 /// How long something took, in words: "42 s", "3 min", "1 h 20 min".
 pub(crate) fn took_words(d: Duration) -> String {
     let s = d.as_secs();
@@ -663,6 +810,7 @@ fn help_rows() -> Vec<Comp> {
         ("Ctrl+B y", tr("copy what the last command printed")),
         ("Ctrl+R", tr("search the history")),
         ("Ctrl+F", tr("find in the tab's history")),
+        ("Ctrl+B f · Ctrl+Shift+Space", tr("take a link, a path, a hash off the screen")),
         ("./* · ./1,3", tr("a command to every tab, to some")),
         ("Shift+PageUp · wheel", tr("back in the tab's history")),
         ("Ctrl+click", tr("open a link or a file")),
@@ -732,7 +880,7 @@ pub(crate) fn parse_line(line: &str) -> Vec<Span> {
             continue;
         }
         cur.text.push(c);
-        col = col.saturating_add(1);
+        col = col.saturating_add(cell_width(c));
     }
     flush(&mut spans, &mut cur, col);
     spans
@@ -1844,6 +1992,7 @@ impl App {
         }
         self.term.help = false;
         self.term.find = None;
+        self.term.hints = None;
         // (What is typed changed: the view back to the screen as it is.)
         if self.term.scroll > 0 {
             self.term.scroll = 0;
@@ -1865,6 +2014,7 @@ impl App {
         } else {
             self.term_capture();
         }
+        self.term_tick();
         // (The file read again only when it changed: commands typed in
         // other terminals come in too.)
         self.term_ask(Req::History);
@@ -1912,7 +2062,18 @@ impl App {
         }
         // The suggestion: the newest command typed before that goes on from
         // what is typed (the caret at its end).
-        self.term.ghost = if cmd.is_empty() || quiet || self.term.searching || self.term.hist_at.is_some() || self.term.caret_back > 0 {
+        // (Nothing typed, the tab's last command not found — status 127 —: to
+        // run it from nixpkgs, Golem's way.)
+        let missing = match self.term.last_run.get(&self.term_shown()) {
+            Some((127, line)) if cmd.is_empty() && !quiet => {
+                let first = line.split_whitespace().find(|w| !RUNNERS.contains(w) && !w.contains('=')).unwrap_or("");
+                (!first.is_empty() && first.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))).then(|| format!("nix shell nixpkgs#{first} -c {}", line.trim()))
+            }
+            _ => None,
+        };
+        self.term.ghost = if let Some(m) = missing {
+            m
+        } else if cmd.is_empty() || quiet || self.term.searching || self.term.hist_at.is_some() || self.term.caret_back > 0 {
             String::new()
         } else {
             self.term.hist.iter().chain(&self.term.sent).rev().find(|(_, h)| h.len() > cmd.len() && h.starts_with(&cmd)).map(|(_, h)| h[cmd.len()..].to_owned()).unwrap_or_default()
@@ -1972,7 +2133,7 @@ impl App {
                     .iter()
                     .flat_map(|s| s.lines.iter().rev())
                     .flat_map(|l| {
-                        let text: String = line_cells(l).into_iter().collect();
+                        let text = cells_text(&line_cells(l));
                         text.split(|c: char| c.is_whitespace() || "'\"()[]{}<>,;|=`".contains(c)).map(str::to_owned).collect::<Vec<_>>()
                     })
                     .filter(|w| w.len() > word.len() && w.len() >= 3 && w.starts_with(word))
@@ -2051,12 +2212,17 @@ impl App {
             Ev::Tabs(tabs) => {
                 self.term_ran(&tabs);
                 self.term_went(&tabs);
+                self.term_tick();
                 self.term.tabs = tabs;
                 self.term_capture();
                 self.schedule_frame();
             }
             Ev::Screen(screen) => {
                 self.term.capturing = false;
+                // (Hints up: the screen held still under them.)
+                if self.term.hints.is_some() {
+                    return;
+                }
                 if screen.tab == self.term_shown() {
                     if !screen.alternate {
                         self.term.keys_to_field = false;
@@ -2275,6 +2441,7 @@ impl App {
             };
             if let Some((status, secs, line)) = parse_status(&raw).filter(|_| news) {
                 self.term.running.remove(&t.n);
+                self.term.last_run.insert(t.n, (status, line.clone()));
                 self.term_told(t.n, &line, Duration::from_secs(secs), Some(status), seen);
                 continue;
             }
@@ -2291,6 +2458,24 @@ impl App {
             }
         }
         self.term.running.retain(|n, _| tabs.iter().any(|t| t.n == *n));
+    }
+
+    /// While the box shows the terminal and a tab runs something: a frame
+    /// each second (the word's time goes on).
+    fn term_tick(&mut self) {
+        if self.term.ticking || self.term.running.is_empty() {
+            return;
+        }
+        self.term.ticking = true;
+        let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(Duration::from_secs(1)), |_, _, app: &mut App| {
+            let open = app.term_on() && app.ui.target() == crate::state::Target::Open;
+            if app.term.running.is_empty() || !open {
+                app.term.ticking = false;
+                return calloop::timer::TimeoutAction::Drop;
+            }
+            app.schedule_frame();
+            calloop::timer::TimeoutAction::ToDuration(Duration::from_secs(1))
+        });
     }
 
     /// A command ended in tab `n`: a failure marks its word (red, out of
@@ -2390,6 +2575,49 @@ impl App {
                 }
             }
             self.schedule_frame();
+            return true;
+        }
+        // Hints: the letters take one — into the field at the caret, or
+        // (a capital) to the clipboard; Escape leaves them.
+        if let Some((hints, mut typed)) = self.term.hints.take() {
+            if keysym == Keysym::Escape {
+                self.term_capture();
+                self.schedule_frame();
+                return true;
+            }
+            let text: String = utf8.unwrap_or("").chars().filter(char::is_ascii_alphabetic).collect();
+            if text.is_empty() {
+                self.term.hints = Some((hints, typed));
+                return true;
+            }
+            typed.push_str(&text);
+            let low = typed.to_lowercase();
+            if let Some(h) = hints.iter().find(|h| h.label == low) {
+                let take = h.text.clone();
+                self.term_capture();
+                if typed.chars().any(|c| c.is_ascii_uppercase()) {
+                    self.copy_text(&take);
+                    self.term_flash(crate::i18n::tr("Copied"));
+                } else {
+                    let at = self.term_caret();
+                    let start = self.term_typed().0.len();
+                    let space = at > start && !self.search.query[..at].ends_with(' ');
+                    self.search.query.insert_str(at, &format!("{}{take} ", if space { " " } else { "" }));
+                    self.refilter();
+                }
+                self.schedule_frame();
+                return true;
+            }
+            // (Letters no hint begins with: typed again from nothing.)
+            if !hints.iter().any(|h| h.label.starts_with(&low)) {
+                typed.clear();
+            }
+            self.term.hints = Some((hints, typed));
+            self.schedule_frame();
+            return true;
+        }
+        if ctrl && self.modifiers.shift && keysym == Keysym::space {
+            self.term_hints();
             return true;
         }
         // Ctrl+F: the field is what is looked for; Enter and Up the find
@@ -2798,6 +3026,35 @@ impl App {
         self.refilter();
     }
 
+    /// The hints of what the screen shows now (the lines in sight).
+    fn term_hints(&mut self) {
+        let Some(screen) = self.term.screen.as_ref() else {
+            return;
+        };
+        let layout = self.current_layout();
+        let line = self.term_px().1;
+        let tab_h = line.max(crate::deep_search::TAB_LINE_PX);
+        let used = used_lines(&screen.lines, screen.cursor);
+        let (_, skip, rows) = crate::content::term_view(&layout, tab_h, line, screen.lines.len(), used, self.term.comps.len());
+        let hints = hints_in(&screen.lines, skip, skip + rows, usize::from(self.term.size.0));
+        if hints.is_empty() {
+            self.term_flash(crate::i18n::tr("Nothing to take"));
+            return;
+        }
+        self.term.hints = Some((hints, String::new()));
+        self.schedule_frame();
+    }
+
+    /// The hints to draw: (line, column, length, letters) of those the
+    /// letters typed still lead to.
+    pub(crate) fn term_hint_marks(&self) -> Vec<(usize, u16, u16, String)> {
+        let Some((hints, typed)) = self.term.hints.as_ref() else {
+            return Vec::new();
+        };
+        let low = typed.to_lowercase();
+        hints.iter().filter(|h| h.label.starts_with(&low)).map(|h| (h.line, h.col, h.len, h.label.clone())).collect()
+    }
+
     /// Look for `needle` in the shown tab.
     fn term_find(&mut self, needle: String) {
         if let Some(f) = self.term.find.as_mut() {
@@ -2979,7 +3236,7 @@ impl App {
             let cells = screen.lines.get(l).map(|x| line_cells(x)).unwrap_or_default();
             let from = if l == al { usize::from(ac) } else { 0 };
             let to = if l == bl { usize::from(bc) + 1 } else { cells.len() };
-            let piece: String = cells.get(from.min(cells.len())..to.min(cells.len())).unwrap_or(&[]).iter().collect();
+            let piece = cells_text(cells.get(from.min(cells.len())..to.min(cells.len())).unwrap_or(&[]));
             out.push(piece.trim_end().to_owned());
         }
         let text = out.join("\n");
@@ -3040,6 +3297,10 @@ impl App {
                     (Some(from), Some(pane)) => self.term_ask(Req::CopyOutput { pane, from }),
                     _ => self.term_flash(crate::i18n::tr("Nothing printed")),
                 }
+                None
+            }
+            Some('f') => {
+                self.term_hints();
                 None
             }
             Some('?') => {
@@ -3229,6 +3490,8 @@ impl App {
         }
         if self.term.prefix {
             "Ctrl+B"
+        } else if self.term.hints.is_some() {
+            crate::i18n::tr("Take")
         } else if self.term.find.is_some() {
             crate::i18n::tr("Find")
         } else if self.term.renaming.is_some() {
@@ -3245,7 +3508,7 @@ impl App {
     /// Where the caret stands in what the field shows, as the bytes before
     /// it (`None`: at the end), and the suggestion after it.
     pub(crate) fn term_field_caret(&self) -> (Option<usize>, &str) {
-        if !self.term_on() || self.term_raw() || self.term_secret() || self.term.renaming.is_some() || self.term.closing.is_some() || self.term.find.is_some() {
+        if !self.term_on() || self.term_raw() || self.term_secret() || self.term.renaming.is_some() || self.term.closing.is_some() || self.term.find.is_some() || self.term.hints.is_some() {
             return (None, "");
         }
         let caret = (self.term.caret_back > 0).then(|| self.term_caret());
@@ -3270,6 +3533,12 @@ impl App {
             info!("term: {} tabs, a command", tabs.len());
             for &tab in &tabs {
                 self.term_ask(Req::Keys { tab, keys: keys.clone(), dir: dir.clone() });
+            }
+            if !keys.is_empty() {
+                let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(Duration::from_millis(400)), |_, _, app: &mut App| {
+                    app.term_ask(Req::Tabs);
+                    calloop::timer::TimeoutAction::Drop
+                });
             }
             if !ask.cmd.is_empty() {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -3307,6 +3576,7 @@ impl App {
         self.term.comps_all = None;
         self.term.searching = false;
         self.term.caret_back = 0;
+        self.term.last_run.remove(&tab);
         // (Where its screen stands as the command goes: Ctrl+B y copies
         // what it prints from there.)
         match self.term.screen.as_ref().filter(|s| s.tab == tab && s.scroll == 0 && !keys.is_empty()) {
@@ -3320,8 +3590,17 @@ impl App {
             None => {}
         }
         self.term.current = tab;
+        let sent = !keys.is_empty();
         self.term_ask(Req::Keys { tab, keys, dir });
         self.term_ask(Req::History);
+        // (A moment later the command runs: the tabs read again, so its word
+        // says what runs even when it prints nothing.)
+        if sent {
+            let _ = self.loop_handle.insert_source(calloop::timer::Timer::from_duration(Duration::from_millis(400)), |_, _, app: &mut App| {
+                app.term_ask(Req::Tabs);
+                calloop::timer::TimeoutAction::Drop
+            });
+        }
         self.search.query = "./".into();
         self.refilter();
     }
@@ -3329,6 +3608,9 @@ impl App {
     /// What the field shows: what is typed, or — a password asked — its
     /// dots after the `./N`.
     pub(crate) fn term_field_text(&self) -> Option<String> {
+        if let Some((_, typed)) = &self.term.hints {
+            return Some(if typed.is_empty() { crate::i18n::tr("a letter puts it in the line · a capital copies it").to_string() } else { typed.clone() });
+        }
         if let Some(f) = &self.term.find {
             if f.needle.is_empty() || f.hits.is_empty() {
                 return Some(f.needle.clone());
@@ -3446,7 +3728,11 @@ impl App {
     /// new one.
     fn term_tab_list(&self) -> Vec<(u32, String)> {
         let shown = self.term_shown();
-        let mut words: Vec<(u32, String)> = self.term.tabs.iter().map(|t| (t.n, format!("{} {}", t.n, t.name()))).collect();
+        // (Something running a while: how long, after its name.)
+        let ran = |n: u32| {
+            self.term.running.get(&n).map(|(_, since)| since.elapsed()).filter(|d| *d >= LONG_RUN).map_or(String::new(), |d| format!(" {}", short_time(d)))
+        };
+        let mut words: Vec<(u32, String)> = self.term.tabs.iter().map(|t| (t.n, format!("{} {}{}", t.n, t.name(), ran(t.n)))).collect();
         if !words.iter().any(|(n, _)| *n == shown) {
             words.push((shown, format!("{shown} {}", crate::i18n::tr("new"))));
             words.sort_by_key(|(n, _)| *n);
@@ -3551,6 +3837,36 @@ mod tests {
         assert_eq!(parse_status("1 100 112 cargo build --release\n"), Some((1, 12, "cargo build --release".into())));
         assert_eq!(parse_status("0 5 5 \n"), Some((0, 0, String::new())));
         assert_eq!(parse_status(""), None);
+    }
+
+    #[test]
+    fn a_wide_character_takes_two_cells() {
+        // (Max's prompt: "term 🎩 box-terminal".)
+        let spans = parse_line("term 🎩 \u{1b}[1mbox\u{1b}[0m");
+        assert_eq!(spans[1].col, 8);
+        let cells = line_cells(&spans);
+        assert_eq!(cells[5], '🎩');
+        assert_eq!(cells[6], WIDE);
+        assert_eq!(cells_text(&cells), "term 🎩 box");
+        assert_eq!(text_cells("a🦀"), 3);
+    }
+
+    #[test]
+    fn hints_take_links_paths_hashes_numbers() {
+        for w in ["https://golem.example/x", "src/main.rs:12", "~/Golem", "a1b2c3d", "192.168.1.85", "31337", "max@golem.dev"] {
+            assert!(worth_a_hint(w), "{w}");
+        }
+        for w in ["hello", "12", "deadbee", "--flag", "/", "a.b"] {
+            assert!(!worth_a_hint(w), "{w}");
+        }
+        let lines = vec![parse_line("see (https://x.org/a). and src/a.rs"), parse_line("commit 9fceb02d0ae598e95dc970b74767f19372d61af8")];
+        let h = hints_in(&lines, 0, 2, 80);
+        assert_eq!(h.iter().map(|h| (h.text.as_str(), h.label.as_str())).collect::<Vec<_>>(), [("https://x.org/a", "d"), ("src/a.rs", "s"), ("9fceb02d0ae598e95dc970b74767f19372d61af8", "a")]);
+        assert_eq!((h[0].col, h[0].len), (5, 15));
+        // (A hash that reaches the edge goes on at the next line's start.)
+        let lines = vec![parse_line("at 9fceb02d0ae5"), parse_line("98e95dc9 more")];
+        let h = hints_in(&lines, 0, 2, 15);
+        assert_eq!(h.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(), ["9fceb02d0ae598e95dc9"]);
     }
 
     #[test]

@@ -927,6 +927,7 @@ impl App {
         let n_words = term_words.len();
         let term_dots = if term_on { self.term_dots() } else { Vec::new() };
         let term_found = if term_on { self.term_found() } else { Vec::new() };
+        let term_hints = if term_on { self.term_hint_marks() } else { Vec::new() };
         // The field's suggestion and caret, measured in the field's words.
         let (term_caret, term_ghost) = self.term_field_caret();
         let term_ghost = term_ghost.to_owned();
@@ -2036,6 +2037,7 @@ impl App {
                         scrolled: self.term.scroll,
                         dots: &term_dots,
                         found: &term_found,
+                        hints: &term_hints,
                     })
                 } else {
                     None

@@ -699,8 +699,17 @@ The big daemon files are cohesive but long — go straight to the function:
   server without our conf once and the tabs counted from 0; request/answer files + Ctrl+G, `compadd` wrapped,
   `zle -C` widget so nothing lists), words the screen shows (`CompKind::Screen`), folders gone to for `cd`
   (`term_went` / `term_frequent`: count × freshness, `term-dirs`). `waverunner-ctl terminal [words]` opens the box
-  as the terminal (`Command::Terminal`). Rig rounds: scratchpad `term-rig4.sh`…`term-rig7.sh`. Not built: a tab
-  in foot, tmux panes.
+  as the terminal (`Command::Terminal`). HINTS (kitty's hints / WezTerm's quick select): Ctrl+B f or
+  Ctrl+Shift+Space letters every link, path, hash, number, address in sight (`worth_a_hint`, `hints_in`: the
+  newest get the short letters; a word that reaches the edge goes on at the next line's start), a letter puts it
+  in the line at the caret, a capital copies it; the screen is held still meanwhile and leaves out its own
+  glyphs under the letters (`push_term` splits its runs: ALL text is drawn in one pass above every rect, so a
+  plate can never hide text). A tab running something 10 s+ says how long on its word ("2 cargo 3m",
+  `short_time`, `term_tick`). A command NOT FOUND (the hook's status 127) offers `nix shell nixpkgs#x -c …` as the
+  empty field's ghost. Columns count a character's CELLS (`cell_width`, unicode-width; Max's starship prompt
+  has 🎩 🦀: `line_cells` holds `WIDE` in a wide one's second cell). The box sends a command → the tabs read again
+  400 ms later (a silent one still shows as running). Rig rounds: scratchpad `term-rig4.sh`…`term-rig9.sh`. Not
+  built: a tab in foot (window-size is per window: `latest` for it + a grouped session would do), tmux panes.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through

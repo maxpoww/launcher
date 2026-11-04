@@ -432,6 +432,8 @@ pub struct TermDraw<'a> {
     pub dots: &'a [u8],
     /// Ctrl+F's finds in sight: line, column, length, the one picked.
     pub found: &'a [(usize, u16, u16, bool)],
+    /// The hints: line, column, length, the letters that take it.
+    pub hints: &'a [(usize, u16, u16, String)],
 }
 
 /// The air between the terminal's tabs and the field, and their gap.
@@ -5464,6 +5466,31 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         let r = Rect::new(area.x + f32::from(c) * t.cell_w, area.y + row as f32 * t.line_px, f32::from(n) * t.cell_w, t.line_px);
         g.rects.push(RectInst { rect: r, radius: 2.0, color: crate::options::wash(white, if picked { 0.42 } else { 0.18 }), glass: 0.0, border: 0.0 });
     }
+    // Hints: the word under a soft ground, its letters on a small plate of
+    // ink at its start (in the box's own colour), standing in place of the
+    // screen's first letters of it.
+    for (l, c, n, label) in t.hints {
+        let Some(row) = l.checked_sub(skip).filter(|r| *r < rows) else {
+            continue;
+        };
+        let (x, y) = (area.x + f32::from(*c) * t.cell_w, area.y + row as f32 * t.line_px);
+        g.rects.push(RectInst { rect: Rect::new(x, y, f32::from(*n) * t.cell_w, t.line_px), radius: 2.0, color: crate::options::wash(white, 0.16), glass: 0.0, border: 0.0 });
+        let w = label.chars().count() as f32 * t.cell_w + 4.0;
+        g.rects.push(RectInst { rect: Rect::new(x - 2.0, y + 1.0, w, t.line_px - 2.0), radius: 3.0, color: [ink[0], ink[1], ink[2], 1.0], glass: 0.0, border: 0.0 });
+        g.labels.push(Label {
+            text: label.clone(),
+            pos: (x, y),
+            max_w: w,
+            font_px: t.font_px,
+            line_px: t.line_px,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: Some(crate::options::NERD),
+            color: Some([seen[0], seen[1], seen[2], 1.0]),
+            clip: Some(clip),
+        });
+    }
     // Read back: how far, faint in the room's corner.
     if t.scrolled > 0 {
         let k = t.line_px / crate::term::LINE_PX;
@@ -5487,7 +5514,7 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         let y = area.y + row as f32 * t.line_px;
         for span in line {
             let x = area.x + f32::from(span.col) * t.cell_w;
-            let cells = span.text.chars().count() as f32;
+            let cells = f32::from(crate::term::text_cells(&span.text));
             if span.bg != crate::term::Colour::Default {
                 let bg = colour(span.bg, ink);
                 g.rects.push(RectInst { rect: Rect::new(x, y, cells * t.cell_w, t.line_px), radius: 0.0, color: bg, glass: 0.0, border: 0.0 });
@@ -5499,19 +5526,42 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
             if span.dim {
                 fg = faded_on(fg, seen, 0.6, 3.0);
             }
-            g.labels.push(Label {
-                text: span.text.clone(),
-                pos: (x, y),
-                max_w: cells * t.cell_w + t.cell_w,
-                font_px: t.font_px,
-                line_px: t.line_px,
-                centered: false,
-                dim: false,
-                cache: true,
-                family: Some(crate::options::NERD),
-                color: Some(fg),
-                clip: Some(clip),
-            });
+            // (Under a hint's letters the screen's own are left out: the
+            // letters stand in their place.)
+            let line_no = skip + row;
+            let covered: Vec<(u16, u16)> = t.hints.iter().filter(|h| h.0 == line_no).map(|h| (h.1, h.1 + h.3.chars().count() as u16)).collect();
+            let mut pieces: Vec<(u16, String)> = Vec::new();
+            if covered.is_empty() {
+                pieces.push((span.col, span.text.clone()));
+            } else {
+                let mut at = span.col;
+                for ch in span.text.chars() {
+                    let w = crate::term::cell_width(ch);
+                    let hidden = covered.iter().any(|&(a, b)| at < b && at + w.max(1) > a);
+                    match pieces.last_mut() {
+                        _ if hidden => {}
+                        Some((start, text)) if *start + crate::term::text_cells(text) == at => text.push(ch),
+                        _ => pieces.push((at, ch.to_string())),
+                    }
+                    at += w;
+                }
+            }
+            for (col, text) in pieces {
+                let cells = f32::from(crate::term::text_cells(&text));
+                g.labels.push(Label {
+                    text,
+                    pos: (area.x + f32::from(col) * t.cell_w, y),
+                    max_w: cells * t.cell_w + t.cell_w,
+                    font_px: t.font_px,
+                    line_px: t.line_px,
+                    centered: false,
+                    dim: false,
+                    cache: true,
+                    family: Some(crate::options::NERD),
+                    color: Some(fg),
+                    clip: Some(clip),
+                });
+            }
         }
     }
     if let Some((cx, cy)) = t.cursor {

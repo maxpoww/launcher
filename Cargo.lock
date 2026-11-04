@@ -2750,6 +2750,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "waverunner-core",
  "waverunner-proto",
  "wayland-backend",

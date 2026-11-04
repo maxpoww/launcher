@@ -19,6 +19,9 @@ icons-128 = []
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# The box's terminal: a character's cells (an emoji, a CJK one: two), as
+# tmux counts them (already in the lock through codespan-reporting).
+unicode-width = "0.1"
 
 waverunner-core = { workspace = true }
 waverunner-proto = { workspace = true }
