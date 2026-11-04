@@ -708,8 +708,12 @@ The big daemon files are cohesive but long — go straight to the function:
   `short_time`, `term_tick`). A command NOT FOUND (the hook's status 127) offers `nix shell nixpkgs#x -c …` as the
   empty field's ghost. Columns count a character's CELLS (`cell_width`, unicode-width; Max's starship prompt
   has 🎩 🦀: `line_cells` holds `WIDE` in a wide one's second cell). The box sends a command → the tabs read again
-  400 ms later (a silent one still shows as running). Rig rounds: scratchpad `term-rig4.sh`…`term-rig9.sh`. Not
-  built: a tab in foot (window-size is per window: `latest` for it + a grouped session would do), tmux panes.
+  400 ms later (a silent one still shows as running). Ctrl+B o: the tab IN A WINDOW OF ITS OWN (`term_pop`: the
+  configured terminal runs `tmux new-session -A -t golem -s pop-N ; set destroy-unattached on ; select-window`, the
+  tab's window `window-size latest` meanwhile — tmux's window-size is per window —; `Tab::popped` from
+  `list-sessions`; that session gone → `Req::Unpop`: manual + the box's size again; `resize_all` leaves popped ones
+  alone; `%sessions-changed` re-reads the tabs). Pointer without a pointer: `debug-desktop "term at|pick|cpick
+  <x> <y> [<x2> <y2>]"`. Rig rounds: scratchpad `term-rig4.sh`…`term-rig11.sh`. Not built: tmux panes.
 - `power_pill.rs` — THE POWER PILLS (Max, 2026-11-03): the power key's SHORT press (Golem binds XF86PowerOff's
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through

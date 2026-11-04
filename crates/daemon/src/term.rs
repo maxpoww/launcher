@@ -230,6 +230,8 @@ pub(crate) struct Tab {
     pub path: String,
     /// The name given by hand (Ctrl+B ,), when one was.
     pub title: Option<String>,
+    /// Shown in a window of its own too (Ctrl+B o: its `pop-N` session).
+    pub popped: bool,
 }
 
 impl Tab {
@@ -502,6 +504,10 @@ enum Req {
     CopyOutput { pane: String, from: u64 },
     /// Where `needle` is in a tab, all its history.
     Find { pane: String, needle: String },
+    /// A tab's window sized by the window it is shown in (`latest`), or —
+    /// that window gone — the box's again.
+    Pop { tab: u32 },
+    Unpop { tab: u32, cols: u16, rows: u16 },
 }
 
 /// What the engine's thread tells the box.
@@ -807,6 +813,7 @@ fn help_rows() -> Vec<Comp> {
         ("Ctrl+B c · ./+", tr("a new tab")),
         ("Ctrl+B x · middle click", tr("close the tab")),
         ("Ctrl+B ,", tr("name the tab")),
+        ("Ctrl+B o", tr("the tab in a window of its own")),
         ("Ctrl+B y", tr("copy what the last command printed")),
         ("Ctrl+R", tr("search the history")),
         ("Ctrl+F", tr("find in the tab's history")),
@@ -1644,7 +1651,13 @@ fn start_server(cols: u16, rows: u16) -> Result<(), String> {
 }
 
 /// The tabs as tmux has them.
+/// The session a tab shown in a window of its own is in.
+fn pop_session(n: u32) -> String {
+    format!("pop-{n}")
+}
+
 fn read_tabs() -> Option<Vec<Tab>> {
+    let sessions = run(&["list-sessions", "-F", "#{session_name}"]).unwrap_or_default();
     let out = run(&[
         "list-windows",
         "-t",
@@ -1662,7 +1675,8 @@ fn read_tabs() -> Option<Vec<Tab>> {
                 let path = f.next().unwrap_or("").to_owned();
                 let named = f.next() == Some("1");
                 let title = f.next().filter(|_| named).map(str::to_owned);
-                Some(Tab { n, pane, command, path, title })
+                let popped = sessions.lines().any(|s| s == pop_session(n));
+                Some(Tab { n, pane, command, path, title, popped })
             })
             .collect(),
     )
@@ -1746,7 +1760,8 @@ fn send_keys(tab: u32, keys: &[Key], dir: Option<&str>) {
 fn resize_all(cols: u16, rows: u16) {
     let size = format!("{cols}x{rows}");
     run(&["set", "-g", "default-size", &size]);
-    for t in read_tabs().unwrap_or_default() {
+    // (A tab in a window of its own keeps that window's size.)
+    for t in read_tabs().unwrap_or_default().iter().filter(|t| !t.popped) {
         run(&["resize-window", "-t", &format!("{SESSION}:{}", t.n), "-x", &cols.to_string(), "-y", &rows.to_string()]);
     }
 }
@@ -1789,6 +1804,7 @@ fn watch(to_loop: calloop::channel::Sender<Ev>) {
             || line.starts_with("%unlinked-window")
             || line.starts_with("%window-renamed")
             || line.starts_with("%session-window-changed")
+            || line.starts_with("%sessions-changed")
         {
             Some(Ev::Changed)
         } else if line.starts_with("%exit") {
@@ -1862,6 +1878,14 @@ fn engine(rx: mpsc::Receiver<Req>, to_loop: calloop::channel::Sender<Ev>) {
                 if let Some(tabs) = read_tabs() {
                     let _ = to_loop.send(Ev::Tabs(tabs));
                 }
+            }
+            Req::Pop { tab } => {
+                run(&["set-window-option", "-t", &format!("{SESSION}:{tab}"), "window-size", "latest"]);
+            }
+            Req::Unpop { tab, cols, rows } => {
+                let target = format!("{SESSION}:{tab}");
+                run(&["set-window-option", "-t", &target, "window-size", "manual"]);
+                run(&["resize-window", "-t", &target, "-x", &cols.to_string(), "-y", &rows.to_string()]);
             }
             Req::Find { pane, needle } => {
                 let text = run(&["capture-pane", "-p", "-S", "-", "-E", "-", "-t", &pane]).unwrap_or_default();
@@ -2210,6 +2234,13 @@ impl App {
     fn term_event(&mut self, ev: Ev) {
         match ev {
             Ev::Tabs(tabs) => {
+                // A tab's own window closed: back to the box's size.
+                for t in tabs.iter().filter(|t| !t.popped) {
+                    if self.term.tabs.iter().any(|o| o.n == t.n && o.popped) {
+                        let (cols, rows) = self.term.size;
+                        self.term_ask(Req::Unpop { tab: t.n, cols, rows });
+                    }
+                }
                 self.term_ran(&tabs);
                 self.term_went(&tabs);
                 self.term_tick();
@@ -3026,6 +3057,27 @@ impl App {
         self.refilter();
     }
 
+    /// Tab `n` in a window of its own too — the terminal's (foot): a session
+    /// of the tabs' group showing it, ended when that window closes; the tab
+    /// takes that window's size meanwhile.
+    fn term_pop(&mut self, n: u32) {
+        if self.term_tab(n).is_none() {
+            return;
+        }
+        self.term_ask(Req::Pop { tab: n });
+        let session = pop_session(n);
+        let line = format!(
+            "{} -L {} new-session -A -t {SESSION} -s {session} \\; set-option destroy-unattached on \\; select-window -t {session}:{n}",
+            crate::launch::shell_quote(&tmux_bin()),
+            socket()
+        );
+        info!("term: tab {n} in a window of its own");
+        if let Err(e) = crate::launch::launch(&line, true, &self.config.launch.terminal) {
+            warn!("term: {e}");
+        }
+        self.dismiss();
+    }
+
     /// The hints of what the screen shows now (the lines in sight).
     fn term_hints(&mut self) {
         let Some(screen) = self.term.screen.as_ref() else {
@@ -3301,6 +3353,10 @@ impl App {
             }
             Some('f') => {
                 self.term_hints();
+                None
+            }
+            Some('o') => {
+                self.term_pop(shown);
                 None
             }
             Some('?') => {
@@ -3699,6 +3755,35 @@ impl App {
                 self.term_prefixed(k, false);
             }
             "click" => self.term_click(arg.parse().unwrap_or(0)),
+            // The pointer on the screen without one: "at <x> <y>" says the
+            // cell and the link there; "pick <x> <y> [<x2> <y2>]" presses
+            // there and lets go there (or at the second place); "cpick" the
+            // same with Ctrl (a link opens).
+            "at" | "pick" | "cpick" => {
+                let n: Vec<f32> = arg.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+                if let [x, y, rest @ ..] = &n[..] {
+                    let (x, y) = (*x, *y);
+                    if verb == "at" {
+                        let cell = self.term_cell_at((x, y));
+                        let dir = self.term_tab(self.term_shown()).map(|t| t.path.clone()).unwrap_or_default();
+                        let link = cell.and_then(|(c, l)| {
+                            let cells = self.term.screen.as_ref().and_then(|s| s.lines.get(l)).map(|ln| line_cells(ln)).unwrap_or_default();
+                            link_at(&cells, usize::from(c), &dir)
+                        });
+                        info!("term: at ({x}, {y}): cell {cell:?}, link {link:?}");
+                    } else {
+                        let was = self.modifiers;
+                        self.modifiers.ctrl = verb == "cpick";
+                        self.term_press((x, y));
+                        self.modifiers = was;
+                        if let [x2, y2] = *rest {
+                            self.term_drag((x2, y2));
+                        }
+                        self.term_release();
+                        info!("term: picked {:?}: {:?}", self.term.sel, self.term_selected_text());
+                    }
+                }
+            }
             _ => {}
         }
         let sc = self.term.screen.as_ref();
@@ -3810,7 +3895,7 @@ mod tests {
     #[test]
     fn a_tab_is_named_by_what_runs_or_where_it_is() {
         let home = std::env::var("HOME").unwrap_or_default();
-        let at = |cmd: &str, path: &str| Tab { n: 1, pane: "%1".into(), command: cmd.into(), path: path.into(), title: None }.name();
+        let at = |cmd: &str, path: &str| Tab { n: 1, pane: "%1".into(), command: cmd.into(), path: path.into(), title: None, popped: false }.name();
         assert_eq!(at("zsh", "/home/max/Golem"), "Golem");
         assert_eq!(at("htop", "/home/max"), "htop");
         assert_eq!(at("bash", &home), "~");
