@@ -216,15 +216,6 @@ fn breath_since(from: Instant) -> f32 {
     BREATH_DEPTH * (0.5 - 0.5 * (along * std::f32::consts::TAU).cos())
 }
 
-/// The breath of a button that has no moment of its own (the gear box's
-/// power button): its red, `alpha` as faded, for a fill over its ground.
-/// One clock for all of them, from the first asked.
-pub(crate) fn breath_fill(alpha: f32) -> [f32; 4] {
-    static FROM: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let red = breath_red();
-    [red[0], red[1], red[2], BREATH_RED * breath_since(*FROM.get_or_init(Instant::now)) * alpha]
-}
-
 /// The breath's red: the palette's own when it reads red (the menus' test,
 /// `desktop_menu::reads_red`), else Golem's; made `PASTEL` (part white), then
 /// LINEAR, as a fill is drawn (an sRGB red given as it is came out salmon).

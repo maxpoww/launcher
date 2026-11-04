@@ -1367,10 +1367,11 @@ impl App {
         }
     }
 
-    /// The power button (Max, 2026-11-03): hibernate, asked once, breathing red
-    /// as the banner's power pill does; sleep and restart come out of it to its
-    /// right while the pointer is on it. Where the machine cannot hibernate it
-    /// is sleep, and only restart is behind it.
+    /// The power button (Max, 2026-11-03): hibernate, asked once; sleep and
+    /// restart come out of it to its left while the pointer is on it, over the
+    /// lock, which steps away meanwhile. It does not breathe here (Max: only
+    /// the banner's). Where the machine cannot hibernate it is sleep, and only
+    /// restart is behind it.
     fn power_btn(&self) -> Btn {
         let hibernates = self.power_hibernates();
         let (hit, glyph) = if hibernates {
@@ -1387,7 +1388,6 @@ impl App {
             hit,
             glyph,
             behind,
-            breathes: true,
             ..Default::default()
         }
     }

@@ -266,11 +266,10 @@ pub(crate) struct Btn {
     pub(crate) glyph: &'static str,
     /// Drawn pressed-in: the state it switches is on.
     pub(crate) lit: bool,
-    /// Buttons tucked behind this one, out to its right while the pointer is
-    /// on it (the power button: sleep, restart — the banner's power pills).
+    /// Buttons tucked behind this one, out to its LEFT while the pointer is on
+    /// it, over what stands there — which steps away meanwhile (the power
+    /// button: sleep, restart, over the lock; Max, 2026-11-03).
     pub(crate) behind: Vec<Btn>,
-    /// Its ground breathes red, as the banner's power pill does.
-    pub(crate) breathes: bool,
 }
 
 pub(crate) fn btn(hit: Hit, glyph: &'static str) -> Btn {
@@ -304,6 +303,8 @@ pub(crate) struct Layout {
     footer: Vec<Rect>,
     /// Each footer button's buttons behind it, as far out as they are.
     footer_behind: Vec<Vec<Rect>>,
+    /// The footer buttons those come out over (they step away meanwhile).
+    footer_covered: Vec<bool>,
     field: Option<Rect>,
     total_h: f32,
 }
@@ -1890,7 +1891,7 @@ impl App {
         let fy = rect.y + rect.h - foot_h + (foot_h - d) / 2.0;
         let n = view.footer.len() as f32;
         let row_w = n * d + (n - 1.0).max(0.0) * FOOTER_GAP * s;
-        let footer = (0..view.footer.len())
+        let footer: Vec<Rect> = (0..view.footer.len())
             .map(|i| {
                 Rect::new(
                     rect.x + (rect.w - row_w) / 2.0 + i as f32 * (d + FOOTER_GAP * s),
@@ -1900,21 +1901,28 @@ impl App {
                 )
             })
             .collect();
-        // (Out to the right of their button, which keeps its place: the row
-        // is centred on what stands there at rest, so nothing moves under
+        // (Out to the LEFT of their button, which keeps its place, into the
+        // places of the buttons there, which step away: nothing moves under
         // the hand as they come.)
         let out = self.gear.power_out.clamp(0.0, 1.0);
-        let footer_behind = view
+        let step = d + FOOTER_GAP * s;
+        let footer_behind: Vec<Vec<Rect>> = view
             .footer
             .iter()
             .zip(&footer)
             .map(|(b, r): (&Btn, &Rect)| {
                 (0..b.behind.len())
-                    .map(|k| {
-                        let to = r.x + (k as f32 + 1.0) * (d + FOOTER_GAP * s);
-                        Rect::new(lerp(r.x, to, out), r.y, d, d)
-                    })
+                    .map(|k| Rect::new(lerp(r.x, r.x - (k as f32 + 1.0) * step, out), r.y, d, d))
                     .collect()
+            })
+            .collect();
+        let footer_covered = footer
+            .iter()
+            .map(|q: &Rect| {
+                view.footer.iter().zip(&footer).any(|(b, r)| {
+                    let reach = r.x - b.behind.len() as f32 * step;
+                    !b.behind.is_empty() && q.x < r.x && q.x + q.w > reach + 0.5
+                })
             })
             .collect();
         let field = (has_field || armed).then(|| {
@@ -1951,6 +1959,7 @@ impl App {
             strip,
             footer,
             footer_behind,
+            footer_covered,
             field,
             total_h: y + self.gear.scroll - content.y,
         }
@@ -2008,13 +2017,16 @@ impl App {
                 return Hit::Field;
             }
         } else {
-            for ((b, r), behind) in view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind) {
-                if self.gear.power_out > 0.5 {
+            let out = self.gear.power_out > 0.5;
+            for (((b, r), behind), covered) in
+                view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).zip(&lay.footer_covered)
+            {
+                if out {
                     if let Some((bb, _)) = b.behind.iter().zip(behind).find(|(_, br)| br.contains(p)) {
                         return bb.hit.clone();
                     }
                 }
-                if r.contains(p) {
+                if r.contains(p) && !(out && *covered) {
                     return b.hit.clone();
                 }
             }
@@ -2064,8 +2076,8 @@ impl App {
         let view = self.gear_view();
         let lay = self.gear_layout(&view, self.gear_rect());
         view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).any(|((b, r), behind)| {
-            let right = behind.iter().map(|x| x.x + x.w).fold(r.x + r.w, f32::max);
-            !b.behind.is_empty() && p.1 >= r.y && p.1 <= r.y + r.h && p.0 >= r.x && p.0 <= right
+            let left = behind.iter().map(|x| x.x).fold(r.x, f32::min);
+            !b.behind.is_empty() && p.1 >= r.y && p.1 <= r.y + r.h && p.0 >= left && p.0 <= r.x + r.w
         })
     }
 
@@ -2680,9 +2692,10 @@ impl App {
         // palette, or Off in Light) over a wallpaper of the other kind left
         // them white on a light box (the Acer, 2026-10-17).
         let glyph_ink = pen.ink;
-        // `from`: a button coming out from behind another keeps its symbol off
-        // that one (symbols are drawn in one late pass, over every fill).
-        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, from: Option<f32>| {
+        // `upto`: a button coming out from behind another (leftward) keeps its
+        // symbol off that one (symbols are drawn in one late pass, over every
+        // fill).
+        let round = |scene: &mut Scene, b: &Btn, r: Rect, alpha: f32, upto: Option<f32>| {
             if r.y + r.h > bottom || alpha <= 0.01 {
                 return;
             }
@@ -2696,11 +2709,7 @@ impl App {
                 base[3] *= alpha;
                 scene.rects.push(RectInst { rect: br, radius, color: base, glass: 0.0, border: 0.0 });
             }
-            if b.breathes {
-                let red = crate::power_pill::breath_fill(alpha);
-                scene.rects.push(RectInst { rect: br, radius, color: red, glass: 0.0, border: 0.0 });
-            }
-            let edge = from.unwrap_or(f32::MIN).max(br.x - 4.0);
+            let end = upto.unwrap_or(f32::MAX).min(br.x + br.w + 4.0);
             let gpx = r.h * 0.56;
             scene.labels.push(Label {
                 text: b.glyph.to_owned(),
@@ -2718,7 +2727,7 @@ impl App {
                     glyph_ink[2],
                     glyph_ink[3] * alpha,
                 ]),
-                clip: Some(Rect::new(edge, br.y - 4.0, (br.x + br.w + 4.0 - edge).max(0.0), br.h + 8.0)),
+                clip: Some(Rect::new(br.x - 4.0, br.y - 4.0, (end - br.x + 4.0).max(0.0), br.h + 8.0)),
             });
         };
         for (b, r) in view.strip.iter().zip(&lay.strip) {
@@ -2732,14 +2741,18 @@ impl App {
             0.0
         };
         let out = ((self.gear.power_out - 0.15) / 0.6).clamp(0.0, 1.0);
-        for ((b, r), behind) in view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind) {
+        for (((b, r), behind), covered) in
+            view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind).zip(&lay.footer_covered)
+        {
+            // What they come out over steps away as they come.
+            let own = if *covered { 1.0 - out } else { 1.0 };
             // The ones behind first: their button covers them as they come out.
-            let mut edge = r.x + r.w;
+            let mut edge = r.x;
             for (bb, br) in b.behind.iter().zip(behind) {
                 round(scene, bb, *br, pen.a * (1.0 - t) * out, Some(edge));
-                edge = br.x + br.w;
+                edge = br.x;
             }
-            round(scene, b, *r, pen.a * (1.0 - t), None);
+            round(scene, b, *r, pen.a * (1.0 - t) * own, None);
         }
         if let (Some(fr), Some((text, _))) = (lay.field, &self.gear.arm) {
             if fr.y + fr.h <= bottom {
@@ -2936,11 +2949,6 @@ impl App {
         let (o, m) = ease_toward(self.gear.power_out, behind_to, dt, MORPH_RATE, settle_t(2.0 * self.gear_footer_d()));
         self.gear.power_out = o;
         moving |= m;
-        // A breathing button is motion: frames while one stands in the footer.
-        moving |= !crate::animation::reduce_motion()
-            && self.gear.arm.is_none()
-            && self.gear.field.is_none()
-            && self.gear_view().footer.iter().any(|b| b.breathes);
         let (sc, m) = ease_toward(
             self.gear.scroll,
             self.gear.scroll_target,
