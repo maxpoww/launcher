@@ -21,6 +21,11 @@ use crate::App;
 
 /// fa-times: cancel (the gear box's own X).
 const GLYPH_CANCEL: &str = "\u{f00d}";
+/// How far the words reach into the X's circle — into its empty side, so the
+/// time stands close to the X (Max, 2026-11-04: "más cerca de la x el
+/// tiempo"; 4 touched it), in logical px at scale 1: about 4 px of air left
+/// between the last digit and the X.
+const WORDS_INTO_X: f32 = 1.0;
 
 /// The pill's state.
 #[derive(Debug, Default)]
@@ -49,10 +54,10 @@ impl App {
         EDGE_PAD + self.options_pill_h() + OPTION_GAP + self.power_room()
     }
 
-    /// How wide the words' part is: the words, the pill's air before them
-    /// and half of it before the X.
+    /// How wide the words' part is: the pill's air before them and the words,
+    /// their end a little into the X's circle.
     fn timer_words_part(&self) -> f32 {
-        self.timer_pill.words_w + 1.5 * PILL_PAD_X
+        PILL_PAD_X + self.timer_pill.words_w - WORDS_INTO_X * self.options_scale()
     }
 
     fn timer_pill_w(&self) -> f32 {
@@ -181,10 +186,11 @@ impl App {
         let ink = self.options_text_color();
         let ink = [ink[0], ink[1], ink[2], ink[3] * a];
         let s = self.options_scale();
+        let reach = Rect::new(words.x, words.y, words.w + WORDS_INTO_X * s + 1.0, words.h);
         scene.labels.push(Label {
             text: self.timer_pill.words.clone(),
             pos: (r.x + PILL_PAD_X, r.y + (r.h - LINE_PX * s) / 2.0),
-            max_w: words.w,
+            max_w: reach.w,
             font_px: FONT_PX * s,
             line_px: LINE_PX * s,
             centered: false,
@@ -193,7 +199,7 @@ impl App {
             cache: false,
             family: TEXT_FONT,
             color: Some(ink),
-            clip: Some(words),
+            clip: Some(reach),
         });
         scene.labels.push(Label {
             text: GLYPH_CANCEL.to_owned(),
