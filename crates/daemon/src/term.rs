@@ -792,13 +792,34 @@ pub(crate) fn took_words(d: Duration) -> String {
     }
 }
 
-/// A notification of the terminal's own (OPTIONS shows it).
+/// A notification of the terminal's own (OPTIONS shows it): asked of the
+/// session bus with busctl (every Golem has it; notify-send it may not —
+/// the dev box has none).
 fn notify(title: &str, body: &str) {
     info!("term: told \"{title}\"");
-    let args = ["-a", "Terminal", "-i", "utilities-terminal", title, body].map(str::to_owned);
+    let args = [
+        "--user",
+        "call",
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify",
+        "susssasa{sv}i",
+        "Terminal",
+        "0",
+        "utilities-terminal",
+        title,
+        body,
+        "0",
+        "0",
+        "10000",
+    ]
+    .map(str::to_owned);
     let _ = std::thread::Builder::new().name("term-notify".into()).spawn(move || {
-        if let Err(e) = Command::new("notify-send").args(&args).stdin(Stdio::null()).status() {
-            warn!("term: no notification: {e}");
+        match Command::new("busctl").args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => warn!("term: no notification: busctl {s}"),
+            Err(e) => warn!("term: no notification: {e}"),
         }
     });
 }

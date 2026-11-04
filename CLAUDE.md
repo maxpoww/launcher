@@ -694,7 +694,8 @@ The big daemon files are cohesive but long — go straight to the function:
   (`term-tabs`) and the tabs made again in them when the server comes up new. THE SHELL HOOK (`HOOK_ZSHENV`,
   kitty/ghostty's way: ZDOTDIR → our .zshenv gives the user's ZDOTDIR back, then precmd/preexec write
   "status start end line" to `term-status/<pane>`; only a zsh `SHELL`): `term_ran` tells a command that ended out
-  of sight after ≥ 10 s (`notify`: notify-send → OPTIONS, "cargo build failed · tab 2", "It ran 3 min"); no hook
+  of sight after ≥ 10 s (`notify`: busctl Notify on the session bus → OPTIONS — the dev box has no notify-send —, "cargo build failed · tab 2",
+  "It ran 3 min"); the box is SOLID while it is the terminal (`card_fill` α → 1 with `card_open`, Max 2026-11-04); no hook
   → what the box saw run. COMPLETION: its own thread (`completer`, only the newest ask) — programs/paths at once,
   then for an argument ZSH'S OWN completion with descriptions (`Zsh`: `COMPLETE_ZSH` in a zsh -d -i on a tmux
   server OF ITS OWN `-L <socket>-complete -f /dev/null` — ⚠ never the tabs' server: its `new-session` started that

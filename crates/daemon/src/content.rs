@@ -3145,6 +3145,12 @@ pub fn scene(
         card_fill[3] = lerp(card_fill[3] * rest, open_a.max(card_fill[3] * dock_tone), card_open);
         // (The Shell's Transparency, the owner's, from there.)
         card_fill[3] = crate::options::shell_glass(card_fill[3]);
+        // THE BOX'S TERMINAL is solid (Max, 2026-11-04: "cuando estoy en la
+        // terminal en el dock la superficie no sea transparente"): nothing
+        // behind shows through its words, as it opens.
+        if term.is_some() {
+            card_fill[3] = lerp(card_fill[3], 1.0, card_open);
+        }
     }
     scene.rects.push(RectInst {
         rect: card_rect,
