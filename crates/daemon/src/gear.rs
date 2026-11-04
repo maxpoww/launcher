@@ -3686,6 +3686,8 @@ impl App {
                 self.set_stats_box(false);
                 self.update_stats_reveal();
             }
+            // The sleep timer's minute-before notice, now (`sleep_timer.rs`).
+            "timer-notice" => self.sleep_timer_notice_now(),
             // The footer's buttons behind a button out (`behind off`: in), as
             // the pointer on it would have them; the next pointer move decides.
             "behind" => {

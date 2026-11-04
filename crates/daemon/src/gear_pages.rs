@@ -38,6 +38,8 @@ const G_INFO: &str = "\u{f05a}";
 const G_POWER: &str = "\u{f011}";
 const G_MOON: &str = "\u{f186}";
 const G_LOCK: &str = "\u{f023}";
+/// The sleep timer at rest: an hourglass.
+const G_TIMER: &str = "\u{f252}";
 const G_REFRESH: &str = "\u{f021}";
 const G_COG: &str = "\u{f013}";
 const G_TRASH: &str = "\u{f014}";
@@ -70,6 +72,8 @@ pub(crate) enum SysHit {
     AutoBright,
     AllSettings,
     Lock,
+    /// The sleep timer (`sleep_timer.rs`): its next step.
+    SleepTimer,
     Sleep,
     AskRestart,
     DoRestart,
@@ -1361,9 +1365,23 @@ impl App {
         ));
         View {
             items,
-            footer: vec![btn(sys(SysHit::Lock), G_LOCK), self.power_btn()],
+            // (The timer first: the power button's two behind it come out over
+            // the lock and it — Max, 2026-11-04.)
+            footer: vec![self.timer_btn(), btn(sys(SysHit::Lock), G_LOCK), self.power_btn()],
             zebra: true,
             ..View::default()
+        }
+    }
+
+    /// The sleep timer's button: an hourglass, or — running — lit with the
+    /// minutes left.
+    fn timer_btn(&self) -> Btn {
+        let left = self.sleep_timer_left();
+        Btn {
+            hit: sys(SysHit::SleepTimer),
+            glyph: left.map_or(G_TIMER, crate::sleep_timer::minutes_glyph),
+            lit: left.is_some(),
+            ..Default::default()
         }
     }
 
@@ -1993,6 +2011,7 @@ impl App {
                 self.set_stats_box(false);
                 crate::hypr::dispatch("hl.dsp.exec_cmd(\"hyprlock\")");
             }
+            SysHit::SleepTimer => self.sleep_timer_step(),
             SysHit::Sleep => {
                 self.set_stats_box(false);
                 run_detached("systemctl", vec!["suspend".into()]);
@@ -2248,6 +2267,7 @@ impl App {
             ("saver", _) => SysHit::AutoSaver,
             ("limit", _) => SysHit::ChargeLimit,
             ("awake", _) => SysHit::Awake,
+            ("timer", _) => SysHit::SleepTimer,
             ("autobright", _) => SysHit::AutoBright,
             ("effects", _) => SysHit::Effects(arg == "light"),
             ("lid", _) => SysHit::Lid(arg == "nothing"),
