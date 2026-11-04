@@ -719,7 +719,8 @@ The big daemon files are cohesive but long — go straight to the function:
   <x> <y> [<x2> <y2>]"`. Rig rounds: scratchpad `term-rig4.sh`…`term-rig11.sh`. Not built: tmux panes.
 - `term_pill.rs` — THE TERMINAL'S PILL on the banner (Max, 2026-11-04): right of the card's pill (`term_pill_x`:
   the card pill grown for a dictation, the copy-link as far as it is out; the Mind band after `term_pill_room`), a
-  round pill with the terminal's symbol while a tab of the box's terminal runs something (`term_pill_on`); the
+  round pill with the terminal's symbol while the box's terminal has tabs (`term_pill_on`; only-while-running hid it:
+  Max "i dont see it"); the
   pointer on it → the symbol becomes + and the tabs come out to its right as words (`PillId::TermTab(k)`, measured
   in `term_pill_sync` on every `Ev::Tabs`; running ones in full ink, idle quieter), as the power pills' do; a click
   on + opens the box as the terminal on a new tab, on a word on that tab (`term_pill_click` → `Command::Terminal`

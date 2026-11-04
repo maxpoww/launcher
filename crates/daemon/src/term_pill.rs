@@ -5,8 +5,10 @@
 //! terminal and the symbol becomes a + clicking opens a new tab").
 //!
 //! AT REST: one round pill right of the card's pill (and of the copy-link
-//! when that is out), the terminal's symbol, while a tab of the box's
-//! terminal (`term.rs`) runs something; what stands right of it moves over.
+//! when that is out), the terminal's symbol, while the box's terminal
+//! (`term.rs`) has tabs — first only while one ran something, which hid it
+//! with the tabs at their prompts ("i dont see it"); what stands right of it
+//! moves over.
 //!
 //! THE POINTER ON IT: its symbol becomes a +, and the tabs come out from
 //! behind it to its right as words ("1 ~", "2 cargo"), the ones running
@@ -46,9 +48,11 @@ pub(crate) struct TermPill {
 }
 
 impl App {
-    /// Whether the pill stands: a tab runs something (or the hand is on it).
+    /// Whether the pill stands: the terminal has tabs (Max, 2026-11-04, the
+    /// pill shown only while one ran something: "i dont see it") — or the
+    /// hand is on it.
     fn term_pill_on(&self) -> bool {
-        self.term.tabs.iter().any(|t| !t.idle()) || self.term_pill.open
+        !self.term.tabs.is_empty() || self.term_pill.open
     }
 
     /// The tabs changed (or what runs in them): the words again, measured,
