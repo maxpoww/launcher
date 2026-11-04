@@ -44,6 +44,10 @@ const CHOICE_PILL_H: f32 = 26.0;
 const STRIP_H: f32 = 52.0;
 const STRIP_GAP: f32 = 6.0;
 const STRIP_X: f32 = 12.0;
+/// A footer button's words: their margin at its left end, and how far into
+/// the symbol's circle they may reach (its empty side), in circles.
+const WORDS_PAD: f32 = 0.15;
+const WORDS_INTO: f32 = 0.12;
 const FOOTER_GAP: f32 = 26.0;
 const FIELD_PAD: f32 = 12.0;
 const CARD_TILE: f32 = 56.0;
@@ -277,6 +281,9 @@ pub(crate) struct Btn {
     /// The symbol while the pointer is on the button or what came out of it
     /// (the running timer's X).
     pub(crate) hover_glyph: Option<&'static str>,
+    /// The words beside the symbol answer a click of their own (the running
+    /// timer's minutes: edited), underlined under the pointer.
+    pub(crate) label_hit: Option<Hit>,
 }
 
 pub(crate) fn btn(hit: Hit, glyph: &'static str) -> Btn {
@@ -2045,6 +2052,9 @@ impl App {
                     }
                 }
                 if r.contains(p) && !(out.is_some() && *covered == out) {
+                    if let Some(words) = b.label_hit.as_ref().filter(|_| p.0 < Self::words_end(*r)) {
+                        return words.clone();
+                    }
                     return b.hit.clone();
                 }
             }
@@ -2110,11 +2120,19 @@ impl App {
         match (&b.label, b.glyph.is_empty()) {
             (Some(words), false) => {
                 // (Estimated, as the page's rows are: the layout has no
-                // renderer to measure with; a clock's digits are even.)
-                est_w(words, FONT_PX * self.options_scale()) * 1.1 + 0.3 * d
+                // renderer to measure with. Close to the symbol: the words
+                // end just inside its circle, short of the symbol itself —
+                // Max, 2026-11-04: "los minutos un poco más cerca".)
+                est_w(words, FONT_PX * self.options_scale()) + WORDS_PAD * d - WORDS_INTO * d
             }
             _ => 0.0,
         }
+    }
+
+    /// Where a button's words end and its symbol's circle begins answering
+    /// (a little into the circle, where it is empty).
+    fn words_end(r: Rect) -> f32 {
+        r.x + r.w - r.h + WORDS_INTO * r.h
     }
 
     pub(crate) fn gear_hit_clickable(&self) -> bool {
@@ -2761,7 +2779,19 @@ impl App {
             if let Some(words) = &b.label {
                 let alone = b.glyph.is_empty();
                 let px = if alone { r.h * 0.36 } else { FONT_PX * s };
-                let at = if alone { br.x + br.w / 2.0 } else { br.x + 0.3 * r.h };
+                let at = if alone { br.x + br.w / 2.0 } else { br.x + WORDS_PAD * r.h };
+                // Words that answer a click: underlined under the pointer (the
+                // quiet language's value, a word underlined).
+                if !alone && b.label_hit.as_ref() == Some(hit) {
+                    let line = Rect::new(at, br.y + br.h / 2.0 + px * 0.62, est_w(words, px), 1.5 * s);
+                    scene.rects.push(RectInst {
+                        rect: line,
+                        radius: 0.75 * s,
+                        color: [ink[0], ink[1], ink[2], ink[3] * 0.55],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
                 scene.labels.push(Label {
                     text: words.clone(),
                     pos: (at, br.y + (br.h - px * 1.2) / 2.0),

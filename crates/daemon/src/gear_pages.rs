@@ -74,6 +74,8 @@ pub(crate) enum SysHit {
     Lock,
     /// The sleep timer (`sleep_timer.rs`): its next step.
     SleepTimer,
+    /// The running timer's minutes: the field, with them written.
+    SleepTimerEdit,
     Sleep,
     AskRestart,
     DoRestart,
@@ -1376,9 +1378,9 @@ impl App {
     }
 
     /// The sleep timer's button: an hourglass (a click: the field, to type the
-    /// time); running, the countdown beside it — words, no pill — and the
-    /// pointer on it turns the hourglass into an X: a click cancels (Max,
-    /// 2026-11-04).
+    /// time); running, the minutes left close beside it — words, no pill; a
+    /// click on them edits them — and the pointer on the hourglass turns it
+    /// into an X: a click cancels (Max, 2026-11-04).
     fn timer_btn(&self) -> Btn {
         let Some(left) = self.sleep_timer_left() else {
             return btn(sys(SysHit::SleepTimer), G_TIMER);
@@ -1386,9 +1388,20 @@ impl App {
         Btn {
             hit: sys(SysHit::SleepTimer),
             glyph: G_TIMER,
-            label: Some(crate::sleep_timer::countdown(left)),
+            label: Some(crate::sleep_timer::minutes_text(left)),
+            label_hit: Some(sys(SysHit::SleepTimerEdit)),
             hover_glyph: Some(G_TIMES),
             ..Default::default()
+        }
+    }
+
+    /// The sleep timer's question, in the footer's field.
+    fn timer_prompt(&self) -> &'static str {
+        // (It hibernates; the words say "off": Max, 2026-11-04.)
+        if self.power_hibernates() {
+            tr("Turn off in how many minutes?")
+        } else {
+            tr("Sleep in how many minutes?")
         }
     }
 
@@ -2020,13 +2033,12 @@ impl App {
             }
             SysHit::SleepTimer if self.sleep_timer_left().is_some() => self.sleep_timer_cancel(),
             SysHit::SleepTimer => {
-                let prompt = if self.power_hibernates() {
-                    // (It hibernates; the words say "off": Max, 2026-11-04.)
-                    tr("Turn off in how many minutes?")
-                } else {
-                    tr("Sleep in how many minutes?")
-                };
-                self.gear_ask(PField::SleepMinutes, prompt, G_TIMER, false, String::new());
+                self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, String::new());
+            }
+            SysHit::SleepTimerEdit => {
+                let minutes = self.sleep_timer_left().map(crate::sleep_timer::minutes_up).unwrap_or_default();
+                let text = if minutes > 0 { minutes.to_string() } else { String::new() };
+                self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, text);
             }
             SysHit::Sleep => {
                 self.set_stats_box(false);
@@ -2284,6 +2296,7 @@ impl App {
             ("limit", _) => SysHit::ChargeLimit,
             ("awake", _) => SysHit::Awake,
             ("timer", _) => SysHit::SleepTimer,
+            ("timer-edit", _) => SysHit::SleepTimerEdit,
             ("autobright", _) => SysHit::AutoBright,
             ("effects", _) => SysHit::Effects(arg == "light"),
             ("lid", _) => SysHit::Lid(arg == "nothing"),
