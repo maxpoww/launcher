@@ -8,12 +8,12 @@
 //! introducir el tiempo manualmente"): minutes ("45"), hours and minutes
 //! ("1:30", "1h30", "2h"); Enter with nothing typed sets nothing. The words
 //! say "turn off" (Max: "only the words, we want it to hibernate"). While it
-//! runs the MINUTES LEFT stand close beside its hourglass ("36 min", no
-//! seconds), words on the box, no pill ("no usemos una píldora"); a click on
-//! them opens the field with them written, to edit; the pointer on the
-//! hourglass turns it into an X — a click cancels. (Gone, by Max's word: the
-//! 15 → 30 → 60 → 90 → off cycle of the first cut, a "+15" beside the
-//! countdown, a "(15)" default, the seconds.)
+//! runs the COUNTDOWN stands close beside its hourglass ("15:05"), words on
+//! the box, no pill ("no usemos una píldora"); a click on it opens the field
+//! with the whole minutes written, no seconds, to edit (Max: "no secs when
+//! editing"); the pointer on the hourglass turns it into an X — a click
+//! cancels. (Gone, by Max's word: the 15 → 30 → 60 → 90 → off cycle of the
+//! first cut, a "+15" beside the countdown, a "(15)" default.)
 //!
 //! THE SYSTEM KEEPS IT: a transient user timer (`systemd-run --user
 //! --on-active`, unit `golem-sleep-timer`) hibernates (or, where the machine
@@ -80,14 +80,22 @@ pub(crate) fn parse_minutes(text: &str) -> Option<i64> {
     (minutes > 0).then_some(minutes.min(LONGEST))
 }
 
-/// Seconds left as whole minutes, rounded up (a timer with 30 s left says 1).
-pub(crate) fn minutes_up(secs: i64) -> i64 {
-    (secs.max(0) + 59) / 60
+/// The countdown as the button shows it: minutes and seconds ("15:05",
+/// "89:59"), with hours from 100 minutes on ("2:05:00").
+pub(crate) fn countdown(secs: i64) -> String {
+    let secs = secs.max(0);
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if secs >= 100 * 60 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{}:{s:02}", secs / 60)
+    }
 }
 
-/// What the button says: the minutes left, no seconds (Max: "sin segundos").
-pub(crate) fn minutes_text(secs: i64) -> String {
-    format!("{} min", minutes_up(secs))
+/// The minutes the field is opened with to edit: the whole ones, no seconds
+/// ("15:05" → "15"), and never less than one.
+pub(crate) fn whole_minutes(secs: i64) -> i64 {
+    (secs / 60).max(1)
 }
 
 /// A notice with a Cancel button, on the session's notification server;
@@ -187,7 +195,7 @@ impl App {
         }
         // (Hibernate where the machine can; else sleep.)
         let action = if self.power_hibernates() { "hibernate" } else { "suspend" };
-        info!("sleep timer: {}", secs.map_or_else(|| "off".to_owned(), |s| format!("{action} in {}", minutes_text(s))));
+        info!("sleep timer: {}", secs.map_or_else(|| "off".to_owned(), |s| format!("{action} in {}", countdown(s))));
         // The system's own timer, made again each time (on a thread: these
         // ask the user manager).
         self.desktop_off_loop(
@@ -273,11 +281,11 @@ impl App {
         );
     }
 
-    /// How often the minutes are drawn again: every few seconds while the gear
-    /// box shows them (a minute turns within that), else each half minute.
+    /// How often the countdown is drawn again: each second while the gear box
+    /// shows it, else each half minute (nothing on screen counts down).
     fn sleep_timer_every(&self) -> Duration {
         if self.gear_page() == Some(crate::gear::PageKind::Gear) {
-            Duration::from_secs(5)
+            Duration::from_secs(1)
         } else {
             Duration::from_secs(30)
         }
@@ -322,11 +330,18 @@ mod tests {
     }
 
     #[test]
-    fn the_minutes_left_round_up() {
-        assert_eq!(minutes_text(14 * 60 + 32), "15 min");
-        assert_eq!(minutes_text(30), "1 min");
-        assert_eq!(minutes_text(90 * 60), "90 min");
-        assert_eq!(minutes_up(0), 0);
-        assert_eq!(minutes_up(-3), 0);
+    fn the_countdown_reads_as_a_clock() {
+        assert_eq!(countdown(15 * 60 + 5), "15:05");
+        assert_eq!(countdown(59), "0:59");
+        assert_eq!(countdown(89 * 60 + 59), "89:59");
+        assert_eq!(countdown(125 * 60), "2:05:00");
+        assert_eq!(countdown(-3), "0:00");
+    }
+
+    #[test]
+    fn the_field_edits_whole_minutes() {
+        assert_eq!(whole_minutes(15 * 60 + 5), 15);
+        assert_eq!(whole_minutes(30), 1);
+        assert_eq!(whole_minutes(0), 1);
     }
 }

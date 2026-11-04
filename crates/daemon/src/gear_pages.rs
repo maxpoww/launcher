@@ -1378,9 +1378,9 @@ impl App {
     }
 
     /// The sleep timer's button: an hourglass (a click: the field, to type the
-    /// time); running, the minutes left close beside it — words, no pill; a
-    /// click on them edits them — and the pointer on the hourglass turns it
-    /// into an X: a click cancels (Max, 2026-11-04).
+    /// time); running, the countdown close beside it — words, no pill; a click
+    /// on it edits the minutes — and the pointer on the hourglass turns it into
+    /// an X: a click cancels (Max, 2026-11-04).
     fn timer_btn(&self) -> Btn {
         let Some(left) = self.sleep_timer_left() else {
             return btn(sys(SysHit::SleepTimer), G_TIMER);
@@ -1388,7 +1388,7 @@ impl App {
         Btn {
             hit: sys(SysHit::SleepTimer),
             glyph: G_TIMER,
-            label: Some(crate::sleep_timer::minutes_text(left)),
+            label: Some(crate::sleep_timer::countdown(left)),
             label_hit: Some(sys(SysHit::SleepTimerEdit)),
             hover_glyph: Some(G_TIMES),
             ..Default::default()
@@ -2036,8 +2036,8 @@ impl App {
                 self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, String::new());
             }
             SysHit::SleepTimerEdit => {
-                let minutes = self.sleep_timer_left().map(crate::sleep_timer::minutes_up).unwrap_or_default();
-                let text = if minutes > 0 { minutes.to_string() } else { String::new() };
+                // (The whole minutes, no seconds: Max, 2026-11-04.)
+                let text = self.sleep_timer_left().map(|s| crate::sleep_timer::whole_minutes(s).to_string()).unwrap_or_default();
                 self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, text);
             }
             SysHit::Sleep => {
