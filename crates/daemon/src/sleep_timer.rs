@@ -197,6 +197,15 @@ impl App {
         // (Hibernate where the machine can; else sleep.)
         let action = if self.power_hibernates() { "hibernate" } else { "suspend" };
         info!("sleep timer: {}", secs.map_or_else(|| "off".to_owned(), |s| format!("{action} in {}", countdown(s))));
+        // A test rig never sets the machine going off: the countdown only.
+        if std::env::var_os("GOLEM_RIG").is_some() {
+            info!("sleep timer: a rig — no system timer");
+            self.sleep_timer_notice_due();
+            self.gear_changed();
+            self.timer_pill_sync();
+            self.sleep_timer_tick();
+            return;
+        }
         // The system's own timer, made again each time (on a thread: these
         // ask the user manager).
         self.desktop_off_loop(
