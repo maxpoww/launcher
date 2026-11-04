@@ -74,8 +74,6 @@ pub(crate) enum SysHit {
     Lock,
     /// The sleep timer (`sleep_timer.rs`): its next step.
     SleepTimer,
-    /// "+15" beside the running timer.
-    SleepTimerMore,
     Sleep,
     AskRestart,
     DoRestart,
@@ -1379,19 +1377,17 @@ impl App {
 
     /// The sleep timer's button: an hourglass (a click: the field, to type the
     /// time); running, the countdown beside it — words, no pill — and the
-    /// pointer on it turns the hourglass into an X (a click cancels) and brings
-    /// "+15" out to its left (Max, 2026-11-04).
+    /// pointer on it turns the hourglass into an X: a click cancels (Max,
+    /// 2026-11-04).
     fn timer_btn(&self) -> Btn {
         let Some(left) = self.sleep_timer_left() else {
             return btn(sys(SysHit::SleepTimer), G_TIMER);
         };
-        let more = format!("+{}", crate::sleep_timer::STEP);
         Btn {
             hit: sys(SysHit::SleepTimer),
             glyph: G_TIMER,
             label: Some(crate::sleep_timer::countdown(left)),
             hover_glyph: Some(G_TIMES),
-            behind: vec![Btn { hit: sys(SysHit::SleepTimerMore), label: Some(more), ..Default::default() }],
             ..Default::default()
         }
     }
@@ -2025,13 +2021,13 @@ impl App {
             SysHit::SleepTimer if self.sleep_timer_left().is_some() => self.sleep_timer_cancel(),
             SysHit::SleepTimer => {
                 let prompt = if self.power_hibernates() {
-                    tr("Hibernate in how many minutes? (15)")
+                    // (It hibernates; the words say "off": Max, 2026-11-04.)
+                    tr("Turn off in how many minutes?")
                 } else {
-                    tr("Sleep in how many minutes? (15)")
+                    tr("Sleep in how many minutes?")
                 };
                 self.gear_ask(PField::SleepMinutes, prompt, G_TIMER, false, String::new());
             }
-            SysHit::SleepTimerMore => self.sleep_timer_more(),
             SysHit::Sleep => {
                 self.set_stats_box(false);
                 run_detached("systemctl", vec!["suspend".into()]);
@@ -2288,7 +2284,6 @@ impl App {
             ("limit", _) => SysHit::ChargeLimit,
             ("awake", _) => SysHit::Awake,
             ("timer", _) => SysHit::SleepTimer,
-            ("timer-more", _) => SysHit::SleepTimerMore,
             ("autobright", _) => SysHit::AutoBright,
             ("effects", _) => SysHit::Effects(arg == "light"),
             ("lid", _) => SysHit::Lid(arg == "nothing"),

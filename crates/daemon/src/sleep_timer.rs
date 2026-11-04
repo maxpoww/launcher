@@ -6,12 +6,12 @@
 //! behind it (sleep, restart) come out over the lock and the timer. A click
 //! opens the footer's field to TYPE the time (Max, 2026-11-04: "quiero
 //! introducir el tiempo manualmente"): minutes ("45"), hours and minutes
-//! ("1:30", "1h30", "2h"); Enter with nothing typed is 15. While it runs the
-//! COUNTDOWN stands beside its hourglass, words on the box, no pill ("no
-//! usemos una píldora"), and the pointer on it turns the hourglass into an X —
-//! a click cancels — and brings a "+15" out to its left, which adds a quarter
-//! of an hour. (The first cut stepped 15 → 30 → 60 → 90 → off
-//! as a television's sleep button: cancelling took up to four clicks.)
+//! ("1:30", "1h30", "2h"); Enter with nothing typed sets nothing. The words
+//! say "turn off" (Max: "only the words, we want it to hibernate"). While it
+//! runs the COUNTDOWN stands beside its hourglass, words on the box, no pill
+//! ("no usemos una píldora"), and the pointer on it turns the hourglass into
+//! an X — a click cancels. (Gone, by Max's word: the 15 → 30 → 60 → 90 → off
+//! cycle of the first cut, a "+15" beside the countdown, a "(15)" default.)
 //!
 //! THE SYSTEM KEEPS IT: a transient user timer (`systemd-run --user
 //! --on-active`, unit `golem-sleep-timer`) hibernates (or, where the machine
@@ -33,9 +33,7 @@ use tracing::{info, warn};
 use crate::App;
 use crate::i18n::tr;
 
-/// What a click sets, and what "+15" adds, in minutes.
-pub(crate) const STEP: i64 = 15;
-/// No timer runs longer than this (a "+15" held down…).
+/// No timer runs longer than this.
 const LONGEST: i64 = 12 * 60;
 /// The user unit that does it.
 const UNIT: &str = "golem-sleep-timer";
@@ -63,11 +61,11 @@ fn state_file() -> PathBuf {
 }
 
 /// The time typed in the field, in minutes: "45", "1:30", "1h30", "2h",
-/// "90m"; nothing typed is `STEP`. `None`: not a time (or 0).
+/// "90m". `None`: nothing typed, not a time, or 0.
 pub(crate) fn parse_minutes(text: &str) -> Option<i64> {
     let t: String = text.trim().to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
     if t.is_empty() {
-        return Some(STEP);
+        return None;
     }
     let num = |s: &str| -> Option<i64> { if s.is_empty() { Some(0) } else { s.parse::<i64>().ok() } };
     let minutes = if let Some((h, m)) = t.split_once(':') {
@@ -167,13 +165,6 @@ impl App {
         true
     }
 
-    /// "+15": a quarter of an hour more.
-    pub(crate) fn sleep_timer_more(&mut self) {
-        if let Some(at) = self.sleep_timer.deadline.filter(|_| self.sleep_timer_left().is_some()) {
-            self.sleep_timer_set(Some((at + STEP * 60).min(now() + LONGEST * 60)));
-        }
-    }
-
     /// Set to run out at `until` (unix seconds; none: off), in the system.
     pub(crate) fn sleep_timer_set(&mut self, until: Option<i64>) {
         self.sleep_timer.run = self.sleep_timer.run.wrapping_add(1);
@@ -266,7 +257,8 @@ impl App {
     }
 
     fn sleep_timer_notice(&mut self, run: u32) {
-        let title = if self.power_hibernates() { tr("Hibernating in 1 min") } else { tr("Going to sleep in 1 min") };
+        // (It hibernates; the words say "off", as the timer's own do.)
+        let title = if self.power_hibernates() { tr("Turning off in 1 min") } else { tr("Going to sleep in 1 min") };
         let (body, cancel) = (tr("The sleep timer ran out"), tr("Cancel"));
         // (Waited for off the loop, a little past the end: the machine goes.)
         let wait = Duration::from_secs(NOTICE as u64 + 30);
@@ -317,7 +309,7 @@ mod tests {
 
     #[test]
     fn a_typed_time_reads_as_minutes() {
-        assert_eq!(parse_minutes(""), Some(STEP));
+        assert_eq!(parse_minutes(""), None);
         assert_eq!(parse_minutes("45"), Some(45));
         assert_eq!(parse_minutes(" 45 min "), Some(45));
         assert_eq!(parse_minutes("90m"), Some(90));
