@@ -597,7 +597,7 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         // (The terminal's pill stands with the card's.)
         PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_) => PillGroup::Clipboard,
         // (The sleep timer's stand by the gear too.)
-        PillId::Timer | PillId::TimerCancel => PillGroup::Settings,
+        PillId::Timer => PillGroup::Settings,
         // The task pill stands by the bell and, like it, is led by nothing.
         PillId::Notif | PillId::NotifMute | PillId::Task | PillId::Phone | PillId::Drive(_) => PillGroup::Notif,
         PillId::Clock => PillGroup::Clock,
@@ -916,8 +916,7 @@ fn draw_z(id: PillId) -> u8 {
         PillId::TermPill => 11,
         PillId::TermTab(_) => 10,
         PillId::TermTabClose(_) => 11,
-        PillId::Timer => 10,
-        PillId::TimerCancel => 11,
+        PillId::Timer => 11,
         // The readout slides out from BEHIND the gear and over the clipboard
         // cluster while it is out, so it draws above that cluster and below the
         // gear itself — the same stacking the clipboard box uses under its own
@@ -1007,11 +1006,9 @@ pub(crate) enum PillId {
     /// with its × at its right.
     TermTab(u8),
     TermTabClose(u8),
-    /// The sleep timer's countdown on the banner while it runs
-    /// (`timer_pill.rs`): words, not a button.
+    /// The sleep timer on the banner while it runs (`timer_pill.rs`): its
+    /// countdown (a click edits it) and its X (cancels) in one pill.
     Timer,
-    /// Its X, bonded to its right: cancels the timer.
-    TimerCancel,
     /// The clipboard OPTION's small fixed pill: a clipboard glyph, a gap right
     /// of the settings gear. The preview/history box slides out to its right
     /// from behind it — the left-side mirror of the bell + its box (see
@@ -1585,7 +1582,7 @@ fn presence(id: PillId) -> Presence {
             stage: true,
         },
         // So is the time left before the machine goes off.
-        PillId::Timer | PillId::TimerCancel => Presence {
+        PillId::Timer => Presence {
             desktop: true,
             overview: true,
             stage: true,
@@ -4081,8 +4078,8 @@ impl App {
                 self.push_term_pill(scene, pill.rect, pill.id);
                 continue;
             }
-            if matches!(pill.id, PillId::Timer | PillId::TimerCancel) {
-                self.push_timer_pill(scene, pill.rect, pill.id);
+            if pill.id == PillId::Timer {
+                self.push_timer_pill(scene, pill.rect);
                 continue;
             }
             // The clipboard box draws itself (slides out from behind the small
@@ -5956,9 +5953,8 @@ impl App {
         if matches!(id, PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_)) {
             return self.term_pill_reachable(id);
         }
-        // The sleep timer's countdown is words; its X takes the pointer.
-        if matches!(id, PillId::Timer | PillId::TimerCancel) {
-            return self.timer_pill_reachable(id);
+        if id == PillId::Timer {
+            return self.timer_pill_reachable();
         }
         if self.pin_rests(id) {
             return true;
@@ -7051,7 +7047,7 @@ impl App {
             Some(PillId::Drive(i)) => self.drive_pill_click(i),
             Some(id @ (PillId::Power | PillId::PowerSleep | PillId::PowerRestart)) => self.power_pill_click(id),
             Some(id @ (PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_))) => self.term_pill_click(id),
-            Some(id @ (PillId::Timer | PillId::TimerCancel)) => self.timer_pill_click(id),
+            Some(PillId::Timer) => self.timer_pill_click(),
             // Clicking the clipboard element pastes the current clip into the
             // focused window. Both ids resolve here because the box overlaps the
             // small pill at rest (a scrollable history box will split these in a

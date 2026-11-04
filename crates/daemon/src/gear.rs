@@ -3787,8 +3787,9 @@ impl App {
             }
             // The sleep timer's minute-before notice, now (`sleep_timer.rs`).
             "timer-notice" => self.sleep_timer_notice_now(),
-            // The banner's X (`timer_pill.rs`), as its click does.
-            "timer-x" => self.timer_pill_click(crate::options::PillId::TimerCancel),
+            // The banner's timer pill (`timer_pill.rs`): its X, its time.
+            "timer-x" => self.sleep_timer_cancel(),
+            "timer-time" => self.timer_pill_edit(),
             // The footer's buttons behind a button out (`behind off`: in), as
             // the pointer on it would have them; the next pointer move decides.
             // (`behind timer`: the first footer button with buttons behind it;

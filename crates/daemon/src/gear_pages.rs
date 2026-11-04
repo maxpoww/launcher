@@ -1386,6 +1386,13 @@ impl App {
         btn(sys(SysHit::SleepTimer), G_TIMER)
     }
 
+    /// The sleep timer's time asked in the footer's field — while it runs,
+    /// its whole minutes written, no seconds (Max, 2026-11-04).
+    pub(crate) fn sleep_timer_ask(&mut self) {
+        let text = self.sleep_timer_left().map(|s| crate::sleep_timer::whole_minutes(s).to_string()).unwrap_or_default();
+        self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, text);
+    }
+
     /// The sleep timer's question, in the footer's field.
     fn timer_prompt(&self) -> &'static str {
         // (It hibernates; the words say "off": Max, 2026-11-04.)
@@ -2022,11 +2029,7 @@ impl App {
                 self.set_stats_box(false);
                 crate::hypr::dispatch("hl.dsp.exec_cmd(\"hyprlock\")");
             }
-            SysHit::SleepTimer | SysHit::SleepTimerEdit => {
-                // (The whole minutes, no seconds: Max, 2026-11-04.)
-                let text = self.sleep_timer_left().map(|s| crate::sleep_timer::whole_minutes(s).to_string()).unwrap_or_default();
-                self.gear_ask(PField::SleepMinutes, self.timer_prompt(), G_TIMER, false, text);
-            }
+            SysHit::SleepTimer | SysHit::SleepTimerEdit => self.sleep_timer_ask(),
             SysHit::Sleep => {
                 self.set_stats_box(false);
                 run_detached("systemctl", vec!["suspend".into()]);
