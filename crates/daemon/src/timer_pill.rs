@@ -1,22 +1,24 @@
 //! THE SLEEP TIMER ON THE BANNER (Max, 2026-11-04: "ahora que el tiempo y la
 //! x estén en el banner (afuera de la caja) cuando está corriendo", then
 //! "show the time and the X on the same pill (plus click on the time to
-//! edit)"): while the gear box's sleep timer (`sleep_timer.rs`) runs, ONE
-//! pill stands on the banner right of the gear — and of the power key's pills
-//! while they are up: its countdown, then an X in a circle at its right end.
-//! What stands right of it moves over, as it does for the power pills.
+//! edit)"): while the gear box's sleep timer (`sleep_timer.rs`) runs and the
+//! box is SHUT, ONE pill stands on the banner right of the gear — and of the
+//! power key's pills while they are up: its countdown, then an X in a circle
+//! at its right end. What stands right of it moves over, as it does for the
+//! power pills. While the box is open the timer stands in it as it did (the
+//! box's X and countdown); the pill comes as the box shuts (Max: "que pase al
+//! banner cuando se cierra la caja") and goes as it opens, eased.
 //!
-//! The pointer on it lights the part under it (the words or the X, the
-//! power message's chips' way: the pill does not lift). A click on the X
+//! The pointer on it lifts and washes the WHOLE pill, as every pill's hover
+//! (Max: "el hover effect hacelo en la píldora completa"). A click on the X
 //! cancels the timer; on the time it opens the gear box with the time asked
-//! in its field, the whole minutes written. The box keeps only the hourglass,
-//! where the time is set. The pill comes and goes as the timer does, eased.
+//! in its field, the whole minutes written.
 
 use std::time::Instant;
 
 use crate::animation::{self, ease_toward};
 use crate::content::{Label, Rect, RectInst, Scene};
-use crate::options::{push_neumorph, PillId, EDGE_PAD, FONT_PX, LINE_PX, NERD, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
+use crate::options::{hover_grow, push_neumorph, PillId, EDGE_PAD, FONT_PX, LINE_PX, NERD, OPTION_GAP, PILL_PAD_X, TEXT_FONT};
 use crate::App;
 
 /// fa-times: cancel (the gear box's own X).
@@ -150,7 +152,7 @@ impl App {
         let dt = self.timer_pill.last.map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
         self.timer_pill.last = Some(now);
         let span = self.timer_pill_w() + OPTION_GAP;
-        let on = f32::from(u8::from(self.sleep_timer_left().is_some()));
+        let on = f32::from(u8::from(self.sleep_timer_left().is_some() && !self.stats.open));
         let (t, moving) = ease_toward(self.timer_pill.t, on, dt, animation::MORPH_RATE, animation::settle_t(span));
         self.timer_pill.t = t;
         self.sync_options_input();
@@ -162,27 +164,23 @@ impl App {
         }
     }
 
-    /// Draw the pill: its ground, the part under the pointer lit, the
-    /// countdown's words and the X.
-    pub(crate) fn push_timer_pill(&self, scene: &mut Scene, r: Rect) {
+    /// Draw the pill: its ground (lifted and washed whole under the
+    /// pointer), the countdown's words and the X.
+    pub(crate) fn push_timer_pill(&self, scene: &mut Scene, rect: Rect) {
         let a = ((self.timer_pill.t - 0.15) / 0.6).clamp(0.0, 1.0);
         if a <= 0.004 {
             return;
         }
         let bright = self.options_bar_is_bright();
+        let hovered = self.options_hover == Some(PillId::Timer);
+        let r = if hovered { hover_grow(rect) } else { rect };
         let radius = r.h / 2.0;
         push_neumorph(scene, r, radius, bright, a);
-        let mut rest = self.options_rest_wash();
-        rest[3] *= a;
-        scene.rects.push(RectInst { rect: r, radius, color: rest, glass: 0.0, border: 0.0 });
+        let mut wash = if hovered { self.options_hover_wash() } else { self.options_rest_wash() };
+        wash[3] *= a;
+        scene.rects.push(RectInst { rect: r, radius, color: wash, glass: 0.0, border: 0.0 });
         let x_rect = Self::timer_x_rect(r);
         let words = Rect::new(r.x, r.y, (x_rect.x - r.x).max(0.0), r.h);
-        if self.options_hover == Some(PillId::Timer) {
-            let lit = if self.timer_ptr_on_x() { x_rect } else { words };
-            let mut wash = self.options_hover_wash();
-            wash[3] *= a;
-            scene.rects.push(RectInst { rect: lit, radius, color: wash, glass: 0.0, border: 0.0 });
-        }
         let ink = self.options_text_color();
         let ink = [ink[0], ink[1], ink[2], ink[3] * a];
         let s = self.options_scale();

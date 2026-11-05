@@ -1378,12 +1378,22 @@ impl App {
     }
 
     /// The sleep timer's button: an hourglass — a click: the field, to type
-    /// the time, or while it runs to edit it. The countdown and the X that
-    /// cancels are on the banner while it runs (`timer_pill.rs`; Max,
-    /// 2026-11-04: "que el tiempo y la x estén en el banner (afuera de la
-    /// caja)").
+    /// the time. While it runs, an X (a click cancels) with the countdown close
+    /// beside it, words, no pill; a click on them edits the minutes. That is
+    /// while the box is open: shut, the timer is on the banner (`timer_pill.rs`;
+    /// Max, 2026-11-04: "que quede donde estaba antes, que pase al banner
+    /// cuando se cierra la caja").
     fn timer_btn(&self) -> Btn {
-        btn(sys(SysHit::SleepTimer), G_TIMER)
+        let Some(left) = self.sleep_timer_left() else {
+            return btn(sys(SysHit::SleepTimer), G_TIMER);
+        };
+        Btn {
+            hit: sys(SysHit::SleepTimer),
+            glyph: G_TIMES,
+            label: Some(crate::sleep_timer::countdown(left)),
+            label_hit: Some(sys(SysHit::SleepTimerEdit)),
+            ..Default::default()
+        }
     }
 
     /// The sleep timer's time asked in the footer's field — while it runs,
@@ -2029,6 +2039,7 @@ impl App {
                 self.set_stats_box(false);
                 crate::hypr::dispatch("hl.dsp.exec_cmd(\"hyprlock\")");
             }
+            SysHit::SleepTimer if self.sleep_timer_left().is_some() => self.sleep_timer_cancel(),
             SysHit::SleepTimer | SysHit::SleepTimerEdit => self.sleep_timer_ask(),
             SysHit::Sleep => {
                 self.set_stats_box(false);

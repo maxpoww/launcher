@@ -801,6 +801,9 @@ impl App {
             h.send(BtCommand::Watch(page == Some(PageKind::Bt)));
         }
         self.sync_gear_keyboard();
+        // The sleep timer stands in the box while it is open, on the banner
+        // once it is shut (`timer_pill.rs`).
+        self.timer_pill_sync();
     }
 
     /// The box holds the keyboard on the pages where typing means something
