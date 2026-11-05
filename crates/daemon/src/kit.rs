@@ -167,11 +167,6 @@ pub(crate) fn danger_tint(dark: bool) -> [f32; 4] {
     [r[0], r[1], r[2], if dark { 0.14 } else { 0.10 }]
 }
 
-/// [`danger`] in a linear grid's colours (the dock's box, the desktop's).
-pub(crate) fn danger_linear(dark: bool) -> [f32; 4] {
-    to_linear(danger(dark))
-}
-
 fn to_linear(c: [f32; 4]) -> [f32; 4] {
     let f = |v: f32| if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
     [f(c[0]), f(c[1]), f(c[2]), c[3]]
