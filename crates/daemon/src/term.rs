@@ -1722,27 +1722,22 @@ fn ensure_server(cols: u16, rows: u16) -> Result<(), String> {
     if run(&["has-session", "-t", SESSION]).is_some() {
         return Ok(());
     }
-    start_server(cols, rows)?;
     let kept = std::fs::read_to_string(tabs_file()).unwrap_or_default();
-    for line in kept.lines() {
-        let Some((n, dir)) = line.split_once('\t') else {
-            continue;
-        };
-        if !Path::new(dir).is_dir() {
+    let tabs: Vec<(&str, &str)> = kept.lines().filter_map(|l| l.split_once('\t')).filter(|(_, dir)| Path::new(dir).is_dir()).collect();
+    // The first tab is BORN in its folder: the server's first window starts
+    // there. (A `cd` typed into its shell showed as a command running by
+    // itself when the terminal opened — Max, 2026-11-05.)
+    let first = tabs.iter().find(|(n, _)| *n == "1").map(|(_, dir)| *dir);
+    start_server(cols, rows, first)?;
+    for (n, dir) in tabs {
+        if n == "1" {
             continue;
         }
         let target = format!("{SESSION}:{n}");
-        if n == "1" {
-            // (The first is there already, at home: it goes there.)
-            let keys = format!("cd {}", escape(dir));
-            run(&["send-keys", "-t", &target, "-l", &format!(" {keys}")]);
-            run(&["send-keys", "-t", &target, "Enter", "C-l"]);
-        } else {
-            let mut args = vec!["new-window", "-d", "-t", &target, "-c", dir];
-            let env = shell_env();
-            args.extend(env.iter().map(String::as_str));
-            run(&args);
-        }
+        let mut args = vec!["new-window", "-d", "-t", &target, "-c", dir];
+        let env = shell_env();
+        args.extend(env.iter().map(String::as_str));
+        run(&args);
     }
     if !kept.is_empty() {
         info!("term: the tabs back in their folders");
@@ -1750,8 +1745,9 @@ fn ensure_server(cols: u16, rows: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// The server started, as a service of its own when it can be.
-fn start_server(cols: u16, rows: u16) -> Result<(), String> {
+/// The server started, as a service of its own when it can be; its first
+/// window in `first` (else home).
+fn start_server(cols: u16, rows: u16, first: Option<&str>) -> Result<(), String> {
     let conf = conf_path();
     if let Some(dir) = conf.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -1759,11 +1755,11 @@ fn start_server(cols: u16, rows: u16) -> Result<(), String> {
     let tmp = conf.with_extension("tmp");
     let text = format!("{CONF}set -g default-size {cols}x{rows}\n");
     std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &conf)).map_err(|e| format!("cannot write {}: {e}", conf.display()))?;
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let start_dir = first.map_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()), str::to_owned);
     let conf_s = conf.to_string_lossy().into_owned();
     let bin = tmux_bin();
     let env = shell_env();
-    let mut server: Vec<&str> = vec![bin.as_str(), "-L", socket(), "-f", &conf_s, "new-session", "-d", "-s", SESSION, "-c", &home];
+    let mut server: Vec<&str> = vec![bin.as_str(), "-L", socket(), "-f", &conf_s, "new-session", "-d", "-s", SESSION, "-c", &start_dir];
     server.extend(env.iter().map(String::as_str));
     // A user service: its shells get the session's environment (not the
     // dock's) and outlive the dock. (Never from a test rig.)
@@ -1802,7 +1798,7 @@ fn start_server(cols: u16, rows: u16) -> Result<(), String> {
     // (No user manager to ask: started here, without what is the dock's own.)
     warn!("term: no user service, starting tmux directly");
     let mut c = tmux();
-    c.args(["-f", &conf_s, "new-session", "-d", "-s", SESSION, "-c", &home]).args(&env);
+    c.args(["-f", &conf_s, "new-session", "-d", "-s", SESSION, "-c", &start_dir]).args(&env);
     for (k, _) in std::env::vars_os() {
         let k = k.to_string_lossy();
         if k.starts_with("WAVERUNNER_") || k == "LD_LIBRARY_PATH" || k.starts_with("VK_") || k.starts_with("__EGL") || k.starts_with("__GLX") || k == "RUST_LOG" {
