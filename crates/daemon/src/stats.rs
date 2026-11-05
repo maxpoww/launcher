@@ -13,8 +13,10 @@
 //! gran píldora"): its symbol and number with `READING_PAD` at both ends, the
 //! pills `BOND_GAP` apart — the power pills' bond — fanning out from behind
 //! the first as the readout slides out (`stats_pills`). Opening the box, the
-//! pills give way to the box's one ground, which grows down from that row as
-//! before (`push_stats_grounds`).
+//! pills STAY, separate, on the banner — the page's own lit as the tab chosen
+//! — and the box's ground grows down UNDER them, `BOND_GAP` below (Max:
+//! "que las píldoras sigan separadas arriba de la caja abierta";
+//! `push_stats_grounds`).
 //!
 //! The numbers come from the Brain's own `ContextState.metrics` — the daemon
 //! reads no `/proc` of its own (method.md §1, "the Brain is the only sense").
@@ -1032,9 +1034,9 @@ impl App {
         if a < 0.01 {
             return;
         }
-        // The bar's ink on the bar; the box's as it opens under the row (the
-        // pill's fill makes the same turn — a light box kept the bar's white).
-        let ink = crate::animation::lerp4(self.options_text_color(), self.box_surface_at(rect).1, self.stats_open_t());
+        // The bar's ink, always: the pills stay on the banner as the box opens
+        // under them.
+        let ink = self.options_text_color();
         // Each couple is centred in its own pill (`stats_columns` from
         // `stats_pills` — the same arithmetic `stats_full_w` sized the row
         // with).
@@ -1193,10 +1195,10 @@ impl App {
         out
     }
 
-    /// The readout's grounds: each reading's own pill while the box is shut
-    /// (the one under the pointer lifted and washed, as a pill's hover), and
-    /// as the box opens the box's one ground growing in under them while the
-    /// pills give way to it.
+    /// The readout's grounds: each reading's own pill (the one under the
+    /// pointer lifted and washed, as a pill's hover; with the box open, the
+    /// one whose page shows washed as the tab chosen), and as the box opens its
+    /// ground growing down under the row of pills.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_stats_grounds(
         &self,
@@ -1209,36 +1211,36 @@ impl App {
         rest_wash: [f32; 4],
     ) {
         let e = self.stats_open_t().clamp(0.0, 1.0);
-        // The pills, while the box is shut — gone a third of the way open.
-        let own = (1.0 - e * 3.0).clamp(0.0, 1.0);
-        if own > 0.001 {
-            let pills = self.stats_pills(rect);
-            let ptr = self.options_ptr.filter(|_| self.options_hover == Some(PillId::SettingsStats));
-            // (The later ones first: each comes out from behind the one
-            // before it.)
-            for p in pills.iter().rev() {
-                let over = e < 0.01 && ptr.is_some_and(|(x, _)| x >= p.x && x < p.x + p.w);
-                let r = if over { hover_grow(*p) } else { *p };
-                let radius = r.h / 2.0;
-                push_neumorph(scene, r, radius, bright, shadow_a * own);
-                let wash = if over { hover_wash } else { rest_wash };
-                scene.rects.push(RectInst {
-                    rect: r,
-                    radius,
-                    color: [wash[0], wash[1], wash[2], wash[3] * a * own],
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
+        let pills = self.stats_pills(rect);
+        let ptr = self.options_ptr.filter(|_| self.options_hover == Some(PillId::SettingsStats));
+        let band_h = self.options_pill_h();
+        let page = self.stats_page();
+        // (The later ones first: each comes out from behind the one before it.)
+        for (k, p) in pills.iter().enumerate().rev() {
+            let over = ptr.is_some_and(|(x, y)| y <= rect.y + band_h && x >= p.x && x < p.x + p.w);
+            let chosen = e > 0.5 && page == k + 2;
+            let r = if over { hover_grow(*p) } else { *p };
+            let radius = r.h / 2.0;
+            push_neumorph(scene, r, radius, bright, shadow_a);
+            let wash = if over || chosen { hover_wash } else { rest_wash };
+            scene.rects.push(RectInst {
+                rect: r,
+                radius,
+                color: [wash[0], wash[1], wash[2], wash[3] * a],
+                glass: 0.0,
+                border: 0.0,
+            });
         }
         // The box's ground, as it opens: the frosted surface every box wears,
-        // in from nothing (the pills were the row).
-        if e > 0.001 {
-            let radius = self.stats_radius();
-            push_neumorph(scene, rect, radius, bright, shadow_a * e);
+        // growing down from just under the row.
+        let top = rect.y + band_h + BOND_GAP;
+        let ground = Rect::new(rect.x, top, rect.w, (rect.y + rect.h - top).max(0.0));
+        if e > 0.001 && ground.h > 1.0 {
+            let radius = (BOX_RADIUS * self.options_scale()).min(ground.h / 2.0);
+            push_neumorph(scene, ground, radius, bright, shadow_a * e);
             let (fill, _) = self.box_surface_at(rect);
             scene.rects.push(RectInst {
-                rect,
+                rect: ground,
                 radius,
                 color: [fill[0], fill[1], fill[2], self.box_panel_alpha() * e],
                 glass: 0.0,
