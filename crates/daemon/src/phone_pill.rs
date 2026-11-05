@@ -1203,11 +1203,12 @@ impl App {
                 self.draw_options();
                 return;
             }
-            if value < 0.0 {
+            if self.wheel_opens(value) {
                 return;
             }
         }
-        let open = value < 0.0 && self.phone_pill.shown.is_some();
+        // (THE KIT: pulling up opens a box, as natural scrolling says.)
+        let open = self.wheel_opens(value) && self.phone_pill.shown.is_some();
         if open != self.phone_pill.box_open {
             self.phone_pill.box_open = open;
             self.schedule_phone_pill_frame();
@@ -1531,10 +1532,11 @@ impl App {
             let ph = self.options_pill_h().min(long.h);
             let e = p.box_e;
             let solid = 1.0 - (1.0 - e).powi(3);
-            let radius = lerp(ph / 2.0, crate::clipboard::BOX_RADIUS, e);
+            let radius = lerp(ph / 2.0, self.box_radius(), e);
             push_neumorph(scene, long, radius, bright, out);
             let wash = self.options_rest_wash();
-            let (panel, box_ink) = self.clip_box_surface();
+            // (Its colour where it stands, as every box's: `box_surface_at`.)
+            let (panel, box_ink) = self.box_surface_at(long);
             scene.rects.push(RectInst {
                 rect: long,
                 radius,
@@ -1557,7 +1559,7 @@ impl App {
                     fill: [panel[0], panel[1], panel[2], self.box_panel_alpha() * solid * out],
                     ink: [box_ink[0], box_ink[1], box_ink[2], box_ink[3] * out],
                     wash: self.options_hover_wash(),
-                    radius: crate::clipboard::BOX_RADIUS,
+                    radius: self.box_radius(),
                     glass: 0.0,
                     accent: MenuPaint::accent_now(),
                 };

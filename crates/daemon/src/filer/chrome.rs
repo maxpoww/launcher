@@ -932,7 +932,10 @@ impl App {
             hits.seek,
         ) = (sort, info, grid, list, hidden, find, seek);
         if seek.w > 1.0 {
-            // The search: what is typed, or what it searches.
+            // The search: what is typed, or what it searches — on THE KIT's
+            // field: a faint fill, a stadium.
+            let ground = Rect::new(seek.x - 5.0, seek.y - 2.0, seek.w + 8.0, seek.h + 4.0);
+            g.rects.push(rect(ground, ground.h / 2.0, faded(tones.field, e)));
             let typed = win.find.clone().unwrap_or_default();
             if typed.is_empty() {
                 let folder = tab_name(&win.dir, &win.places);
@@ -963,7 +966,7 @@ impl App {
             if win.find.is_some() {
                 let tw = measure(win, &typed, LINE_PX, None).min(seek.w - 2.0);
                 g.rects.push(rect(
-                    Rect::new(seek.x + tw + 1.0, text_y + 1.0, 1.0, LINE_LH - 2.0),
+                    Rect::new(seek.x + tw + 1.0, text_y + 1.0, 1.5, LINE_LH - 2.0),
                     0.0,
                     ink,
                 ));

@@ -3119,7 +3119,20 @@ impl App {
                     }
                     let px = FONT_PX * s;
                     let c = if b.hit == *hit { pen.hot } else { pen.dim };
-                    pen.text(scene, tr("‹ Back").to_owned(), (r.x + BACK_PAD * s, r.y + (r.h - LINE_PX * s) / 2.0), r.w, (px, LINE_PX * s), c, false, None);
+                    // (Over the list, not in it: the pen's clip is the list's.)
+                    scene.labels.push(Label {
+                        text: tr("‹ Back").to_owned(),
+                        pos: (r.x + BACK_PAD * s, r.y + (r.h - LINE_PX * s) / 2.0),
+                        max_w: r.w,
+                        font_px: px,
+                        line_px: LINE_PX * s,
+                        centered: false,
+                        dim: false,
+                        cache: true,
+                        family: None,
+                        color: Some([c[0], c[1], c[2], c[3] * pen.a]),
+                        clip: Some(Rect::new(r.x - 4.0, r.y - 4.0, r.w + 8.0, r.h + 8.0)),
+                    });
                 }
                 continue;
             }
