@@ -8,6 +8,14 @@
 //! and the same leave-hold before it retracts, so the two edges of the bar
 //! behave identically.
 //!
+//! EACH READING IS ITS OWN PILL (Max, 2026-11-05: "quiero que las secciones de
+//! la píldora 'gear' estén todas en píldoras separadas en lugar de en una sola
+//! gran píldora"): its symbol and number with `READING_PAD` at both ends, the
+//! pills `BOND_GAP` apart — the power pills' bond — fanning out from behind
+//! the first as the readout slides out (`stats_pills`). Opening the box, the
+//! pills give way to the box's one ground, which grows down from that row as
+//! before (`push_stats_grounds`).
+//!
 //! The numbers come from the Brain's own `ContextState.metrics` — the daemon
 //! reads no `/proc` of its own (method.md §1, "the Brain is the only sense").
 //! A reading the engine does not have is simply not shown: a desktop with no
@@ -18,9 +26,9 @@ use std::time::{Duration, Instant};
 use calloop::timer::{TimeoutAction, Timer};
 
 use crate::animation::{ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SETTLE_PX};
-use crate::content::{Label, Rect, Scene};
+use crate::content::{Label, Rect, RectInst, Scene};
 use crate::gear::PageKind;
-use crate::options::{PillId, BOND_GAP, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
+use crate::options::{hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
 use crate::App;
 use options_engine::NetworkLink;
 
@@ -46,17 +54,10 @@ const ICON_PX: f32 = 19.0;
 /// measured ink ([`Icon::ink`]) rather than by its advance or a shared cell —
 /// both of which leave slack that lands in the gap and differs per glyph.
 const PAIR_GAP: f32 = 3.0;
-/// The gap BETWEEN couples — the readings' own rhythm (Max, 2026-09-13: *"move
-/// the icons on the gear pill, closer"*). Comfortably wider than [`PAIR_GAP`],
-/// which is what keeps each symbol reading as belonging to the number beside it
-/// rather than to the column next door.
-const COL_GAP: f32 = 7.0;
-/// The margin at both ends of the pill, which is NOT the couple gap: the ends
-/// are bounded by the round caps, so they need air the middle does not. Tying
-/// the two together is what made the last reading sit on the cap (Max: *"BT is
-/// too close to the end of the pill"*) — tightening the row would have brought
-/// that straight back, since a 15px margin barely clears a ~12px cap radius.
-const END_PAD: f32 = 14.0;
+/// The air at both ends of a reading's own pill, between its round caps and
+/// its couple (a bar pill's words get `PILL_PAD_X`; a couple of a symbol and a
+/// figure wants a little less).
+const READING_PAD: f32 = 10.0;
 
 // --- The box (Max, 2026-09-13: "scroll down or click the gear opens a box") --
 /// The open panel's height is [`crate::options::BOX_DRAWER_H`] — the ONE height
@@ -95,7 +96,7 @@ struct Icon {
     ///
     /// The layout spaces couples by ink, not by a common cell or by the font's
     /// advance — that is what makes every symbol-to-number distance exactly
-    /// [`PAIR_GAP`] and every couple-to-couple distance exactly [`COL_GAP`],
+    /// [`PAIR_GAP`] and every couple centred in its own pill,
     /// instead of each varying with how wide its own glyph happens to be
     /// (measured at 8.8–14.4px and 27.5–33px respectively before this).
     ///
@@ -682,19 +683,21 @@ impl App {
         if self.stats.widths.is_empty() {
             return STATS_W * s; // nothing measured yet (first frame)
         }
-        let ink: f32 = self
+        // Every reading's own pill, and the bond between them: the SAME
+        // arithmetic `stats_pills` lays them out with.
+        let pills: f32 = self
             .stats
             .widths
             .iter()
-            .map(|(icon_w, value_w)| pair_w(*icon_w, *value_w, s))
+            .map(|(icon_w, value_w)| self.stats_pill_w(pair_w(*icon_w, *value_w, s)))
             .sum();
-        let gaps = COL_GAP * s * (self.stats.widths.len() - 1) as f32;
-        // The SAME margin the draw lays out from, at both ends — get this wrong
-        // and the row is off-centre by the difference. It was `options_pill_h()`
-        // (the round caps) while the draw used the gap, which left a right
-        // margin of about one pixel: the arithmetic behind "BT is too close to
-        // the end of the pill".
-        ink + gaps + 2.0 * END_PAD * s
+        pills + BOND_GAP * (self.stats.widths.len() - 1) as f32
+    }
+
+    /// A reading's own pill's width: its couple and `READING_PAD` at both
+    /// ends, never narrower than a round pill.
+    fn stats_pill_w(&self, couple: f32) -> f32 {
+        (couple + 2.0 * READING_PAD * self.options_scale()).max(self.options_pill_h())
     }
 
     /// Whether the readout is out far enough to be worth drawing or touching.
@@ -1032,11 +1035,9 @@ impl App {
         // The bar's ink on the bar; the box's as it opens under the row (the
         // pill's fill makes the same turn — a light box kept the bar's white).
         let ink = crate::animation::lerp4(self.options_text_color(), self.box_surface_at(rect).1, self.stats_open_t());
-        // The couples are laid out one after another from the left margin, each
-        // at its own width with `COL_GAP` between — the same arithmetic
-        // `stats_full_w` sized the pill with, so the row lands centred by
-        // construction rather than by dividing a width that may not fit. The
-        // ends get `END_PAD` instead of the gap: they are bounded by the caps.
+        // Each couple is centred in its own pill (`stats_columns` from
+        // `stats_pills` — the same arithmetic `stats_full_w` sized the row
+        // with).
         let font = VALUE_PX * s;
         let line = LINE_PX * s;
         // ONE line per column. A label stacked over its value is the obvious
@@ -1161,16 +1162,88 @@ impl App {
     /// somewhere other than where its symbol is drawn.
     fn stats_columns(&self, rect: Rect) -> Vec<Rect> {
         let s = self.options_scale();
+        let readings = self.stats_readings();
+        self.stats_pills(rect)
+            .into_iter()
+            .zip(readings.iter().enumerate())
+            .map(|(p, (i, r))| {
+                let (icon_w, value_w) = self.stats_pair_w(i, r, s);
+                let w = pair_w(icon_w, value_w, s);
+                Rect::new(p.x + (p.w - w) / 2.0, p.y, w, p.h)
+            })
+            .collect()
+    }
+
+    /// Where each reading's own pill stands now: fanned out from behind the
+    /// first as the readout slides out (`t`), `BOND_GAP` apart once it is out
+    /// — the power pills' way of coming out from behind one another.
+    pub(crate) fn stats_pills(&self, rect: Rect) -> Vec<Rect> {
+        let s = self.options_scale();
         let band_h = self.options_pill_h();
+        let t = self.stats.t.clamp(0.0, 1.0);
         let readings = self.stats_readings();
         let mut out = Vec::with_capacity(readings.len());
-        let mut pair_x = rect.x + END_PAD * s;
+        let mut offset = 0.0;
         for (i, r) in readings.iter().enumerate() {
             let (icon_w, value_w) = self.stats_pair_w(i, r, s);
-            let w = pair_w(icon_w, value_w, s);
-            out.push(Rect::new(pair_x, rect.y, w, band_h));
-            pair_x += w + COL_GAP * s;
+            let w = self.stats_pill_w(pair_w(icon_w, value_w, s));
+            out.push(Rect::new(rect.x + offset * t, rect.y, w, band_h));
+            offset += w + BOND_GAP;
         }
         out
+    }
+
+    /// The readout's grounds: each reading's own pill while the box is shut
+    /// (the one under the pointer lifted and washed, as a pill's hover), and
+    /// as the box opens the box's one ground growing in under them while the
+    /// pills give way to it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_stats_grounds(
+        &self,
+        scene: &mut Scene,
+        rect: Rect,
+        bright: bool,
+        a: f32,
+        shadow_a: f32,
+        hover_wash: [f32; 4],
+        rest_wash: [f32; 4],
+    ) {
+        let e = self.stats_open_t().clamp(0.0, 1.0);
+        // The pills, while the box is shut — gone a third of the way open.
+        let own = (1.0 - e * 3.0).clamp(0.0, 1.0);
+        if own > 0.001 {
+            let pills = self.stats_pills(rect);
+            let ptr = self.options_ptr.filter(|_| self.options_hover == Some(PillId::SettingsStats));
+            // (The later ones first: each comes out from behind the one
+            // before it.)
+            for p in pills.iter().rev() {
+                let over = e < 0.01 && ptr.is_some_and(|(x, _)| x >= p.x && x < p.x + p.w);
+                let r = if over { hover_grow(*p) } else { *p };
+                let radius = r.h / 2.0;
+                push_neumorph(scene, r, radius, bright, shadow_a * own);
+                let wash = if over { hover_wash } else { rest_wash };
+                scene.rects.push(RectInst {
+                    rect: r,
+                    radius,
+                    color: [wash[0], wash[1], wash[2], wash[3] * a * own],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+        }
+        // The box's ground, as it opens: the frosted surface every box wears,
+        // in from nothing (the pills were the row).
+        if e > 0.001 {
+            let radius = self.stats_radius();
+            push_neumorph(scene, rect, radius, bright, shadow_a * e);
+            let (fill, _) = self.box_surface_at(rect);
+            scene.rects.push(RectInst {
+                rect,
+                radius,
+                color: [fill[0], fill[1], fill[2], self.box_panel_alpha() * e],
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
     }
 }
