@@ -137,6 +137,7 @@ pub(crate) enum Hit {
     NetShare,
     NetShowPw,
     NetForget,
+    NetForgetNow,
     NetAuto,
     NetMetered,
     NetPrivate,
@@ -157,6 +158,7 @@ pub(crate) enum Hit {
     BtVisible,
     DevToggle,
     DevForget,
+    DevForgetNow,
     DevAuto,
     DevRename,
     DevQuality(bool),
@@ -383,8 +385,10 @@ pub(crate) struct GearState {
     /// last attempt was refused for its password.
     net_busy: Option<String>,
     net_err: Option<String>,
-    /// Whether that failure was the password (else: it could not connect).
+    /// Whether that failure was the password (else: it could not connect),
+    /// and whether it was refused here for being too short.
     net_err_password: bool,
+    net_err_short: bool,
     net_scanning: bool,
     hs_busy: bool,
     /// Why sharing did not start, as a title and a line under it.
@@ -571,10 +575,10 @@ fn item_h(item: &Item, s: f32, box_w: f32) -> f32 {
 /// The pressable parts of one item, first match wins.
 fn item_zones(item: &Item, r: Rect, s: f32) -> Vec<(Hit, Rect)> {
     match item {
-        Item::Row { hit, more, .. } => {
+        Item::Row { hit, more, trail, .. } => {
             let mut z = Vec::new();
             if let Some((m, _)) = more {
-                z.push((m.clone(), row_more_rect(r, s)));
+                z.push((m.clone(), row_more_rect(r, s, trail)));
             }
             if *hit != Hit::None {
                 z.push((hit.clone(), r));
@@ -623,15 +627,27 @@ fn choice_key_w(key: &str, s: f32) -> f32 {
     (est_w(key, FONT_PX * s) * 1.1 + 14.0 * s).min((KV_KEY_W + 10.0) * s)
 }
 
-/// A row's corner control: where the trail sits, a little larger to press.
-fn row_more_rect(r: Rect, s: f32) -> Rect {
+/// How much of a row's end its trail takes (none: nothing).
+fn trail_w(trail: &Trail, s: f32) -> f32 {
+    match trail {
+        Trail::None => 0.0,
+        Trail::Glyph(_) => 18.0 * s,
+        Trail::Switch(_) => (SWITCH_W + 6.0) * s,
+        Trail::Text(t) => est_w(t, 15.0 * s) * 1.25 + 6.0 * s,
+        Trail::Battery(b) => est_w(&format!("{b}%"), 15.0 * s) + 4.0 * s,
+    }
+}
+
+/// A row's corner control: at the row's end where it has no trail, else just
+/// LEFT of the trail — which stays, and stays what a click there does (Max,
+/// 2026-11-05: on hover the Bluetooth switch became a pencil, "si hago click
+/// estoy trabajando en el toggle").
+fn row_more_rect(r: Rect, s: f32, trail: &Trail) -> Rect {
     let d = MORE_SZ * s;
-    Rect::new(
-        r.x + r.w - TRAIL_PAD * s - d + 4.0 * s,
-        r.y + (ROW_PAD_Y * s + LINE_PX * s / 2.0) - d / 2.0,
-        d,
-        d,
-    )
+    let end = r.x + r.w - TRAIL_PAD * s + 4.0 * s;
+    let tw = trail_w(trail, s);
+    let x = if tw > 0.0 { end - 4.0 * s - tw - 6.0 * s - d } else { end - d };
+    Rect::new(x, r.y + (ROW_PAD_Y * s + LINE_PX * s / 2.0) - d / 2.0, d, d)
 }
 
 /// The content-scissored grid this page's rects ride, so a half-scrolled row's
@@ -946,6 +962,7 @@ impl App {
                 self.gear.net_busy = None;
                 self.gear.net_err = Some(ssid.clone());
                 self.gear.net_err_password = wrong_password;
+                self.gear.net_err_short = false;
                 if wrong_password && self.gear_page() == Some(PageKind::Net) {
                     self.gear.net_view = NetView::List;
                     self.open_gear_field(password_field(ssid, false));
@@ -1091,7 +1108,7 @@ impl App {
                     more: None,
                     tile: None,
                     title: tr("Airplane mode").into(),
-                    sub: tr("Wi-Fi and Bluetooth are off").into(),
+                    sub: tr("Wi-Fi and Bluetooth off").into(),
                     tone: Tone::Normal,
                     trail: Trail::Switch(true),
                     sel: false,
@@ -1118,16 +1135,33 @@ impl App {
             hit: Hit::WifiPower,
             more: None,
             tile: None,
-            title: "Wi-Fi".into(),
+            title: tr("Wi-Fi").into(),
             sub: sub.into(),
             tone: Tone::Normal,
             trail: Trail::Switch(on),
             sel: false,
         };
-        let compact = |sub: &str, on: bool, why: &str| View {
-            items: vec![power(sub, on), Item::Empty(why.into())],
-            compact: true,
-            ..View::default()
+        // (A wired link is told even with no Wi-Fi or Wi-Fi off: a desktop on
+        // its cable read "This computer has no Wi-Fi" and nothing more.)
+        let wired = snap.wired.as_ref().map(|speed| Item::Row {
+            hit: Hit::None,
+            more: None,
+            tile: Some(G_ETH),
+            title: tr("Wired").into(),
+            sub: if speed.is_empty() {
+                tr("Connected").into()
+            } else {
+                crate::i18n::fill(tr("Connected · {speed}"), &[("speed", speed)])
+            },
+            tone: Tone::Normal,
+            trail: Trail::Glyph(G_CHECK),
+            sel: false,
+        });
+        let compact = |sub: &str, on: bool, why: &str| {
+            let mut items = vec![power(sub, on)];
+            items.extend(wired.clone());
+            items.push(Item::Empty(why.into()));
+            View { items, compact: wired.is_none(), ..View::default() }
         };
         if !snap.reachable {
             return compact(
@@ -1154,21 +1188,8 @@ impl App {
         };
         let mut items = vec![power(&sub, true)];
         let query = self.search_query();
-        if let (Some(speed), true) = (&snap.wired, query.is_empty()) {
-            items.push(Item::Row {
-                hit: Hit::None,
-                more: None,
-                tile: Some(G_ETH),
-                title: tr("Wired").into(),
-                sub: if speed.is_empty() {
-                    tr("Connected").into()
-                } else {
-                    crate::i18n::fill(tr("Connected · {speed}"), &[("speed", &speed)])
-                },
-                tone: Tone::Normal,
-                trail: Trail::Glyph(G_CHECK),
-                sel: false,
-            });
+        if query.is_empty() {
+            items.extend(wired);
         }
         let mut shown = 0;
         for ap in snap
@@ -1181,7 +1202,9 @@ impl App {
                 (tr("Connecting…").to_owned(), Tone::Busy)
             } else if g.net_err.as_deref() == Some(ap.ssid.as_str()) && !ap.active {
                 (
-                    if g.net_err_password {
+                    if g.net_err_short {
+                        tr("A password has 8 characters or more")
+                    } else if g.net_err_password {
                         tr("Wrong password. Try again")
                     } else {
                         tr("Could not connect. Try again")
@@ -2243,28 +2266,30 @@ impl App {
                         pen.glyph(scene, g, (t.x + t.w / 2.0, t.y + t.h / 2.0), d * 0.52, col);
                         tx += (TILE + TILE_GAP) * s - (TILE * s - d);
                     }
-                    // The trail: its resting form, or the corner control while
-                    // the pointer is on the row (only ever one of the two).
+                    // The trail always (what the row IS: on, connected, its
+                    // battery…); the corner control beside it, left of it,
+                    // while the pointer is on the row.
                     let right = r.x + r.w - TRAIL_PAD * s;
                     let line_cy = r.y + ROW_PAD_Y * s + LINE_PX * s / 2.0;
                     let mut text_right = right;
-                    match (more, hovered) {
-                        (Some((m, g)), true) => {
-                            let z = row_more_rect(r, s);
-                            let on = m == hit;
-                            if on {
-                                pen.rect(scene, z, z.h / 2.0, [ink[0], ink[1], ink[2], 0.14], 0.0);
-                            }
-                            pen.glyph(
-                                scene,
-                                g,
-                                (z.x + z.w / 2.0, z.y + z.h / 2.0),
-                                FONT_PX * s,
-                                if on { pen.hot } else { pen.dim },
-                            );
-                            text_right = z.x - 4.0 * s;
+                    let mut more_left = None;
+                    if let (Some((m, g)), true) = (more, hovered) {
+                        let z = row_more_rect(r, s, trail);
+                        let on = m == hit;
+                        if on {
+                            pen.rect(scene, z, z.h / 2.0, [ink[0], ink[1], ink[2], 0.14], 0.0);
                         }
-                        _ => match trail {
+                        pen.glyph(
+                            scene,
+                            g,
+                            (z.x + z.w / 2.0, z.y + z.h / 2.0),
+                            FONT_PX * s,
+                            if on { pen.hot } else { pen.dim },
+                        );
+                        more_left = Some(z.x - 4.0 * s);
+                    }
+                    {
+                        match trail {
                             Trail::None => {}
                             Trail::Glyph(g) => {
                                 pen.glyph(scene, g, (right - 9.0 * s, line_cy), 16.0 * s, col);
@@ -2303,7 +2328,11 @@ impl App {
                                 );
                                 text_right = right - w - 6.0 * s;
                             }
-                        },
+                        }
+                    }
+                    // (The words end before the corner control while it shows.)
+                    if let Some(l) = more_left {
+                        text_right = text_right.min(l);
                     }
                     let max_w = (text_right - tx).max(0.0);
                     let px = (FONT_PX * s, LINE_PX * s);
@@ -3203,10 +3232,10 @@ impl App {
             if !on_list || self.gear_view().compact || text.trim().is_empty() {
                 return;
             }
-            let prompt = if self.gear_page() == Some(PageKind::Net) {
-                tr("Search networks…")
-            } else {
-                tr("Search devices…")
+            let prompt = match self.gear_page() {
+                Some(PageKind::Net) => tr("Search networks…"),
+                Some(PageKind::Bt) => tr("Search devices…"),
+                _ => tr("Search apps…"),
             };
             self.open_gear_field(Field {
                 kind: FieldKind::Search,
@@ -3239,7 +3268,13 @@ impl App {
         let text = f.text.trim().to_owned();
         match f.kind {
             FieldKind::Search => {
-                // Enter takes the first match, like the clipboard's search.
+                // Enter takes the first match, like the clipboard's search —
+                // with nothing typed, nothing (it was the first row: the
+                // network in use, disconnected).
+                if text.is_empty() {
+                    self.close_gear_field();
+                    return;
+                }
                 let first =
                     self.gear_view().items.into_iter().find_map(|i| match i {
                         Item::Row {
@@ -3262,6 +3297,7 @@ impl App {
                 if f.text.chars().count() < 8 {
                     self.gear.net_err = Some(ssid);
                     self.gear.net_err_password = true;
+                    self.gear.net_err_short = true;
                     if let Some(f) = &mut self.gear.field {
                         f.text.clear();
                     }
@@ -3334,6 +3370,11 @@ impl App {
                     self.settings.hotspot_pass = f.text;
                     self.settings.save();
                     self.close_gear_field();
+                } else if let Some(f) = &mut self.gear.field {
+                    // (Too short: said where it is typed, the field kept.)
+                    f.prompt = tr("A password has 8 characters or more").to_owned();
+                    f.text.clear();
+                    self.schedule_stats_frame();
                 }
             }
         }
@@ -3538,7 +3579,15 @@ impl App {
                 }
             }
             Hit::NetShowPw | Hit::HsEye => self.gear.show_pw = !self.gear.show_pw,
+            // Forgetting a network loses its password: asked once, as every
+            // thing in the box that cannot be undone.
             Hit::NetForget => {
+                if let NetView::Detail(ssid) = self.gear.net_view.clone() {
+                    let ask = crate::i18n::fill(tr("Forget {name}? Click again"), &[("name", &ssid)]);
+                    self.gear_arm(&ask, Hit::NetForgetNow);
+                }
+            }
+            Hit::NetForgetNow => {
                 if let NetView::Detail(ssid) = self.gear.net_view.clone() {
                     self.net_send(NetCommand::Forget(ssid));
                     self.gear.net_view = NetView::List;
@@ -3631,6 +3680,7 @@ impl App {
                 self.bt_send(BtCommand::Discoverable(!on));
             }
             Hit::DevForget
+            | Hit::DevForgetNow
             | Hit::DevAuto
             | Hit::DevRename
             | Hit::DevQuality(_)
@@ -3749,7 +3799,12 @@ impl App {
             return;
         };
         match hit {
+            // (Asked once: it must be paired again to come back.)
             Hit::DevForget => {
+                let ask = crate::i18n::fill(tr("Forget {name}? Click again"), &[("name", &d.name)]);
+                self.gear_arm(&ask, Hit::DevForgetNow);
+            }
+            Hit::DevForgetNow => {
                 self.bt_send(BtCommand::Forget(path));
                 self.gear.bt_view = BtView::List;
                 self.gear_show_view();

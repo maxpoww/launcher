@@ -87,7 +87,6 @@ pub(crate) enum SysHit {
     AskKill(String),
     DoKill(String),
     SystemTasks,
-    PowerPage,
     // battery
     Mode(String),
     AutoSaver,
@@ -682,11 +681,11 @@ impl App {
                     .unwrap_or_else(|| "balanced".into());
                 info!("gear: battery at {pct}% — saver on (was {from})");
                 self.gear.pages.saver_from = Some(from);
-                self.sys_send(SysCommand::Profile("power-saver".into()));
+                self.sys_send(SysCommand::Profile { mode: "power-saver".into(), picked: false });
             }
         } else if let Some(from) = self.gear.pages.saver_from.take() {
             info!("gear: battery no longer low — back to {from}");
-            self.sys_send(SysCommand::Profile(from));
+            self.sys_send(SysCommand::Profile { mode: from, picked: false });
         }
     }
 
@@ -900,7 +899,7 @@ impl App {
         let hot = l.temp.is_some_and(|t| t >= 92.0);
         let mut parts = vec![format!("{:.0}%", l.cpu)];
         if let Some(t) = l.temp {
-            parts.push(format!("{t:.0}°"));
+            parts.push(format!("{t:.0} °C"));
         }
         parts.push(crate::i18n::fill(tr("{0} cores"), &[("0", &p.machine.cores)]));
         let status = row_with(
@@ -923,18 +922,11 @@ impl App {
             Item::Graph(p.cpu_hist.clone()),
             Item::Cores(l.cores.clone()),
         ];
+        // The mode chosen here as on the battery's page (it wore a pencil and
+        // only went there).
         if let Some(profile) = &l.profile {
-            if self.stats_page_for(PageKind::Battery).is_some() {
-                items.push(Item::Kv {
-                    hit: Some(sys(SysHit::PowerPage)),
-                    key: tr("Power mode").into(),
-                    value: mode_name(profile).into(),
-                });
-            } else {
-                // A desktop has no battery page: the mode lives here.
-                items.push(self.mode_choice(profile));
-                items.push(Item::Note(mode_note(profile).into()));
-            }
+            items.push(self.mode_choice(profile));
+            items.push(Item::Note(mode_note(profile).into()));
         }
         items.push(head(tr("Using the processor")));
         items.extend(self.app_rows(|a| f64::from(a.cpu), |a| format!("{:.0}%", a.cpu)));
@@ -1922,7 +1914,7 @@ impl App {
             items.push(kv(tr("Wear"), crate::i18n::fill(tr("{w}% used up"), &[("w", &w)])));
         }
         if let Some(t) = x.temp_c {
-            items.push(kv(tr("Temperature"), format!("{t:.0}°")));
+            items.push(kv(tr("Temperature"), format!("{t:.0} °C")));
         }
         if let Some(h) = x.power_on_hours {
             items.push(kv(tr("Powered on"), span_text(h * 60)));
@@ -2033,7 +2025,9 @@ impl App {
             }
             SysHit::AllSettings => {
                 self.set_stats_box(false);
-                self.toggle_control_panel();
+                if !self.control_panel {
+                    self.toggle_control_panel();
+                }
             }
             SysHit::Lock => {
                 self.set_stats_box(false);
@@ -2043,7 +2037,7 @@ impl App {
             SysHit::SleepTimer | SysHit::SleepTimerEdit => self.sleep_timer_ask(),
             SysHit::Sleep => {
                 self.set_stats_box(false);
-                run_detached("systemctl", vec!["suspend".into()]);
+                crate::power_pill::machine("suspend");
             }
             SysHit::AskRestart => self.gear_arm(tr("Restart now? Click again"), sys(SysHit::DoRestart)),
             // The banner's own restart: the apps closed first, as their X does,
@@ -2055,7 +2049,7 @@ impl App {
             SysHit::AskHibernate => self.gear_arm(tr("Hibernate now? Click again"), sys(SysHit::DoHibernate)),
             SysHit::DoHibernate => {
                 self.set_stats_box(false);
-                run_detached("systemctl", vec!["hibernate".into()]);
+                crate::power_pill::machine("hibernate");
             }
             SysHit::App(key) => self.page_view(PView::App(key)),
             SysHit::AppClose(key) => {
@@ -2082,16 +2076,11 @@ impl App {
                 self.page_view(PView::List);
             }
             SysHit::SystemTasks => self.gear.pages.show_system = !self.gear.pages.show_system,
-            SysHit::PowerPage => {
-                if let Some(page) = self.stats_page_for(PageKind::Battery) {
-                    self.stats_open_page(page);
-                }
-            }
             SysHit::Mode(profile) => {
                 // A mode chosen by hand ends the low-battery saver's claim.
                 self.gear.pages.saver_from = None;
                 self.gear.pages.live.profile = Some(profile.clone());
-                self.sys_send(SysCommand::Profile(profile));
+                self.sys_send(SysCommand::Profile { mode: profile, picked: true });
             }
             SysHit::AutoSaver => {
                 self.settings.battery_saver_off = !self.settings.battery_saver_off;

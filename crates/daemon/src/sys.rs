@@ -231,7 +231,9 @@ pub(crate) enum SysCommand {
     /// compositor is asked there) so processes can be grouped into apps.
     Windows(Vec<(String, String, i32)>),
     Kill(Vec<i32>),
-    Profile(String),
+    /// A power mode set; `picked`: by the owner (kept as their choice for
+    /// this source), else by Golem itself (the low-battery saver).
+    Profile { mode: String, picked: bool },
     ChargeLimit(bool),
     Clean(Vec<Junk>),
     Erase(bool),
@@ -334,9 +336,13 @@ fn run(events: &Sender<SysEvent>, rx: &mpsc::Receiver<SysCommand>) {
                     }
                 }
             }
-            Some(SysCommand::Profile(p)) => {
-                crate::power_profiles::set(&p);
-                crate::power_mode::picked(&p);
+            Some(SysCommand::Profile { mode, picked }) => {
+                crate::power_profiles::set(&mode);
+                // (The low-battery saver is not the owner's pick: kept as
+                // one, it stood as their battery choice from then on.)
+                if picked {
+                    crate::power_mode::picked(&mode);
+                }
             }
             Some(SysCommand::ChargeLimit(on)) => {
                 if let Some(path) = battery_dir().map(|d| d.join("charge_control_end_threshold")) {

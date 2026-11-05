@@ -195,7 +195,7 @@ fn answer<T>(question: impl Future<Output = zbus::Result<T>>) -> Option<T> {
 }
 
 /// `systemctl <verb>`, on a thread of its own (reaped; the loop never waits).
-fn machine(verb: &'static str) {
+pub(crate) fn machine(verb: &'static str) {
     // A test rig runs on the machine itself: it never puts it to sleep.
     if std::env::var_os("GOLEM_RIG").is_some() {
         info!("power: a rig — would {verb}");
