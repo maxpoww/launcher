@@ -1768,6 +1768,28 @@ fn start_server(cols: u16, rows: u16) -> Result<(), String> {
     // A user service: its shells get the session's environment (not the
     // dock's) and outlive the dock. (Never from a test rig.)
     let rig = std::env::var_os("GOLEM_RIG").is_some();
+    // A unit of an earlier run, ended but still loaded, keeps its name taken:
+    // systemd-run refused it and every start fell back to tmux started here
+    // (2026-11-05: yesterday's golem-terminal.service, inactive since 18:01,
+    // still loaded). Cleared first — only when it is NOT active: an active
+    // one can be holding a server with no `golem` session (a tab in a window
+    // of its own), and stopping it would end those; then the direct start
+    // below joins that live server.
+    let unit_name = format!("{UNIT}.service");
+    let user_ctl = |args: &[&str]| {
+        Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if !rig && !user_ctl(&["is-active", "--quiet", &unit_name]) {
+        user_ctl(&["stop", &unit_name]);
+        user_ctl(&["reset-failed", &unit_name]);
+    }
     let unit = if rig { Command::new("false").status() } else { Command::new("systemd-run")
         .args(["--user", "--quiet", "--collect", "--unit", UNIT, "-p", "Type=forking", "--description", "Golem: the box's terminal tabs", "--"])
         .args(&server)
