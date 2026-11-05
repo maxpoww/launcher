@@ -165,7 +165,7 @@ fn line(label: &str, value: &str, act: Act) -> Line {
 fn guide(title: &str, under: &str, steps: &[(&str, &str)], last: &[&str]) -> Vec<Line> {
     // (Steps come as constant tables: translated here, as they become lines.)
     let say = |label: &str| line(crate::i18n::tr_dyn(label), "", Act::Nothing);
-    let mut lines = vec![line(tr("‹  Back"), "", Act::Turn(Page::Menu))];
+    let mut lines = vec![line(tr("‹ Back"), "", Act::Turn(Page::Menu))];
     lines.push(Line { air: true, ..say(title) });
     lines.push(Line { dim: true, ..say(under) });
     for (n, (text, seen)) in steps.iter().enumerate() {
@@ -234,7 +234,7 @@ fn files_lines() -> Vec<Line> {
 /// (`debug-desktop "phonepill fake"`): each page as it looks, acting on
 /// nothing.
 fn fake_lines(page: Page) -> Vec<Line> {
-    let back = line("‹  Back", "", Act::Turn(Page::Menu));
+    let back = line(tr("‹ Back"), "", Act::Turn(Page::Menu));
     let rows: &[(&str, &str, bool)] = match page {
         Page::Menu => &[
             ("Open", "", false),
@@ -887,7 +887,7 @@ impl App {
             return Vec::new();
         };
         let path = v.path.to_string_lossy().into_owned();
-        let back = line("‹  Back", "", Act::Turn(Page::Menu));
+        let back = line(tr("‹ Back"), "", Act::Turn(Page::Menu));
         let group = |mut l: Line| {
             l.air = true;
             l
@@ -933,14 +933,16 @@ impl App {
             Page::Camera => {
                 let mut lines = vec![back];
                 let Some((on, lenses, pictures)) = self.camera_choices() else {
-                    lines.push(group(line("The camera is off", "", Act::Nothing)));
+                    lines.push(group(line(tr("The camera is off"), "", Act::Nothing)));
                     return lines;
                 };
                 if self.camera_has_torch() {
-                    lines.push(group(line("Flash", if on.torch { "On" } else { tr("Off") }, Act::Flash)));
+                    lines.push(group(line(tr("Flash"), if on.torch { tr("On") } else { tr("Off") }, Act::Flash)));
                 }
                 for (n, name) in lenses.iter().enumerate() {
-                    let l = line(name, yes(n == on.lens), Act::Lens(n));
+                    // (The lens's name is the phone's own or ours — "Ultra wide",
+                    // "Main"…: translated where it is known.)
+                    let l = line(crate::i18n::tr_dyn(name), yes(n == on.lens), Act::Lens(n));
                     lines.push(if n == 0 { group(l) } else { l });
                 }
                 for (k, picture) in pictures.iter().enumerate() {
@@ -954,11 +956,11 @@ impl App {
             Page::Properties => {
                 let mut lines = vec![back];
                 match &self.phone_pill.facts {
-                    None => lines.push(group(line("Asking the phone…", "", Act::Nothing))),
-                    Some(facts) if facts.is_empty() => lines.push(group(line("It would not say", "", Act::Nothing))),
+                    None => lines.push(group(line(tr("Asking the phone…"), "", Act::Nothing))),
+                    Some(facts) if facts.is_empty() => lines.push(group(line(tr("It would not say"), "", Act::Nothing))),
                     Some(facts) => {
                         for (n, (key, value)) in facts.iter().enumerate() {
-                            let l = line(key, value, Act::Nothing);
+                            let l = line(crate::i18n::tr_dyn(key), value, Act::Nothing);
                             lines.push(if n == 0 { group(l) } else { l });
                         }
                     }

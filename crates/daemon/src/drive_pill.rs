@@ -88,7 +88,7 @@ pub(crate) struct DrivePills {
 /// What a drive says: its name, and what is free on it.
 fn says(name: &str, space: Option<(u64, u64)>, ejecting: bool) -> String {
     if ejecting {
-        return format!("{name} · {}", tr("Ejecting…"));
+        return crate::i18n::fill(tr("{name} · Ejecting…"), &[("name", &name)]);
     }
     match space {
         Some((total, free)) if total > 0 => crate::i18n::fill(

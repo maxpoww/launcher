@@ -15,6 +15,8 @@ use tracing::{debug, warn};
 use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{Connection, Proxy};
 
+use crate::i18n::tr;
+
 const DEST: &str = "org.freedesktop.UDisks2";
 const BLOCK: &str = "org.freedesktop.UDisks2.Block";
 const FS: &str = "org.freedesktop.UDisks2.Filesystem";
@@ -245,7 +247,7 @@ async fn same_drive(conn: &Connection, drive: &str, expect: &Expect) -> zbus::Re
     let (serial, want) = (serial.trim(), expect.serial.trim());
     let same_serial = serial.is_empty() || want.is_empty() || serial == want;
     if size != expect.size || !same_serial {
-        return Err(zbus::Error::Failure("another drive took its place".into()));
+        return Err(zbus::Error::Failure(tr("another drive took its place").into()));
     }
     Ok(())
 }
@@ -257,7 +259,7 @@ async fn same_volume(conn: &Connection, volume: &str, uuid: Option<&str>) -> zbu
     };
     let have: String = proxy(conn, volume, BLOCK).await?.get_property("IdUUID").await?;
     if have != want {
-        return Err(zbus::Error::Failure("another drive took its place".into()));
+        return Err(zbus::Error::Failure(tr("another drive took its place").into()));
     }
     Ok(())
 }
@@ -332,7 +334,7 @@ async fn run(conn: &Connection, cmd: DriveCommand) -> zbus::Result<()> {
             match res {
                 Ok(true) => Ok(()),
                 Ok(false) => Err(zbus::Error::Failure(
-                    "it has damage that could not be repaired".into(),
+                    tr("it has damage that could not be repaired").into(),
                 )),
                 Err(e) => Err(e),
             }
