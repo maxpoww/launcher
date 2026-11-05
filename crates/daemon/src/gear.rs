@@ -20,7 +20,7 @@ use crate::bt_files::{FileCommand, FileEvent, FileHandle};
 use crate::content::{GridContent, Label, Rect, RectInst, Scene};
 use crate::net::{self, Ap, NetCommand, NetDetail, NetEvent, NetHandle, NetSnapshot};
 use crate::options::{
-    hover_grow, hover_ink_for, push_neumorph, FONT_PX, HOVER_FRAME_ALPHA,
+    hover_grow, hover_ink_for, push_neumorph, FONT_PX,
     LINE_PX, NERD, PILL_MARGIN_Y, PILL_PAD_X,
 };
 use crate::App;
@@ -37,8 +37,15 @@ const TRAIL_PAD: f32 = 8.0;
 const MORE_SZ: f32 = 28.0;
 const HEAD_H: f32 = 30.0;
 const KV_H: f32 = 30.0;
+/// A level's row; its symbol's circle; the room for its words at the right.
+const LEVEL_H: f32 = 44.0;
+const LEVEL_GLYPH: f32 = 30.0;
+const LEVEL_WORD_W: f32 = 52.0;
+/// The › of a row with a page of its own.
+const GO_SZ: f32 = 24.0;
+/// How far in from the box's sides a row's tint stands.
+const ROW_INSET: f32 = 6.0;
 const KV_KEY_W: f32 = 118.0;
-const TOGGLE_H: f32 = 46.0;
 const CHOICE_H: f32 = 38.0;
 const CHOICE_PILL_H: f32 = 26.0;
 const STRIP_H: f32 = 52.0;
@@ -54,10 +61,10 @@ const CARD_TILE: f32 = 56.0;
 const QR_SZ: f32 = 124.0;
 const QR_PAD: f32 = 8.0;
 const SMALL_PX: f32 = 14.0;
+const HEADING_PX: f32 = 12.5;
 const SMALL_LINE: f32 = 17.0;
 const CODE_PX: f32 = 38.0;
-const SWITCH_W: f32 = 40.0;
-const SWITCH_H: f32 = 20.0;
+use crate::kit::{SWITCH_H, SWITCH_W};
 /// The box's height when the page has nothing to list (radio off, airplane
 /// mode): the switch row and one line under it.
 const COMPACT_H: f32 = 150.0;
@@ -65,10 +72,6 @@ const GRAPH_H: f32 = 56.0;
 const CORES_H: f32 = 30.0;
 /// Pixels of list travel per wheel unit — the other boxes' figure.
 const SCROLL_SPEED: f32 = 3.0;
-/// The accent the bar already uses for "look here" (the unread bell).
-fn amber() -> [f32; 4] {
-    crate::palette::accent_srgb()
-}
 /// What a sign-in page is asked for: a plain-http address every portal
 /// intercepts, and the one Seam's own check uses.
 const PORTAL_URL: &str = "http://detectportal.firefox.com/canonical.html";
@@ -78,16 +81,17 @@ const G_WIFI: [&str; 4] = ["\u{f091f}", "\u{f0922}", "\u{f0925}", "\u{f0928}"];
 const G_ETH: &str = "\u{f0200}";
 const G_LOCK: &str = "\u{f023}";
 const G_CHECK: &str = "\u{f00c}";
-const G_MORE: &str = "\u{f141}";
+/// A row with a page of its own ends in this, always (THE KIT: the details
+/// are a ›, never a hidden ⋯).
+pub(crate) const G_GO: &str = "\u{f0142}";
 const G_REFRESH: &str = "\u{f021}";
 const G_PLUS: &str = "\u{f067}";
-const G_PLANE: &str = "\u{f072}";
 const G_EYE: &str = "\u{f06e}";
 const G_QR: &str = "\u{f029}";
 const G_LINK: &str = "\u{f0c1}";
 const G_UNLINK: &str = "\u{f127}";
 const G_TRASH: &str = "\u{f014}";
-const G_BACK: &str = "\u{f053}";
+pub(crate) const G_BACK: &str = "\u{f053}";
 const G_PENCIL: &str = "\u{f040}";
 const G_TIMES: &str = "\u{f00d}";
 const G_SEARCH: &str = "\u{f002}";
@@ -138,6 +142,9 @@ pub(crate) enum Hit {
     NetShowPw,
     NetForget,
     NetForgetNow,
+    /// A saved network out of range: forget it (asked), then for good.
+    NetForgetSaved(String),
+    NetForgetSavedNow(String),
     NetAuto,
     NetMetered,
     NetPrivate,
@@ -172,6 +179,8 @@ pub(crate) enum Hit {
     Confirm,
     /// The machine pages' own targets (`gear_pages.rs`).
     Sys(crate::gear_pages::SysHit),
+    /// The quick settings' (`quick.rs`).
+    Quick(crate::quick::QuickHit),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +273,22 @@ pub(crate) enum Item {
     Bar(Vec<(String, f32, f32)>),
     /// A small dim line under what it explains.
     Note(String),
+    /// A level set by hand (THE KIT's slider: a 2 px track, the accent up to
+    /// the value, a 12 px knob; a press, a drag or the wheel set it): its
+    /// symbol at the left — a click there does `glyph_hit` (mute) —, at the
+    /// right the value in words, or a word a click turns (`word_hit`: Auto,
+    /// lit by `word_on`).
+    Level {
+        hit: Hit,
+        glyph: &'static str,
+        glyph_hit: Hit,
+        value: f32,
+        word: String,
+        word_hit: Hit,
+        word_on: bool,
+        /// Drawn quieter (muted: the level is kept, nothing is heard).
+        quiet: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -397,6 +422,11 @@ pub(crate) struct GearState {
     show_pw: bool,
     qr: Option<Vec<Vec<bool>>>,
     bt_busy: Option<String>,
+    /// The device whose connecting failed last: said on its row until it is
+    /// tried again.
+    bt_err: Option<String>,
+    /// The network being left (its row says "Disconnecting…" until it is).
+    net_leaving: Option<String>,
     /// Whether that device was connected when the action began: what the
     /// action is called, and how its end is recognised.
     bt_busy_was: bool,
@@ -427,6 +457,8 @@ pub(crate) struct GearState {
     behind_open: Option<usize>,
     behind_ix: Option<usize>,
     behind_out: f32,
+    /// The quick settings' (`quick.rs`).
+    pub(crate) quick: crate::quick::QuickState,
 }
 
 impl GearState {
@@ -537,8 +569,13 @@ fn item_h(item: &Item, s: f32, box_w: f32) -> f32 {
             (2.0 * ROW_PAD_Y + text) * s
         }
         Item::Heading { .. } => HEAD_H * s,
+        Item::Level { .. } => LEVEL_H * s,
         Item::Kv { .. } => KV_H * s,
-        Item::Toggle { hint, .. } => (if hint.is_empty() { KV_H } else { TOGGLE_H }) * s,
+        // (THE KIT: a switch's row is a row — the list's height and words.)
+        Item::Toggle { hint, .. } => {
+            let text = if hint.is_empty() { LINE_PX } else { 2.0 * LINE_PX + SUB_GAP };
+            (2.0 * ROW_PAD_Y + text) * s
+        }
         Item::Choice { .. } => CHOICE_H * s,
         Item::Card { extra, .. } => {
             let extra = match extra {
@@ -577,8 +614,8 @@ fn item_zones(item: &Item, r: Rect, s: f32) -> Vec<(Hit, Rect)> {
     match item {
         Item::Row { hit, more, trail, .. } => {
             let mut z = Vec::new();
-            if let Some((m, _)) = more {
-                z.push((m.clone(), row_more_rect(r, s, trail)));
+            if let Some((m, g)) = more {
+                z.push((m.clone(), row_more_rect(r, s, trail, g)));
             }
             if *hit != Hit::None {
                 z.push((hit.clone(), r));
@@ -586,6 +623,20 @@ fn item_zones(item: &Item, r: Rect, s: f32) -> Vec<(Hit, Rect)> {
             z
         }
         Item::Kv { hit: Some(h), .. } => vec![(h.clone(), r)],
+        Item::Level { hit, glyph_hit, word_hit, .. } => {
+            let (g, (x0, x1), word) = level_parts(r, s);
+            let mut z = Vec::new();
+            if *glyph_hit != Hit::None {
+                z.push((glyph_hit.clone(), g));
+            }
+            if *word_hit != Hit::None {
+                z.push((word_hit.clone(), word));
+            }
+            // (The track's zone is the row's height and a knob's width past
+            // each end: a press near the end is the end.)
+            z.push((hit.clone(), Rect::new(x0 - 8.0 * s, r.y, x1 - x0 + 16.0 * s, r.h)));
+            z
+        }
         Item::Toggle { hit, .. } => vec![(hit.clone(), r)],
         Item::Choice { key, opts } => {
             // The key takes the room its word needs, not a fixed column: on a
@@ -641,13 +692,42 @@ fn trail_w(trail: &Trail, s: f32) -> f32 {
 /// A row's corner control: at the row's end where it has no trail, else just
 /// LEFT of the trail — which stays, and stays what a click there does (Max,
 /// 2026-11-05: on hover the Bluetooth switch became a pencil, "si hago click
-/// estoy trabajando en el toggle").
-fn row_more_rect(r: Rect, s: f32, trail: &Trail) -> Rect {
+/// estoy trabajando en el toggle"). A row's way to its own page (`G_GO`) is
+/// always at the very end, the trail left of it.
+fn row_more_rect(r: Rect, s: f32, trail: &Trail, glyph: &str) -> Rect {
+    if glyph == G_GO {
+        return row_go_rect(r, s);
+    }
     let d = MORE_SZ * s;
     let end = r.x + r.w - TRAIL_PAD * s + 4.0 * s;
     let tw = trail_w(trail, s);
     let x = if tw > 0.0 { end - 4.0 * s - tw - 6.0 * s - d } else { end - d };
-    Rect::new(x, r.y + (ROW_PAD_Y * s + LINE_PX * s / 2.0) - d / 2.0, d, d)
+    // Beside the trail, on its line: a switch stands in the row's middle.
+    let cy = if matches!(trail, Trail::Switch(_)) {
+        r.y + r.h / 2.0
+    } else {
+        r.y + ROW_PAD_Y * s + LINE_PX * s / 2.0
+    };
+    Rect::new(x, cy - d / 2.0, d, d)
+}
+
+/// The › of a row with a page of its own: at its end, in its middle.
+fn row_go_rect(r: Rect, s: f32) -> Rect {
+    let d = GO_SZ * s;
+    Rect::new(r.x + r.w - TRAIL_PAD * s + 4.0 * s - d, r.y + (r.h - d) / 2.0, d, d)
+}
+
+/// A level's three parts: its symbol's circle (where a row's tile stands), the
+/// track's run `(x0, x1)`, and the word's place at the right.
+fn level_parts(r: Rect, s: f32) -> (Rect, (f32, f32), Rect) {
+    let d = LEVEL_GLYPH * s;
+    let cx = r.x + ROW_PAD_X * s + TILE * s / 2.0;
+    let g = Rect::new(cx - d / 2.0, r.y + (r.h - d) / 2.0, d, d);
+    let wh = CHOICE_PILL_H * s;
+    let word = Rect::new(r.x + r.w - (TRAIL_PAD + LEVEL_WORD_W) * s, r.y + (r.h - wh) / 2.0, LEVEL_WORD_W * s, wh);
+    let x0 = r.x + (ROW_PAD_X + TILE + TILE_GAP) * s;
+    let x1 = word.x - 12.0 * s;
+    (g, (x0, x1.max(x0 + 1.0)), word)
 }
 
 /// The content-scissored grid this page's rects ride, so a half-scrolled row's
@@ -672,6 +752,8 @@ struct Pen {
     ink: [f32; 4],
     dim: [f32; 4],
     hot: [f32; 4],
+    /// The row under the pointer: the kit's accent tint (`kit::row_tint`).
+    tint: [f32; 4],
     content: Rect,
 }
 
@@ -726,25 +808,38 @@ impl Pen {
         });
     }
 
-    /// The bar's one switch: a stadium track and a knob that sits at the end
-    /// it is switched to.
+    /// THE KIT's switch (`kit::SWITCH_*`): off, an outlined capsule with its
+    /// knob at the left; on, filled with the accent and its knob at the right
+    /// in the accent's own contrast.
     fn switch(&self, scene: &mut Scene, right: f32, cy: f32, on: bool) {
-        // The control panel's slim switch (quiet, 2026-10-16): off, an
-        // outlined capsule with its knob at the left; on, filled with the
-        // ink and a dark knob at the right.
         let s = self.s;
         let (w, h) = (SWITCH_W * s, SWITCH_H * s);
         let sw = Rect::new(right - w, cy - h / 2.0, w, h);
         let i = self.ink;
-        let d = h - 8.0 * s;
+        let d = crate::kit::SWITCH_KNOB * s;
+        let inset = (h - d) / 2.0;
         if on {
-            self.rect(scene, sw, h / 2.0, [i[0], i[1], i[2], 0.92], 0.0);
-            let dark = if i[0] + i[1] + i[2] > 1.5 { [0.02, 0.025, 0.035, 1.0] } else { [0.97, 0.97, 0.97, 1.0] };
-            self.rect(scene, Rect::new(sw.x + w - d - 4.0 * s, sw.y + 4.0 * s, d, d), d / 2.0, dark, 0.0);
+            self.rect(scene, sw, h / 2.0, crate::kit::accent(), 0.0);
+            self.rect(scene, Rect::new(sw.x + w - d - inset, sw.y + inset, d, d), d / 2.0, crate::kit::on_accent(), 0.0);
         } else {
-            self.rect(scene, sw, h / 2.0, [i[0], i[1], i[2], 0.38], 1.0);
-            self.rect(scene, Rect::new(sw.x + 4.0 * s, sw.y + 4.0 * s, d, d), d / 2.0, [i[0], i[1], i[2], 0.75], 0.0);
+            self.rect(scene, sw, h / 2.0, [i[0], i[1], i[2], crate::kit::SWITCH_LINE], 1.0);
+            self.rect(
+                scene,
+                Rect::new(sw.x + inset, sw.y + inset, d, d),
+                d / 2.0,
+                [i[0], i[1], i[2], crate::kit::SWITCH_KNOB_OFF],
+                0.0,
+            );
         }
+    }
+
+    /// The row under the pointer or the keys, tinted (the kit's one hover),
+    /// a little in from the box's sides as a menu's row is from its panel.
+    fn lit(&self, scene: &mut Scene, r: Rect) {
+        let s = self.s;
+        let inset = if r.w > 120.0 * s { ROW_INSET * s } else { 0.0 };
+        let r = Rect::new(r.x + inset, r.y, r.w - 2.0 * inset, r.h);
+        self.rect(scene, r, crate::kit::ROW_RADIUS * s, self.tint, 0.0);
     }
 
 }
@@ -924,6 +1019,11 @@ impl App {
     fn on_net_event(&mut self, ev: NetEvent) {
         match ev {
             NetEvent::Snapshot(s) => {
+                if let Some(left) = &self.gear.net_leaving {
+                    if !s.aps.iter().any(|a| a.active && &a.ssid == left) {
+                        self.gear.net_leaving = None;
+                    }
+                }
                 if let Some(busy) = &self.gear.net_busy {
                     if s.aps.iter().any(|a| a.active && &a.ssid == busy) {
                         self.gear.net_busy = None;
@@ -1027,6 +1127,10 @@ impl App {
                 debug!("bt: {path} done (ok: {ok})");
                 if self.gear.bt_busy.as_deref() == Some(path.as_str()) {
                     self.gear.bt_busy = None;
+                    // A connect that failed says so on its row.
+                    if !ok && !self.gear.bt_busy_was {
+                        self.gear.bt_err = Some(path.clone());
+                    }
                 }
                 if self.gear.bt_view == BtView::Pair(path) {
                     self.gear.bt_view = BtView::List;
@@ -1198,7 +1302,9 @@ impl App {
             .filter(|a| query.is_empty() || a.ssid.to_lowercase().contains(&query))
         {
             shown += 1;
-            let (sub, tone) = if g.net_busy.as_deref() == Some(ap.ssid.as_str()) {
+            let (sub, tone) = if g.net_leaving.as_deref() == Some(ap.ssid.as_str()) && ap.active {
+                (tr("Disconnecting…").to_owned(), Tone::Busy)
+            } else if g.net_busy.as_deref() == Some(ap.ssid.as_str()) {
                 (tr("Connecting…").to_owned(), Tone::Busy)
             } else if g.net_err.as_deref() == Some(ap.ssid.as_str()) && !ap.active {
                 (
@@ -1236,7 +1342,7 @@ impl App {
             };
             items.push(Item::Row {
                 hit: Hit::Net(ap.ssid.clone()),
-                more: Some((Hit::NetMore(ap.ssid.clone()), G_MORE)),
+                more: Some((Hit::NetMore(ap.ssid.clone()), G_GO)),
                 tile: Some(wifi_glyph(ap.signal)),
                 title: ap.ssid.clone(),
                 sub,
@@ -1250,6 +1356,24 @@ impl App {
                 },
                 sel: matches!(&g.field, Some(Field { kind: FieldKind::Password { ssid, .. }, .. }) if *ssid == ap.ssid),
             });
+        }
+        // The saved ones out of range: there, to be forgotten (THE KIT: what
+        // this machine keeps is seen).
+        let away: Vec<&String> = snap.away.iter().filter(|s| query.is_empty() || s.to_lowercase().contains(&query)).collect();
+        if !away.is_empty() {
+            items.push(Item::Heading { text: tr("Saved, not in range").into(), busy: false });
+            for ssid in away {
+                items.push(Item::Row {
+                    hit: Hit::None,
+                    more: Some((Hit::NetForgetSaved(ssid.clone()), G_TRASH)),
+                    tile: Some(G_WIFI[0]),
+                    title: ssid.clone(),
+                    sub: tr("Saved").into(),
+                    tone: Tone::Normal,
+                    trail: Trail::None,
+                    sel: false,
+                });
+            }
         }
         if g.net_scanning {
             items.push(Item::Heading {
@@ -1282,7 +1406,6 @@ impl App {
                     lit: snap.hotspot_on || snap.bt_share_on,
                     ..Default::default()
                 },
-                btn(Hit::Airplane, G_PLANE),
             ],
             zebra: true,
             ..View::default()
@@ -1621,12 +1744,14 @@ impl App {
                 )
             } else if d.connected {
                 (tr("Connected").to_owned(), Tone::Normal)
+            } else if g.bt_err.as_deref() == Some(d.path.as_str()) {
+                (tr("Could not connect. Try again").to_owned(), Tone::Warn)
             } else {
                 (tr("Paired").to_owned(), Tone::Normal)
             };
             items.push(Item::Row {
                 hit: Hit::Dev(d.path.clone()),
-                more: Some((Hit::DevMore(d.path.clone()), G_MORE)),
+                more: Some((Hit::DevMore(d.path.clone()), G_GO)),
                 tile: Some(glyph),
                 title: d.name.clone(),
                 sub,
@@ -1665,7 +1790,7 @@ impl App {
                 sub: if busy(d) {
                     tr("Pairing…").into()
                 } else {
-                    kind.into()
+                    crate::i18n::fill(tr("{kind} · click to pair"), &[("kind", &kind)])
                 },
                 tone: if busy(d) { Tone::Busy } else { Tone::Normal },
                 trail: Trail::None,
@@ -1698,13 +1823,6 @@ impl App {
                     ..Default::default()
                 },
                 btn(Hit::BtFiles, G_SEND),
-                Btn {
-                    hit: Hit::Hotspot,
-                    glyph: G_HOTSPOT,
-                    lit: g.net_snap.bt_share_on || g.net_snap.hotspot_on,
-                    ..Default::default()
-                },
-                btn(Hit::Airplane, G_PLANE),
             ],
             zebra: true,
             ..View::default()
@@ -1768,12 +1886,18 @@ impl App {
                     value: a.codec.clone(),
                 });
             }
+            // Where the sound goes is a fact with a ✓, not a switch (turning
+            // it "off" would say nowhere): the quick settings choose another.
             if a.has_sink() {
-                items.push(Item::Toggle {
-                    hit: Hit::DevOutput,
-                    label: tr("Use for sound").into(),
-                    hint: tr("Plays this computer's sound through it").into(),
-                    on: a.is_output,
+                items.push(Item::Row {
+                    hit: if a.is_output { Hit::None } else { Hit::DevOutput },
+                    more: None,
+                    tile: None,
+                    title: tr(if a.is_output { "Sound plays here" } else { "Play sound here" }).into(),
+                    sub: if a.is_output { String::new() } else { tr("Click to send this computer's sound to it").into() },
+                    tone: Tone::Normal,
+                    trail: if a.is_output { Trail::Glyph(G_CHECK) } else { Trail::None },
+                    sel: false,
                 });
             }
         }
@@ -2039,6 +2163,27 @@ impl App {
 
     // --- hit-testing ---------------------------------------------------------
 
+    /// What the pointer is on in the open page, now.
+    pub(crate) fn gear_hit_now(&self) -> Hit {
+        self.gear_hit_at()
+    }
+
+    /// Where the pointer stands along the track of the level `hit`, 0..1
+    /// (`None`: no such level on the page).
+    pub(crate) fn gear_level_at_ptr(&self, hit: &Hit) -> Option<f32> {
+        let p = self.options_ptr?;
+        let view = self.gear_view();
+        let lay = self.gear_layout(&view, self.gear_rect());
+        let s = self.options_scale();
+        view.items.iter().zip(&lay.items).find_map(|(item, r)| match item {
+            Item::Level { hit: h, .. } if h == hit => {
+                let (_, (x0, x1), _) = level_parts(*r, s);
+                Some(((p.0 - x0) / (x1 - x0)).clamp(0.0, 1.0))
+            }
+            _ => None,
+        })
+    }
+
     fn gear_hit_at(&self) -> Hit {
         let (Some(p), Some(_)) = (self.options_ptr, self.gear_page()) else {
             return Hit::None;
@@ -2190,6 +2335,7 @@ impl App {
             ink,
             dim: self.dim_ink(ink),
             hot: hover_ink_for(ink),
+            tint: crate::kit::row_tint(bright),
             content,
         };
         let hit = &self.gear.hit;
@@ -2252,29 +2398,45 @@ impl App {
                     }
                     list_pos += 1;
                     let lit = (hovered && (*row_hit != Hit::None || more.is_some())) || *sel;
-                    // (Quiet, 2026-10-16: the row under the pointer is washed.)
                     if lit {
-                        pen.rect(scene, r, 7.0, [pen.hot[0], pen.hot[1], pen.hot[2], QUIET_ROW_WASH], 0.0);
+                        pen.lit(scene, r);
                     }
                     let col = if lit { pen.hot } else { pen.dim };
                     let mut tx = r.x + ROW_PAD_X * s;
                     if let Some(g) = tile {
-                        // A one-line row wears a smaller tile, so it fits the row's own height.
+                        // A one-line row wears a smaller tile, so it fits the
+                        // row's own height — in the same column, so every row's
+                        // words begin at one line (an empty tile: only that).
                         let d = if sub.is_empty() { SMALL_TILE } else { TILE } * s;
-                        let t = Rect::new(tx, r.y + (r.h - d) / 2.0, d, d);
+                        let t = Rect::new(tx + (TILE * s - d) / 2.0, r.y + (r.h - d) / 2.0, d, d);
                         // (The icon alone: nothing behind it at rest.)
-                        pen.glyph(scene, g, (t.x + t.w / 2.0, t.y + t.h / 2.0), d * 0.52, col);
-                        tx += (TILE + TILE_GAP) * s - (TILE * s - d);
+                        if !g.is_empty() {
+                            pen.glyph(scene, g, (t.x + t.w / 2.0, t.y + t.h / 2.0), d * 0.52, col);
+                        }
+                        tx += (TILE + TILE_GAP) * s;
                     }
                     // The trail always (what the row IS: on, connected, its
                     // battery…); the corner control beside it, left of it,
-                    // while the pointer is on the row.
-                    let right = r.x + r.w - TRAIL_PAD * s;
+                    // while the pointer is on the row; a page of its own: a ›
+                    // at the very end, always, the trail left of it.
+                    let go = more.as_ref().is_some_and(|(_, g)| *g == G_GO);
+                    let right = if go {
+                        row_go_rect(r, s).x - 2.0 * s
+                    } else {
+                        r.x + r.w - TRAIL_PAD * s
+                    };
                     let line_cy = r.y + ROW_PAD_Y * s + LINE_PX * s / 2.0;
                     let mut text_right = right;
                     let mut more_left = None;
-                    if let (Some((m, g)), true) = (more, hovered) {
-                        let z = row_more_rect(r, s, trail);
+                    if let (Some((m, _)), true) = (more, go) {
+                        let z = row_go_rect(r, s);
+                        let on = m == hit;
+                        if on {
+                            pen.rect(scene, z, z.h / 2.0, [ink[0], ink[1], ink[2], 0.10], 0.0);
+                        }
+                        pen.glyph(scene, G_GO, (z.x + z.w / 2.0, z.y + z.h / 2.0), FONT_PX * s, if on || lit { pen.hot } else { pen.dim });
+                    } else if let (Some((m, g)), true) = (more, hovered) {
+                        let z = row_more_rect(r, s, trail, g);
                         let on = m == hit;
                         if on {
                             pen.rect(scene, z, z.h / 2.0, [ink[0], ink[1], ink[2], 0.14], 0.0);
@@ -2296,7 +2458,8 @@ impl App {
                                 text_right = right - 22.0 * s;
                             }
                             Trail::Switch(on) => {
-                                pen.switch(scene, right - 6.0 * s, line_cy, *on);
+                                // (Centred on the row, as every switch is.)
+                                pen.switch(scene, right - 6.0 * s, r.y + r.h / 2.0, *on);
                                 text_right = right - (SWITCH_W + 14.0) * s;
                             }
                             Trail::Text(t) => {
@@ -2349,7 +2512,7 @@ impl App {
                     if !sub.is_empty() {
                         let sub_w = (r.x + r.w - ROW_PAD_X * s - tx).max(0.0);
                         let c = match tone {
-                            Tone::Warn => [amber()[0], amber()[1], amber()[2], 1.0],
+                            Tone::Warn => crate::kit::warn(),
                             _ => [col[0], col[1], col[2], col[3] * 0.72],
                         };
                         pen.text(
@@ -2470,6 +2633,7 @@ impl App {
                     false,
                     None,
                 ),
+                // (THE KIT's heading: 12.5 px at half the ink.)
                 Item::Heading { text, .. } => pen.text(
                     scene,
                     text.clone(),
@@ -2478,7 +2642,7 @@ impl App {
                         r.y + (r.h - SMALL_LINE * s) / 2.0 + 2.0 * s,
                     ),
                     r.w,
-                    (SMALL_PX * s, SMALL_LINE * s),
+                    (HEADING_PX * s, SMALL_LINE * s),
                     [ink[0], ink[1], ink[2], ink[3] * 0.5],
                     false,
                     None,
@@ -2493,13 +2657,89 @@ impl App {
                     true,
                     None,
                 ),
+                Item::Level {
+                    hit: track_hit,
+                    glyph,
+                    glyph_hit,
+                    value,
+                    word,
+                    word_hit,
+                    word_on,
+                    quiet,
+                } => {
+                    let (g, (x0, x1), wr) = level_parts(r, s);
+                    // The symbol: a button where it does something (mute), a
+                    // round wash under the pointer as every icon button.
+                    let on_glyph = *glyph_hit != Hit::None && glyph_hit == hit;
+                    if on_glyph {
+                        pen.rect(scene, g, g.h / 2.0, [ink[0], ink[1], ink[2], 0.10], 0.0);
+                    }
+                    pen.glyph(
+                        scene,
+                        glyph,
+                        (g.x + g.w / 2.0, g.y + g.h / 2.0),
+                        TILE * s * 0.52,
+                        if on_glyph { pen.hot } else { pen.dim },
+                    );
+                    // The track, the accent up to the value, the knob.
+                    let cy = r.y + r.h / 2.0;
+                    let v = value.clamp(0.0, 1.0);
+                    let kx = x0 + (x1 - x0) * v;
+                    let held = self.gear.quick.drag.is_some_and(|l| l.hit() == *track_hit);
+                    let over = held || track_hit == hit;
+                    let line = 2.0 * s;
+                    pen.rect(
+                        scene,
+                        Rect::new(x0, cy - line / 2.0, x1 - x0, line),
+                        line / 2.0,
+                        [ink[0], ink[1], ink[2], crate::kit::SWITCH_LINE * 0.7],
+                        0.0,
+                    );
+                    let fill = if *quiet { [ink[0], ink[1], ink[2], 0.45] } else { crate::kit::accent() };
+                    pen.rect(scene, Rect::new(x0, cy - line / 2.0, kx - x0, line), line / 2.0, fill, 0.0);
+                    let k = if over { 14.0 } else { crate::kit::SWITCH_KNOB } * s;
+                    let knob = if *quiet { [ink[0], ink[1], ink[2], 0.6] } else { [ink[0], ink[1], ink[2], 0.95] };
+                    pen.rect(scene, Rect::new(kx - k / 2.0, cy - k / 2.0, k, k), k / 2.0, knob, 0.0);
+                    // The words at the right: the value, or a word that turns.
+                    let px = (15.0 * s, LINE_PX * s);
+                    let ty = wr.y + (wr.h - px.1) / 2.0;
+                    if *word_hit != Hit::None {
+                        let over_word = word_hit == hit;
+                        if over_word {
+                            pen.lit(scene, wr);
+                        }
+                        if *word_on {
+                            let uw = (est_w(word, px.0) * 1.1).min(wr.w - 8.0 * s);
+                            pen.rect(
+                                scene,
+                                Rect::new(wr.x + (wr.w - uw) / 2.0, wr.y + wr.h - 3.0 * s, uw, 1.5 * s),
+                                0.0,
+                                crate::kit::accent(),
+                                0.0,
+                            );
+                        }
+                        let c = if *word_on || over_word { pen.hot } else { [ink[0], ink[1], ink[2], ink[3] * 0.6] };
+                        pen.text(scene, word.clone(), (wr.x + wr.w / 2.0, ty), wr.w, px, c, true, None);
+                    } else {
+                        pen.text(
+                            scene,
+                            word.clone(),
+                            (wr.x + wr.w / 2.0, ty),
+                            wr.w + 8.0 * s,
+                            px,
+                            [ink[0], ink[1], ink[2], ink[3] * 0.72],
+                            true,
+                            None,
+                        );
+                    }
+                }
                 Item::Kv {
                     hit: kv_hit,
                     key,
                     value,
                 } => {
                     if hovered {
-                        push_hover_frame_clipped(&pen, scene, r);
+                        pen.lit(scene, r);
                     }
                     let px = (FONT_PX * s, LINE_PX * s);
                     let y = r.y + (r.h - px.1) / 2.0;
@@ -2546,44 +2786,30 @@ impl App {
                 Item::Toggle {
                     label, hint, on, ..
                 } => {
+                    // The list's row with its switch (THE KIT: one idiom): its
+                    // words where a row's are, the switch where a row's is.
                     if hovered {
-                        push_hover_frame_clipped(&pen, scene, r);
+                        pen.lit(scene, r);
                     }
-                    let col = if hovered {
-                        pen.hot
-                    } else {
-                        [ink[0], ink[1], ink[2], ink[3] * 0.85]
-                    };
-                    let block = if hint.is_empty() {
-                        LINE_PX
-                    } else {
-                        LINE_PX + SMALL_LINE
-                    };
-                    let y = r.y + (r.h - block * s) / 2.0;
-                    let w = r.w - (2.0 * ROW_PAD_X + SWITCH_W + 10.0) * s;
-                    pen.text(
-                        scene,
-                        label.clone(),
-                        (r.x + ROW_PAD_X * s, y),
-                        w,
-                        (FONT_PX * s, LINE_PX * s),
-                        col,
-                        false,
-                        None,
-                    );
+                    let col = if hovered { pen.hot } else { pen.dim };
+                    let right = r.x + r.w - TRAIL_PAD * s;
+                    let tx = r.x + ROW_PAD_X * s;
+                    let w = (right - (SWITCH_W + 14.0) * s - tx).max(0.0);
+                    let px = (FONT_PX * s, LINE_PX * s);
+                    pen.text(scene, fit(label, w, px.0), (tx, r.y + ROW_PAD_Y * s), w + 4.0, px, col, false, None);
                     if !hint.is_empty() {
                         pen.text(
                             scene,
-                            fit(hint, w, SMALL_PX * s),
-                            (r.x + ROW_PAD_X * s, y + LINE_PX * s),
+                            fit(hint, w, px.0),
+                            (tx, r.y + (ROW_PAD_Y + LINE_PX + SUB_GAP) * s),
                             w + 4.0,
-                            (SMALL_PX * s, SMALL_LINE * s),
-                            [ink[0], ink[1], ink[2], ink[3] * 0.5],
+                            px,
+                            [col[0], col[1], col[2], col[3] * 0.72],
                             false,
                             None,
                         );
                     }
-                    pen.switch(scene, r.x + r.w - ROW_PAD_X * s, r.y + r.h / 2.0, *on);
+                    pen.switch(scene, right - 6.0 * s, r.y + r.h / 2.0, *on);
                 }
                 Item::Choice { key, opts } => {
                     let px = (FONT_PX * s, LINE_PX * s);
@@ -2603,15 +2829,16 @@ impl App {
                         // a choice is its word; the one in use bright and
                         // underlined, the wash under the pointer.
                         if over {
-                            pen.rect(scene, *z, z.h / 2.0, [ink[0], ink[1], ink[2], QUIET_ROW_WASH], 0.0);
+                            pen.lit(scene, *z);
                         }
                         if *on {
+                            // (The kit: the word in use underlined in the accent.)
                             let uw = (est_w(label, 15.0 * s) * 1.1).min(z.w - 8.0 * s);
                             pen.rect(
                                 scene,
                                 Rect::new(z.x + (z.w - uw) / 2.0, z.y + z.h - 3.0 * s, uw, 1.5 * s),
                                 0.0,
-                                [ink[0], ink[1], ink[2], 0.9],
+                                crate::kit::accent(),
                                 0.0,
                             );
                         }
@@ -2889,16 +3116,16 @@ impl App {
         }
         if let (Some(fr), Some((text, _))) = (lay.field, &self.gear.arm) {
             if fr.y + fr.h <= bottom {
-                // The footer as a question: the field's own stadium, in the
-                // accent, saying what a second click does.
+                // The footer as a question (THE KIT: what cannot be undone is
+                // asked in place, in red): the field's own stadium on the red's
+                // quiet ground, saying what a second click does.
                 let over = self.gear.hit == Hit::Confirm;
                 let radius = fr.h / 2.0;
-                push_neumorph(scene, fr, radius, bright, a);
-                let mut wash = if over {
-                    self.options_hover_wash()
-                } else {
-                    self.options_rest_wash()
-                };
+                let red = crate::kit::danger(!bright);
+                let mut wash = crate::kit::danger_tint(!bright);
+                if over {
+                    wash[3] *= 1.6;
+                }
                 wash[3] *= a;
                 scene.rects.push(RectInst {
                     rect: fr,
@@ -2918,7 +3145,7 @@ impl App {
                     dim: false,
                     cache: false,
                     family: None,
-                    color: Some([amber()[0], amber()[1], amber()[2], a]),
+                    color: Some([red[0], red[1], red[2], a]),
                     clip: Some(fr),
                 });
             }
@@ -3097,8 +3324,12 @@ impl App {
         moving
     }
 
-    /// The wheel inside an open page: travel the list.
+    /// The wheel inside an open page: a level under the pointer is set by it,
+    /// else the list travels.
     pub(crate) fn gear_axis(&mut self, value: f32) {
+        if self.quick_wheel(value) {
+            return;
+        }
         let span = self.gear_scroll_span();
         self.gear.scroll_target = (self.gear.scroll_target + value * SCROLL_SPEED).clamp(0.0, span);
         self.schedule_stats_frame();
@@ -3465,6 +3696,7 @@ impl App {
                 }
                 self.set_stats_box(false);
             } else {
+                self.gear.net_leaving = Some(ssid);
                 self.net_send(NetCommand::Disconnect);
             }
         } else if ap.saved.is_some() || !ap.secured() {
@@ -3514,7 +3746,9 @@ impl App {
                 }
             }
             Hit::Back => {
-                self.pages_back();
+                if !self.quick_back() {
+                    self.pages_back();
+                }
                 self.gear.net_view = NetView::List;
                 self.gear.bt_view = BtView::List;
                 self.gear.share = false;
@@ -3522,6 +3756,7 @@ impl App {
                 self.gear_show_view();
             }
             Hit::Airplane => self.set_airplane(!self.settings.airplane),
+            Hit::Quick(q) => self.quick_settings_click(q),
             Hit::WifiPower => {
                 let on = self.gear.net_snap.wifi_on;
                 self.net_send(NetCommand::Radio(!on));
@@ -3587,6 +3822,11 @@ impl App {
                     self.gear_arm(&ask, Hit::NetForgetNow);
                 }
             }
+            Hit::NetForgetSaved(ssid) => {
+                let ask = crate::i18n::fill(tr("Forget {name}? Click again"), &[("name", &ssid)]);
+                self.gear_arm(&ask, Hit::NetForgetSavedNow(ssid));
+            }
+            Hit::NetForgetSavedNow(ssid) => self.net_send(NetCommand::Forget(ssid)),
             Hit::NetForgetNow => {
                 if let NetView::Detail(ssid) = self.gear.net_view.clone() {
                     self.net_send(NetCommand::Forget(ssid));
@@ -3782,6 +4022,7 @@ impl App {
         };
         self.gear.bt_busy = Some(path.clone());
         self.gear.bt_busy_was = d.connected;
+        self.gear.bt_err = None;
         self.bt_send(if d.connected {
             BtCommand::Disconnect(path)
         } else if d.paired {
@@ -4040,6 +4281,12 @@ impl App {
                 Item::Heading { text, busy } => {
                     format!("heading [{text}]{}", if *busy { " busy" } else { "" })
                 }
+                Item::Level { hit, value, word, word_on, quiet, .. } => format!(
+                    "level {:.0}% [{word}]{}{} -> {hit:?}",
+                    value * 100.0,
+                    if *word_on { " on" } else { "" },
+                    if *quiet { " quiet" } else { "" }
+                ),
                 Item::Card {
                     title,
                     sub,
@@ -4122,18 +4369,6 @@ fn field_eye_rect(fr: Rect) -> Rect {
 /// How much of the zebra's tone a details sheet keeps.
 const QUIET_SHEET: f32 = 0.12;
 
-/// The wash on a row under the pointer, as much of the ink as this.
-const QUIET_ROW_WASH: f32 = 0.07;
-
-fn push_hover_frame_clipped(pen: &Pen, scene: &mut Scene, r: Rect) {
-    pen.rect(
-        scene,
-        r,
-        7.0,
-        [pen.hot[0], pen.hot[1], pen.hot[2], HOVER_FRAME_ALPHA],
-        1.0,
-    );
-}
 
 #[cfg(test)]
 mod tests {
@@ -4170,7 +4405,7 @@ mod tests {
     fn a_row_presses_its_corner_before_itself() {
         let row = Item::Row {
             hit: Hit::Net("a".into()),
-            more: Some((Hit::NetMore("a".into()), G_MORE)),
+            more: Some((Hit::NetMore("a".into()), G_GO)),
             tile: None,
             title: "a".into(),
             sub: "Saved".into(),
@@ -4186,7 +4421,8 @@ mod tests {
                 .find(|(_, z)| z.contains(p))
                 .map(|(h, _)| h.clone())
         };
-        assert_eq!(at((380.0, 20.0)), Some(Hit::NetMore("a".into())));
+        // (The › stands at the end, in the row's middle.)
+        assert_eq!(at((384.0, r.h / 2.0)), Some(Hit::NetMore("a".into())));
         assert_eq!(at((100.0, 20.0)), Some(Hit::Net("a".into())));
     }
 

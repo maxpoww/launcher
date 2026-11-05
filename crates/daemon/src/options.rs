@@ -5542,6 +5542,8 @@ impl App {
             } => {
                 self.options_ptr = Some((surface_x as f32, surface_y as f32));
                 self.options_on_motion(surface_y as f32);
+                // A level of the quick settings in the hand follows it.
+                self.quick_motion();
             }
             wl_pointer::Event::Leave { .. } => {
                 // Pointer off the bar: the Leader is released and its group
@@ -5549,6 +5551,7 @@ impl App {
                 // Nothing is permanently displaced.
                 self.release_leader();
                 self.bar_zoom_keys(false);
+                self.quick_release();
                 self.options_ptr = None;
                 self.pointer_surface = PointerSurface::Dock;
                 self.options_reveal_deadline = None;
@@ -5606,12 +5609,15 @@ impl App {
                 // lands on, so the re-flow the click causes happens around it.
                 // On PRESS — the anchor is the layout that was aimed at.
                 self.capture_leader();
+                // A press on a quick settings' level takes hold of it.
+                self.quick_press();
             }
             wl_pointer::Event::Button { button, state, .. }
                 if button == BTN_LEFT
                     && state == WEnum::Value(wl_pointer::ButtonState::Released)
                     && self.options_interactive() =>
             {
+                self.quick_release();
                 self.options_click();
             }
             // Right PRESS on the [current task] pill (unless a module — the

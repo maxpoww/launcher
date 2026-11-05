@@ -77,6 +77,8 @@ pub(crate) struct NetSnapshot {
     pub(crate) hotspot_on: bool,
     /// Internet sharing over Bluetooth is up.
     pub(crate) bt_share_on: bool,
+    /// The saved networks not in range now, by name.
+    pub(crate) away: Vec<String>,
 }
 
 /// What the details view shows for one network, read on demand.
@@ -750,6 +752,9 @@ fn snapshot(profiles: &mut HashMap<String, String>) -> NetSnapshot {
             }
         }
         sort_aps(&mut snap.aps);
+        let mut away: Vec<String> = saved.into_keys().filter(|s| !snap.aps.iter().any(|a| &a.ssid == s)).collect();
+        away.sort_by_key(|s| s.to_lowercase());
+        snap.away = away;
     }
     snap
 }

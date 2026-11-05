@@ -45,10 +45,12 @@ const G_COG: &str = "\u{f013}";
 const G_TRASH: &str = "\u{f014}";
 const G_BACK: &str = "\u{f053}";
 const G_TIMES: &str = "\u{f00d}";
-const G_MORE: &str = "\u{f141}";
 const G_CHECK: &str = "\u{f00c}";
 const G_PLUS: &str = "\u{f067}";
 const G_WINDOW: &str = "\u{f2d0}";
+const G_FLOAT: &str = "\u{f05b2}";
+const G_PLANE: &str = "\u{f001d}";
+const G_COFFEE: &str = "\u{f0176}";
 const G_FILM: &str = "\u{f008}";
 const G_PENCIL: &str = "\u{f040}";
 
@@ -238,7 +240,7 @@ pub(crate) struct PagesState {
     drive_tell: Option<String>,
     sys: Option<SysHandle>,
     machine: Machine,
-    live: Live,
+    pub(crate) live: Live,
     disk: Disk,
     /// Window class → the app's name, as the dock knows it.
     names: HashMap<String, String>,
@@ -357,6 +359,12 @@ fn kv(key: &str, value: impl Into<String>) -> Item {
         key: key.into(),
         value: value.into(),
     }
+}
+
+/// A row that switches: its symbol, its words, the kit's switch; the whole row
+/// is the click.
+fn switch_row(glyph: &'static str, title: &str, sub: &str, on: bool, hit: Hit) -> Item {
+    row_with(row(Some(glyph), title, sub), hit, None, Trail::Switch(on), Tone::Normal)
 }
 
 fn head(text: &str) -> Item {
@@ -489,13 +497,16 @@ fn has_light_sensor() -> bool {
     })
 }
 
-/// A lit keyboard the kernel exposes as an LED (`*::kbd_backlight`), which
-/// `golem-autobrightness` turns on in the dark.
-fn has_keyboard_light() -> bool {
-    std::fs::read_dir("/sys/class/leds").is_ok_and(|dir| {
-        dir.flatten()
-            .any(|d| d.file_name().to_string_lossy().ends_with("kbd_backlight"))
-    })
+/// Whether the brightness can follow the room here: the system has
+/// `golem-autobrightness` and the machine a light sensor (asked once a run).
+pub(crate) fn autobright_can() -> bool {
+    static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CAN.get_or_init(|| crate::launch::on_path("golem-autobrightness") && has_light_sensor())
+}
+
+/// Whether it follows the room now.
+pub(crate) fn autobright_on() -> bool {
+    !App::autobright_off_path().exists()
 }
 
 fn config_home() -> PathBuf {
@@ -544,6 +555,7 @@ impl App {
     pub(crate) fn pages_sync(&mut self, page: Option<PageKind>) {
         let want = sys_page_of(page);
         self.gear.pages.view = PView::List;
+        self.gear.quick.output_page = false;
         if want.is_none() && self.gear.pages.sys.is_none() {
             return;
         }
@@ -711,22 +723,10 @@ impl App {
         config_home().join("golem/autobrightness-off")
     }
 
-    /// The row under "Keep awake", only where it can do something: the
-    /// system has `golem-autobrightness` and the machine a light sensor.
-    fn autobright_row() -> Option<Item> {
-        (crate::launch::on_path("golem-autobrightness") && has_light_sensor()).then(|| {
-            Item::Toggle {
-                hit: sys(SysHit::AutoBright),
-                label: tr("Automatic brightness").into(),
-                hint: if has_keyboard_light() {
-                    tr("Screen and keyboard follow the room's light").into()
-                } else {
-                    tr("The screen follows the room's light").into()
-                },
-                on: !Self::autobright_off_path().exists(),
-            }
-        })
+    fn caffeine_on() -> bool {
+        Self::caffeine_path().exists()
     }
+
 
     /// Write the idle config with the owner's times and point hypridle at it
     /// (a drop-in on its unit); with no choice left, both are removed.
@@ -820,6 +820,7 @@ impl App {
             (PView::Drive(i), _) => self.drive_view(*i),
             (PView::Format(i), _) => self.format_view(*i),
             (PView::Video, _) => self.video_view(),
+            (PView::List, PageKind::Gear) if self.gear.quick.output_page => self.quick_output_view(),
             (PView::List, PageKind::Gear) => self.machine_view(),
             (PView::List, PageKind::Disk) => self.disk_view(),
             (PView::List, PageKind::Cpu) => self.cpu_view(),
@@ -1087,15 +1088,6 @@ impl App {
                 on: b.limit.is_some_and(|l| l <= 80),
             });
         }
-        if crate::launch::on_path("golem-caffeine") {
-            items.push(Item::Toggle {
-                hit: sys(SysHit::Awake),
-                label: tr("Keep awake").into(),
-                hint: tr("No dimming, no sleep").into(),
-                on: Self::caffeine_path().exists(),
-            });
-        }
-        items.extend(Self::autobright_row());
         items.extend(self.idle_rows());
         if b.design_wh > 1.0 {
             let health = (100.0 * b.full_wh / b.design_wh).round().clamp(0.0, 100.0) as u8;
@@ -1106,7 +1098,7 @@ impl App {
                     crate::i18n::fill(tr("{0}. Holds {health}% of what it did new"), &[("0", &(health_word(health))), ("health", &health)]),
                 ),
                 sys(SysHit::Health),
-                Some((sys(SysHit::Health), G_MORE)),
+                Some((sys(SysHit::Health), crate::gear::G_GO)),
                 Trail::None,
                 if health < 60 {
                     Tone::Warn
@@ -1312,7 +1304,7 @@ impl App {
                     },
                 ),
                 sys(SysHit::About),
-                Some((sys(SysHit::About), G_MORE)),
+                Some((sys(SysHit::About), crate::gear::G_GO)),
                 Trail::None,
                 Tone::Normal,
             ),
@@ -1323,39 +1315,37 @@ impl App {
                 Trail::None,
                 tone,
             ),
-            Item::Toggle {
-                hit: sys(SysHit::Float),
-                label: tr("Floating windows").into(),
-                hint: if self.floating_mode() {
-                    tr("Every window floats").into()
-                } else {
-                    tr("Windows tile. Golem places them").into()
-                },
-                on: self.floating_mode(),
-            },
         ];
+        // SOUND AND SCREEN and the first MODES (`quick.rs`), then the rest of
+        // the modes, each a row with its switch (THE KIT: one idiom).
+        items.extend(self.quick_items());
+        items.push(switch_row(
+            G_PLANE,
+            tr("Airplane mode"),
+            tr("Wi-Fi and Bluetooth off"),
+            self.settings.airplane,
+            Hit::Airplane,
+        ));
         if crate::launch::on_path("golem-caffeine") {
-            items.push(Item::Toggle {
-                hit: sys(SysHit::Awake),
-                label: tr("Keep awake").into(),
-                hint: tr("No dimming, no sleep").into(),
-                on: Self::caffeine_path().exists(),
-            });
+            items.push(switch_row(G_COFFEE, tr("Keep awake"), tr("No dimming, no sleep"), Self::caffeine_on(), sys(SysHit::Awake)));
         }
-        items.extend(Self::autobright_row());
+        items.push(switch_row(
+            G_FLOAT,
+            tr("Floating windows"),
+            if self.floating_mode() { tr("Every window floats") } else { tr("Windows tile. Golem places them") },
+            self.floating_mode(),
+            sys(SysHit::Float),
+        ));
+        if let Some(profile) = &p.live.profile {
+            items.push(self.mode_choice(profile));
+        }
         if self.stats_page_for(PageKind::Battery).is_none() {
             items.extend(self.idle_rows());
         }
-        items.push(Item::Toggle {
-            hit: Hit::Airplane,
-            label: tr("Airplane mode").into(),
-            hint: tr("Wi-Fi and Bluetooth off").into(),
-            on: self.settings.airplane,
-        });
         items.push(row_with(
             row(Some(G_COG), tr("All settings"), tr("Screen, sound and the rest")),
             sys(SysHit::AllSettings),
-            None,
+            Some((sys(SysHit::AllSettings), crate::gear::G_GO)),
             Trail::None,
             Tone::Normal,
         ));
@@ -1492,7 +1482,7 @@ impl App {
             items.push(row_with(
                 row(Some(G_GPU), c.name.clone(), sub),
                 sys(SysHit::Card(i)),
-                Some((sys(SysHit::Card(i)), G_MORE)),
+                Some((sys(SysHit::Card(i)), crate::gear::G_GO)),
                 if c.primary {
                     Trail::Glyph(G_CHECK)
                 } else {
@@ -1541,7 +1531,7 @@ impl App {
                     },
                 ),
                 sys(SysHit::Video),
-                Some((sys(SysHit::Video), G_MORE)),
+                Some((sys(SysHit::Video), crate::gear::G_GO)),
                 Trail::None,
                 Tone::Normal,
             ));
@@ -1661,7 +1651,7 @@ impl App {
                 items.push(row_with(
                     row(Some(G_FOLDER), f.name.clone(), ""),
                     sys(SysHit::Folder(i)),
-                    Some((sys(SysHit::Folder(i)), G_MORE)),
+                    Some((sys(SysHit::Folder(i)), crate::gear::G_GO)),
                     Trail::Text(size_text(f.bytes)),
                     Tone::Normal,
                 ));
@@ -1687,7 +1677,7 @@ impl App {
                     },
                 ),
                 sys(SysHit::Clean),
-                Some((sys(SysHit::Clean), G_MORE)),
+                Some((sys(SysHit::Clean), crate::gear::G_GO)),
                 Trail::None,
                 Tone::Normal,
             ));
@@ -1730,7 +1720,7 @@ impl App {
                         },
                     ),
                     sys(SysHit::Drive(i)),
-                    Some((sys(SysHit::Drive(i)), G_MORE)),
+                    Some((sys(SysHit::Drive(i)), crate::gear::G_GO)),
                     Trail::None,
                     if bad { Tone::Warn } else { Tone::Normal },
                 ));

@@ -88,6 +88,8 @@ mod focus_cycle;
 mod font_index;
 mod fractional;
 mod gear;
+mod kit;
+mod quick;
 mod gear_pages;
 mod glyphs;
 mod frame;

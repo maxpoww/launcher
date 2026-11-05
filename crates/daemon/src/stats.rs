@@ -127,7 +127,7 @@ struct Reading {
 /// swings between nothing and whatever the link can carry, several times a
 /// second.
 const RESERVE_PCT: &str = "100%";
-const RESERVE_RATE: &str = "99.9MB";
+const RESERVE_RATE: &str = "99.9MB/s";
 /// A device count reserves TWO digits. Not because ten headsets are likely, but
 /// because a column with no reservation has no slack to give: every percentage
 /// here is left-aligned in a `100%` box and spills what it does not use into the
@@ -169,7 +169,8 @@ fn rate_text(bps: Option<u64>) -> String {
     if b < K {
         // Whole bytes: below a kilobyte the number IS the detail, and "0B" is a
         // true and useful reading — the link is up and idle.
-        return format!("{}B", b as u64);
+        // (Per second, said: THE KIT — a rate reads as one.)
+        return format!("{}B/s", b as u64);
     }
     for (unit, scale) in [("KB", K), ("MB", K * K), ("GB", K * K * K)] {
         let scaled = b / scale;
@@ -177,9 +178,9 @@ fn rate_text(bps: Option<u64>) -> String {
             // One decimal only while it buys precision: 1.4MB says more than
             // 1MB, 140MB says as much as 140.3MB and is a character shorter.
             return if scaled < 10.0 {
-                format!("{scaled:.1}{unit}")
+                format!("{scaled:.1}{unit}/s")
             } else {
-                format!("{:.0}{unit}", scaled)
+                format!("{:.0}{unit}/s", scaled)
             };
         }
     }
@@ -339,19 +340,19 @@ mod tests {
         assert_eq!(rate_text(None), "", "unknown says nothing, not zero");
         assert_eq!(
             rate_text(Some(0)),
-            "0B",
+            "0B/s",
             "a live idle link truthfully reads zero"
         );
-        assert_eq!(rate_text(Some(940)), "940B");
-        assert_eq!(rate_text(Some(1024)), "1.0KB");
-        assert_eq!(rate_text(Some(12_000)), "12KB");
+        assert_eq!(rate_text(Some(940)), "940B/s");
+        assert_eq!(rate_text(Some(1024)), "1.0KB/s");
+        assert_eq!(rate_text(Some(12_000)), "12KB/s");
         assert_eq!(
             rate_text(Some(1_500_000)),
-            "1.4MB",
+            "1.4MB/s",
             "1024-based, like every other byte count"
         );
-        assert_eq!(rate_text(Some(140_000_000)), "134MB");
-        assert_eq!(rate_text(Some(2_000_000_000)), "1.9GB");
+        assert_eq!(rate_text(Some(140_000_000)), "134MB/s");
+        assert_eq!(rate_text(Some(2_000_000_000)), "1.9GB/s");
         // Nothing may outgrow the width the layout reserves for it.
         for bps in [0, 1, 999, 1024, 999_999, 50_000_000, 9_000_000_000] {
             assert!(
@@ -983,14 +984,18 @@ impl App {
         // kernel that will not hand out perf counters, means we cannot tell, and
         // a column that quietly means "cannot tell" is the surface lying (see
         // `options-engine`'s `collectors::gpu`).
-        if let Some(gpu) = m.gpu_usage_pct {
-            out.push(Reading {
+        // The graphics page is on every machine (its Effects are the
+        // look's, whatever the card): with no number, its symbol alone, as a
+        // network that is down.
+        out.push(match m.gpu_usage_pct {
+            Some(gpu) => Reading {
                 kind: PageKind::Gpu,
                 icon: ICON_GPU,
                 value: format!("{gpu:.0}%"),
                 reserve: RESERVE_PCT,
-            });
-        }
+            },
+            None => Reading { kind: PageKind::Gpu, icon: ICON_GPU, value: String::new(), reserve: "" },
+        });
         if let Some(bat) = m.battery_pct {
             out.push(Reading {
                 kind: PageKind::Battery,

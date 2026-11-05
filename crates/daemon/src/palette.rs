@@ -3705,6 +3705,37 @@ impl crate::App {
         }
     }
 
+    /// THE QUICK SETTINGS' Dark mode (the gear box, 2026-11-05): every surface
+    /// takes the look at once — the shell, the apps, the websites, the icons —,
+    /// each keeping its own light. The sun stops deciding (Auto, Ambient): the
+    /// switch is the owner's hand, as the Colours sliders are, and what the sun
+    /// gave is kept where it was (`freeze`), so nothing else moves.
+    pub(crate) fn colors_dark_all(&mut self, dark: bool) {
+        let frozen = self.lighting_cancel().map(line_to).or_else(crate::lighting::ambient_line);
+        GolemSettings::change(|s| {
+            let mut c = s.colors.clone().unwrap_or_default();
+            if c.ambient_of(Surface::Shell) {
+                c.auto = None;
+                c.ambient = None;
+                freeze(&mut c, &[Surface::Shell, Surface::Apps, Surface::Icons, Surface::Web], frozen);
+            }
+            c.shell_dark = Some(dark);
+            c.apps_dark = Some(dark);
+            c.web_dark = Some(dark);
+            c.icons_dark = Some(dark);
+            s.colors = Some(c);
+            s.store();
+        });
+        info!("palette: dark mode {} from the quick settings", if dark { "on" } else { "off" });
+        crate::wall_follow::refresh();
+        tell_apps_look(dark);
+        if dark == crate::look::dark() {
+            self.colors_apply(true);
+        } else {
+            self.look_set(dark);
+        }
+    }
+
     /// A choice in the "Colours" setting: save it, then put it in use.
     pub(crate) fn colors_pick(&mut self, key: &str, value: &str) {
         if let Some(note) = refusal(key, value, &choice(), REDUCE.load(Ordering::Relaxed)) {

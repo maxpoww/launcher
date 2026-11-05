@@ -124,6 +124,11 @@ pub(crate) struct Live {
     /// The system update is running right now.
     pub(crate) updating: bool,
     pub(crate) last_update_secs: Option<u64>,
+    /// THE QUICK SETTINGS' readings (the first page only): whether the
+    /// microphone is muted (`None`: no microphone), and the screen's
+    /// brightness 0..1 (`None`: this screen sets its own).
+    pub(crate) mic_muted: Option<bool>,
+    pub(crate) bright: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -402,8 +407,16 @@ fn run(events: &Sender<SysEvent>, rx: &mpsc::Receiver<SysCommand>) {
                     }
                 }
             }
-            Some(_) => {
-                let live = read_live(&machine, &mut prev, &windows);
+            Some(page) => {
+                let mut live = read_live(&machine, &mut prev, &windows);
+                if page == SysPage::Machine {
+                    live.mic_muted = out_of("wpctl", &["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+                        .and_then(|t| crate::controls::parse_volume(&t))
+                        .map(|(_, muted)| muted);
+                    live.bright = out_of("golem-brightness", &["-m"])
+                        .and_then(|t| crate::controls::parse_brightness(&t))
+                        .map(|b| b as f32);
+                }
                 if events.send(SysEvent::Live(Box::new(live))).is_err() {
                     return;
                 }

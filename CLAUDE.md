@@ -444,6 +444,22 @@ The big daemon files are cohesive but long — go straight to the function:
   snapping, then the still fades out (`wp_alpha_modifier_v1`). The still's size at the NEW scale
   is committed just before the change so it never shows magnified. Any failure → the change is
   made bare; the still cannot outlive 2 s. `App::dissolve(output, new_scale, then)`.
+- `kit.rs` — THE KIT (Max, 2026-11-05: "quiero full consistencia"; the sheet
+  https://claude.ai/artifact/QSig7uAfBuGvzASySGNNEg): one form per job for every surface but the card —
+  the switch (36 × 20, the accent when on, centred, the row switches it), the row under the pointer (the
+  ONE MENU's accent tint, `row_tint`), red only for what cannot be undone (`danger`, the menu's red; asked
+  in place on its quiet ground, `danger_tint`), the palette's warning colour for a problem (`warn`).
+  Take sizes and signal colours from here; never a colour of a surface's own for these.
+- `quick.rs` — THE QUICK SETTINGS on the gear box's first page: Sound and screen (the volume — its symbol
+  mutes, `Item::Level` — with its output › its page, the brightness with Auto, the microphone) and the
+  Modes (night light, dark mode — `palette::colors_dark_all`: every surface's look, the sun stops
+  deciding —, do not disturb; the machine page adds airplane, keep awake, floating windows, the power
+  mode). Picks run `controls::apply` on a thread of its own (the newest of each key: a drag sends what the
+  hand says now); what the hand set is held `HOLD` over the readings (the brain's sound inventory, `sys`'s
+  `mic_muted`/`bright` read on the first page only). A level: press, drag (`quick_press`/`quick_motion`/
+  `quick_release` from `options_pointer`), click or wheel. Rows with a page of their own end in `G_GO` (›),
+  always. Rig: `debug-gear dump` lists the page; ⚠ the rig with `PIPEWIRE_REMOTE` reads the REAL sound —
+  look only.
 - `gear.rs` — the gear box's pages with content: **Wi-Fi** and **Bluetooth** (the readout's
   first two readings). A page is a `View` (rows, cards, key/value lines, round buttons); ONE
   layout (`gear_layout`) places it and both the draw (`push_gear_page`) and the hit-test walk
