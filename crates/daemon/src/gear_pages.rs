@@ -124,7 +124,6 @@ pub(crate) enum SysHit {
     FormatName,
     AskFormat,
     DoFormat,
-    CheckUpdates,
     Video,
     AskErase,
     DoErase,
@@ -1254,37 +1253,7 @@ impl App {
     fn machine_view(&self) -> View {
         let p = &self.gear.pages;
         let m = &p.machine;
-        let on_for = span_text(p.live.uptime_secs / 60);
-        let stale = self
-            .brain
-            .as_ref()
-            .is_some_and(|c| c.deploy.stale_generation);
-        let (title, sub, tone, hit) = if p.live.updating {
-            (
-                tr("Updating now…"),
-                tr("Keep working. It finishes at the next restart").to_owned(),
-                Tone::Busy,
-                Hit::None,
-            )
-        } else if stale {
-            (
-                tr("Restart to finish updating"),
-                tr("Click to restart now").to_owned(),
-                Tone::Warn,
-                sys(SysHit::AskRestart),
-            )
-        } else {
-            (
-                tr("Up to date"),
-                p.live
-                    .last_update_secs
-                    .map_or(tr("Click to check now").to_owned(), |s| {
-                        crate::i18n::fill(tr("Checked {0} ago"), &[("0", &(span_text(s / 60)))])
-                    }),
-                Tone::Normal,
-                sys(SysHit::CheckUpdates),
-            )
-        };
+        let state = self.update_state();
         let mut items = vec![
             row_with(
                 row(
@@ -1295,25 +1264,16 @@ impl App {
                         m.host.clone()
                     },
                     // "Golem 26.05 (Yarara)": the release's own name is for the
-                    // details view; the row has room for the version. (Before
-                    // the first reading — seconds on a slow disk — no "up 0 min".)
-                    if p.live.uptime_secs == 0 {
-                        m.os.split(" (").next().unwrap_or(&m.os).to_owned()
-                    } else {
-                        crate::i18n::fill(tr("{0} · up {on_for}"), &[("0", &(m.os.split(" (").next().unwrap_or(&m.os))), ("on_for", &on_for)])
-                    },
+                    // details view; the row has room for the version, and
+                    // whether it is up to date (Max, 2026-11-05: "nothing about
+                    // update, golem takes care of update, lets put an 'up to
+                    // date' on the system info" — no row, no button for it).
+                    format!("{} · {state}", m.os.split(" (").next().unwrap_or(&m.os)),
                 ),
                 sys(SysHit::About),
                 Some((sys(SysHit::About), crate::gear::G_GO)),
                 Trail::None,
                 Tone::Normal,
-            ),
-            row_with(
-                row(Some(G_REFRESH), title, sub),
-                hit,
-                None,
-                Trail::None,
-                tone,
             ),
         ];
         // SOUND AND SCREEN and the first MODES (`quick.rs`), then the rest of
@@ -1420,6 +1380,19 @@ impl App {
         }
     }
 
+    /// Where the system stands, in words: Golem updates itself (no check, no
+    /// button) and finishes at the next restart.
+    fn update_state(&self) -> &'static str {
+        let stale = self.brain.as_ref().is_some_and(|c| c.deploy.stale_generation);
+        if self.gear.pages.live.updating {
+            tr("Updating…")
+        } else if stale {
+            tr("Up to date after a restart")
+        } else {
+            tr("Up to date")
+        }
+    }
+
     fn about_view(&self) -> View {
         let p = &self.gear.pages;
         let m = &p.machine;
@@ -1430,7 +1403,7 @@ impl App {
             } else {
                 m.host.clone()
             },
-            sub: m.os.clone(),
+            sub: format!("{} · {}", m.os, self.update_state()),
             extra: Extra::None,
             rename: None,
         }];
@@ -2282,7 +2255,6 @@ impl App {
             ("lid", _) => SysHit::Lid(arg == "nothing"),
             ("screen", _) => SysHit::ScreenOff(secs),
             ("sleepafter", _) => SysHit::SleepAfter(secs),
-            ("updates", _) => SysHit::CheckUpdates,
             ("erase", _) => SysHit::AskErase,
             ("stop-erase", _) => SysHit::StopErase,
             ("app-close", _) => SysHit::AppClose(arg.to_owned()),
@@ -3026,18 +2998,6 @@ impl App {
                         },
                     );
                 }
-            }
-            SysHit::CheckUpdates => {
-                // The system's own updater, started now. It is the system's to
-                // allow; the row turns to "Updating now…" when it runs.
-                run_detached(
-                    "systemctl",
-                    vec![
-                        "start".into(),
-                        "--no-block".into(),
-                        "golem-autoupdate.service".into(),
-                    ],
-                );
             }
             SysHit::Video => self.page_view(PView::Video),
             _ => {}

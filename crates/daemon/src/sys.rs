@@ -123,7 +123,6 @@ pub(crate) struct Live {
     pub(crate) uptime_secs: u64,
     /// The system update is running right now.
     pub(crate) updating: bool,
-    pub(crate) last_update_secs: Option<u64>,
     /// THE QUICK SETTINGS' readings (the first page only): whether the
     /// microphone is muted (`None`: no microphone), and the screen's
     /// brightness 0..1 (`None`: this screen sets its own).
@@ -891,20 +890,12 @@ fn read_live(machine: &Machine, prev: &mut Prev, windows: &[(String, String, i32
             "golem-autoupdate.service",
             "-p",
             "ActiveState",
-            "-p",
-            "ExecMainExitTimestampMonotonic",
         ],
     )
     .unwrap_or_default();
     live.updating = unit
         .lines()
         .any(|l| l == "ActiveState=activating" || l == "ActiveState=active");
-    live.last_update_secs = unit
-        .lines()
-        .find_map(|l| l.strip_prefix("ExecMainExitTimestampMonotonic="))
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|us| *us > 0)
-        .map(|us| live.uptime_secs.saturating_sub(us / 1_000_000));
     prev.total = all.0;
     prev.idle = all.1;
     prev.cores = cores;
