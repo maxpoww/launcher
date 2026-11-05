@@ -803,6 +803,7 @@ impl App {
         }
         let others = self.clip.keyboard_held
             || self.gear.keyboard_held
+            || self.timer_pill_keys()
             || self.desktop.config.as_ref().is_some_and(|c| c.hosted && c.editing);
         if want {
             self.cancel_keyboard_handback(crate::KbSurface::Options);

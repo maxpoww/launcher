@@ -3084,6 +3084,7 @@ impl App {
         // (The bar's surface is shared: the clipboard box may hold it too.)
         let others = self.clip.keyboard_held
             || self.phone_box_keys()
+            || self.timer_pill_keys()
             || self
                 .desktop
                 .config
@@ -3793,6 +3794,17 @@ impl App {
             // The banner's timer pill (`timer_pill.rs`): its X, its time.
             "timer-x" => self.sleep_timer_cancel(),
             "timer-time" => self.timer_pill_edit(),
+            // Keys to the pill being edited: "timer-key 45", "timer-key enter|esc|bs".
+            "timer-key" => match arg {
+                "enter" => self.timer_pill_key(Keysym::Return, None),
+                "esc" => self.timer_pill_key(Keysym::Escape, None),
+                "bs" => self.timer_pill_key(Keysym::BackSpace, None),
+                typed => {
+                    for c in typed.chars() {
+                        self.timer_pill_key(Keysym::from_char(c), Some(&c.to_string()));
+                    }
+                }
+            },
             // The footer's buttons behind a button out (`behind off`: in), as
             // the pointer on it would have them; the next pointer move decides.
             // (`behind timer`: the first footer button with buttons behind it;

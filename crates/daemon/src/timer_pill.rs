@@ -11,10 +11,17 @@
 //!
 //! The pointer on it lifts and washes the WHOLE pill, as every pill's hover
 //! (Max: "el hover effect hacelo en la píldora completa"). A click on the X
-//! cancels the timer; on the time it opens the gear box with the time asked
-//! in its field, the whole minutes written.
+//! cancels the timer; on the time the time is EDITED ON THE PILL ITSELF (Max:
+//! "la edición después del click en la píldora del banner sea en el banner,
+//! no abrir la caja"): the whole minutes left written and picked — the first
+//! key typed takes their place —, a caret, a quiet "min" after it; Enter sets
+//! it (`sleep_timer_typed`: "45", "1:30", "2h"…), Escape, a click off the pill
+//! or the keyboard going elsewhere leave it as it was. The banner holds the
+//! keyboard meanwhile (the gear field's grab, `set_timer_keyboard`).
 
 use std::time::Instant;
+
+use smithay_client_toolkit::seat::keyboard::Keysym;
 
 use crate::animation::{self, ease_toward};
 use crate::content::{Label, Rect, RectInst, Scene};
@@ -23,15 +30,35 @@ use crate::App;
 
 /// fa-times: cancel (the gear box's own X).
 const GLYPH_CANCEL: &str = "\u{f00d}";
+/// The quiet unit after what is typed on the pill.
+const UNIT: &str = " min";
+/// The caret's room between what is typed and the unit.
+const CARET_AIR: f32 = 3.0;
+/// No time typed is longer than this.
+const TYPED_MAX: usize = 8;
 /// How far the words reach into the X's circle — into its empty side, so the
 /// time stands close to the X (Max, 2026-11-04: "más cerca de la x el
 /// tiempo"; 4 touched it), in logical px at scale 1: about 4 px of air left
 /// between the last digit and the X.
 const WORDS_INTO_X: f32 = 1.0;
 
+/// What edits are made of on the pill: digits and the words of a time.
+fn typable(c: char) -> bool {
+    c.is_ascii_digit() || ":hmin ".contains(c.to_ascii_lowercase())
+}
+
 /// The pill's state.
 #[derive(Debug, Default)]
 pub(crate) struct TimerPill {
+    /// The time being typed on the pill, and whether it is still the minutes
+    /// it began with (picked: the first key takes their place).
+    editing: Option<String>,
+    fresh: bool,
+    /// The banner holds the keyboard for it.
+    keys_held: bool,
+    /// What is typed and the quiet " min" after it, measured.
+    typed_w: f32,
+    unit_w: f32,
     /// 0 (gone) → 1 (there).
     t: f32,
     /// The countdown as last shown (kept while the pill goes).
@@ -57,9 +84,12 @@ impl App {
     }
 
     /// How wide the words' part is: the pill's air before them and the words,
-    /// their end a little into the X's circle.
+    /// their end a little into the X's circle (being edited: what is typed,
+    /// the caret and " min", never narrower than the countdown).
     fn timer_words_part(&self) -> f32 {
-        PILL_PAD_X + self.timer_pill.words_w - WORDS_INTO_X * self.options_scale()
+        let tp = &self.timer_pill;
+        let words = if tp.editing.is_some() { tp.words_w.max(tp.typed_w + CARET_AIR + tp.unit_w) } else { tp.words_w };
+        PILL_PAD_X + words - WORDS_INTO_X * self.options_scale()
     }
 
     fn timer_pill_w(&self) -> f32 {
@@ -106,17 +136,138 @@ impl App {
         }
     }
 
-    /// The time edited: the gear box open on its page, the time asked in its
-    /// field (which holds the box open until Enter or Escape).
+    /// The time edited on the pill: the whole minutes left written and
+    /// picked, the keyboard the banner's.
     pub(crate) fn timer_pill_edit(&mut self) {
-        let Some(page) = self.stats_page_for(crate::gear::PageKind::Gear) else {
+        let Some(left) = self.sleep_timer_left() else {
             return;
         };
-        self.stats.reveal = true;
-        if !(self.stats.open && self.stats_page() == page) {
-            self.stats_open_page(page);
+        if self.timer_pill.editing.is_none() {
+            self.timer_pill.editing = Some(crate::sleep_timer::whole_minutes(left).to_string());
+            self.timer_pill.fresh = true;
+            self.set_timer_keyboard(true);
         }
-        self.sleep_timer_ask();
+        self.timer_pill_measure_typed();
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// Whether the pill is being edited (it takes every key).
+    pub(crate) fn timer_pill_editing(&self) -> bool {
+        self.timer_pill.editing.is_some()
+    }
+
+    /// Whether the banner holds the keyboard for the pill.
+    pub(crate) fn timer_pill_keys(&self) -> bool {
+        self.timer_pill.keys_held
+    }
+
+    /// A key while the pill is edited: Enter sets the time, Escape leaves it
+    /// as it was, Backspace takes a letter back (all of them while they are
+    /// still the minutes it began with), what makes a time is typed.
+    pub(crate) fn timer_pill_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        let Some(mut text) = self.timer_pill.editing.clone() else {
+            return;
+        };
+        match keysym {
+            Keysym::Escape => return self.timer_pill_edit_end(),
+            Keysym::Return | Keysym::KP_Enter => {
+                // (Nothing typed: as it was. Not a time: stays to be put right.)
+                if text.trim().is_empty() || self.sleep_timer_typed(&text) {
+                    self.timer_pill_edit_end();
+                } else {
+                    tracing::info!("sleep timer: {text:?} is not a time");
+                }
+                return;
+            }
+            Keysym::BackSpace => {
+                if self.timer_pill.fresh {
+                    text.clear();
+                } else {
+                    text.pop();
+                }
+            }
+            _ => {
+                if self.modifiers.ctrl || self.modifiers.alt {
+                    return;
+                }
+                let typed: String = utf8.unwrap_or("").chars().filter(|c| typable(*c)).collect();
+                if typed.is_empty() {
+                    return;
+                }
+                if self.timer_pill.fresh {
+                    text.clear();
+                }
+                text.push_str(&typed);
+                text = text.chars().take(TYPED_MAX).collect();
+            }
+        }
+        self.timer_pill.fresh = false;
+        self.timer_pill.editing = Some(text);
+        self.timer_pill_measure_typed();
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// The edit ends with nothing changed by it (Enter's own change made).
+    pub(crate) fn timer_pill_edit_end(&mut self) {
+        if self.timer_pill.editing.take().is_none() {
+            return;
+        }
+        self.timer_pill.fresh = false;
+        self.set_timer_keyboard(false);
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// The keyboard went elsewhere (a click on a window): the edit is left,
+    /// the grab already gone.
+    pub(crate) fn timer_pill_keys_left(&mut self) {
+        if self.timer_pill.editing.take().is_none() && !self.timer_pill.keys_held {
+            return;
+        }
+        self.timer_pill.keys_held = false;
+        if let Some(layer) = &self.options_layer {
+            crate::surface::set_interactive(layer, self.options_keys_wanted());
+        }
+        self.sync_options_input();
+        self.draw_options();
+    }
+
+    /// Take or release the banner's keyboard for the edit (the bar's surface
+    /// is shared: the gear's, the clipboard's and the phone box's grabs).
+    fn set_timer_keyboard(&mut self, want: bool) {
+        if want == self.timer_pill.keys_held {
+            return;
+        }
+        let others = self.clip.keyboard_held
+            || self.gear.keyboard_held
+            || self.phone_box_keys()
+            || self.desktop.config.as_ref().is_some_and(|c| c.hosted && c.editing);
+        if want {
+            self.cancel_keyboard_handback(crate::KbSurface::Options);
+        } else if !others && !self.keyboard_handback_armed(crate::KbSurface::Options) {
+            self.begin_keyboard_handback(crate::KbSurface::Options, None);
+        }
+        self.timer_pill.keys_held = want;
+        tracing::debug!("timer pill: keyboard grab {}", if want { "on" } else { "off" });
+        let any = self.options_keys_wanted();
+        if let Some(layer) = &self.options_layer {
+            crate::surface::set_interactive(layer, any);
+        }
+    }
+
+    /// Measure what is typed and the unit after it.
+    fn timer_pill_measure_typed(&mut self) {
+        let text = self.timer_pill.editing.clone().unwrap_or_default();
+        let font_px = FONT_PX * self.options_scale();
+        if let Some(r) = self.options_renderer.as_mut() {
+            self.timer_pill.typed_w = if text.is_empty() { 0.0 } else { r.measure_text(&text, font_px, TEXT_FONT) };
+            self.timer_pill.unit_w = r.measure_text(UNIT, font_px, TEXT_FONT);
+        } else {
+            self.timer_pill.typed_w = text.chars().count() as f32 * font_px * 0.6;
+            self.timer_pill.unit_w = UNIT.chars().count() as f32 * font_px * 0.5;
+        }
     }
 
     /// The timer began, changed, went on a second, or ended: the countdown
@@ -124,6 +275,9 @@ impl App {
     pub(crate) fn timer_pill_sync(&mut self) {
         if let Some(left) = self.sleep_timer_left() {
             self.timer_pill.words = crate::sleep_timer::countdown(left);
+        } else {
+            // (Ended, or cancelled by its X: nothing is being edited any more.)
+            self.timer_pill_edit_end();
         }
         let shaped = shape(&self.timer_pill.words);
         if shaped != self.timer_pill.measured {
@@ -176,7 +330,9 @@ impl App {
         let r = if hovered { hover_grow(rect) } else { rect };
         let radius = r.h / 2.0;
         push_neumorph(scene, r, radius, bright, a);
-        let mut wash = if hovered { self.options_hover_wash() } else { self.options_rest_wash() };
+        // (Being edited it stays lit: a field, taking the keys.)
+        let lit = hovered || self.timer_pill.editing.is_some();
+        let mut wash = if lit { self.options_hover_wash() } else { self.options_rest_wash() };
         wash[3] *= a;
         scene.rects.push(RectInst { rect: r, radius, color: wash, glass: 0.0, border: 0.0 });
         let x_rect = Self::timer_x_rect(r);
@@ -185,6 +341,9 @@ impl App {
         let ink = [ink[0], ink[1], ink[2], ink[3] * a];
         let s = self.options_scale();
         let reach = Rect::new(words.x, words.y, words.w + WORDS_INTO_X * s + 1.0, words.h);
+        if let Some(text) = &self.timer_pill.editing {
+            self.push_timer_typed(scene, r, reach, text, ink);
+        } else {
         scene.labels.push(Label {
             text: self.timer_pill.words.clone(),
             pos: (r.x + PILL_PAD_X, r.y + (r.h - LINE_PX * s) / 2.0),
@@ -199,6 +358,7 @@ impl App {
             color: Some(ink),
             clip: Some(reach),
         });
+        }
         scene.labels.push(Label {
             text: GLYPH_CANCEL.to_owned(),
             pos: (x_rect.x + x_rect.w / 2.0, x_rect.y + (x_rect.h - LINE_PX * s) / 2.0),
@@ -215,9 +375,63 @@ impl App {
     }
 }
 
+impl App {
+    /// What is typed on the pill: picked while it is still the minutes it
+    /// began with, else a caret after it; the quiet unit after both.
+    fn push_timer_typed(&self, scene: &mut Scene, r: Rect, reach: Rect, text: &str, ink: [f32; 4]) {
+        let s = self.options_scale();
+        let tp = &self.timer_pill;
+        let x0 = r.x + PILL_PAD_X;
+        let line_h = LINE_PX * s;
+        let top = r.y + (r.h - line_h) / 2.0;
+        if tp.fresh && !text.is_empty() {
+            scene.rects.push(RectInst {
+                rect: Rect::new(x0 - 2.0, top, tp.typed_w + 4.0, line_h),
+                radius: 3.0 * s,
+                color: [ink[0], ink[1], ink[2], ink[3] * 0.22],
+                glass: 0.0,
+                border: 0.0,
+            });
+        } else {
+            scene.rects.push(RectInst {
+                rect: Rect::new(x0 + tp.typed_w + 0.5, top + 2.0, 1.5 * s, line_h - 4.0),
+                radius: 0.75 * s,
+                color: ink,
+                glass: 0.0,
+                border: 0.0,
+            });
+        }
+        for (words, at, tone) in [(text, x0, 1.0), (UNIT, x0 + tp.typed_w + CARET_AIR, 0.55)] {
+            if words.is_empty() {
+                continue;
+            }
+            scene.labels.push(Label {
+                text: words.to_owned(),
+                pos: (at, top),
+                max_w: reach.w,
+                font_px: FONT_PX * s,
+                line_px: line_h,
+                centered: false,
+                dim: false,
+                cache: false,
+                family: TEXT_FONT,
+                color: Some([ink[0], ink[1], ink[2], ink[3] * tone]),
+                clip: Some(reach),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_time_is_typed() {
+        assert!("0123456789:hmin ".chars().all(typable));
+        assert!(typable('H') && typable('M'));
+        assert!(!typable('x') && !typable('-') && !typable('.'));
+    }
 
     #[test]
     fn the_width_is_measured_from_the_shape() {

@@ -2849,6 +2849,7 @@ impl App {
         self.clip.keyboard_held
             || self.gear.keyboard_held
             || self.phone_box_keys()
+            || self.timer_pill_keys()
             || self
                 .desktop
                 .config
@@ -2863,6 +2864,7 @@ impl App {
         }
         let others = self.gear.keyboard_held
             || self.phone_box_keys()
+            || self.timer_pill_keys()
             || self
                 .desktop
                 .config

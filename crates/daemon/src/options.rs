@@ -6894,6 +6894,11 @@ impl App {
     }
 
     fn options_click(&mut self) {
+        // A time being typed on the sleep timer's pill: a click off the pill
+        // leaves it as it was (and goes on to do what it does).
+        if self.timer_pill_editing() && self.options_hover != Some(PillId::Timer) {
+            self.timer_pill_edit_end();
+        }
         // The open sunset settings box: the gear (top-right) closes it; a click
         // on a control acts; a click anywhere else closes it. Checked before
         // everything else so an open box owns the surface.

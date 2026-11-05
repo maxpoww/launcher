@@ -7489,6 +7489,11 @@ impl App {
             }
             return;
         }
+        // The sleep timer's time being typed on its banner pill.
+        if self.timer_pill_editing() {
+            self.timer_pill_key(keysym, utf8);
+            return;
+        }
         // The terminal's own (`term.rs`): Enter sends, and a program on the
         // whole screen takes every key (before the box's own Ctrl keys).
         if self.term_key(keysym, utf8) {
@@ -8382,6 +8387,8 @@ impl KeyboardHandler for App {
         }
         if surface != self.layer.wl_surface() {
             debug!("keyboard focus left the OPTIONS surface");
+            // (A time being typed on the timer's pill is left as it was.)
+            self.timer_pill_keys_left();
             // The box's release, confirmed: the keyboard goes where it chose.
             self.complete_keyboard_handback(KbSurface::Options);
             return;
