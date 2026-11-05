@@ -4332,27 +4332,21 @@ impl App {
             // (drawn in the message branch below): the ordinary neumorph and
             // wash fade out as that material fades in — one substance at a
             // time, never stacked.
-            push_neumorph(scene, rect, radius, bright, shadow_a * (1.0 - module_t));
-            let base = if hovered { hover_wash } else { rest_wash };
-            // A pill's wash is a translucent film — right for a pill, wrong for
-            // a panel, which has to occlude what it grew over. The readout lerps
-            // to the same frosted surface the other boxes use as it opens.
-            let (base, alpha) = if pill.id == PillId::SettingsStats && self.stats_open_t() > 0.001 {
-                let e = self.stats_open_t();
-                // Its own side's frost — the gear lives at the left edge beside
-                // the clipboard, not at the notification's end of the bar.
-                let (fill, _) = self.box_surface_at(rect);
-                (fill, lerp(base[3] * a, self.box_panel_alpha(), e))
+            // The gear's readout: each reading its own pill, the box's ground
+            // as it opens (`stats.rs`).
+            if pill.id == PillId::SettingsStats {
+                self.push_stats_grounds(scene, rect, bright, a, shadow_a, hover_wash, rest_wash);
             } else {
-                (base, base[3] * a * (1.0 - module_t))
-            };
-            scene.rects.push(RectInst {
-                rect,
-                radius,
-                color: [base[0], base[1], base[2], alpha],
-                glass: 0.0,
-                border: 0.0,
-            });
+                push_neumorph(scene, rect, radius, bright, shadow_a * (1.0 - module_t));
+                let base = if hovered { hover_wash } else { rest_wash };
+                scene.rects.push(RectInst {
+                    rect,
+                    radius,
+                    color: [base[0], base[1], base[2], base[3] * a * (1.0 - module_t)],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
             let g = pill.glyph_color.unwrap_or(text_color);
             let family = pill.family;
             let cx = rect.x + rect.w / 2.0;
