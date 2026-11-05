@@ -744,10 +744,12 @@ The big daemon files are cohesive but long — go straight to the function:
   release to `waverunner-ctl power`; logind ignores it and powers off on a long one) puts a round HIBERNATE pill
   right of the gear (`PillId::Power`; what stands right of the gear moves over by `power_room`, through
   `options_left_start`); the pointer on it brings SLEEP and RESTART out from behind it to its right
-  (`PowerSleep`, `PowerRestart`); a click does it at once, the pills gone first. They go with a second press, a
-  moment after the hand leaves once it came, or after `UNVISITED` (8 s) with no hand; over a fullscreen the key
-  calls the banner, which goes back after. No hibernation (logind's CanHibernate, asked at each press): the round
-  pill is sleep and only restart is behind. Rig: `power [open|shut|away|state]` (never a click: it is real).
+  (`PowerSleep`, `PowerRestart`); a click does it at once, the pills gone first. A SECOND PRESS of the key while the
+  round pill shows is its click (hibernate; a restart waiting: cancelled — Max, 2026-11-05). They go a moment after
+  the hand leaves once it came, or after `UNVISITED` (8 s) with no hand; over a fullscreen the key calls the banner,
+  which goes back after. No hibernation (logind's CanHibernate, asked at each press): the round pill is sleep and
+  only restart is behind. Rig: `power [open|shut|away|state]`; under `GOLEM_RIG` the machine is never put to sleep
+  (`machine` logs "a rig — would hibernate"), elsewhere a click or a second `power` is REAL.
 - `desktop_menu.rs` + `glyphs.rs` — THE ONE MENU (Max, 2026-10-21, mockups v50/v52 "All menus":
   "Build all of it"): EVERY right-click — Files' file / folder / several / archive / app shortcut /
   empty space / bin item / bin / sidebar place, the desktop's wallpaper and what stands on it, a

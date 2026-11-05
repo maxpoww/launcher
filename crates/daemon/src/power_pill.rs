@@ -37,8 +37,11 @@
 //! second close as "never mind" (the Text Editor on the test VM, 2026-11-03),
 //! and the owner closes it by its own X.
 //!
-//! THEY GO with a second press of the key (a restart waiting: cancelled), when
-//! the hand leaves after coming, or by themselves when it never comes
+//! A SECOND PRESS of the key while the round pill shows does what its click
+//! does — hibernate (sleep where the machine cannot) — (Max, 2026-11-05: "que
+//! el botón corto muestre el botón de hibernar, y si se está mostrando, un
+//! segundo toque hiberne"); a restart waiting is cancelled by it instead. They
+//! go when the hand leaves after coming, or by themselves when it never comes
 //! (`UNVISITED`).
 //!
 //! A machine that cannot hibernate (no disk swap): the round pill is sleep and
@@ -193,6 +196,11 @@ fn answer<T>(question: impl Future<Output = zbus::Result<T>>) -> Option<T> {
 
 /// `systemctl <verb>`, on a thread of its own (reaped; the loop never waits).
 fn machine(verb: &'static str) {
+    // A test rig runs on the machine itself: it never puts it to sleep.
+    if std::env::var_os("GOLEM_RIG").is_some() {
+        info!("power: a rig — would {verb}");
+        return;
+    }
     info!("power: {verb}");
     let spawned = std::thread::Builder::new().name("power".into()).spawn(move || {
         match std::process::Command::new("systemctl").arg(verb).output() {
@@ -253,8 +261,9 @@ impl App {
             self.power_restart_cancel();
             return;
         }
+        // (Showing: the second press is the round pill's own click.)
         if self.power.on {
-            self.power_pills_away();
+            self.power_pill_click(PillId::Power);
             return;
         }
         let p = &mut self.power;
