@@ -1196,6 +1196,8 @@ pub(crate) struct ClipState {
     icon_pending: HashSet<u64>,
     /// "Click again to clear all", asked in place (THE KIT).
     pub(crate) clear_ask: crate::kit::Ask,
+    /// The footer's buttons say their names (THE KIT).
+    names: crate::kit::Names<ClipHit>,
 }
 
 impl ClipState {
@@ -1291,6 +1293,7 @@ impl ClipState {
             icon_slot: HashMap::new(),
             icon_pending: HashSet::new(),
             clear_ask: crate::kit::Ask::default(),
+            names: crate::kit::Names::default(),
         }
     }
 }
@@ -1863,6 +1866,17 @@ impl App {
         let f = self.clip_footer_rect(rect);
         let d = self.clip_footer_button_d();
         crate::kit::ask_rect((f.x + f.w / 2.0, f.y + f.h / 2.0), d, crate::i18n::tr("Click again to clear all"), 1.0)
+    }
+
+    /// A footer button's name.
+    fn clip_button_name(hit: ClipHit) -> Option<&'static str> {
+        Some(match hit {
+            ClipHit::NewNote => crate::i18n::tr("New note"),
+            ClipHit::Emoji => crate::i18n::tr("Emoji"),
+            ClipHit::Dictionary => crate::i18n::tr("Define a word"),
+            ClipHit::ClearAll => crate::i18n::tr("Clear all"),
+            _ => return None,
+        })
     }
 
     /// The search field's rect once fully out: the footer zone's full width,
@@ -2440,6 +2454,13 @@ impl App {
                 clip: Some(gclip),
             });
         }
+        // The name of the button rested on, over it (THE KIT).
+        if let Some(h) = self.clip.names.shown() {
+            if let (Some((_, at)), Some(words)) = (self.clip_footer_buttons(rect).into_iter().find(|(b, _)| b == h), Self::clip_button_name(*h)) {
+                let r = crate::kit::name_rect(at, words, true, rect, 1.0);
+                crate::kit::push_name(scene, r, words, btn_a, 1.0, false);
+            }
+        }
     }
 
     /// Draw the type-to-search field the footer morphs into: a stadium stretched
@@ -2750,7 +2771,17 @@ impl App {
             ClipHit::Row(i) | ClipHit::Delete(i) => Some(i),
             _ => None,
         };
-        let changed = hit != self.clip.hit || hover_row != self.clip.hover_row;
+        // A footer button rested on says its name (THE KIT).
+        let button = (Self::clip_button_name(hit).is_some() && !self.clip.clear_ask.asking()).then_some(hit);
+        let named = self.clip.names.shown().copied();
+        if let Some(wait) = self.clip.names.follow(button, self.options_ptr.is_some()) {
+            let timer = calloop::timer::Timer::from_duration(wait);
+            let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+                app.schedule_clip_frame();
+                calloop::timer::TimeoutAction::Drop
+            });
+        }
+        let changed = hit != self.clip.hit || hover_row != self.clip.hover_row || named != self.clip.names.shown().copied();
         self.clip.hit = hit;
         self.clip.hover_row = hover_row;
         changed

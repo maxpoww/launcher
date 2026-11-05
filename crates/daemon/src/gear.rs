@@ -459,6 +459,8 @@ pub(crate) struct GearState {
     behind_out: f32,
     /// The quick settings' (`quick.rs`).
     pub(crate) quick: crate::quick::QuickState,
+    /// The strip's and the footer's buttons say their names (THE KIT).
+    names: crate::kit::Names<Hit>,
 }
 
 impl GearState {
@@ -2254,6 +2256,19 @@ impl App {
     pub(crate) fn update_gear_hit(&mut self) -> bool {
         let hit = self.gear_hit_at();
         let changed = hit != self.gear.hit;
+        // An icon button rested on says its name (THE KIT): a frame is asked
+        // for when its wait is over.
+        let button = self.gear_button_rect(&hit).map(|_| hit.clone());
+        let among = self.options_ptr.is_some() && self.gear_page().is_some();
+        let named = self.gear.names.shown().cloned();
+        if let Some(wait) = self.gear.names.follow(button, among) {
+            let timer = calloop::timer::Timer::from_duration(wait);
+            let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+                app.schedule_stats_frame();
+                calloop::timer::TimeoutAction::Drop
+            });
+        }
+        let changed = changed || named != self.gear.names.shown().cloned();
         self.gear.hit = hit;
         let open = self.gear_behind_ptr_on();
         if open != self.gear.behind_open {
@@ -3155,6 +3170,86 @@ impl App {
                 self.push_gear_field(scene, fr, f, a, bright);
             }
         }
+        // The name of the icon button rested on (THE KIT): under a strip's,
+        // over a footer's.
+        if let Some(h) = self.gear.names.shown() {
+            if let (Some((at, above)), Some(words)) = (self.gear_button_rect(h), self.gear_hit_name(h)) {
+                let r = crate::kit::name_rect(at, &words, above, rect, s);
+                crate::kit::push_name(scene, r, &words, a, s, false);
+            }
+        }
+    }
+
+    /// Where the icon button `hit` stands on the open page — the strip's (its
+    /// name goes under it) or the footer's, those behind included (over it).
+    fn gear_button_rect(&self, hit: &Hit) -> Option<(Rect, bool)> {
+        if *hit == Hit::None {
+            return None;
+        }
+        let view = self.gear_view();
+        let lay = self.gear_layout(&view, self.gear_rect());
+        if let Some((_, r)) = view.strip.iter().zip(&lay.strip).find(|(b, _)| b.hit == *hit) {
+            return Some((*r, false));
+        }
+        // (While the footer is a field or a question, it has no buttons.)
+        if lay.field.is_some() {
+            return None;
+        }
+        for ((b, r), behind) in view.footer.iter().zip(&lay.footer).zip(&lay.footer_behind) {
+            // A button with words beside it (the timer's countdown) is named by them.
+            if b.hit == *hit && b.label.is_none() {
+                return Some((*r, true));
+            }
+            if let Some((_, br)) = b.behind.iter().zip(behind).find(|(bb, _)| bb.hit == *hit) {
+                return Some((*br, true));
+            }
+        }
+        None
+    }
+
+    /// What an icon button of the box does, in words (its name).
+    fn gear_hit_name(&self, hit: &Hit) -> Option<String> {
+        use crate::gear_pages::SysHit as S;
+        let g = &self.gear;
+        let ap_on = |s: &str| self.net_ap(s).is_some_and(|a| a.active);
+        let words = match hit {
+            Hit::Back => tr("Back"),
+            Hit::NetToggle => match &g.net_view {
+                NetView::Detail(ssid) if ap_on(ssid) => tr("Disconnect"),
+                _ => tr("Connect"),
+            },
+            Hit::NetShare => tr("Share this network"),
+            Hit::NetShowPw | Hit::HsEye if g.show_pw => tr("Hide the password"),
+            Hit::NetShowPw | Hit::HsEye => tr("Show the password"),
+            Hit::NetForget | Hit::DevForget => tr("Forget"),
+            Hit::DevToggle => match &g.bt_view {
+                BtView::Detail(path) if self.bt_dev(path).is_some_and(|d| d.connected) => tr("Disconnect"),
+                _ => tr("Connect"),
+            },
+            Hit::PairNo => tr("Cancel"),
+            Hit::PairYes => tr("It matches: pair"),
+            Hit::WifiScan => tr("Search again"),
+            Hit::Hidden => tr("Join a hidden network…"),
+            Hit::Hotspot => tr("Share internet"),
+            Hit::BtScan if g.bt_snap.discovering => tr("Stop searching"),
+            Hit::BtScan => tr("Search for devices"),
+            Hit::BtVisible if g.bt_snap.discoverable => tr("Stop being visible"),
+            Hit::BtVisible => tr("Be visible to others"),
+            Hit::BtFiles => tr("Send or receive files"),
+            Hit::Sys(S::SleepTimer) if self.sleep_timer_left().is_some() => tr("Cancel the timer"),
+            Hit::Sys(S::SleepTimer) => tr("Sleep timer"),
+            Hit::Sys(S::Lock) => tr("Lock"),
+            Hit::Sys(S::AskHibernate) => tr("Hibernate"),
+            Hit::Sys(S::Sleep) => tr("Sleep"),
+            Hit::Sys(S::AskRestart) => tr("Restart"),
+            Hit::Sys(S::AppClose(_)) => tr("Close"),
+            Hit::Sys(S::AskKill(_)) => tr("Force quit"),
+            Hit::Sys(S::OpenFolder(_)) => tr("Show in Files"),
+            Hit::Sys(S::OpenDrive(_)) => tr("Open"),
+            Hit::Sys(S::Eject(_)) => tr("Eject"),
+            _ => return None,
+        };
+        Some(words.to_owned())
     }
 
     /// The footer stretched into a field: the clipboard's search field, with a

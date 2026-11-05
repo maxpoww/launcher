@@ -1817,6 +1817,8 @@ struct Win {
 
     ptr: Option<(f32, f32)>,
     hover: Spot,
+    /// The chrome's icon buttons say their names (THE KIT).
+    button_names: crate::kit::Names<Spot>,
     /// The scroll being reported comes from a wheel (notches), not fingers.
     /// The scroll comes from FINGERS on a touchpad (the folder then follows
     /// them step for step); how fast it was going (px/s) and when its last
@@ -2111,6 +2113,71 @@ impl Win {
             .iter()
             .position(|u| u.as_deref() == Some(key))
             .map(|l| l as u32)
+    }
+
+    /// What the chrome's icon button at `spot` does, in words (its name);
+    /// `None`: not an icon button (it has words, or is no button).
+    fn spot_name(&self, spot: Spot) -> Option<String> {
+        let w = match spot {
+            Spot::Pin if self.pinned => tr("Let the sidebar fold"),
+            Spot::Pin => tr("Keep the sidebar open"),
+            Spot::TabX(_) => tr("Close tab"),
+            Spot::TabAdd => tr("New tab"),
+            Spot::Pencil => tr("Type a path"),
+            Spot::Sort => tr("Sort"),
+            Spot::Info => tr("Get info"),
+            Spot::View(false) => tr("Icons"),
+            Spot::View(true) => tr("List"),
+            Spot::Hidden if self.hidden => tr("Hide hidden files"),
+            Spot::Hidden => tr("Show hidden files"),
+            Spot::Find if self.find.is_some() => tr("Cancel search"),
+            Spot::Find => tr("Search"),
+            Spot::Undo => tr("Undo"),
+            Spot::Pill(n) => {
+                let act = self.hits.pill_btns.get(n).map(|(_, a)| a.clone())?;
+                // (A button with words is named by them.)
+                let worded = self.pill_view.as_ref().is_some_and(|v| {
+                    v.parts.iter().any(|p| matches!(p, chrome::PillPart::Button { act: a, words, .. } if *a == act && !words.is_empty()))
+                });
+                if worded {
+                    return None;
+                }
+                match act {
+                    chrome::PillAct::Act(Action::MoveToBin) => tr("Move to the bin"),
+                    chrome::PillAct::More => tr("More"),
+                    chrome::PillAct::Clear => tr("Clear the selection"),
+                    chrome::PillAct::Forget => tr("Forget"),
+                    chrome::PillAct::Keys => tr("Keyboard shortcuts"),
+                    chrome::PillAct::KeysOff => tr("Turn off keyboard mode"),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        Some(w.to_owned())
+    }
+
+    /// The icon button at `spot`: where it is, whether its name goes over it
+    /// (the pill's, at the window's foot), and the name.
+    fn spot_named(&self, spot: Spot) -> Option<(Rect, bool, String)> {
+        let words = self.spot_name(spot)?;
+        let h = &self.hits;
+        let (at, above) = match spot {
+            Spot::Pin => (h.pin, false),
+            Spot::TabX(n) => (h.tab_x.iter().find(|(_, i)| *i == n)?.0, false),
+            Spot::TabAdd => (h.tab_add, false),
+            Spot::Pencil => (h.pencil, false),
+            Spot::Sort => (h.sort, false),
+            Spot::Info => (h.info, false),
+            Spot::View(false) => (h.grid, false),
+            Spot::View(true) => (h.list, false),
+            Spot::Hidden => (h.hidden, false),
+            Spot::Find => (h.seek, false),
+            Spot::Undo => (h.undo, false),
+            Spot::Pill(n) => (h.pill_btns.get(n)?.0, true),
+            _ => return None,
+        };
+        Some((at, above, words))
     }
 
     fn spot(&mut self, pos: (f32, f32), layout: &Layout) -> Spot {
@@ -3171,6 +3238,7 @@ impl App {
             missing: HashSet::new(),
             ptr: None,
             hover: Spot::Nothing,
+            button_names: crate::kit::Names::default(),
             finger: false,
             scroll_vel: 0.0,
             scroll_last: None,
@@ -6222,6 +6290,15 @@ impl App {
         }
         scene.grids.extend(chrome);
         win.hits = hits;
+        // The name of the chrome's icon button rested on (THE KIT): under the
+        // top line's, over the pill's — never over a menu or a panel.
+        if win.menu.is_none() && win.props.is_none() && win.confirm.is_none() && win.shortcuts.is_none() {
+            if let Some((at, above, words)) = win.button_names.shown().and_then(|sp| win.spot_named(*sp)) {
+                let (vw, vh) = win.virt();
+                let r = crate::kit::name_rect(at, &words, above, Rect::new(0.0, 0.0, vw, vh), 1.0);
+                crate::kit::push_name(&mut scene, r, &words, 1.0, 1.0, true);
+            }
+        }
         // The menu and the box, over everything.
         if let Some(menu) = win.menu.as_ref() {
             // (A symbol by its name; an app's icon by its own key.)
@@ -6382,8 +6459,19 @@ impl App {
         let side = win.side_follow();
         let wait = !waiting && win.side_wait.is_some();
         let spot = win.ptr.map_or(Spot::Nothing, |p| win.spot(p, &layout));
-        let changed = spot != win.hover || side;
+        // An icon button rested on says its name (THE KIT).
+        let button = win.spot_name(spot).is_some().then_some(spot);
+        let named = win.button_names.shown().copied();
+        let name_wait = win.button_names.follow(button, win.ptr.is_some());
+        let changed = spot != win.hover || side || named != win.button_names.shown().copied();
         win.hover = spot;
+        if let Some(after) = name_wait {
+            let timer = calloop::timer::Timer::from_duration(after);
+            let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+                app.filer_request_draw(id);
+                calloop::timer::TimeoutAction::Drop
+            });
+        }
         if wait {
             self.filer_side_wait(id);
         }
@@ -9121,7 +9209,7 @@ impl App {
         };
         let layout = win.layout(icon_scale);
         format!(
-            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}, keys on {:?}, find {:?}, info {}, hidden {}, list {}, tabs {}",
+            "window {id} {}x{} on {} — {} items{}, {} cols, scroll {:.0}/{:.0}, selected {}, back {}, forward {}, places {}, layers {}/{}, menu {}, props {}, rename {:?}, keys on {:?}, find {:?}, info {}, hidden {}, list {}, tabs {}, hover {:?} at {:?}, named {:?}",
             win.size.0,
             win.size.1,
             win.dir.display(),
@@ -9145,6 +9233,9 @@ impl App {
             win.hidden,
             win.list,
             win.tabs.len(),
+            win.hover,
+            win.ptr,
+            win.button_names.shown(),
         )
     }
 }

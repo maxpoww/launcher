@@ -275,6 +275,9 @@ pub(crate) struct Up {
     /// One tooltip has shown: the next show at once, while the pointer is
     /// on the head (the dock's names' way).
     pub(crate) tips_warm: bool,
+    /// A FILE's icon buttons — the head's ×, the pencil, the video bar's play
+    /// and camera — say their names (THE KIT; a page's head has its own above).
+    pub(crate) names: crate::kit::Names<u8>,
 }
 
 impl Up {
@@ -1409,6 +1412,7 @@ impl App {
             said: thing.said,
             tip: None,
             tips_warm: false,
+            names: crate::kit::Names::default(),
         });
         self.desktop_top.peek_tiles = None;
         self.desktop_top.peek_soft = false;
@@ -1859,8 +1863,9 @@ impl App {
                 if let Some(up) = self.peek.up.as_mut() {
                     up.ptr = Some((*surface_x as f32, *surface_y as f32));
                 }
-                // (A page's button rested on: its tooltip.)
+                // (A page's button rested on: its tooltip; a file's: its name.)
                 self.page_tip_follow();
+                self.peek_names_follow();
                 // (A zoomed photo being dragged.)
                 self.peek_zoom_motion((*surface_x as f32, *surface_y as f32));
                 self.request_desktop_top_draw();
@@ -1870,6 +1875,7 @@ impl App {
                     up.ptr = None;
                     up.tip = None;
                     up.tips_warm = false;
+                    up.names.follow(None, false);
                 }
                 self.request_desktop_top_draw();
             }
@@ -3137,6 +3143,45 @@ impl App {
         scene.grids.extend(over_page);
         scene.grids.extend(notice_grid);
         scene.grids.extend(tip_grid);
+        // A file's icon button rested on: its name (THE KIT).
+        if let Some((at, above, words)) = up.names.shown().and_then(|k| self.peek_file_button(*k)) {
+            let r = crate::kit::name_rect(at, &words, above, up.rect, 1.0);
+            crate::kit::push_name(scene, r, &words, open, 1.0, false);
+        }
+    }
+
+    /// A file's icon button `k` (0 the head's ×, 1 its pencil, 2 the video
+    /// bar's play, 3 its camera): where it is, whether its name goes over it,
+    /// and the name — while it shows (not on a page, not while editing).
+    fn peek_file_button(&self, k: u8) -> Option<(Rect, bool, String)> {
+        let up = self.peek.up.as_ref()?;
+        if up.said.is_some() || up.edit.is_some() || up.text_edit.is_some() || up.trim_edit.is_some() || up.closing {
+            return None;
+        }
+        let video = self.peek_shown().is_some_and(|(_, p)| p.video.is_some());
+        let (parts, bar) = (parts(up.rect), video_bar(up.rect));
+        Some(match k {
+            0 => (parts.close, false, tr("Close").to_owned()),
+            1 if self.peek_editable() => (parts.pencil, false, tr("Edit").to_owned()),
+            2 if video => (bar.play, true, tr(if up.play.is_some() { "Pause" } else { "Play" }).to_owned()),
+            3 if video => (bar.snap, true, tr("Keep this frame as a photo").to_owned()),
+            _ => return None,
+        })
+    }
+
+    /// The pointer moved on Quick Look: a file's icon button under it starts
+    /// its name's wait (`kit::Names`).
+    fn peek_names_follow(&mut self) {
+        let ptr = self.peek.up.as_ref().and_then(|u| u.ptr);
+        let on = ptr.and_then(|p| (0..4u8).find(|k| self.peek_file_button(*k).is_some_and(|(r, _, _)| r.contains(p))));
+        let Some(up) = self.peek.up.as_mut() else { return };
+        if let Some(wait) = up.names.follow(on, ptr.is_some()) {
+            let timer = calloop::timer::Timer::from_duration(wait);
+            let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+                app.request_desktop_top_draw();
+                calloop::timer::TimeoutAction::Drop
+            });
+        }
     }
 
     pub(crate) fn peek_word_w(&self, word: &str) -> f32 {

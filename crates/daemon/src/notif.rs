@@ -498,6 +498,8 @@ pub(crate) struct NotifState {
     next_record_id: u32,
     /// "Click again to clear all", asked in place (THE KIT).
     pub(crate) clear_ask: crate::kit::Ask,
+    /// The footer's button says its name (THE KIT).
+    names: crate::kit::Names<NotifHit>,
 }
 
 impl NotifState {
@@ -579,6 +581,7 @@ impl NotifState {
             handle,
             next_record_id: u32::MAX,
             clear_ask: crate::kit::Ask::default(),
+            names: crate::kit::Names::default(),
         }
     }
 
@@ -1626,7 +1629,17 @@ impl App {
             NotifHit::Card(i) | NotifHit::Close(i) => Some(i),
             _ => None,
         };
-        let changed = hit != self.notif.hit || hover_card != self.notif.hover_card;
+        // The footer's button rested on says its name (THE KIT).
+        let button = (hit == NotifHit::DismissAll && !self.notif.clear_ask.asking()).then_some(hit);
+        let named = self.notif.names.shown().copied();
+        if let Some(wait) = self.notif.names.follow(button, self.options_ptr.is_some()) {
+            let timer = Timer::from_duration(wait);
+            let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut App| {
+                app.schedule_notif_frame();
+                TimeoutAction::Drop
+            });
+        }
+        let changed = hit != self.notif.hit || hover_card != self.notif.hover_card || named != self.notif.names.shown().copied();
         self.notif.hit = hit;
         self.notif.hover_card = hover_card;
         changed
@@ -2361,6 +2374,13 @@ impl App {
             color: Some([g[0], g[1], g[2], g[3] * alpha]),
             clip: Some(gclip),
         });
+        // Its name, over it, once rested on (THE KIT).
+        if self.notif.names.shown() == Some(&NotifHit::DismissAll) {
+            let words = crate::i18n::tr("Clear all");
+            let s = self.options_scale();
+            let r = crate::kit::name_rect(self.footer_button_rect(rect), words, true, rect, s);
+            crate::kit::push_name(scene, r, words, alpha, s, false);
+        }
     }
 
     /// Draw the notification bell — the FIXED circle that is also the DND toggle.

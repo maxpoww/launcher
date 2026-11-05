@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::content::{Label, Rect, RectInst, Scene};
+use crate::content::{GridContent, Label, Rect, RectInst, Scene};
 
 /// The slim switch: 36 × 20, a 12 px knob 4 px in. Off: an outline at
 /// `SWITCH_LINE` of the ink, its knob at the left at `SWITCH_KNOB_OFF`; on:
@@ -119,6 +119,106 @@ pub(crate) fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
 /// Whether an ink is a light one (so its ground is dark).
 pub(crate) fn ink_is_light(ink: [f32; 4]) -> bool {
     ink[0] + ink[1] + ink[2] > 1.5
+}
+
+/// An icon button's name shows this long after the pointer rests on it, then
+/// at once on its neighbours while the pointer stays among them.
+pub(crate) const NAME_AFTER: Duration = Duration::from_millis(500);
+/// The name's pill: its height, its words' size, the air at their ends, and
+/// how far from its button.
+const NAME_H: f32 = 24.0;
+const NAME_PX: f32 = 12.0;
+const NAME_PAD: f32 = 11.0;
+const NAME_GAP: f32 = 6.0;
+
+/// THE NAMES of icon buttons (THE KIT, 2026-11-05: an icon alone says what it
+/// does once the pointer rests on it `NAME_AFTER`; after one has shown, the
+/// others show at once while the pointer stays among them — the dock's names'
+/// and Quick Look's head's way, one for every box, window and menu; the
+/// banner's own pills stay unnamed). `T` says which button.
+#[derive(Debug, Clone)]
+pub(crate) struct Names<T> {
+    on: Option<(T, Instant)>,
+    warm: bool,
+}
+
+impl<T> Default for Names<T> {
+    fn default() -> Self {
+        Self { on: None, warm: false }
+    }
+}
+
+impl<T: PartialEq + Clone> Names<T> {
+    /// The pointer is on button `on` (`None`: on none), still `among` the
+    /// buttons' surface or not. Returns how long until a frame should show a
+    /// name, when one has to be waited for.
+    pub(crate) fn follow(&mut self, on: Option<T>, among: bool) -> Option<Duration> {
+        if self.on.as_ref().is_some_and(|(_, at)| at.elapsed() >= NAME_AFTER) {
+            self.warm = true;
+        }
+        if !among {
+            self.warm = false;
+        }
+        if self.on.as_ref().map(|(b, _)| b) == on.as_ref() {
+            return None;
+        }
+        let now = Instant::now();
+        let since = if self.warm { now.checked_sub(NAME_AFTER).unwrap_or(now) } else { now };
+        let wait = on.is_some() && !self.warm;
+        self.on = on.map(|b| (b, since));
+        wait.then_some(NAME_AFTER + Duration::from_millis(20))
+    }
+
+    /// The button whose name shows now.
+    pub(crate) fn shown(&self) -> Option<&T> {
+        self.on.as_ref().filter(|(_, at)| at.elapsed() >= NAME_AFTER).map(|(b, _)| b)
+    }
+}
+
+/// Where button `at`'s name stands: under it, or over it (`above`: a footer's
+/// buttons, at the foot of their box), kept inside `room`.
+pub(crate) fn name_rect(at: Rect, words: &str, above: bool, room: Rect, s: f32) -> Rect {
+    let w = words.chars().count() as f32 * NAME_PX * s * 0.56 + 2.0 * NAME_PAD * s;
+    let h = NAME_H * s;
+    let x = (at.x + at.w / 2.0 - w / 2.0).min(room.x + room.w - w - 4.0 * s).max(room.x + 4.0 * s);
+    let y = if above { at.y - NAME_GAP * s - h } else { at.y + at.h + NAME_GAP * s };
+    Rect::new(x.round(), y.round(), w.round(), h.round())
+}
+
+/// Draw a name at `r` (Quick Look's dark pill, white words) over everything:
+/// a grid of its own, last, and every word under it left out (all words are
+/// drawn in one pass over every fill, so nothing else can cover them).
+/// `linear`: the surface's colours are linear (the dock's, Files').
+pub(crate) fn push_name(scene: &mut Scene, r: Rect, words: &str, a: f32, s: f32, linear: bool) {
+    let covered = |l: &Label| {
+        let w = (l.text.chars().count() as f32 * l.font_px * 0.56).min(l.max_w.max(0.0));
+        let x0 = if l.centered { l.pos.0 - w / 2.0 } else { l.pos.0 };
+        x0 < r.x + r.w && x0 + w > r.x && l.pos.1 < r.y + r.h && l.pos.1 + l.line_px > r.y
+    };
+    scene.labels.retain(|l| !covered(l));
+    for g in &mut scene.grids {
+        g.labels.retain(|l| !covered(l));
+    }
+    let ground = if linear { to_linear([0.06, 0.07, 0.09, 1.0]) } else { [0.06, 0.07, 0.09, 1.0] };
+    let px = NAME_PX * s;
+    scene.grids.push(GridContent {
+        clip: Rect::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0),
+        rects: vec![RectInst { rect: r, radius: r.h / 2.0, color: [ground[0], ground[1], ground[2], 0.88 * a], glass: 0.0, border: 0.0 }],
+        labels: vec![Label {
+            text: words.to_owned(),
+            pos: (r.x + r.w / 2.0, r.y + (r.h - px * 1.3) / 2.0),
+            max_w: r.w,
+            font_px: px,
+            line_px: px * 1.3,
+            centered: true,
+            dim: false,
+            cache: false,
+            family: None,
+            color: Some([1.0, 1.0, 1.0, a]),
+            clip: None,
+        }],
+        ..Default::default()
+    });
 }
 
 /// The accent (the palette's own), as sRGB fractions.
