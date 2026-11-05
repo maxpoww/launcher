@@ -616,7 +616,7 @@ impl App {
         over.rects.push(RectInst {
             rect: Rect::new(x(t.a), s.y, x(t.b) - x(t.a), s.h),
             radius: 6.0,
-            color: [1.0, 0.75, 0.6, 0.35 * open],
+            color: crate::kit::with_alpha(crate::kit::accent(), 0.35 * open),
             glass: 0.0,
             border: 0.0,
         });
@@ -625,7 +625,7 @@ impl App {
             over.rects.push(RectInst {
                 rect: Rect::new(x(secs) - 6.0, s.y - 3.0, 12.0, s.h + 6.0),
                 radius: 4.0,
-                color: [1.0, 0.75, 0.6, (if hot { 1.0 } else { 0.9 }) * open],
+                color: crate::kit::with_alpha(crate::kit::accent(), (if hot { 1.0 } else { 0.9 }) * open),
                 glass: 0.0,
                 border: 0.0,
             });
@@ -739,7 +739,11 @@ impl App {
                 });
             };
         let (cw, cf, ci) = if t.armed {
-            (tr("Discard changes?"), [0.88, 0.32, 0.32, open], white)
+            (
+                tr("Click again to discard"),
+                crate::kit::with_alpha(crate::kit::danger_tint(crate::kit::ink_is_light(ink)), open),
+                crate::kit::with_alpha(crate::kit::danger(crate::kit::ink_is_light(ink)), open),
+            )
         } else {
             (tr("Cancel"), soft(head.cancel), ink)
         };
@@ -748,7 +752,7 @@ impl App {
         pill(
             g,
             head.save,
-            [1.0, 0.75, 0.6, open],
+            crate::kit::with_alpha(crate::kit::accent(), open),
             tr("Save"),
             [ground[0], ground[1], ground[2], open],
         );

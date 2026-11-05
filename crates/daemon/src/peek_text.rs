@@ -556,7 +556,7 @@ impl App {
             g.rects.push(RectInst {
                 rect: Rect::new(cx - 1.0, cy + 1.0, 2.0, LINE - 2.0),
                 radius: 1.0,
-                color: [1.0, 0.75, 0.6, open],
+                color: crate::kit::with_alpha(crate::kit::accent(), open),
                 glass: 0.0,
                 border: 0.0,
             });
@@ -619,9 +619,9 @@ impl App {
             };
         let (cancel_word, cancel_fill, cancel_ink) = if t.armed {
             (
-                tr("Discard changes?"),
-                [0.88, 0.32, 0.32, open],
-                [1.0, 1.0, 1.0, open],
+                tr("Click again to discard"),
+                crate::kit::with_alpha(crate::kit::danger_tint(crate::kit::ink_is_light(ink)), open),
+                crate::kit::with_alpha(crate::kit::danger(crate::kit::ink_is_light(ink)), open),
             )
         } else {
             (tr("Cancel"), soft(parts.cancel), ink)
@@ -631,7 +631,7 @@ impl App {
         pill(
             g,
             parts.save,
-            [1.0, 0.75, 0.6, open],
+            crate::kit::with_alpha(crate::kit::accent(), open),
             tr("Save"),
             [ground[0], ground[1], ground[2], open],
         );

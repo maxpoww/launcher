@@ -5712,7 +5712,8 @@ fn push_term(scene: &mut Scene, t: TermDraw, layout: &Layout, ink: [f32; 4], see
         let close = t.closes.get(i).copied().unwrap_or(0);
         if close > 0 {
             let colour = match close {
-                3 => crate::term::xterm(9, t.colours),
+                // (THE KIT's red, the menus', in this grid's linear colours.)
+                3 => crate::kit::danger_linear(crate::kit::ink_is_light(ink)),
                 2 => ink,
                 _ => faded_on(ink, seen, 0.5, 2.0),
             };

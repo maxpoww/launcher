@@ -46,9 +46,9 @@ fn accent() -> [f32; 3] {
     let a = crate::palette::accent_srgb();
     [0, 1, 2].map(|i| crate::options::srgb_to_linear(a[i]))
 }
-/// What takes files off the phone.
+/// What takes files off the phone: THE KIT's red (the menus'), for the look.
 fn danger() -> [f32; 3] {
-    let d = crate::palette::danger_srgb();
+    let d = crate::kit::danger(crate::look::dark());
     [0, 1, 2].map(|i| crate::options::srgb_to_linear(d[i]))
 }
 /// How many letters of the small text fit a line of the box (it has no
@@ -397,7 +397,7 @@ impl Config {
             }
             y += 8.0;
             chip(&mut b, Rect::new(x + 4.0, y, 190.0, 23.0), tr("Move them off the phone"), Hit::Really, true);
-            chip(&mut b, Rect::new(x + 204.0, y, 84.0, 23.0), tr("Not now"), Hit::NotNow, false);
+            chip(&mut b, Rect::new(x + 204.0, y, 84.0, 23.0), tr("Cancel"), Hit::NotNow, false);
             y += 23.0 + 10.0;
         }
 

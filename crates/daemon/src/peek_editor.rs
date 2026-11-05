@@ -151,7 +151,7 @@ pub(crate) fn edit_parts(r: Rect, crop_waiting: bool) -> EditParts {
 pub(crate) fn edit_parts_for(r: Rect, crop_waiting: bool, pdf: Option<bool>) -> EditParts {
     let save_w = word_w(tr("Save"), 12.0) + 28.0;
     let copy_w = word_w(tr("Save copy"), 12.0) + 28.0;
-    let cancel_w = word_w(tr("Discard changes?"), 12.0).max(word_w(tr("Cancel"), 12.0)) + 28.0;
+    let cancel_w = word_w(tr("Click again to discard"), 12.0).max(word_w(tr("Cancel"), 12.0)) + 28.0;
     let save = Rect::new(r.x + r.w - 12.0 - save_w, r.y + 10.0, save_w, 26.0);
     let copy = Rect::new(save.x - 8.0 - copy_w, r.y + 10.0, copy_w, 26.0);
     let cancel = Rect::new(copy.x - 8.0 - cancel_w, r.y + 10.0, cancel_w, 26.0);
@@ -1283,16 +1283,16 @@ impl App {
         };
         let (cancel_word, cancel_fill, cancel_ink) = if edit.armed {
             (
-                tr("Discard changes?"),
-                [0.88, 0.32, 0.32, open],
-                [1.0, 1.0, 1.0, open],
+                tr("Click again to discard"),
+                crate::kit::with_alpha(crate::kit::danger_tint(crate::kit::ink_is_light(ink)), open),
+                crate::kit::with_alpha(crate::kit::danger(crate::kit::ink_is_light(ink)), open),
             )
         } else {
             (tr("Cancel"), soft(parts.cancel), ink)
         };
         pill(g, parts.cancel, cancel_fill, cancel_word, cancel_ink);
         // (The one that does what is most done is lit; a RAW saves a copy only.)
-        let accent = [1.0, 0.75, 0.6, open];
+        let accent = crate::kit::with_alpha(crate::kit::accent(), open);
         if can_save {
             pill(g, parts.copy, soft(parts.copy), tr("Save copy"), ink);
             pill(
@@ -1351,7 +1351,7 @@ impl App {
                 _ => {
                     let on = matches!(b, Btn::Tool(t) if t == edit.tool);
                     let lit = if b == Btn::Apply {
-                        [1.0, 0.75, 0.6, open]
+                        crate::kit::with_alpha(crate::kit::accent(), open)
                     } else {
                         [
                             1.0,
@@ -1483,7 +1483,7 @@ impl App {
                 (pad.done, tr("Use"), true),
             ] {
                 let fill = if lit {
-                    [1.0, 0.75, 0.6, open]
+                    crate::kit::with_alpha(crate::kit::accent(), open)
                 } else {
                     [ink[0], ink[1], ink[2], 0.14 * open]
                 };

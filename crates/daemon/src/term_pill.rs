@@ -225,7 +225,8 @@ impl App {
             let n = p.words.get(usize::from(k)).map(|(n, _, _)| *n);
             let ink = self.options_text_color();
             let c = if n.is_some() && self.term.closing == n {
-                crate::palette::terminal_words()[9]
+                // (THE KIT's red, the menus'.)
+                crate::kit::danger(crate::kit::ink_is_light(ink))
             } else if self.options_hover == Some(id) {
                 ink
             } else {

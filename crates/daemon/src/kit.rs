@@ -10,6 +10,10 @@
 //! they cannot drift apart again. The card is the one exception (Max: never
 //! change the card).
 
+use std::time::{Duration, Instant};
+
+use crate::content::{Label, Rect, RectInst, Scene};
+
 /// The slim switch: 36 × 20, a 12 px knob 4 px in. Off: an outline at
 /// `SWITCH_LINE` of the ink, its knob at the left at `SWITCH_KNOB_OFF`; on:
 /// filled with the accent, the knob at the right in the accent's own
@@ -22,6 +26,100 @@ pub(crate) const SWITCH_KNOB_OFF: f32 = 0.75;
 
 /// A row's corner radius (times the scale).
 pub(crate) const ROW_RADIUS: f32 = 7.0;
+
+/// ⏏ — what lets a drive or a phone go (× only closes; the can throws away).
+pub(crate) const GLYPH_EJECT: &str = "\u{f052}";
+
+/// How long a "Click again to …" waits for its second click.
+pub(crate) const ASK_FOR: Duration = Duration::from_secs(4);
+/// Its words' size, and the air at their ends.
+const ASK_PX: f32 = 14.0;
+const ASK_PAD: f32 = 16.0;
+
+/// A question asked IN PLACE before what cannot be undone (THE KIT: the
+/// control becomes a red line saying what a second click does, "Click again to
+/// …"; it ends by itself after `ASK_FOR`, or with any other click). What Undo
+/// covers is never asked.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Ask(Option<Instant>);
+
+impl Ask {
+    /// Asking now (and not run out).
+    pub(crate) fn asking(&self) -> bool {
+        self.0.is_some_and(|t| t.elapsed() < ASK_FOR)
+    }
+
+    /// A press on the control: `true` = the second (do it now), `false` = the
+    /// first (it asks from now).
+    pub(crate) fn press(&mut self) -> bool {
+        if self.asking() {
+            self.0 = None;
+            true
+        } else {
+            self.0 = Some(Instant::now());
+            false
+        }
+    }
+
+    /// Withdrawn (another click, the box closing).
+    pub(crate) fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// The asked line's place: a stadium `h` high round its words, centred on `c`
+/// (`s` the scale).
+pub(crate) fn ask_rect(c: (f32, f32), h: f32, words: &str, s: f32) -> Rect {
+    let w = words.chars().count() as f32 * ASK_PX * s * 0.54 + 2.0 * ASK_PAD * s;
+    Rect::new(c.0 - w / 2.0, c.1 - h / 2.0, w, h)
+}
+
+/// Draw the asked line at `r`: the red's quiet ground, its words in the red
+/// (a step stronger under the pointer).
+pub(crate) fn push_ask(scene: &mut Scene, r: Rect, words: &str, dark: bool, over: bool, a: f32, s: f32) {
+    let red = danger(dark);
+    let mut ground = danger_tint(dark);
+    if over {
+        ground[3] *= 1.6;
+    }
+    ground[3] *= a;
+    scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: ground, glass: 0.0, border: 0.0 });
+    let px = ASK_PX * s;
+    scene.labels.push(Label {
+        text: words.to_owned(),
+        pos: (r.x + r.w / 2.0, r.y + (r.h - px * 1.25) / 2.0),
+        max_w: r.w,
+        font_px: px,
+        line_px: px * 1.25,
+        centered: true,
+        dim: false,
+        cache: false,
+        family: None,
+        color: Some([red[0], red[1], red[2], a]),
+        clip: None,
+    });
+}
+
+impl crate::App {
+    /// An asked line runs out by itself: the bar is drawn again when it has.
+    pub(crate) fn ask_runs_out(&mut self) {
+        let timer = calloop::timer::Timer::from_duration(ASK_FOR + Duration::from_millis(30));
+        let _ = self.loop_handle.insert_source(timer, |_, _, app: &mut crate::App| {
+            app.draw_options();
+            calloop::timer::TimeoutAction::Drop
+        });
+    }
+}
+
+/// `c` at `a` of its own alpha.
+pub(crate) fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], c[3] * a]
+}
+
+/// Whether an ink is a light one (so its ground is dark).
+pub(crate) fn ink_is_light(ink: [f32; 4]) -> bool {
+    ink[0] + ink[1] + ink[2] > 1.5
+}
 
 /// The accent (the palette's own), as sRGB fractions.
 pub(crate) fn accent() -> [f32; 4] {
@@ -67,6 +165,11 @@ pub(crate) fn danger(dark: bool) -> [f32; 4] {
 pub(crate) fn danger_tint(dark: bool) -> [f32; 4] {
     let r = danger(dark);
     [r[0], r[1], r[2], if dark { 0.14 } else { 0.10 }]
+}
+
+/// [`danger`] in a linear grid's colours (the dock's box, the desktop's).
+pub(crate) fn danger_linear(dark: bool) -> [f32; 4] {
+    to_linear(danger(dark))
 }
 
 fn to_linear(c: [f32; 4]) -> [f32; 4] {

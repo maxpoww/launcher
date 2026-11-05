@@ -4124,7 +4124,7 @@ impl App {
         }
         if let Some(n) = self.term.closing {
             let program = self.term_tab(n).map(|t| t.command.clone()).unwrap_or_default();
-            return Some(crate::i18n::fill(crate::i18n::tr("{program} is running · × again or Enter closes the tab, Esc keeps it"), &[("program", &program)]));
+            return Some(crate::i18n::fill(crate::i18n::tr("{program} is running · Click × again or press Enter to close the tab · Esc keeps it"), &[("program", &program)]));
         }
         // (A program holds the keys: which, and the way back to the field.)
         if self.term_raw() {

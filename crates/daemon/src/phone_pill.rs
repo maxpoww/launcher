@@ -1759,10 +1759,11 @@ impl App {
         let mut wash = lerp4(self.options_rest_wash(), self.options_hover_wash(), lift);
         wash[3] *= a;
         scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: wash, glass: 0.0, border: 0.0 });
-        // Under the pointer it says what a click does: an X (the phone is
-        // ejected) — Max, 2026-10-11. (fa-mobile sits small in its box:
-        // drawn a little larger than the pills' own glyphs.)
-        let (glyph, k) = if on_round { (crate::options::GLYPH_CLOSE, 1.0) } else { (GLYPH_PHONE, 1.15) };
+        // Under the pointer it says what a click does: ⏏, the phone is
+        // ejected (THE KIT, 2026-11-05: × only closes; it was an X since
+        // 2026-10-11). (fa-mobile sits small in its box: drawn a little larger
+        // than the pills' own glyphs.)
+        let (glyph, k) = if on_round { (crate::kit::GLYPH_EJECT, 1.0) } else { (GLYPH_PHONE, 1.15) };
         let (font, line) = (FONT_PX * s * k, LINE_PX * s * k);
         scene.labels.push(Label {
             text: glyph.to_owned(),

@@ -419,8 +419,9 @@ impl App {
         let mut wash = lerp4(self.options_rest_wash(), self.options_hover_wash(), lift);
         wash[3] *= a;
         scene.rects.push(RectInst { rect: r, radius: r.h / 2.0, color: wash, glass: 0.0, border: 0.0 });
-        // Under the pointer it says what a click does: an X (it is ejected).
-        let glyph = if on_round { crate::options::GLYPH_CLOSE } else { p.glyph };
+        // Under the pointer it says what a click does: ⏏ (THE KIT, 2026-11-05:
+        // × only closes; it was an X).
+        let glyph = if on_round { crate::kit::GLYPH_EJECT } else { p.glyph };
         let (font, line) = (FONT_PX * s * 1.1, LINE_PX * s * 1.1);
         scene.labels.push(Label {
             text: glyph.to_owned(),

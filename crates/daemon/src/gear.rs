@@ -3621,6 +3621,17 @@ impl App {
         // (The field is gone: the keys it held go back.)
         self.sync_gear_keyboard();
         self.schedule_stats_frame();
+        // THE KIT: a question asked in place runs out by itself.
+        let asked = text.to_owned();
+        let timer = calloop::timer::Timer::from_duration(crate::kit::ASK_FOR);
+        let _ = self.loop_handle.insert_source(timer, move |_, _, app: &mut App| {
+            if app.gear.arm.as_ref().is_some_and(|(t, _)| *t == asked) {
+                app.gear.arm = None;
+                app.update_stats_reveal();
+                app.schedule_stats_frame();
+            }
+            calloop::timer::TimeoutAction::Drop
+        });
     }
 
     /// Ask a machine page's question in the footer field.
@@ -3818,12 +3829,12 @@ impl App {
             // thing in the box that cannot be undone.
             Hit::NetForget => {
                 if let NetView::Detail(ssid) = self.gear.net_view.clone() {
-                    let ask = crate::i18n::fill(tr("Forget {name}? Click again"), &[("name", &ssid)]);
+                    let ask = crate::i18n::fill(tr("Click again to forget {name}"), &[("name", &ssid)]);
                     self.gear_arm(&ask, Hit::NetForgetNow);
                 }
             }
             Hit::NetForgetSaved(ssid) => {
-                let ask = crate::i18n::fill(tr("Forget {name}? Click again"), &[("name", &ssid)]);
+                let ask = crate::i18n::fill(tr("Click again to forget {name}"), &[("name", &ssid)]);
                 self.gear_arm(&ask, Hit::NetForgetSavedNow(ssid));
             }
             Hit::NetForgetSavedNow(ssid) => self.net_send(NetCommand::Forget(ssid)),
@@ -4042,7 +4053,7 @@ impl App {
         match hit {
             // (Asked once: it must be paired again to come back.)
             Hit::DevForget => {
-                let ask = crate::i18n::fill(tr("Forget {name}? Click again"), &[("name", &d.name)]);
+                let ask = crate::i18n::fill(tr("Click again to forget {name}"), &[("name", &d.name)]);
                 self.gear_arm(&ask, Hit::DevForgetNow);
             }
             Hit::DevForgetNow => {

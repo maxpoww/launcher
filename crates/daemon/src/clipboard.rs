@@ -1194,6 +1194,8 @@ pub(crate) struct ClipState {
     pub(crate) icon_slot: HashMap<u64, u32>,
     /// Source keys with a thumbnail request in flight (dedup).
     icon_pending: HashSet<u64>,
+    /// "Click again to clear all", asked in place (THE KIT).
+    pub(crate) clear_ask: crate::kit::Ask,
 }
 
 impl ClipState {
@@ -1288,6 +1290,7 @@ impl ClipState {
             thumbs,
             icon_slot: HashMap::new(),
             icon_pending: HashSet::new(),
+            clear_ask: crate::kit::Ask::default(),
         }
     }
 }
@@ -1854,6 +1857,14 @@ impl App {
         ]
     }
 
+    /// Where "Click again to clear all" stands: the middle of the footer, as
+    /// high as its buttons (the box is drawn unscaled, as they are).
+    fn clip_ask_rect(&self, rect: Rect) -> Rect {
+        let f = self.clip_footer_rect(rect);
+        let d = self.clip_footer_button_d();
+        crate::kit::ask_rect((f.x + f.w / 2.0, f.y + f.h / 2.0), d, crate::i18n::tr("Click again to clear all"), 1.0)
+    }
+
     /// The search field's rect once fully out: the footer zone's full width,
     /// keeping the buttons' height so the morph is a stretch, not a resize. It
     /// grows from the middle button's seat (see `push_clip_footer`).
@@ -2381,6 +2392,12 @@ impl App {
         if btn_a <= 0.01 {
             return;
         }
+        if self.clip.clear_ask.asking() {
+            let over = self.clip.hit == ClipHit::ClearAll;
+            let r = self.clip_ask_rect(rect);
+            crate::kit::push_ask(scene, r, crate::i18n::tr("Click again to clear all"), !bright, over, btn_a, 1.0);
+            return;
+        }
         for (hit, br0) in self.clip_footer_buttons(rect) {
             let hovered = self.clip.hit == hit;
             let br = if hovered { hover_grow(br0) } else { br0 };
@@ -2694,6 +2711,9 @@ impl App {
             // keyboard back after a paste handed it to the window below.
             if self.clip.search_t > 0.5 {
                 return ClipHit::SearchField;
+            }
+            if self.clip.clear_ask.asking() {
+                return if self.clip_ask_rect(rect).contains(p) { ClipHit::ClearAll } else { ClipHit::None };
             }
             for (hit, br) in self.clip_footer_buttons(rect) {
                 if br.contains(p) {
@@ -4134,6 +4154,9 @@ impl App {
         if self.emoji_open() {
             return self.emoji_click();
         }
+        if self.clip.hit != ClipHit::ClearAll {
+            self.clip.clear_ask.clear();
+        }
         match self.clip.hit {
             ClipHit::Emoji => {
                 self.open_emoji();
@@ -4152,8 +4175,14 @@ impl App {
                 self.open_dict();
                 true
             }
+            // (Nothing brings the history back: asked in place, THE KIT.)
             ClipHit::ClearAll => {
-                self.clear_all_clips();
+                if self.clip.clear_ask.press() {
+                    self.clear_all_clips();
+                } else {
+                    self.ask_runs_out();
+                    self.schedule_clip_frame();
+                }
                 true
             }
             ClipHit::Delete(i) => {

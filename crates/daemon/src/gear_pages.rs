@@ -2029,14 +2029,14 @@ impl App {
                 self.set_stats_box(false);
                 crate::power_pill::machine("suspend");
             }
-            SysHit::AskRestart => self.gear_arm(tr("Restart now? Click again"), sys(SysHit::DoRestart)),
+            SysHit::AskRestart => self.gear_arm(tr("Click again to restart"), sys(SysHit::DoRestart)),
             // The banner's own restart: the apps closed first, as their X does,
             // the message on the banner's power pill.
             SysHit::DoRestart => {
                 self.set_stats_box(false);
                 self.power_restart_gracefully();
             }
-            SysHit::AskHibernate => self.gear_arm(tr("Hibernate now? Click again"), sys(SysHit::DoHibernate)),
+            SysHit::AskHibernate => self.gear_arm(tr("Click again to hibernate"), sys(SysHit::DoHibernate)),
             SysHit::DoHibernate => {
                 self.set_stats_box(false);
                 crate::power_pill::machine("hibernate");
@@ -2055,7 +2055,7 @@ impl App {
             SysHit::AskKill(key) => {
                 let name = self.app(&key).map(|a| self.app_name(a)).unwrap_or_default();
                 self.gear_arm(
-                    &crate::i18n::fill(tr("Force quit {name}? Click again"), &[("name", &name)]),
+                    &crate::i18n::fill(tr("Click again to force quit {name}"), &[("name", &name)]),
                     sys(SysHit::DoKill(key)),
                 );
             }
@@ -2146,7 +2146,7 @@ impl App {
             SysHit::AskClean => {
                 let n = self.junk_bytes(true);
                 self.gear_arm(
-                    &crate::i18n::fill(tr("Remove {0} for good? Click again"), &[("0", &(size_text(n)))]),
+                    &crate::i18n::fill(tr("Click again to remove {0} for good"), &[("0", &(size_text(n)))]),
                     sys(SysHit::DoClean),
                 );
             }
@@ -2190,9 +2190,9 @@ impl App {
                     .any(|d: &Drive| d.system && d.rotational);
                 self.gear_arm(
                     if hours {
-                        tr("Erase empty space? Takes hours. Click again")
+                        tr("Click again to erase the empty space (it takes hours)")
                     } else {
-                        tr("Erase empty space? Click again")
+                        tr("Click again to erase the empty space")
                     },
                     sys(SysHit::DoErase),
                 );
@@ -3054,7 +3054,7 @@ impl App {
             return;
         };
         let name = x.name;
-        self.gear_arm(&format!("Erase {name}? Click again"), sys(SysHit::DoFormat));
+        self.gear_arm(&crate::i18n::fill(tr("Click again to erase {name}"), &[("name", &name)]), sys(SysHit::DoFormat));
     }
 
     /// The footer field of a machine page was confirmed with `text`.

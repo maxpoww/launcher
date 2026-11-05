@@ -172,13 +172,10 @@ impl BoxMetrics {
         }
     }
 }
-/// fa-trash-o (outline can with vertical lines) — the per-card delete control.
+/// fa-trash-o (outline can with vertical lines) — the footer's Clear all.
 const GLYPH_TRASH: &str = "\u{f014}";
-
-/// Crimson for destructive controls (× dismiss), Shinings "Live" `#E05252`.
-fn crimson() -> [f32; 4] {
-    crate::palette::danger_srgb()
-}
+/// × — a card's dismiss (THE KIT: × only closes; the can is for throwing away).
+const GLYPH_TIMES: &str = "\u{f00d}";
 /// Unread-indicator colour — the bell-pill tint/glow and the "+N" count badge.
 /// Matched to the user's Hyprland active window-border colour (`#ffbe98`, a warm
 /// peach) so the unread cue speaks the same accent as the rest of the desktop.
@@ -499,6 +496,8 @@ pub(crate) struct NotifState {
     /// the notify daemon counts up from 1 each boot: the two can never meet, so
     /// a record can't collide with a real notification's id.
     next_record_id: u32,
+    /// "Click again to clear all", asked in place (THE KIT).
+    pub(crate) clear_ask: crate::kit::Ask,
 }
 
 impl NotifState {
@@ -579,6 +578,7 @@ impl NotifState {
             hold_deadline: None,
             handle,
             next_record_id: u32::MAX,
+            clear_ask: crate::kit::Ask::default(),
         }
     }
 
@@ -1585,6 +1585,12 @@ impl App {
         Rect::new(x, y, d, d)
     }
 
+    /// Where "Click again to clear all" stands: on the footer button's seat.
+    fn notif_ask_rect(&self, rect: Rect) -> Rect {
+        let b = self.footer_button_rect(rect);
+        crate::kit::ask_rect((b.x + b.w / 2.0, b.y + b.h / 2.0), b.h, crate::i18n::tr("Click again to clear all"), self.options_scale())
+    }
+
     /// What the pointer is over inside the open box (footer > cards).
     fn notif_hit(&self) -> NotifHit {
         if self.notif.expand_t < 0.5 {
@@ -1595,7 +1601,8 @@ impl App {
         };
         let rect = self.notif_rect();
         if self.notif_footer_rect(rect).contains(p) {
-            if self.footer_button_rect(rect).contains(p) {
+            let button = if self.notif.clear_ask.asking() { self.notif_ask_rect(rect) } else { self.footer_button_rect(rect) };
+            if button.contains(p) {
                 return NotifHit::DismissAll;
             }
             return NotifHit::None;
@@ -2081,16 +2088,17 @@ impl App {
             }
         }
 
-        // × dismiss once the box is open.
+        // × dismiss once the box is open (never red: a dismissed card is in
+        // the history, nothing is lost).
         if hovered {
             let close = card_close_rect(full_rect, nm);
             let xc = if self.notif.hit == NotifHit::Close(idx) {
-                crimson()
+                crate::options::hover_ink_for(dim_ink)
             } else {
                 dim_ink
             };
             scene.labels.push(centered_glyph(
-                GLYPH_TRASH,
+                GLYPH_TIMES,
                 close,
                 Some(NERD),
                 xc,
@@ -2242,7 +2250,7 @@ impl App {
             let on_x = self.notif.hit == NotifHit::Close(idx);
             let xc = if on_x { hover_ink } else { dim_ink };
             scene.labels.push(Label {
-                text: GLYPH_TRASH.to_owned(),
+                text: GLYPH_TIMES.to_owned(),
                 pos: (close.x + close.w / 2.0, header_ty),
                 max_w: close.w + 8.0,
                 font_px: nm.font_px * 1.3,
@@ -2311,9 +2319,14 @@ impl App {
     /// Draw the single footer option — the "Clear all" ✕ pill — styled exactly
     /// like a topbar OPTIONS control: a neumorphic circle with the bar's rest/hover
     /// wash and the red fa-times glyph. Fades in with `alpha` (the expand).
-    fn push_notif_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, _bright: bool) {
+    fn push_notif_footer(&self, scene: &mut Scene, rect: Rect, alpha: f32, bright: bool) {
         // No divider — the pill floats free on the box fill (like the bar pills).
         let hovered = self.notif.hit == NotifHit::DismissAll;
+        if self.notif.clear_ask.asking() {
+            let r = self.notif_ask_rect(rect);
+            crate::kit::push_ask(scene, r, crate::i18n::tr("Click again to clear all"), !bright, hovered, alpha, self.options_scale());
+            return;
+        }
         // Same unified hover lift as every bar pill.
         let br = self.footer_button_rect(rect);
         let br = if hovered { hover_grow(br) } else { br };
@@ -2578,13 +2591,22 @@ impl App {
             self.schedule_notif_frame();
             return true;
         }
+        if self.notif.hit != NotifHit::DismissAll {
+            self.notif.clear_ask.clear();
+        }
         match self.notif.hit {
             NotifHit::Close(i) => {
                 self.notif_dismiss(i);
                 true
             }
+            // (Clearing all cannot be undone: asked in place, THE KIT.)
             NotifHit::DismissAll => {
-                self.notif_dismiss_all();
+                if self.notif.clear_ask.press() {
+                    self.notif_dismiss_all();
+                } else {
+                    self.ask_runs_out();
+                    self.schedule_notif_frame();
+                }
                 true
             }
             // Clicking a card body opens the notification: its `default` action

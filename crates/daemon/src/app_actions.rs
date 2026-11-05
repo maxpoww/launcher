@@ -1613,7 +1613,7 @@ impl App {
             return String::new();
         };
         let text = if action.does == Does::Uninstall && a.armed.is_some() {
-            tr("Again to uninstall").to_string()
+            tr("Click again to uninstall").to_string()
         } else {
             action.name.clone()
         };
