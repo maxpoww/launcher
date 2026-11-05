@@ -801,6 +801,16 @@ impl App {
     }
 
     /// Retract after `delay` unless the pointer comes back in the meantime.
+    /// The box and its row away now, as a hand that left would have them.
+    pub(crate) fn stats_put_away(&mut self) {
+        self.stats.hold_deadline = None;
+        self.set_stats_box(false);
+        self.stats.reveal = false;
+        self.stats.last = None;
+        self.schedule_stats_frame();
+        self.sync_options_input();
+    }
+
     fn schedule_stats_collapse(&mut self, delay: Duration) {
         let at = Instant::now() + delay;
         self.stats.hold_deadline = Some(at);

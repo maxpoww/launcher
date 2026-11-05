@@ -6899,6 +6899,12 @@ impl App {
         if self.timer_pill_editing() && self.options_hover != Some(PillId::Timer) {
             self.timer_pill_edit_end();
         }
+        // A field of the gear box waiting for typing: a click off the box puts
+        // it away (`gear_click_off`), and that is all the click does.
+        let on_box = matches!(self.options_hover, Some(PillId::Settings | PillId::SettingsStats));
+        if self.gear_click_off(on_box) {
+            return;
+        }
         // The open sunset settings box: the gear (top-right) closes it; a click
         // on a control acts; a click anywhere else closes it. Checked before
         // everything else so an open box owns the surface.
