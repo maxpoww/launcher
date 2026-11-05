@@ -58,6 +58,12 @@ const PAIR_GAP: f32 = 3.0;
 /// its couple (a bar pill's words get `PILL_PAD_X`; a couple of a symbol and a
 /// figure wants a little less).
 const READING_PAD: f32 = 10.0;
+/// THE OPEN BOX is narrower than the row of pills (Max, 2026-11-05: "for me it
+/// is too wide"): opened, the readings are one band of the box's one ground, so
+/// they drop their pills' air and stand this far apart, `OPEN_PAD` in from its
+/// sides; the box is as wide as that band.
+const OPEN_GAP: f32 = 10.0;
+const OPEN_PAD: f32 = 12.0;
 
 // --- The box (Max, 2026-09-13: "scroll down or click the gear opens a box") --
 /// The open panel's height is [`crate::options::BOX_DRAWER_H`] — the ONE height
@@ -428,7 +434,8 @@ impl App {
         let ph = self.options_pill_h();
         let t = self.stats.t;
         let left = EDGE_PAD + (ph + BOND_GAP) * t;
-        let w = lerp(ph, self.stats_full_w(), t).max(ph);
+        // (Opened, it narrows to the readings' tight band: `stats_open_w`.)
+        let w = lerp(lerp(ph, self.stats_full_w(), t), self.stats_open_w(), self.stats.e).max(ph);
         // Opening grows the row DOWNWARD and does nothing else: same width, same
         // left edge, the readings still sitting in the band at the top. The box
         // is the row grown, not a different object that replaced it.
@@ -693,6 +700,18 @@ impl App {
             .map(|(icon_w, value_w)| self.stats_pill_w(pair_w(*icon_w, *value_w, s)))
             .sum();
         pills + BOND_GAP * (self.stats.widths.len() - 1) as f32
+    }
+
+    /// The open box's width: every couple, `OPEN_GAP` apart, `OPEN_PAD` in from
+    /// both sides — never wider than the row of pills it grew from.
+    pub(crate) fn stats_open_w(&self) -> f32 {
+        let s = self.options_scale();
+        if self.stats.widths.is_empty() {
+            return self.stats_full_w();
+        }
+        let n = self.stats.widths.len() as f32;
+        let couples: f32 = self.stats.widths.iter().map(|(i, v)| pair_w(*i, *v, s)).sum();
+        (couples + (n - 1.0) * OPEN_GAP * s + 2.0 * OPEN_PAD * s).min(self.stats_full_w())
     }
 
     /// A reading's own pill's width: its couple and `READING_PAD` at both
@@ -1167,14 +1186,20 @@ impl App {
     /// somewhere other than where its symbol is drawn.
     fn stats_columns(&self, rect: Rect) -> Vec<Rect> {
         let s = self.options_scale();
+        let e = self.stats.e.clamp(0.0, 1.0);
         let readings = self.stats_readings();
+        // Shut: centred in its own pill; opening, each eases to its place in
+        // the box's tight band (`OPEN_GAP`, `OPEN_PAD`).
+        let mut open_x = rect.x + OPEN_PAD * s;
         self.stats_pills(rect)
             .into_iter()
             .zip(readings.iter().enumerate())
             .map(|(p, (i, r))| {
                 let (icon_w, value_w) = self.stats_pair_w(i, r, s);
                 let w = pair_w(icon_w, value_w, s);
-                Rect::new(p.x + (p.w - w) / 2.0, p.y, w, p.h)
+                let x = lerp(p.x + (p.w - w) / 2.0, open_x, e);
+                open_x += w + OPEN_GAP * s;
+                Rect::new(x, p.y, w, p.h)
             })
             .collect()
     }

@@ -2138,7 +2138,8 @@ impl App {
     /// so nothing inside shifts while the box is still growing.
     fn gear_rect(&self) -> Rect {
         let r = self.stats_geom();
-        Rect::new(r.x, r.y, r.w, self.gear_target_h())
+        // (The settled width too: the box narrows as it opens — `stats_open_w`.)
+        Rect::new(r.x, r.y, self.stats_open_w(), self.gear_target_h())
     }
 
     fn gear_target_h(&self) -> f32 {
