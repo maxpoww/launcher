@@ -747,12 +747,14 @@ impl App {
     }
 
     /// Whether the open page must not fold when the pointer wanders off: a
-    /// half-typed password or a pairing in progress is not a visit that ends
-    /// because the hand moved.
+    /// pairing in progress, a drive being worked on, a question asked once.
+    /// A FIELD does not hold it (Max, 2026-11-05: "cuando estoy escribiendo y
+    /// me arrepiento y salgo de la caja o hasta hago click afuera, no se
+    /// cierra la caja"): leaving it, or a click off it, puts what was being
+    /// typed away with the box.
     pub(crate) fn gear_pins_box(&self) -> bool {
         self.gear_page().is_some()
             && (self.gear.debug_hold
-                || self.gear.field.is_some()
                 || self.gear.arm.is_some()
                 || self.gear.pages.pins_box()
                 || matches!(self.gear.bt_view, BtView::Pair(_)))
@@ -3101,6 +3103,17 @@ impl App {
         if let Some(layer) = &self.options_layer {
             crate::surface::set_interactive(layer, any);
         }
+    }
+
+    /// A field of the box waits for typing: a click off the box puts the box
+    /// away at once (the field holds the keyboard exclusively, so the click
+    /// comes to the bar wherever it lands). Whether it did.
+    pub(crate) fn gear_click_off(&mut self, on_box: bool) -> bool {
+        if on_box || self.gear.field.is_none() || self.gear_page().is_none() || self.gear.debug_hold {
+            return false;
+        }
+        self.stats_put_away();
+        true
     }
 
     /// Whether keys belong to the gear page right now.
