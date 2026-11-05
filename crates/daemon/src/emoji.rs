@@ -323,7 +323,7 @@ impl App {
         // list beneath must be skipped, not painted over — see `push_clip_dict`).
         scene.rects.push(RectInst {
             rect,
-            radius: crate::clipboard::BOX_RADIUS,
+            radius: self.box_radius(),
             color: [fill[0], fill[1], fill[2], a],
             glass: 0.0,
             border: 0.0,

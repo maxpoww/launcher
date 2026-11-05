@@ -1539,17 +1539,27 @@ impl App {
                     None,
                     white,
                 ));
+                // THE KIT's one slider: a 2 px line, the accent up to the
+                // value, a 12 px knob.
+                let cy = line.y + line.h / 2.0;
                 over.rects.push(RectInst {
-                    rect: Rect::new(line.x, line.y + line.h / 2.0 - 2.0, line.w, 4.0),
-                    radius: 2.0,
+                    rect: Rect::new(line.x, cy - 1.0, line.w, 2.0),
+                    radius: 1.0,
                     color: [1.0, 1.0, 1.0, 0.3 * open],
                     glass: 0.0,
                     border: 0.0,
                 });
                 let x = line.x + values[i].clamp(0.0, 1.0) * line.w;
                 over.rects.push(RectInst {
-                    rect: Rect::new(x - 7.0, line.y + line.h / 2.0 - 7.0, 14.0, 14.0),
-                    radius: 7.0,
+                    rect: Rect::new(line.x, cy - 1.0, x - line.x, 2.0),
+                    radius: 1.0,
+                    color: crate::kit::with_alpha(crate::kit::accent(), open),
+                    glass: 0.0,
+                    border: 0.0,
+                });
+                over.rects.push(RectInst {
+                    rect: Rect::new(x - 6.0, cy - 6.0, 12.0, 12.0),
+                    radius: 6.0,
                     color: white,
                     glass: 0.0,
                     border: 0.0,

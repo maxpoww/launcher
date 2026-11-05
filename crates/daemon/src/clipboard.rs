@@ -1974,7 +1974,7 @@ impl App {
         if peek < 0.001 && e < 0.001 {
             return;
         }
-        let radius = lerp(ph / 2.0, BOX_RADIUS, e);
+        let radius = lerp(ph / 2.0, self.box_radius(), e);
         // (THE LONG PILL HAS BECOME THE CARD: the card stands in its place,
         // in the bar's row, and nothing of the pill is drawn — Max,
         // 2026-10-12.)
@@ -2458,7 +2458,7 @@ impl App {
         if let Some(h) = self.clip.names.shown() {
             if let (Some((_, at)), Some(words)) = (self.clip_footer_buttons(rect).into_iter().find(|(b, _)| b == h), Self::clip_button_name(*h)) {
                 let r = crate::kit::name_rect(at, words, true, rect, 1.0);
-                crate::kit::push_name(scene, r, words, btn_a, 1.0, false);
+                crate::kit::push_name(scene, r, words, btn_a, 1.0);
             }
         }
     }
@@ -2580,7 +2580,7 @@ impl App {
         // Opaque cover wiping the list/footer beneath (rounded like the box).
         scene.rects.push(RectInst {
             rect,
-            radius: BOX_RADIUS,
+            radius: self.box_radius(),
             color: [fill[0], fill[1], fill[2], a],
             glass: 0.0,
             border: 0.0,
@@ -3944,7 +3944,7 @@ impl App {
         let vis_h = meta_full.h * chrome_t;
         let mtop = rect.y + rect.h - vis_h;
         let mclip = Rect::new(rect.x, mtop, rect.w, vis_h);
-        push_bottom_rounded(scene, mclip, BOX_RADIUS, sheet_c);
+        push_bottom_rounded(scene, mclip, self.box_radius(), sheet_c);
         scene.rects.push(RectInst {
             rect: Rect::new(rect.x, mtop, rect.w, 1.0),
             radius: 0.0,
@@ -4083,7 +4083,7 @@ impl App {
         push_top_rounded(
             scene,
             Rect::new(rect.x, rect.y, rect.w, band_h),
-            BOX_RADIUS,
+            self.box_radius(),
             card_c,
         );
 

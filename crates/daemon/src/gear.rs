@@ -43,6 +43,8 @@ const LEVEL_GLYPH: f32 = 30.0;
 const LEVEL_WORD_W: f32 = 52.0;
 /// The › of a row with a page of its own.
 const GO_SZ: f32 = 24.0;
+/// "‹ Back"'s air at its ends.
+const BACK_PAD: f32 = 12.0;
 /// How far in from the box's sides a row's tint stands.
 const ROW_INSET: f32 = 6.0;
 const KV_KEY_W: f32 = 118.0;
@@ -61,7 +63,6 @@ const CARD_TILE: f32 = 56.0;
 const QR_SZ: f32 = 124.0;
 const QR_PAD: f32 = 8.0;
 const SMALL_PX: f32 = 14.0;
-const HEADING_PX: f32 = 12.5;
 const SMALL_LINE: f32 = 17.0;
 const CODE_PX: f32 = 38.0;
 use crate::kit::{SWITCH_H, SWITCH_W};
@@ -717,6 +718,11 @@ fn row_more_rect(r: Rect, s: f32, trail: &Trail, glyph: &str) -> Rect {
 fn row_go_rect(r: Rect, s: f32) -> Rect {
     let d = GO_SZ * s;
     Rect::new(r.x + r.w - TRAIL_PAD * s + 4.0 * s - d, r.y + (r.h - d) / 2.0, d, d)
+}
+
+/// "‹ Back"'s width (its words, estimated as the rows' are, and their air).
+fn back_w(s: f32) -> f32 {
+    est_w(tr("‹ Back"), FONT_PX * s) * 1.1 + 2.0 * BACK_PAD * s
 }
 
 /// A level's three parts: its symbol's circle (where a row's tile stands), the
@@ -2046,14 +2052,17 @@ impl App {
             rect.w,
             (rect.y + rect.h - foot_h - top).max(0.0),
         );
-        let strip = (0..view.strip.len())
-            .map(|i| {
-                Rect::new(
-                    rect.x + STRIP_X * s + i as f32 * (d + STRIP_GAP * s),
-                    rect.y + band + (strip_h - d) / 2.0,
-                    d,
-                    d,
-                )
+        // (Back is words, "‹ Back" — THE KIT's one Back —, as wide as they
+        // are; the round buttons follow it.)
+        let mut x = rect.x + STRIP_X * s;
+        let strip = view
+            .strip
+            .iter()
+            .map(|b| {
+                let w = if b.hit == Hit::Back { back_w(s) } else { d };
+                let r = Rect::new(x, rect.y + band + (strip_h - d) / 2.0, w, d);
+                x += w + STRIP_GAP * s;
+                r
             })
             .collect();
         let fy = rect.y + rect.h - foot_h + (foot_h - d) / 2.0;
@@ -2363,7 +2372,7 @@ impl App {
             // one squares the top off).
             let top = r.y.max(content.y);
             let bot = (rect.y + rect.h).min(bottom);
-            let radius = crate::clipboard::BOX_RADIUS * s;
+            let radius = self.box_radius();
             // (Quiet, 2026-10-16: a breath off the box, as Golem Files' side
             // panel is off its content — not the zebra's full step.)
             let color = [stripe[0], stripe[1], stripe[2], stripe[3] * pen.a * QUIET_SHEET];
@@ -2528,7 +2537,7 @@ impl App {
                     if !sub.is_empty() {
                         let sub_w = (r.x + r.w - ROW_PAD_X * s - tx).max(0.0);
                         let c = match tone {
-                            Tone::Warn => crate::kit::warn(),
+                            Tone::Warn => crate::kit::warn_on(!bright),
                             _ => [col[0], col[1], col[2], col[3] * 0.72],
                         };
                         pen.text(
@@ -2658,7 +2667,7 @@ impl App {
                         r.y + (r.h - SMALL_LINE * s) / 2.0 + 2.0 * s,
                     ),
                     r.w,
-                    (HEADING_PX * s, SMALL_LINE * s),
+                    (crate::kit::HEADING_PX * s, SMALL_LINE * s),
                     [ink[0], ink[1], ink[2], ink[3] * 0.5],
                     false,
                     None,
@@ -3100,6 +3109,20 @@ impl App {
             });
         };
         for (b, r) in view.strip.iter().zip(&lay.strip) {
+            if b.hit == Hit::Back {
+                // "‹ Back": its words, the wash under the pointer.
+                if r.y + r.h <= bottom {
+                    if b.hit == *hit {
+                        let mut base = self.options_hover_wash();
+                        base[3] *= pen.a;
+                        scene.rects.push(RectInst { rect: *r, radius: r.h / 2.0, color: base, glass: 0.0, border: 0.0 });
+                    }
+                    let px = FONT_PX * s;
+                    let c = if b.hit == *hit { pen.hot } else { pen.dim };
+                    pen.text(scene, tr("‹ Back").to_owned(), (r.x + BACK_PAD * s, r.y + (r.h - LINE_PX * s) / 2.0), r.w, (px, LINE_PX * s), c, false, None);
+                }
+                continue;
+            }
             round(scene, b, *r, pen.a, None);
         }
         let t = if self.gear.arm.is_some() {
@@ -3175,7 +3198,7 @@ impl App {
         if let Some(h) = self.gear.names.shown() {
             if let (Some((at, above)), Some(words)) = (self.gear_button_rect(h), self.gear_hit_name(h)) {
                 let r = crate::kit::name_rect(at, &words, above, rect, s);
-                crate::kit::push_name(scene, r, &words, a, s, false);
+                crate::kit::push_name(scene, r, &words, a, s);
             }
         }
     }
@@ -3213,7 +3236,6 @@ impl App {
         let g = &self.gear;
         let ap_on = |s: &str| self.net_ap(s).is_some_and(|a| a.active);
         let words = match hit {
-            Hit::Back => tr("Back"),
             Hit::NetToggle => match &g.net_view {
                 NetView::Detail(ssid) if ap_on(ssid) => tr("Disconnect"),
                 _ => tr("Connect"),

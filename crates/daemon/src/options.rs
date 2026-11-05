@@ -3708,7 +3708,7 @@ impl App {
             // swelled with the box and the thing ballooned into a lozenge
             // before it opened. The clipboard lerps from the resting band's
             // `ph / 2`, which is a constant, and that is the whole difference.
-            let radius = lerp(self.options_pill_h() / 2.0, crate::clipboard::BOX_RADIUS, e);
+            let radius = lerp(self.options_pill_h() / 2.0, self.box_radius(), e);
             push_neumorph(scene, rect, radius, bright, a);
             let wash = if hovered && e < 0.01 {
                 self.options_hover_wash()

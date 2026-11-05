@@ -2242,7 +2242,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 }
                 None => view.groups.push(Group { centred: true, ..line(tr("Every app follows the Apps section. Pick one to make an exception.").to_owned()) }),
             }
-            view.groups.push(Group { centred: true, ..group(None, "colors-apps-list", 0.0, vec![choice(tr("Back"), false, "back")]) });
+            view.groups.push(Group { centred: true, ..group(None, "colors-apps-list", 0.0, vec![choice(tr("‹ Back"), false, "back")]) });
         }
         // THE COLOURS BOX (the Colours model, 2026-10-20; docs/colours-model.md):
         // the cards first (the palettes, or on Backgrounds the wallpapers), the

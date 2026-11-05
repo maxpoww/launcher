@@ -371,20 +371,22 @@ impl App {
             let r = Rect::new(bx, y, w, BUTTON_H * sc);
             let first = b == Button::Install && lit;
             let on = page.hover == Some(b) || page.keyed == Some(b);
-            let rest = if first { 0.20 } else { 0.10 };
-            draw.rects.push(RectInst {
-                rect: r,
-                radius: r.h / 2.0,
-                color: crate::options::wash(!bright, rest + if on { 0.10 } else { 0.0 }),
-                glass: 0.0,
-                border: 0.0,
-            });
+            // (THE KIT: the one main action is the accent's words on its tint;
+            // the others a faint fill.)
+            let color = if first {
+                let t = crate::kit::main_tint(!bright, on);
+                let l = crate::kit::linear(t);
+                [l[0], l[1], l[2], t[3]]
+            } else {
+                crate::options::wash(!bright, 0.10 + if on { 0.10 } else { 0.0 })
+            };
+            draw.rects.push(RectInst { rect: r, radius: r.h / 2.0, color, glass: 0.0, border: 0.0 });
             let quiet = (b == Button::Open && matches!(page.of, Of::Package(_)))
                 || (b == Button::Install && self.page_busy())
                 || (b == Button::Try && self.page_trying());
             draw.labels.push(Label {
                 centered: true,
-                ..label(words, r.x + r.w / 2.0, r.y + (r.h - BUTTON_PX * sc * 1.3) / 2.0, w, BUTTON_PX * sc, BUTTON_PX * sc * 1.3, None, if quiet { dim } else { ink })
+                ..label(words, r.x + r.w / 2.0, r.y + (r.h - BUTTON_PX * sc * 1.3) / 2.0, w, BUTTON_PX * sc, BUTTON_PX * sc * 1.3, None, if quiet { dim } else if first { crate::kit::accent_on(!bright) } else { ink })
             });
             buttons.push((b, r));
             bx += w + BUTTON_GAP * sc;

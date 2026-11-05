@@ -7596,12 +7596,18 @@ impl App {
                     self.panel_search();
                     return;
                 }
-                // (The box's terminal stays drawn while the box goes down,
-                // `term_fade_check`: its field empties once it is.)
+                // THE KIT: Escape steps back one layer — what was typed clears
+                // first, the box goes at the next. (The box's terminal stays
+                // drawn while the box goes down, `term_fade_check`: its field
+                // empties once it is.)
                 if !self.term_on() {
+                    let typed = !self.search.query.is_empty();
                     self.search.query.clear();
                     self.search.open = false;
                     self.refilter();
+                    if typed {
+                        return;
+                    }
                 }
                 self.dismiss();
             }

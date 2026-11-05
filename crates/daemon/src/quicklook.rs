@@ -2729,16 +2729,13 @@ impl App {
                     } else {
                         0.0
                     };
-                    let line = Rect::new(
-                        bar.track.x,
-                        bar.track.y + bar.track.h / 2.0 - 2.0,
-                        bar.track.w,
-                        4.0,
-                    );
+                    // THE KIT's one slider: a 2 px line, the accent up to
+                    // where it is, a 12 px knob there.
+                    let line = Rect::new(bar.track.x, bar.track.y + bar.track.h / 2.0 - 1.0, bar.track.w, 2.0);
                     over.rects.push(RectInst {
                         rect: line,
-                        radius: 2.0,
-                        color: [1.0, 1.0, 1.0, 0.25 * open],
+                        radius: 1.0,
+                        color: [1.0, 1.0, 1.0, 0.3 * open],
                         glass: 0.0,
                         border: 0.0,
                     });
@@ -2747,11 +2744,13 @@ impl App {
                             w: line.w * done,
                             ..line
                         },
-                        radius: 2.0,
-                        color: white,
+                        radius: 1.0,
+                        color: crate::kit::with_alpha(crate::kit::accent(), open),
                         glass: 0.0,
                         border: 0.0,
                     });
+                    let knob = Rect::new(line.x + line.w * done - 6.0, line.y + 1.0 - 6.0, 12.0, 12.0);
+                    over.rects.push(RectInst { rect: knob, radius: 6.0, color: white, glass: 0.0, border: 0.0 });
                     let time = format!("{} / {}", kinds::clock(at), kinds::clock(secs));
                     over.labels.push(text_label(
                         &time,
@@ -3146,7 +3145,7 @@ impl App {
         // A file's icon button rested on: its name (THE KIT).
         if let Some((at, above, words)) = up.names.shown().and_then(|k| self.peek_file_button(*k)) {
             let r = crate::kit::name_rect(at, &words, above, up.rect, 1.0);
-            crate::kit::push_name(scene, r, &words, open, 1.0, false);
+            crate::kit::push_name(scene, r, &words, open, 1.0);
         }
     }
 

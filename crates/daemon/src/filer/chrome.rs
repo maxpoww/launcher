@@ -681,17 +681,9 @@ impl App {
         };
         let (icon, row_h) = (win.place_icon(), win.place_row());
         let mut y = PLACES_TOP - win.side_scroll;
+        // (THE KIT's heading: 12.5 px at half the ink, not bold.)
         let heading = |list: &mut GridContent, y: f32, text: &str| {
-            list.labels.push(Label {
-                family: Some(crate::content::FONT_BOLD),
-                ..words(
-                    text,
-                    (SIDE_PAD * 2.0, y + 12.0),
-                    inner,
-                    11.0,
-                    faded(tones.dim_text, open),
-                )
-            });
+            list.labels.push(words(text, (SIDE_PAD * 2.0, y + 11.0), inner, crate::kit::HEADING_PX, faded(tones.dim_text, open)));
         };
         hits.places.clear();
         // (`..` stands first, over Favourites' heading.)
@@ -1078,8 +1070,9 @@ impl App {
                     g.rects.push(rect(field, 6.0, tones.field));
                     let text_w = measure(win, &text, LINE_PX, None);
                     let tx = (field.x + 9.0).min(field.x + field.w - 9.0 - text_w);
+                    // (A problem: THE KIT's warning colour, readable here.)
                     let color = if win.go_bad {
-                        [0.79, 0.06, 0.07, 1.0]
+                        crate::kit::linear(crate::kit::warn_on(crate::kit::ink_is_light(ink)))
                     } else {
                         ink
                     };
@@ -1807,9 +1800,9 @@ impl App {
             clip: Some(panel),
             ..words(
                 tr("History"),
-                (panel.x + HIST_PAD + 10.0, panel.y + HIST_PAD + 4.0),
+                (panel.x + HIST_PAD + 10.0, panel.y + HIST_PAD + 3.0),
                 width - 2.0 * HIST_PAD - 20.0,
-                11.0,
+                crate::kit::HEADING_PX,
                 dim,
             )
         });

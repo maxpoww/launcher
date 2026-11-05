@@ -4688,6 +4688,18 @@ impl App {
             // (A menu's keys are the keys as they are: no left hand there.)
             let keysym = if self.desktop.menu.is_some() { typed } else { keysym };
             match keysym {
+                // THE KIT: Escape steps back ONE layer — Properties to the menu
+                // it grew out of, a menu's page to its first page, then away.
+                Keysym::Escape if self.desktop.props.as_ref().is_some_and(|p| p.back.is_some()) => {
+                    let at = self.desktop.props.as_ref().map_or((0.0, 0.0), |p| (p.rect.x, p.rect.y));
+                    self.desktop_props_back(at);
+                }
+                Keysym::Escape if self.desktop.menu.as_ref().is_some_and(|m| m.page != crate::desktop_menu::Page::Main) => {
+                    if let Some(m) = self.desktop.menu.as_mut() {
+                        m.show_main();
+                    }
+                    self.request_desktop_draw();
+                }
                 Keysym::Escape => {
                     self.desktop.menu = None;
                     self.desktop.props = None;

@@ -168,7 +168,7 @@ impl BoxMetrics {
             empty_h: 120.0 * s,
             text_gap: 8.0 * s,
             list_pad: 6.0 * s,
-            box_radius: 10.0 * s,
+            box_radius: crate::kit::BOX_RADIUS * s,
         }
     }
 }
@@ -2379,7 +2379,7 @@ impl App {
             let words = crate::i18n::tr("Clear all");
             let s = self.options_scale();
             let r = crate::kit::name_rect(self.footer_button_rect(rect), words, true, rect, s);
-            crate::kit::push_name(scene, r, words, alpha, s, false);
+            crate::kit::push_name(scene, r, words, alpha, s);
         }
     }
 
@@ -2999,12 +2999,18 @@ impl App {
             self.notif.scroll_accum = 0.0;
             self.schedule_notif_frame();
         } else {
-            // Collapsed: accumulate to a whole notch, then open the box with the
-            // newest flush at the top (anchored, growing from the one-liner).
-            self.notif.scroll_accum += delta;
-            if self.notif.scroll_accum.abs() >= NOTCH {
+            // Collapsed: a pull up (THE KIT: every box opens the same way)
+            // accumulates to a whole notch, then opens the box with the newest
+            // flush at the top (anchored, growing from the one-liner); a push
+            // the other way starts the count again.
+            if delta < 0.0 {
+                self.notif.scroll_accum -= delta;
+                if self.notif.scroll_accum >= NOTCH {
+                    self.notif.scroll_accum = 0.0;
+                    self.open_notif_box();
+                }
+            } else {
                 self.notif.scroll_accum = 0.0;
-                self.open_notif_box();
             }
         }
     }

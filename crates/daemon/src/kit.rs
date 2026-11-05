@@ -188,8 +188,8 @@ pub(crate) fn name_rect(at: Rect, words: &str, above: bool, room: Rect, s: f32) 
 /// Draw a name at `r` (Quick Look's dark pill, white words) over everything:
 /// a grid of its own, last, and every word under it left out (all words are
 /// drawn in one pass over every fill, so nothing else can cover them).
-/// `linear`: the surface's colours are linear (the dock's, Files').
-pub(crate) fn push_name(scene: &mut Scene, r: Rect, words: &str, a: f32, s: f32, linear: bool) {
+/// (The same numbers on every surface, so the pill looks one everywhere.)
+pub(crate) fn push_name(scene: &mut Scene, r: Rect, words: &str, a: f32, s: f32) {
     let covered = |l: &Label| {
         let w = (l.text.chars().count() as f32 * l.font_px * 0.56).min(l.max_w.max(0.0));
         let x0 = if l.centered { l.pos.0 - w / 2.0 } else { l.pos.0 };
@@ -199,7 +199,7 @@ pub(crate) fn push_name(scene: &mut Scene, r: Rect, words: &str, a: f32, s: f32,
     for g in &mut scene.grids {
         g.labels.retain(|l| !covered(l));
     }
-    let ground = if linear { to_linear([0.06, 0.07, 0.09, 1.0]) } else { [0.06, 0.07, 0.09, 1.0] };
+    let ground = [0.06, 0.07, 0.09, 1.0];
     let px = NAME_PX * s;
     scene.grids.push(GridContent {
         clip: Rect::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0),
@@ -220,6 +220,28 @@ pub(crate) fn push_name(scene: &mut Scene, r: Rect, words: &str, a: f32, s: f32,
         ..Default::default()
     });
 }
+
+/// A box's corner (times the scale): every box of the banner and the dock.
+pub(crate) const BOX_RADIUS: f32 = 11.5;
+
+impl crate::App {
+    /// A banner box's corner at the bar's scale (THE KIT: one corner, at every
+    /// scale — the bell's was 10, the clipboard's did not scale).
+    pub(crate) fn box_radius(&self) -> f32 {
+        BOX_RADIUS * self.options_scale()
+    }
+
+    /// THE KIT's wheel over a pill with a box (the gear's rule, now every
+    /// box's): pulling up opens it, pushing down puts it away — which way is
+    /// "up" as natural scrolling says.
+    pub(crate) fn wheel_opens(&self, value: f32) -> bool {
+        let delta = if self.config.input.natural_scroll { value } else { -value };
+        delta < 0.0
+    }
+}
+
+/// A section's heading: its words' size (at half the ink, never bold).
+pub(crate) const HEADING_PX: f32 = 12.5;
 
 /// The accent (the palette's own), as sRGB fractions.
 pub(crate) fn accent() -> [f32; 4] {
@@ -250,6 +272,58 @@ pub(crate) fn on_accent() -> [f32; 4] {
 /// "destroys").
 pub(crate) fn warn() -> [f32; 4] {
     crate::palette::warn_srgb()
+}
+
+/// [`warn`] as WORDS on a box of the `dark` or the light look: walked toward
+/// white or black until it reads at 4.5 : 1 on that look's usual ground (a
+/// yellow on a light box would not read).
+pub(crate) fn warn_on(dark: bool) -> [f32; 4] {
+    readable(warn(), dark)
+}
+
+/// The accent as the WORDS of the one main action (on its tint), readable on a
+/// box of the `dark` or the light look.
+pub(crate) fn accent_on(dark: bool) -> [f32; 4] {
+    readable(accent(), dark)
+}
+
+/// The main action's ground: the accent's tint (a step stronger under the
+/// pointer), as an alpha over the box.
+pub(crate) fn main_tint(dark: bool, over: bool) -> [f32; 4] {
+    let a = accent();
+    let k = if dark { 0.22 } else { 0.16 } + if over { 0.10 } else { 0.0 };
+    [a[0], a[1], a[2], k]
+}
+
+/// `c` walked toward white or black until it reads at 4.5 : 1 on the `dark`
+/// or the light look's usual ground.
+fn readable(c: [f32; 4], dark: bool) -> [f32; 4] {
+    let ground = if dark { [0.086, 0.09, 0.106, 1.0] } else { [0.97, 0.97, 0.96, 1.0] };
+    let to = if dark { 1.0 } else { 0.0 };
+    let mut c = [c[0], c[1], c[2], 1.0];
+    for _ in 0..24 {
+        if contrast(c, ground) >= 4.5 {
+            break;
+        }
+        c = [c[0] + (to - c[0]) * 0.1, c[1] + (to - c[1]) * 0.1, c[2] + (to - c[2]) * 0.1, 1.0];
+    }
+    c
+}
+
+/// Two sRGB colours' contrast ratio (WCAG).
+fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let lum = |c: [f32; 4]| {
+        let l = to_linear(c);
+        0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2]
+    };
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// An sRGB colour for a renderer that takes linear ones (Files', the
+/// desktop's: `Renderer::labels_linear`).
+pub(crate) fn linear(c: [f32; 4]) -> [f32; 4] {
+    to_linear(c)
 }
 
 /// What cannot be undone, asked: THE ONE MENU's red (`desktop_menu::danger_on`:

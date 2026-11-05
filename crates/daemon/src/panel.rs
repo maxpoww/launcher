@@ -3936,8 +3936,6 @@ impl Panel {
                     continue;
                 }
                 let ink_c = |a: f32| [paint.ink[0], paint.ink[1], paint.ink[2], a * ca];
-                // (What reads on the ink: the ground's tone.)
-                let on_ink = if paint.bright { [0.93, 0.93, 0.92, ca] } else { [0.02, 0.02, 0.025, ca] };
                 let label_in = |out: &mut PanelDraw, t: String, x: f32, y: f32, w: f32, px: f32, col: [f32; 4]| {
                     let (mx, my) = map(x, y);
                     out.labels.push(Label { text: t, pos: (mx, my), max_w: w * cs, font_px: px * s * cs, line_px: px * 1.3 * s * cs, centered: true, dim: false, cache: resting, family: TEXT_FONT, color: Some(col), clip: None });
@@ -3964,8 +3962,11 @@ impl Panel {
                         let (mx, my) = map(tx, ty);
                         let knob = 12.0 * s;
                         if on {
-                            rect(out, tx, ty, tw, th, th / 2.0, ink_c(0.92));
-                            rect(out, tx + tw - 4.0 * s - knob, ty + 4.0 * s, knob, knob, knob / 2.0, on_ink);
+                            // (THE KIT's switch: on = the accent, its knob in the
+                            // accent's contrast.)
+                            let (acc, k) = (crate::kit::linear(crate::kit::accent()), crate::kit::linear(crate::kit::on_accent()));
+                            rect(out, tx, ty, tw, th, th / 2.0, [acc[0], acc[1], acc[2], ca]);
+                            rect(out, tx + tw - 4.0 * s - knob, ty + 4.0 * s, knob, knob, knob / 2.0, [k[0], k[1], k[2], ca]);
                         } else {
                             out.rects.push(RectInst { rect: Rect::new(mx, my, tw * cs, th * cs), radius: th / 2.0 * cs, color: ink_c(0.38), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
                             rect(out, tx + 4.0 * s, ty + 4.0 * s, knob, knob, knob / 2.0, ink_c(0.75));
@@ -3976,17 +3977,19 @@ impl Panel {
                             out.rects.push(RectInst { rect: Rect::new(mx, my, (tw + 2.0 * g) * cs, (th + 2.0 * g) * cs), radius: (th / 2.0 + g) * cs, color: ink_c(0.7), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
                         }
                     }
-                    // A BUTTON: a hairline capsule; the main one filled.
+                    // A BUTTON (THE KIT's word buttons): a faint fill, stronger
+                    // under the pointer or the keys; the main one the accent's
+                    // words on its tint.
                     Style::Button { main } => {
-                        let (mx, my) = map(r.x, r.y);
                         if main {
-                            rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, ink_c(if keyed { 1.0 } else { 0.92 }));
-                            label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, on_ink);
+                            let dark = !paint.bright;
+                            let t = crate::kit::main_tint(dark, keyed);
+                            let l = crate::kit::linear(t);
+                            rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, [l[0], l[1], l[2], t[3] * ca]);
+                            let w = crate::kit::accent_on(dark);
+                            label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, [w[0], w[1], w[2], ca]);
                         } else {
-                            if keyed {
-                                rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, crate::options::wash(!paint.bright, hover_a));
-                            }
-                            out.rects.push(RectInst { rect: Rect::new(mx, my, r.w * cs, r.h * cs), radius: r.h / 2.0 * cs, color: ink_c(0.3), glass: 0.0, border: (1.0 * s * cs).max(1.0) });
+                            rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, crate::options::wash(!paint.bright, if keyed { hover_a } else { 0.08 }));
                             label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - line) / 2.0, r.w, 14.0, ink_c(if chip.on || keyed { 1.0 } else { 0.85 }));
                         }
                     }
@@ -4116,9 +4119,10 @@ impl Panel {
                 let (tx, ty) = (rx + rw - 9.0 * s - tw, ry + (rh - th) / 2.0);
                 let knob = 12.0 * s;
                 if on {
-                    rect(&mut inside, tx, ty, tw, th, th / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.92]);
-                    let dark = if paint.bright { [0.93, 0.93, 0.92, 1.0] } else { [0.02, 0.025, 0.035, 1.0] };
-                    rect(&mut inside, tx + tw - 4.0 * s - knob, ty + 4.0 * s, knob, knob, knob / 2.0, dark);
+                    // (THE KIT's switch: on = the accent.)
+                    let (acc, k) = (crate::kit::linear(crate::kit::accent()), crate::kit::linear(crate::kit::on_accent()));
+                    rect(&mut inside, tx, ty, tw, th, th / 2.0, acc);
+                    rect(&mut inside, tx + tw - 4.0 * s - knob, ty + 4.0 * s, knob, knob, knob / 2.0, k);
                 } else {
                     let (mx, my) = map(tx, ty);
                     inside.rects.push(RectInst {

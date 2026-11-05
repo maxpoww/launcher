@@ -6296,7 +6296,7 @@ impl App {
             if let Some((at, above, words)) = win.button_names.shown().and_then(|sp| win.spot_named(*sp)) {
                 let (vw, vh) = win.virt();
                 let r = crate::kit::name_rect(at, &words, above, Rect::new(0.0, 0.0, vw, vh), 1.0);
-                crate::kit::push_name(&mut scene, r, &words, 1.0, 1.0, true);
+                crate::kit::push_name(&mut scene, r, &words, 1.0, 1.0);
             }
         }
         // The menu and the box, over everything.
@@ -8350,6 +8350,23 @@ impl App {
             // (Ctrl +/−/0 make the MENU bigger or smaller, not the files.)
             let menu = win.menu.is_some() && ctrl;
             match keysym {
+                // THE KIT: Escape steps back ONE layer — Properties to the menu
+                // it grew out of, a menu's page to its first page, then away.
+                Keysym::Escape if win.props.as_ref().is_some_and(|p| p.back.is_some()) => {
+                    if let Some(props) = win.props.take() {
+                        if let Some(mut menu) = props.back {
+                            menu.grow_from = Some(props.rect);
+                            menu.t = 0.0;
+                            menu.pressed = None;
+                            win.menu = Some(menu);
+                        }
+                    }
+                    self.filer_hover(id);
+                    self.filer_request_draw(id);
+                }
+                Keysym::Escape if win.menu.as_ref().is_some_and(|m| m.page != crate::desktop_menu::Page::Main) => {
+                    self.filer_menu_back(id);
+                }
                 Keysym::Escape => {
                     win.menu = None;
                     win.menu_path = None;

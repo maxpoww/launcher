@@ -443,7 +443,7 @@ impl Props {
         };
         if let Some(back) = self.back_rect() {
             grid.labels.push(label(
-                tr("‹  Back"),
+                tr("‹ Back"),
                 (back.x + 8.0, back.y + (BACK_H - LINE_PX) / 2.0),
                 back.w - 12.0,
                 FONT_PX,
@@ -581,7 +581,7 @@ mod tests {
         p.push(&mut scene, &PAINT);
         let g = &scene.grids[0];
         assert_eq!(g.rects[0].rect, p.rect);
-        assert_eq!(g.labels[0].text, "‹  Back");
+        assert_eq!(g.labels[0].text, "‹ Back");
         // Near the surface's edge it is pulled in to stay whole.
         let menu = Menu::new(Ctx { on: On::Folder, ..Default::default() }, Some(0), false, (900.0, 700.0), 1000.0, 800.0);
         let p = Props::open(&folder_item(&f), (0.0, 0.0), Some(menu), 1000.0, 800.0, &dir);

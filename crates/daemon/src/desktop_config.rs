@@ -404,16 +404,17 @@ impl Config {
         // ── Apply or cancel ──
         rule(&mut b, &mut y);
         let (apply, cancel) = (Rect::new(right - 92.0, y, 92.0, 27.0), Rect::new(right - 92.0 - 10.0 - 92.0, y, 92.0, 27.0));
-        // (Cancel a hairline, filled only under the pointer; Apply the one
-        // that does it, in the accent.)
-        if lit(Hit::Cancel) {
-            b.rects.push(RectInst { rect: cancel, radius: 13.5, color: [wash[0], wash[1], wash[2], wash[3] * 1.5], glass: 0.0, border: 0.0 });
-        }
-        b.rects.push(RectInst { rect: cancel, radius: 13.5, color: at(0.3), glass: 0.0, border: 1.0 });
+        // (THE KIT's word buttons: Cancel on a faint fill, stronger under the
+        // pointer; Apply, the one main action, the accent's words on its tint.)
+        let k = if lit(Hit::Cancel) { 1.5 } else { 1.0 };
+        b.rects.push(RectInst { rect: cancel, radius: 13.5, color: [wash[0], wash[1], wash[2], wash[3] * k], glass: 0.0, border: 0.0 });
         b.labels.push(centred(tr("Cancel"), cancel, at(0.95)));
         b.hits.push((Hit::Cancel, cancel));
-        b.rects.push(RectInst { rect: apply, radius: 13.5, color: tint(accent(), if lit(Hit::Apply) { 0.55 } else { 0.32 }), glass: 0.0, border: 0.0 });
-        b.labels.push(centred(tr("Apply"), apply, at(1.0)));
+        let dark = crate::look::dark();
+        let main = crate::kit::linear(crate::kit::main_tint(dark, lit(Hit::Apply)));
+        b.rects.push(RectInst { rect: apply, radius: 13.5, color: [main[0], main[1], main[2], crate::kit::main_tint(dark, lit(Hit::Apply))[3] * ink[3]], glass: 0.0, border: 0.0 });
+        let words = crate::kit::linear(crate::kit::accent_on(dark));
+        b.labels.push(centred(tr("Apply"), apply, [words[0], words[1], words[2], ink[3]]));
         b.hits.push((Hit::Apply, apply));
         y += 27.0 + PAD;
         b.height = y - self.rect.y;

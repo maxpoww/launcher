@@ -299,7 +299,7 @@ impl App {
         if value.abs() < crate::options::SCROLL_DEADZONE {
             return;
         }
-        let open = value < 0.0 && self.tasks.others() > 0 && !self.task_pill_small();
+        let open = self.wheel_opens(value) && self.tasks.others() > 0 && !self.task_pill_small();
         if open != self.task_pill.box_open {
             self.task_pill.box_open = open;
             self.schedule_task_pill_frame();
@@ -520,10 +520,11 @@ impl App {
         let e = self.task_pill.box_e;
         let solid = 1.0 - (1.0 - e).powi(3);
         let band = Rect::new(rect.x, rect.y, rect.w, ph.min(rect.h));
-        let radius = lerp(ph / 2.0, crate::clipboard::BOX_RADIUS, e);
+        let radius = lerp(ph / 2.0, self.box_radius(), e);
         push_neumorph(scene, rect, radius, self.options_bar_is_bright(), a);
         let wash = self.options_rest_wash();
-        let (panel, box_ink) = self.clip_box_surface();
+        // (Its colour where it stands, as every box's: `box_surface_at`.)
+        let (panel, box_ink) = self.box_surface_at(rect);
         scene.rects.push(RectInst {
             rect,
             radius,
