@@ -186,6 +186,8 @@ fn field(key: &'static str, shown: &str, hint: &str, width: f32) -> Group {
     let typing = TYPING.lock().ok().and_then(|t| t.clone()).filter(|(k, _)| *k == key);
     let on = typing.is_some();
     let text = match typing {
+        // (A password is typed as dots.)
+        Some((k, t)) if k.starts_with("account-") => format!("{}▏", "•".repeat(t.chars().count())),
         Some((_, t)) => format!("{t}▏"),
         None if !shown.is_empty() => shown.to_owned(),
         None => hint.to_owned(),
@@ -780,7 +782,7 @@ pub(crate) fn ui_key(key: &str) -> bool {
         || key.starts_with("monitors-")
         || key.starts_with("idle-")
         || matches!(key, "printers-add" | "printers-scan-app")
-        || matches!(key, "access-text" | "access-motion" | "access-reader-install" | "startup-add" | "notif-app")
+        || matches!(key, "access-text" | "access-motion" | "access-reader-install" | "startup-add" | "notif-app" | "account-fields")
         || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"

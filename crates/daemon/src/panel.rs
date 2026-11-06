@@ -4998,6 +4998,11 @@ impl App {
         if key == "wallpaper" && !crate::wall_follow::is_idle_tile(&value) {
             self.wallpaper_changing(&value);
         }
+        // The account's buttons take what is still being typed in a field
+        // (Change the password pressed with the caret in the last field).
+        if key.starts_with("account-") && key != "account-fields" {
+            crate::controls::typing_commit();
+        }
         if !crate::controls::ui_key(key) {
             let ui = self.ui_facts();
             self.controls_send(ControlCommand::Set { label, key, value, ui });
@@ -5021,6 +5026,13 @@ impl App {
                 }
             }
             // The editor's two fields on one row: the value names the field.
+            // The account's three fields (2026-11-06): the same way.
+            "account-fields" => {
+                crate::controls::typing_commit();
+                if let Ok(mut t) = crate::controls::TYPING.lock() {
+                    *t = crate::controls::field_start(&value);
+                }
+            }
             "colors-edit-text" => {
                 let kept = crate::controls::typing_commit();
                 if let Ok(mut t) = crate::controls::TYPING.lock() {

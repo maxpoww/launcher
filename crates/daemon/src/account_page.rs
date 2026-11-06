@@ -115,6 +115,7 @@ pub(crate) fn view(view: &mut ControlView) {
     let mut row = field_of("account-current", &dots(&typed[0]), tr("Current password"), 180.0);
     let new = field_of("account-new", &dots(&typed[1]), tr("New password"), 180.0);
     let again = field_of("account-again", &dots(&typed[2]), tr("New password again"), 180.0);
+    row.choices[0].value = "account-current".to_owned();
     for (f, key) in [(new, "account-new"), (again, "account-again")] {
         row.choices.push(Choice { value: key.to_owned(), ..f.choices[0].clone() });
     }
@@ -196,7 +197,17 @@ fn passwd(current: &str, new: &str) -> Result<(), String> {
     if status == Some(0) {
         return Ok(());
     }
-    // Its own reason, in its own words: the last line that says something.
+    // Its own reason: the current password wrong (PAM's words for it), a
+    // new one it will not take (its "BAD PASSWORD" line), else the last
+    // line that says something.
+    let low = out.to_lowercase();
+    if low.contains("authentication token manipulation error") || low.contains("incorrect") || low.contains("authentication failure") {
+        return Err(tr("the current password is not right").to_owned());
+    }
+    if let Some(bad) = out.lines().map(str::trim).find(|l| l.to_uppercase().contains("BAD PASSWORD")) {
+        let bad = bad.trim_start_matches("BAD PASSWORD:").trim();
+        return Err(crate::i18n::fill(tr("that one is too weak ({why})"), &[("why", &bad)]));
+    }
     let why = out
         .lines()
         .map(|l| l.trim().trim_start_matches("passwd:").trim())
