@@ -10,6 +10,18 @@
 //! so the card itself is the surface. The dock band stays, so the gear that
 //! opened the panel is the one that closes it.
 //!
+//! THE GRID (Max, 2026-11-06: "cambiar el look de controls por iconos como
+//! el grid de apps"; the lab https://claude.ai/artifact/88EjbxM9Tv71byaNmmPDEz,
+//! direction A, "dale, hacé la A"): the field is a GRID OF TILES — a glyph
+//! on a plate, the name under it — seven across, in the order use brings
+//! them: the game's standings below are now the ORDER (every use scores,
+//! scores fade, the grid is sorted by them, so what you reach for comes
+//! first). No layers, no orbit: tiles glide to a new order and lift under
+//! the pointer; a click grows the tile's plate into the setting, as the
+//! pill did; the search still lights the matches and dims the rest. What
+//! follows about the three layers is how it was until then; the layer
+//! constants stay because fast launch's pills wear them.
+//!
 //! The field (designed in a browser mockup with Max, 2026-09-29):
 //!
 //! - **Three lit layers.** Every setting is an OPTIONS pill on one of three
@@ -45,7 +57,7 @@
 use std::collections::BTreeMap;
 use std::f32::consts::TAU;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit::seat::keyboard::Keysym;
@@ -56,7 +68,7 @@ use crate::content::{self, Label, Layout, Rect, RectInst, ShadowInst};
 use crate::controls::{ControlCommand, ControlEvent, ControlView, UiFacts};
 use crate::gear::PageKind;
 use crate::display::DisplayView;
-use crate::options::{FONT_PX, LINE_PX, PILL_PAD_X, TEXT_FONT};
+use crate::options::{FONT_PX, LINE_PX, NERD, TEXT_FONT};
 use crate::state::Target;
 use crate::{apps, groups, App};
 use waverunner_proto::Command;
@@ -344,8 +356,6 @@ pub(crate) const HOVER_WASH_BRIGHT: f32 = 0.30;
 pub(crate) const LAYER_INK: [f32; 3] = [1.0, 0.84, 0.62];
 /// Soft glow per layer: (blur px, alpha). The far layer has none.
 pub(crate) const LAYER_GLOW: [(f32, f32); 3] = [(7.0, 0.17), (3.5, 0.08), (0.0, 0.0)];
-/// How "near" each layer is: sets the orbit radius.
-const LAYER_Z: [f32; 3] = [1.0, 0.62, 0.35];
 
 // ---- Layout (px at bar scale 1) -----------------------------------------
 /// Air kept off the card's sides.
@@ -360,28 +370,85 @@ const STICK: f32 = 10.0;
 /// card when he set it as the maximum (2026-09-30: "i dont want it wider or
 /// taller no matter how big the box gets"). Smaller cards shrink it.
 const FIELD_MAX: (f32, f32) = (960.0, 845.0);
-/// Air under the dock, and above the card's floor as a share of the field:
-/// the heap sits up under the dock with more room below.
+/// Air under the dock before the first row.
 const GAP_TOP: f32 = 32.0;
-const GAP_BOTTOM_FRAC: f32 = 0.21;
+
+// ---- The grid (2026-11-06) ----------------------------------------------
+/// Tiles across at most; the plate under a glyph and its corner; the glyph's
+/// size; the name's type, line and air under the plate; the air between
+/// tiles across and down.
+const GRID_COLS: usize = 7;
+const PLATE: f32 = 54.0;
+const PLATE_RADIUS: f32 = 16.0;
+const GLYPH_PX: f32 = 24.0;
+const NAME_PX: f32 = 12.0;
+const NAME_LINE: f32 = 14.0;
+const NAME_GAP: f32 = 7.0;
+const CELL_GAP: f32 = 8.0;
+const ROW_GAP: f32 = 12.0;
+/// Air under the last row: the Search pill's room at the card's foot.
+const GRID_BOTTOM: f32 = 56.0;
+/// The plate's wash at rest and under the pointer (white on a dark card,
+/// black on a bright one), and the name's ink at rest.
+const PLATE_WASH: f32 = 0.085;
+const PLATE_HOVER: f32 = 0.2;
+const NAME_INK: f32 = 0.84;
+
+/// The glyph a setting wears on its tile — the gear box's symbol font, the
+/// kit's one language for symbols; a module, or a setting not listed, the
+/// cog.
+fn glyph_of(label: &str) -> &'static str {
+    match label {
+        "Resolution" => "\u{f0379}",
+        "Scale" => "\u{f0616}",
+        "Wi-Fi" => "\u{f05a9}",
+        "Sound output" => "\u{f04c3}",
+        "Colours" => "\u{f03d8}",
+        "Brightness" => "\u{f00df}",
+        "Bluetooth" => "\u{f00af}",
+        "Volume" => "\u{f057e}",
+        "Wallpaper" => "\u{f021f}",
+        "Night light" => "\u{f0594}",
+        "Tiles" => "\u{f0570}",
+        "Launcher" => "\u{f056e}",
+        "Monitors" => "\u{f0502}",
+        "Printers" => "\u{f042a}",
+        "Notifications" => "\u{f009a}",
+        "Keyboard layout" => "\u{f030c}",
+        "Power mode" => "\u{f0241}",
+        "Your account" => "\u{f0004}",
+        "Mouse and touchpad" => "\u{f037d}",
+        "Shortcuts" => "\u{f11c}",
+        "Accessibility" => "\u{f02e6}",
+        "Startup apps" => "\u{f040d}",
+        "Lock screen" => "\u{f033e}",
+        "Sleep" => "\u{f0904}",
+        "VPN" => "\u{f0499}",
+        "Language" => "\u{f01e7}",
+        "Time zone" => "\u{f0954}",
+        "Natural scrolling" => "\u{f04e1}",
+        "Updates" => "\u{f06b0}",
+        "About Golem" => "\u{f02fd}",
+        "Microphone" => "\u{f036c}",
+        "Battery" => "\u{f0079}",
+        "Default apps" => "\u{f003b}",
+        "Privacy" => "\u{f0208}",
+        _ => "\u{f0493}",
+    }
+}
 
 // ---- Motion (rates are 1/s for exponential approach) --------------------
 const GLIDE_RATE: f32 = 24.0;
 const SIZE_RATE: f32 = 26.0;
 const FADE_IN_RATE: f32 = 22.0;
-/// Seconds for a layer to leave from its end.
-const EXIT_SECS: f32 = 0.10;
-/// Wheel travel for one layer step, and the shortest gap between steps.
-const WHEEL_STEP: f64 = 10.0;
-const SHIFT_COOLDOWN: Duration = Duration::from_millis(150);
-/// Hover: how fast a pill settles, and comes closer (and by how much).
-const SETTLE_RATE: f32 = 6.0;
+/// Hover: how fast a tile comes closer (and by how much).
 pub(crate) const LIFT_RATE: f32 = 12.0;
 pub(crate) const LIFT: f32 = 0.07;
 /// Search: how fast pills rise or sink as the query changes, how much a
 /// miss shrinks, and how far it dims.
 const SEARCH_RATE: f32 = 14.0;
 const SEARCH_SHRINK: f32 = 0.15;
+const SEARCH_LIFT: f32 = 0.08;
 const SEARCH_DIM: f32 = 0.85;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
@@ -417,22 +484,6 @@ struct Usage {
     settings: BTreeMap<String, Standing>,
 }
 
-impl Usage {
-    /// The saved layer of every item in `items`' order, if the save covers
-    /// them all and keeps the layers' sizes; otherwise (first run, or the
-    /// items changed) `None`.
-    fn arrangement(&self, items: &[Item]) -> Option<Vec<u8>> {
-        let layers: Vec<u8> = items
-            .iter()
-            .map(|(name, ..)| self.settings.get(*name).map(|st| st.layer).filter(|&l| l < 3))
-            .collect::<Option<_>>()?;
-        let count = |ls: &mut dyn Iterator<Item = u8>, l: u8| ls.filter(|&x| x == l).count();
-        (0..3u8)
-            .all(|l| count(&mut layers.iter().copied(), l) == count(&mut items.iter().map(|s| s.1), l))
-            .then_some(layers)
-    }
-}
-
 /// How well a setting matches a (lowercased, trimmed) search: 0 its name
 /// starts with it, 1 its name contains it, 2 a keyword does; `None` no match.
 fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8> {
@@ -457,20 +508,6 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// A tiny deterministic generator: the field looks the same every time it
-/// opens (and across restarts) instead of reshuffling under the eye.
-struct Rng(u32);
-
-impl Rng {
-    fn next(&mut self) -> f32 {
-        // xorshift32
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 17;
-        self.0 ^= self.0 << 5;
-        (self.0 >> 8) as f32 / (1u32 << 24) as f32
-    }
-}
-
 fn smoothstep(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
@@ -485,67 +522,39 @@ fn approach(v: f32, target: f32, rate: f32, dt: f32) -> f32 {
     v + (target - v) * (1.0 - (-dt * rate).exp())
 }
 
-/// A layer leaving from its end of the stack.
-#[derive(Clone, Copy)]
-struct Exit {
-    /// +1: the near layer falling away past the viewer; -1: the far layer
-    /// receding into the distance.
-    dir: i8,
-    /// 0 → 1 over [`EXIT_SECS`].
-    k: f32,
-}
-
-/// One setting's pill. Positions are field-relative centres.
 struct Pill {
     label: &'static str,
     /// What else people call it or look for it by (search).
     keywords: &'static str,
-    /// Search focus, easing: +1 a match (it rises to the front: the near
-    /// layer's size and light), -1 a miss (it sinks back and dims), 0 no
-    /// search.
+    /// Search focus, easing: +1 a match (it lights up), -1 a miss (it dims),
+    /// 0 no search.
     focus: f32,
-    /// Its layer in the arrangement (the game moves it); scrolling cycles
-    /// the layers from here.
-    group: u8,
-    /// The layer it is on now, and the one it is drawn as (they differ only
-    /// while it leaves one end for the other).
-    layer: u8,
+    /// One layer now — the bar's own pill size, the second — kept for what
+    /// still reads a layer.
     drawn: u8,
-    /// Measured size at each layer.
+    /// The tile's size (the same at every layer).
     w: [f32; 3],
     h: [f32; 3],
-    /// Where the layout wants it (`ideal` before settling, `home` after).
-    ideal: (f32, f32),
+    /// Its name, wrapped to the tile (two lines at most).
+    lines: Vec<String>,
+    /// The tile's centre the grid wants it at; `anchor` glides there, `pos`
+    /// is the drawn centre this frame.
     home: (f32, f32),
-    /// The spot it orbits, gliding toward `home`.
     anchor: (f32, f32),
-    /// Drawn centre this frame.
     pos: (f32, f32),
-    /// Size multiplier easing home after a layer change, and presence.
+    /// Size multiplier easing home, and presence.
     sc: f32,
     op: f32,
-    exit: Option<Exit>,
-    /// Orbit clock and its rate (eases to a stop under the pointer).
-    clock: f32,
-    rate: f32,
     lift: f32,
-    phase: [f32; 2],
-    period: f32,
-    spin: f32,
 }
 
 impl Pill {
-    fn size(&self) -> (f32, f32) {
-        let l = self.layer as usize;
-        (self.w[l], self.h[l])
-    }
-
-    /// The extra size its search focus gives it: a match eases up to the
-    /// near layer's size, a miss shrinks a little.
+    /// The extra size its search focus gives it: a match comes a touch
+    /// closer (the grid has no room for more: it lights up instead), a miss
+    /// shrinks a little.
     fn focus_scale(&self) -> f32 {
-        let d = self.drawn as usize;
         if self.focus >= 0.0 {
-            lerp(1.0, LAYER_SCALE[0] / LAYER_SCALE[d], self.focus)
+            lerp(1.0, 1.0 + SEARCH_LIFT, self.focus)
         } else {
             1.0 - SEARCH_SHRINK * -self.focus
         }
@@ -729,7 +738,7 @@ fn track_spans(w: f32, split: bool, mark: Option<f32>) -> Vec<(f32, f32)> {
 type RowSlider<'a> = (u8, &'a crate::controls::Group, Option<(u8, &'a crate::controls::Group)>);
 
 /// `text` in lines no wider than `room` (by `width`), broken between words.
-fn wrap_words(text: &str, room: f32, width: impl Fn(&str) -> f32) -> Vec<String> {
+fn wrap_words(text: &str, room: f32, mut width: impl FnMut(&str) -> f32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for word in text.split_whitespace() {
         match lines.last_mut() {
@@ -952,13 +961,11 @@ pub(crate) struct Panel {
     /// The field this frame, in surface coordinates.
     field: Rect,
     scale: f32,
-    /// Layer steps taken (the cycle's position).
-    shift: i32,
-    /// Seconds the panel has been drifting.
+    /// Seconds the panel has been up (what breathes in an open setting
+    /// reads it).
     clock: f32,
-    wheel: f64,
-    wheel_at: Option<Instant>,
-    last_shift: Option<Instant>,
+    /// The tiles' scale against their full size (`grid_metrics`).
+    tile_k: f32,
     hot: Option<usize>,
     open: Option<OpenBox>,
     /// The game's standings, and where they are saved (`None`: not saved,
@@ -1236,7 +1243,7 @@ impl Panel {
 
     /// Build (or rebuild for a new field size or bar scale) the pills:
     /// measure every label at every layer's size, then lay them out.
-    fn ensure(&mut self, size: (f32, f32), scale: f32, pill_h: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
+    fn ensure(&mut self, size: (f32, f32), scale: f32, _pill_h: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
         let key = (size.0, size.1, scale);
         let fresh = self.pills.is_empty();
         if !fresh
@@ -1253,54 +1260,48 @@ impl Panel {
         self.key = key;
         self.scale = scale;
         if fresh {
-            // The saved arrangement, or (first run, or the settings changed)
-            // the first order, each setting seeded with its layer's score
-            // (scores already earned are kept).
-            let items = self.items;
-            let groups = self.usage.arrangement(items).unwrap_or_else(|| {
-                let now = now_secs();
-                for &(name, layer, _) in items {
-                    let st = self.usage.settings.entry(name.to_owned()).or_default();
-                    let earned = st.score_at(now);
-                    *st = Standing { layer, score: earned.max(SEED_SCORE[layer as usize]), at: now };
-                }
-                items.iter().map(|s| s.1).collect()
-            });
-            let mut rng = Rng(0x85EB_CA6B);
-            self.pills = items
+            // Every setting with a standing: the saved scores, each never
+            // scored one seeded by its first layer (so the first order has
+            // a little weight, fading like any use).
+            let now = now_secs();
+            for &(name, layer, _) in self.items {
+                let st = self.usage.settings.entry(name.to_owned()).or_default();
+                let earned = st.score_at(now);
+                *st = Standing { layer: st.layer, score: earned.max(SEED_SCORE[layer as usize]), at: now };
+            }
+            self.pills = self
+                .items
                 .iter()
-                .zip(groups)
-                .map(|(&(label, _, keywords), group)| Pill {
+                .map(|&(label, _, keywords)| Pill {
                     label,
                     keywords,
                     focus: 0.0,
-                    group,
-                    layer: group,
-                    drawn: group,
+                    drawn: 1,
                     w: [0.0; 3],
                     h: [0.0; 3],
-                    ideal: (0.0, 0.0),
+                    lines: Vec::new(),
                     home: (0.0, 0.0),
                     anchor: (0.0, 0.0),
                     pos: (0.0, 0.0),
                     sc: 1.0,
                     op: 1.0,
-                    exit: None,
-                    clock: rng.next() * 20.0,
-                    rate: 1.0,
                     lift: 0.0,
-                    phase: [rng.next() * TAU, rng.next() * TAU],
-                    period: 12.0 + rng.next() * 6.0,
-                    spin: if rng.next() < 0.5 { -1.0 } else { 1.0 },
                 })
                 .collect();
         }
+        // The tile's size, and each name wrapped to it.
+        let (_, cw, ch, _, _, _, k) = grid_metrics(size, scale, self.pills.len());
+        self.tile_k = k;
         for p in &mut self.pills {
-            for (l, &f) in LAYER_SCALE.iter().enumerate() {
-                let h = pill_h * f;
-                p.h[l] = h;
-                p.w[l] = (measure(crate::i18n::tr(p.label), FONT_PX * scale * f) + 2.0 * PILL_PAD_X * scale * f).max(h);
+            p.w = [cw; 3];
+            p.h = [ch; 3];
+            let room = cw - 4.0 * scale;
+            let mut lines = wrap_words(crate::i18n::tr(p.label), room, |s| measure(s, NAME_PX * scale * k));
+            if lines.len() > 2 {
+                let rest = lines.split_off(1).join(" ");
+                lines.push(format!("{rest}…"));
             }
+            p.lines = lines;
         }
         if self.modules {
             self.name_w.clear();
@@ -1328,15 +1329,19 @@ impl Panel {
             return Vec::new();
         }
         let items = self.items;
-        let groups: Vec<u8> = if self.pills.len() == items.len() {
-            self.pills.iter().map(|p| p.group).collect()
-        } else {
-            self.usage.arrangement(items).unwrap_or_else(|| items.iter().map(|s| s.1).collect())
-        };
+        // Among equal matches, the order use brings them (the grid's own).
+        let now = now_secs();
+        let score = |label: &str| self.usage.settings.get(label).map_or(0.0, |st| st.score_at(now));
+        let mut by_use: Vec<usize> = (0..items.len()).collect();
+        by_use.sort_by(|&a, &b| score(items[b].0).total_cmp(&score(items[a].0)).then(a.cmp(&b)));
+        let mut place = vec![0u8; items.len()];
+        for (k, &i) in by_use.iter().enumerate() {
+            place[i] = k.min(255) as u8;
+        }
         let mut hits: Vec<(u8, u8, usize)> = items
             .iter()
             .enumerate()
-            .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, groups[i], i)))
+            .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, place[i], i)))
             .collect();
         hits.sort();
         hits.into_iter().map(|(rank, _, i)| (rank, items[i].0)).collect()
@@ -1356,77 +1361,46 @@ impl Panel {
         }
     }
 
-    /// Lay the field out for the current layer order: balanced, fitted up
-    /// under the dock, settled so nothing crowds. `snap` puts every pill
-    /// there at once; otherwise they glide.
+    /// Lay the grid out: the tiles in the order use brings them (the
+    /// standings' scores, the first order among equals), seven across from
+    /// under the dock down. `snap` puts every tile there at once; otherwise
+    /// they glide.
     fn compose(&mut self, size: (f32, f32), snap: bool) {
         let s = self.scale.max(0.01);
-        let (w, h) = size;
-        let margin = MARGIN * s;
-        let (top, bottom) = (GAP_TOP * s, GAP_BOTTOM_FRAC * h);
-        balanced(&mut self.pills, (w, h), margin, (top, bottom));
-        for p in &mut self.pills {
-            p.home = p.ideal;
-        }
-        clamp_all(&mut self.pills, (w, h), margin, (top, bottom));
-        settle(&mut self.pills, (w, h), margin, (top, bottom), 18.0 * s, 0.0, 220);
-        fit_vertical(&mut self.pills, h, top, bottom);
-        settle(&mut self.pills, (w, h), margin, (top, bottom), 12.0 * s, 0.08, 120);
-        if snap {
-            for p in &mut self.pills {
+        let (cols, cw, ch, x0, y0, pitch_y, _) = grid_metrics(size, s, self.pills.len());
+        let now = now_secs();
+        let scores: Vec<f64> = self.pills.iter().map(|p| self.usage.settings.get(p.label).map_or(0.0, |st| st.score_at(now))).collect();
+        let mut order: Vec<usize> = (0..self.pills.len()).collect();
+        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+        for (k, &i) in order.iter().enumerate() {
+            let (col, row) = (k % cols, k / cols);
+            let p = &mut self.pills[i];
+            p.home = (x0 + col as f32 * (cw + CELL_GAP * s) + cw / 2.0, y0 + row as f32 * pitch_y + ch / 2.0);
+            if snap {
                 p.anchor = p.home;
                 p.pos = p.home;
             }
         }
     }
 
-    /// Move through the layers: +1 the near layer falls away and returns at
-    /// the back, -1 the far layer recedes and returns in front.
-    fn shift_layers(&mut self, dir: i8) {
-        if self.open.is_some() || self.pills.is_empty() {
-            return;
-        }
-        self.shift += dir as i32;
-        for p in &mut self.pills {
-            let old = p.layer;
-            p.layer = (p.group as i32 - self.shift).rem_euclid(3) as u8;
-            let wraps = if dir > 0 { old == 0 } else { old == 2 };
-            if wraps {
-                p.exit = Some(Exit { dir, k: 0.0 });
-            } else if p.exit.is_none() {
-                // Hold the old size by scale; it eases to the new one while
-                // the pill glides to its new spot.
-                p.sc *= p.h[p.drawn as usize] / p.h[p.layer as usize];
-                p.drawn = p.layer;
-            }
-        }
-        self.hot = None;
-        let size = (self.key.0, self.key.1);
-        self.compose(size, false);
+    /// The plate of tile `p` as drawn now: the square at the top of its cell,
+    /// grown by what lifts it.
+    fn plate_rect(&self, p: &Pill) -> Rect {
+        let ts = self.scale * self.tile_k.max(0.01);
+        let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
+        let side = PLATE * ts * k;
+        let top = p.pos.1 - p.h[1] / 2.0;
+        Rect::new(p.pos.0 - side / 2.0, top + (PLATE * ts - side) / 2.0, side, side)
     }
 
-    /// Wheel travel over the panel: a layer step once it adds up, never
-    /// faster than the move itself.
+    /// Wheel travel over the panel: an open module's list scrolls; the grid
+    /// has nothing to scroll (every tile is on it).
     fn wheel(&mut self, value: f64) {
         if self.modules {
             if let Some(m) = self.open.as_ref().filter(|o| o.want > 0.5).and_then(|o| crate::modules::module(self.pills[o.pill].label)) {
                 let max = self.mod_layout(m).max_scroll;
                 self.mods.scroll = (self.mods.scroll + value as f32 * MOD_WHEEL).clamp(0.0, max);
-                return;
             }
-        }
-        let now = Instant::now();
-        if self.wheel_at.is_none_or(|t| now - t > Duration::from_millis(250)) {
-            self.wheel = 0.0;
-        }
-        self.wheel_at = Some(now);
-        self.wheel += value;
-        if self.wheel.abs() >= WHEEL_STEP && self.last_shift.is_none_or(|t| now - t > SHIFT_COOLDOWN) {
-            // Inverted (Max, 2026-09-30): scrolling up brings the next layer
-            // forward, the near one falling away; down goes back.
-            self.shift_layers(if self.wheel > 0.0 { -1 } else { 1 });
-            self.last_shift = Some(now);
-            self.wheel = 0.0;
         }
     }
 
@@ -1435,7 +1409,7 @@ impl Panel {
         let (fx, fy) = (pos.0 - self.field.x, pos.1 - self.field.y);
         let mut best: Option<(usize, u8)> = None;
         for (i, p) in self.pills.iter().enumerate() {
-            if p.exit.is_some() || p.op < 0.5 {
+            if p.op < 0.5 {
                 continue;
             }
             let d = p.drawn as usize;
@@ -1512,11 +1486,7 @@ impl Panel {
 
     /// Grow pill `i` into its setting.
     fn open_pill(&mut self, clicked: usize) {
-        let p = &self.pills[clicked];
-        let d = p.drawn as usize;
-        let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
-        let (w, h) = (p.w[d] * k, p.h[d] * k);
-        let from = Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h);
+        let from = self.plate_rect(&self.pills[clicked]);
         // (Wallpaper's pill opens the Colours box on its Wallpaper tab,
         // grown out of its own pill: `controls::box_of`.)
         let i = if self.modules { clicked } else { self.box_pill(clicked) };
@@ -1547,7 +1517,7 @@ impl Panel {
             self.control = None;
             self.control_ask = true;
         }
-        // The swap happens now, behind the setting growing over the field.
+        // The order changes now, behind the setting growing over the field.
         self.record_use(clicked, now_secs());
     }
 
@@ -2862,48 +2832,10 @@ impl Panel {
     fn record_use(&mut self, i: usize, now: u64) {
         let st = self.usage.settings.entry(self.pills[i].label.to_owned()).or_default();
         *st = Standing { layer: st.layer, score: st.score_at(now) + 1.0, at: now };
-        let score = st.score;
-        let group = self.pills[i].group;
-        if group > 0 {
-            let score_of = |p: &Pill| self.usage.settings.get(p.label).map_or(0.0, |st| st.score_at(now));
-            let weakest = (0..self.pills.len())
-                .filter(|&j| self.pills[j].group == group - 1)
-                .map(|j| (j, score_of(&self.pills[j])))
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((j, weakest_score)) = weakest.filter(|&(_, sc)| score > sc) {
-                self.pills[i].group = group - 1;
-                self.pills[j].group = group;
-                info!(
-                    "control panel: {} ({score:.2}) steps nearer, {} ({weakest_score:.2}) steps back",
-                    self.pills[i].label, self.pills[j].label
-                );
-                self.regroup();
-            }
-        }
-        for p in &self.pills {
-            if let Some(st) = self.usage.settings.get_mut(p.label) {
-                st.layer = p.group;
-            }
-        }
         if let Some(path) = &self.store {
             crate::persist::write_json("control panel", path, &self.usage);
         }
-    }
-
-    /// Put every pill on its group's layer at the current scroll, and let
-    /// them glide there.
-    fn regroup(&mut self) {
-        for p in &mut self.pills {
-            let layer = (p.group as i32 - self.shift).rem_euclid(3) as u8;
-            if layer == p.layer {
-                continue;
-            }
-            p.layer = layer;
-            if p.exit.is_none() {
-                p.sc *= p.h[p.drawn as usize] / p.h[layer as usize];
-                p.drawn = layer;
-            }
-        }
+        // Its place in the order may have moved: the grid glides to it.
         let size = (self.key.0, self.key.1);
         self.compose(size, false);
     }
@@ -2933,9 +2865,9 @@ impl Panel {
             return false;
         }
         let q = &self.query;
+        // (Among equals the first in the grid: the most used.)
         let best = (0..self.pills.len())
-            .filter(|&i| self.pills[i].exit.is_none())
-            .filter_map(|i| Some((match_rank(self.pills[i].label, self.pills[i].keywords, q)?, self.pills[i].layer, i)))
+            .filter_map(|i| Some((match_rank(self.pills[i].label, self.pills[i].keywords, q)?, self.pills[i].home.1 as i32, self.pills[i].home.0 as i32, i)))
             .min()
             .map(|(.., i)| i);
         match best {
@@ -3173,20 +3105,15 @@ impl Panel {
         if self.pills.is_empty() {
             return;
         }
-        self.shift = 0;
         for p in &mut self.pills {
             p.focus = 0.0;
-            p.layer = p.group;
-            p.drawn = p.group;
-            p.exit = None;
             p.sc = 1.0;
             p.op = 1.0;
             p.lift = 0.0;
-            p.rate = 1.0;
         }
         let size = (self.key.0, self.key.1);
         self.compose(size, true);
-        info!("control panel: panel reset to its first layer order");
+        info!("control panel: panel reset, every tile home");
     }
 
     /// Advance the field by `dt`; `pointer` is in surface coordinates.
@@ -3215,13 +3142,13 @@ impl Panel {
         }
         if let Some(open) = &mut self.open {
             if open.want == 0.0 && !self.solo {
-                // Fold back into where the pill is now: the game may have
-                // moved it to another layer while it was open.
+                // Fold back into where the tile's plate is now: the order
+                // may have moved it while it was open.
                 let p = &self.pills[open.pill];
-                let d = p.drawn as usize;
-                let k = p.sc * p.focus_scale();
-                let (w, h) = (p.w[d] * k, p.h[d] * k);
-                open.from = Rect::new(p.pos.0 - w / 2.0, p.pos.1 - h / 2.0, w, h);
+                let ts = self.scale * self.tile_k.max(0.01);
+                let side = PLATE * ts * p.sc * p.focus_scale();
+                let top = p.pos.1 - p.h[1] / 2.0;
+                open.from = Rect::new(p.pos.0 - side / 2.0, top + (PLATE * ts - side) / 2.0, side, side);
             }
             if self.solo {
                 // A box of its own: the content stands as at rest; the whole
@@ -3253,48 +3180,22 @@ impl Panel {
             }
         }
         self.hot = if self.open.is_none() { pointer.and_then(|p| self.pill_at(p)) } else { None };
-        let s = self.scale;
         let focus_to: Vec<f32> = self.pills.iter().map(|p| self.focus_target(p)).collect();
         for (i, p) in self.pills.iter_mut().enumerate() {
             let hot = self.hot == Some(i);
             p.focus = approach(p.focus, focus_to[i], SEARCH_RATE, dt);
-            if p.exit.is_none() {
-                p.anchor.0 = approach(p.anchor.0, p.home.0, GLIDE_RATE, dt);
-                p.anchor.1 = approach(p.anchor.1, p.home.1, GLIDE_RATE, dt);
-            }
-            p.rate = approach(p.rate, if hot { 0.0 } else { 1.0 }, SETTLE_RATE, dt);
-            p.clock += dt * p.rate;
+            p.anchor.0 = approach(p.anchor.0, p.home.0, GLIDE_RATE, dt);
+            p.anchor.1 = approach(p.anchor.1, p.home.1, GLIDE_RATE, dt);
             p.lift = approach(p.lift, if hot { 1.0 } else { 0.0 }, LIFT_RATE, dt);
             p.sc = approach(p.sc, 1.0, SIZE_RATE, dt);
-            if let Some(exit) = &mut p.exit {
-                exit.k = (exit.k + dt / EXIT_SECS).min(1.0);
-                p.op = 1.0 - smoothstep(exit.k);
-                if exit.k >= 1.0 {
-                    // Arrive at the other end: the back, small and faint, or
-                    // (going back) the front, rising from below.
-                    let back = exit.dir < 0;
-                    p.exit = None;
-                    p.drawn = p.layer;
-                    p.anchor = (p.home.0, p.home.1 + if back { 70.0 * s } else { 0.0 });
-                    p.sc = if back { 1.25 } else { 0.6 };
-                    p.op = 0.0;
-                }
-            } else {
-                p.op = approach(p.op, 1.0, FADE_IN_RATE, dt);
-            }
-            // A tiny orbit round the spot: about a pixel, one slow turn every
-            // 12–18 s, its radius breathing a touch.
-            let z = LAYER_Z[p.drawn as usize];
-            let radius = (0.6 + 0.6 * z) * s * (1.0 + 0.1 * (p.clock * 0.07 * TAU + p.phase[1]).sin());
-            let turn = p.clock * TAU / p.period + p.phase[0];
-            p.pos = (p.anchor.0 + radius * turn.cos() * p.spin, p.anchor.1 + radius * turn.sin());
+            p.op = approach(p.op, 1.0, FADE_IN_RATE, dt);
+            p.pos = p.anchor;
         }
     }
 
-    /// Whether nothing of the panel moves but its pills' orbits — then it
-    /// needs a frame about 30 times a second, not at every refresh of the
-    /// screen (`App::orbit_soon`). A pill gliding, growing, fading, under
-    /// the pointer, a layer turning, a setting opening: not calm.
+    /// Whether nothing of the panel moves — then it needs no frame until
+    /// something does (`App::orbit_soon` asks). A tile gliding, growing,
+    /// fading, under the pointer, a setting opening: not calm.
     pub(crate) fn calm(&self) -> bool {
         const E: f32 = 0.002;
         let still = |a: f32, b: f32| (a - b).abs() < E;
@@ -3309,11 +3210,9 @@ impl Panel {
             && open_still
             && self.pills.iter().enumerate().all(|(i, p)| {
                 let hot = self.hot == Some(i);
-                p.exit.is_none()
-                    && (p.anchor.0 - p.home.0).abs() < 0.05
+                (p.anchor.0 - p.home.0).abs() < 0.05
                     && (p.anchor.1 - p.home.1).abs() < 0.05
                     && still(p.focus, self.focus_target(p))
-                    && still(p.rate, if hot { 0.0 } else { 1.0 })
                     && still(p.lift, if hot { 1.0 } else { 0.0 })
                     && still(p.sc, 1.0)
                     && still(p.op, 1.0)
@@ -3326,50 +3225,28 @@ impl Panel {
         let s = self.scale;
         let f = self.field;
         let wash = |a: f32| crate::options::wash(!paint.bright, a);
-        let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
-        let hover_a = if paint.bright { HOVER_WASH_BRIGHT } else { HOVER_WASH_DARK };
         let glow_rgb = if paint.bright { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
         let open_k = self.open.as_ref().map_or(0.0, |o| o.k);
         let open_pill = self.open.as_ref().map(|o| o.pill);
         let open_from = self.open.as_ref().map(|o| o.from);
 
-        // Far first, near last; a leaving near layer and a lifted pill on top.
+        // A lifted tile on top; the rest in their order.
         let mut order: Vec<usize> = (0..self.pills.len()).collect();
-        let rank = |p: &Pill| -> i32 {
-            match p.exit {
-                Some(e) if e.dir > 0 => 10,
-                Some(_) => -1,
-                None if p.lift > 0.02 => 9,
-                // A search match rises over everything at rest.
-                None if p.focus > 0.5 => 8,
-                None => 3 - p.drawn as i32,
-            }
-        };
-        order.sort_by_key(|&i| rank(&self.pills[i]));
-
+        order.sort_by_key(|&i| u8::from(self.pills[i].lift > 0.02));
         // (One setting in a box of its own: no field behind it.)
         if self.solo {
             order.clear();
         }
+        let plate_a = |rise: f32, lift: f32| lerp(lerp(PLATE_WASH, PLATE_WASH * 1.6, rise), PLATE_HOVER, lift);
+        let ts = s * self.tile_k.max(0.01);
         for i in order {
             let p = &self.pills[i];
-            let d = p.drawn as usize;
-            let (mut dx, mut dy, mut grow, mut fade, mut shrink) = (0.0, 0.0, 1.0, 1.0, 1.0);
-            if let Some(e) = p.exit {
-                let ease = 1.0 - (1.0 - e.k) * (1.0 - e.k);
-                if e.dir > 0 {
-                    dy = 90.0 * s * ease; // falls past the viewer
-                    grow = 1.0 + 0.4 * ease;
-                } else {
-                    dy = -8.0 * s * e.k; // recedes
-                    grow = 1.0 - 0.5 * e.k;
-                }
-            }
+            let (mut dx, mut dy, mut fade, mut shrink) = (0.0, 0.0, 1.0, 1.0);
             if let (Some(op), Some(from)) = (open_pill, open_from) {
                 if op == i {
                     fade = 0.0; // the box has taken its place
                 } else {
-                    // Opened out of the clicked pill: pushed away along the
+                    // Opened out of the clicked tile: pushed away along the
                     // line from it, fading, the nearest furthest.
                     let (cx, cy) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
                     let (ox, oy) = (p.pos.0 - cx, p.pos.1 - cy);
@@ -3381,57 +3258,71 @@ impl Panel {
                     shrink = 1.0 - 0.12 * open_k;
                 }
             }
-            // Search: a match rises to the near layer's size and light, a
-            // miss sinks back and dims.
+            // Search: a match lights up, a miss dims and shrinks a little.
             let rise = p.focus.max(0.0);
             let a = p.op.max(0.0) * fade * (1.0 - SEARCH_DIM * (-p.focus).max(0.0));
             if a < 0.004 {
                 continue;
             }
-            let k = p.sc * grow * shrink * p.focus_scale() * (1.0 + LIFT * p.lift);
-            let (w, h) = (p.w[d] * k, p.h[d] * k);
-            let rect = Rect::new(f.x + p.pos.0 + dx - w / 2.0, f.y + p.pos.1 + dy - h / 2.0, w, h);
-            let radius = h / 2.0;
-            let (blur, glow_a) = (
-                lerp(LAYER_GLOW[d].0, LAYER_GLOW[0].0, rise),
-                lerp(LAYER_GLOW[d].1, LAYER_GLOW[0].1, rise),
-            );
-            if glow_a > 0.0 {
-                out.glows.push(ShadowInst {
-                    rect,
-                    radius,
-                    blur: blur * s,
-                    color: [glow_rgb[0], glow_rgb[1], glow_rgb[2], glow_a * a],
-                    edges: [1.0, 1.0, 1.0, 1.0],
-                });
-            }
-            let wa = lerp(lerp(layer_wash[d], layer_wash[0], rise), hover_a, p.lift);
-            let c = wash(wa);
+            let k = p.sc * shrink * p.focus_scale() * (1.0 + LIFT * p.lift);
+            let side = PLATE * ts * k;
+            let cell_top = p.pos.1 + dy - p.h[1] / 2.0;
+            let cx = p.pos.0 + dx;
+            let plate = Rect::new(f.x + cx - side / 2.0, f.y + cell_top + (PLATE * ts - side) / 2.0, side, side);
+            let c = wash(plate_a(rise, p.lift));
             out.rects.push(RectInst {
-                rect,
-                radius,
+                rect: plate,
+                radius: PLATE_RADIUS * ts * k,
                 color: [c[0], c[1], c[2], c[3] * a],
                 glass: 0.0,
                 border: 0.0,
             });
-            let font = FONT_PX * s * LAYER_SCALE[d] * k;
-            let line = LINE_PX * s * LAYER_SCALE[d] * k;
+            if p.lift > 0.02 {
+                let (blur, glow_a) = LAYER_GLOW[1];
+                out.glows.push(ShadowInst {
+                    rect: plate,
+                    radius: PLATE_RADIUS * ts * k,
+                    blur: blur * s,
+                    color: [glow_rgb[0], glow_rgb[1], glow_rgb[2], glow_a * a * p.lift],
+                    edges: [1.0, 1.0, 1.0, 1.0],
+                });
+            }
             // Glyphs are cached only at rest: an easing size would fill the
             // cache with one entry per frame.
-            let resting = (k - 1.0).abs() < 0.001 && p.exit.is_none();
+            let resting = (k - 1.0).abs() < 0.001;
+            let ink_k = lerp(lerp(NAME_INK, 1.0, rise), 1.0, p.lift);
+            let glyph = GLYPH_PX * ts * k;
             out.labels.push(Label {
-                text: crate::i18n::tr(p.label).to_owned(),
-                pos: (rect.x + w / 2.0, rect.y + (h - line) / 2.0),
-                max_w: w,
-                font_px: font,
-                line_px: line,
+                text: glyph_of(p.label).to_owned(),
+                pos: (plate.x + side / 2.0, plate.y + (side - glyph * 1.2) / 2.0),
+                max_w: side,
+                font_px: glyph,
+                line_px: glyph * 1.2,
                 centered: true,
                 dim: false,
                 cache: resting,
-                family: TEXT_FONT,
-                color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * lerp(LAYER_INK[d], LAYER_INK[0], rise) * a]),
+                family: Some(NERD),
+                color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * lerp(0.92, 1.0, p.lift) * a]),
                 clip: None,
             });
+            let (name_px, name_line) = (NAME_PX * ts * k, NAME_LINE * ts * k);
+            let mut y = f.y + cell_top + (PLATE + NAME_GAP) * ts * k;
+            for line in &p.lines {
+                out.labels.push(Label {
+                    text: line.clone(),
+                    pos: (f.x + cx, y),
+                    max_w: p.w[1] * k,
+                    font_px: name_px,
+                    line_px: name_line,
+                    centered: true,
+                    dim: false,
+                    cache: resting,
+                    family: TEXT_FONT,
+                    color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * ink_k * a]),
+                    clip: None,
+                });
+                y += name_line;
+            }
         }
 
         if let Some(open) = &self.open {
@@ -3462,7 +3353,7 @@ impl Panel {
         let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
         let c = crate::options::wash(!paint.bright, layer_wash[d]);
         if clear < 0.999 {
-            let radius = lerp(open.from.h / 2.0, content::BOX_CORNER_RADIUS, k);
+            let radius = lerp(PLATE_RADIUS * s * self.tile_k.max(0.01), content::BOX_CORNER_RADIUS, k);
             out.rects.push(RectInst {
                 rect: r,
                 radius,
@@ -4287,135 +4178,26 @@ fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -
     false
 }
 
-/// Keep a pill inside the field: `margin` off the sides, `gaps` (top,
-/// bottom) off the dock and the floor.
-fn clamp_pill(p: &mut Pill, size: (f32, f32), margin: f32, gaps: (f32, f32)) {
-    let (w, h) = p.size();
-    p.home.0 = p.home.0.clamp(margin + w / 2.0, (size.0 - margin - w / 2.0).max(margin + w / 2.0));
-    p.home.1 = p.home.1.clamp(gaps.0 + h / 2.0, (size.1 - gaps.1 - h / 2.0).max(gaps.0 + h / 2.0));
-}
-
-fn clamp_all(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
-    for p in pills {
-        clamp_pill(p, size, margin, gaps);
-    }
-}
-
-/// Signed air between two pills at their homes: positive = gap.
-fn air(a: &Pill, b: &Pill) -> f32 {
-    let (aw, ah) = a.size();
-    let (bw, bh) = b.size();
-    ((a.home.0 - b.home.0).abs() - (aw + bw) / 2.0).max((a.home.1 - b.home.1).abs() - (ah + bh) / 2.0)
-}
-
-/// Soft discs: start scattered, then each pill nudges only the neighbours
-/// inside its reach (and the edges, the same way) until the spacing is even
-/// everywhere. The short reach is what fills the middle; long-range
-/// repulsion would press everything against the rim. Distances count x at
-/// half, since pills are wide. Writes each pill's `ideal`.
-fn balanced(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32)) {
-    const SX: f32 = 0.55;
+/// The grid for `n` tiles in a field of `size` at bar scale `s`: columns,
+/// the tile's width and height, where the first tile's cell begins (x, y),
+/// the pitch from one row to the next, and the TILE SCALE — 1, or less in
+/// a field too short for every row at full size (a small screen): the
+/// tiles shrink together, never overlap, never leave the field.
+fn grid_metrics(size: (f32, f32), s: f32, n: usize) -> (usize, f32, f32, f32, f32, f32, f32) {
     let (w, h) = size;
-    let n = pills.len().max(1) as f32;
-    let area = ((w - 2.0 * margin) * SX * (h - gaps.0 - gaps.1)).max(1.0);
-    let reach = 1.08 * (area / n).sqrt();
-    let mut rng = Rng(0x2545_F491);
-    for p in pills.iter_mut() {
-        let (pw, ph) = p.size();
-        p.home = (
-            margin + pw / 2.0 + rng.next() * (w - 2.0 * margin - pw).max(0.0),
-            gaps.0 + ph / 2.0 + rng.next() * (h - gaps.0 - gaps.1 - ph).max(0.0),
-        );
-    }
-    let iters = 400;
-    let mut next = vec![(0.0f32, 0.0f32); pills.len()];
-    for it in 0..iters {
-        let k = 0.35 * (1.0 - it as f32 / iters as f32) + 0.05;
-        for (i, a) in pills.iter().enumerate() {
-            let (mut fx, mut fy) = (0.0, 0.0);
-            for (j, b) in pills.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-                let dx = (a.home.0 - b.home.0) * SX;
-                let dy = a.home.1 - b.home.1;
-                let d = dx.hypot(dy).max(0.01);
-                if d < reach {
-                    let f = (reach - d) / d;
-                    fx += dx * f;
-                    fy += dy * f;
-                }
-            }
-            // The edges push like a neighbour at half the reach.
-            let (aw, ah) = a.size();
-            let edge = reach / 2.0;
-            let l = (a.home.0 - aw / 2.0 - margin) * SX;
-            let r = (w - margin - a.home.0 - aw / 2.0) * SX;
-            let t = a.home.1 - ah / 2.0 - gaps.0;
-            let bt = h - gaps.1 - a.home.1 - ah / 2.0;
-            if l < edge {
-                fx += edge - l;
-            }
-            if r < edge {
-                fx -= edge - r;
-            }
-            if t < edge {
-                fy += edge - t;
-            }
-            if bt < edge {
-                fy -= edge - bt;
-            }
-            next[i] = (a.home.0 + fx / SX * k, a.home.1 + fy * k);
-        }
-        for (p, &n) in pills.iter_mut().zip(&next) {
-            p.home = n;
-            clamp_pill(p, size, margin, gaps);
-        }
-    }
-    for p in pills {
-        p.ideal = p.home;
-    }
-}
-
-/// Settle: pills closer than `gap` push apart, each is pulled back toward
-/// its `ideal` by `pull`, and all stay inside the field.
-fn settle(pills: &mut [Pill], size: (f32, f32), margin: f32, gaps: (f32, f32), gap: f32, pull: f32, iters: usize) {
-    for _ in 0..iters {
-        for i in 0..pills.len() {
-            for j in i + 1..pills.len() {
-                let g = air(&pills[i], &pills[j]);
-                if g >= gap {
-                    continue;
-                }
-                let (ax, ay) = pills[i].home;
-                let (bx, by) = pills[j].home;
-                let (dx, dy) = (bx - ax, (by - ay) * 2.2);
-                let d = dx.hypot(dy).max(1.0);
-                let push = (gap - g) * 0.25;
-                let (ux, uy) = (dx / d, dy / d);
-                pills[i].home = (ax - ux * push, ay - uy * push * 0.6);
-                pills[j].home = (bx + ux * push, by + uy * push * 0.6);
-            }
-        }
-        for p in pills.iter_mut() {
-            p.home.0 += (p.ideal.0 - p.home.0) * pull;
-            p.home.1 += (p.ideal.1 - p.home.1) * pull;
-            clamp_pill(p, size, margin, gaps);
-        }
-    }
-}
-
-/// Fit the heap to the vertical gaps: its top edge `top` under the dock,
-/// its bottom edge `bottom` above the floor.
-fn fit_vertical(pills: &mut [Pill], h: f32, top: f32, bottom: f32) {
-    let lo = pills.iter().map(|p| p.home.1 - p.size().1 / 2.0).fold(f32::MAX, f32::min);
-    let hi = pills.iter().map(|p| p.home.1 + p.size().1 / 2.0).fold(f32::MIN, f32::max);
-    let k = (h - top - bottom) / (hi - lo).max(1.0);
-    for p in pills {
-        let ph = p.size().1;
-        p.home.1 = top + (p.home.1 - ph / 2.0 - lo) * k + ph / 2.0;
-        p.ideal = p.home;
-    }
+    let margin = MARGIN * s;
+    let cols = GRID_COLS.min(n.max(1));
+    let cw = ((w - 2.0 * margin - (cols - 1) as f32 * CELL_GAP * s) / cols as f32).max(PLATE * s);
+    let rows = n.max(1).div_ceil(cols);
+    let (top, bottom) = (GAP_TOP * s, GRID_BOTTOM * s);
+    let room = (h - top - bottom).max(1.0);
+    let full_h = (PLATE + NAME_GAP + 2.0 * NAME_LINE + 4.0) * s;
+    let needed = rows as f32 * full_h + (rows - 1) as f32 * ROW_GAP * s;
+    let k = if needed > room { (room / needed).clamp(0.5, 1.0) } else { 1.0 };
+    let ch = full_h * k;
+    let pitch = ch + ROW_GAP * s * k;
+    let used = (cols as f32 * cw + (cols - 1) as f32 * CELL_GAP * s).min(w);
+    (cols, cw, ch, (w - used) / 2.0, top, pitch, k)
 }
 
 impl App {
@@ -5664,63 +5446,53 @@ mod tests {
         p
     }
 
+    /// A tile's cell, from its home.
+    fn cell(p: &Pill) -> Rect {
+        Rect::new(p.home.0 - p.w[1] / 2.0, p.home.1 - p.h[1] / 2.0, p.w[1], p.h[1])
+    }
+
     fn assert_clean(p: &Panel, what: &str) {
         let (w, h) = (p.key.0, p.key.1);
         for (i, a) in p.pills.iter().enumerate() {
-            let (aw, ah) = a.size();
+            let c = cell(a);
             assert!(
-                a.home.0 - aw / 2.0 >= MARGIN - 0.5
-                    && a.home.0 + aw / 2.0 <= w - MARGIN + 0.5
-                    && a.home.1 - ah / 2.0 >= GAP_TOP - 0.5
-                    && a.home.1 + ah / 2.0 <= h - GAP_BOTTOM_FRAC * h + 0.5,
+                c.x >= MARGIN - 0.5 && c.x + c.w <= w - MARGIN + 0.5 && c.y >= GAP_TOP - 0.5 && c.y + c.h <= h - GRID_BOTTOM + 0.5,
                 "{what}: {} leaves the field at {:?}",
                 a.label,
                 a.home
             );
             for b in p.pills.iter().skip(i + 1) {
-                assert!(air(a, b) > 0.0, "{what}: {} and {} overlap", a.label, b.label);
+                let d = cell(b);
+                let apart = c.x + c.w <= d.x + 0.5 || d.x + d.w <= c.x + 0.5 || c.y + c.h <= d.y + 0.5 || d.y + d.h <= c.y + 0.5;
+                assert!(apart, "{what}: {} and {} overlap", a.label, b.label);
             }
         }
     }
 
+    /// The tiles in the order the grid shows them (rows, then columns).
+    fn shown_order(p: &Panel) -> Vec<&'static str> {
+        let mut v: Vec<&Pill> = p.pills.iter().collect();
+        v.sort_by(|a, b| (a.home.1 as i32, a.home.0 as i32).cmp(&(b.home.1 as i32, b.home.0 as i32)));
+        v.iter().map(|q| q.label).collect()
+    }
+
     #[test]
-    fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
+    fn the_grid_holds_every_tile_inside_the_field_seven_across() {
         let p = panel();
         assert_eq!(p.pills.len(), 34);
-        let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [5, 11, 18]);
         assert_clean(&p, "at rest");
-        // Up under the dock: the heap starts at the top gap.
-        let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
-        assert!((top - GAP_TOP).abs() < 3.0, "heap top at {top}");
-    }
-
-    #[test]
-    fn scrolling_cycles_the_layers_and_every_order_lays_out_clean() {
-        let mut p = panel();
-        let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        p.shift_layers(1);
-        assert_eq!(counts(&p), [11, 18, 5], "down: the near group goes to the back");
-        assert_clean(&p, "one step down");
-        p.shift_layers(1);
-        assert_eq!(counts(&p), [18, 5, 11]);
-        assert_clean(&p, "two steps down");
-        p.shift_layers(-1);
-        p.shift_layers(-1);
-        assert_eq!(counts(&p), [5, 11, 18], "up undoes it");
-        // The near group left from the front, so it is leaving now.
-        assert!(p.pills.iter().any(|q| q.exit.is_some()));
-    }
-
-    #[test]
-    fn a_leaving_layer_arrives_at_the_other_end() {
-        let mut p = panel();
-        p.shift_layers(1);
-        for _ in 0..60 {
-            p.step(1.0 / 60.0, None);
-        }
-        assert!(p.pills.iter().all(|q| q.exit.is_none() && q.drawn == q.layer));
-        assert!(p.pills.iter().all(|q| q.op > 0.95), "everyone back in view");
+        // Up under the dock: the first row starts at the top gap.
+        let top = p.pills.iter().map(|q| cell(q).y).fold(f32::MAX, f32::min);
+        assert!((top - GAP_TOP).abs() < 0.5, "first row at {top}");
+        let mut rows: Vec<i32> = p.pills.iter().map(|q| q.home.1 as i32).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows.len(), 5, "34 tiles in 5 rows");
+        assert_eq!(p.pills.iter().filter(|q| q.home.1 as i32 == rows[0]).count(), GRID_COLS, "seven on the first row");
+        // The first order: the near layer's five first (their seeds).
+        assert_eq!(&shown_order(&p)[..5], &["Resolution", "Scale", "Wi-Fi", "Sound output", "Colours"]);
+        // Every name on at most two lines.
+        assert!(p.pills.iter().all(|q| (1..=2).contains(&q.lines.len())), "{:?}", p.pills.iter().map(|q| q.lines.len()).collect::<Vec<_>>());
     }
 
     #[test]
@@ -5756,26 +5528,18 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_brings_back_the_first_layer_order() {
+    fn a_reset_puts_every_tile_home_with_no_search() {
         let mut p = panel();
-        let first: Vec<(u8, (f32, f32))> = p.pills.iter().map(|q| (q.layer, q.home)).collect();
-        p.shift_layers(1);
+        let first: Vec<(f32, f32)> = p.pills.iter().map(|q| q.home).collect();
         p.set_query("wifi");
+        for _ in 0..30 {
+            p.step(1.0 / 60.0, None);
+        }
         p.reset();
-        assert_eq!(p.shift, 0);
-        for (q, (layer, home)) in p.pills.iter().zip(&first) {
-            assert_eq!(q.layer, *layer, "{} back on its first layer", q.label);
+        for (q, home) in p.pills.iter().zip(&first) {
             assert!((q.home.0 - home.0).abs() < 0.5 && (q.home.1 - home.1).abs() < 0.5, "{} back home", q.label);
-            assert!(q.exit.is_none() && q.focus == 0.0);
+            assert!(q.focus == 0.0 && q.pos == q.home);
         }
-    }
-
-    fn layer_sizes(p: &Panel) -> [usize; 3] {
-        let mut n = [0; 3];
-        for q in &p.pills {
-            n[q.group as usize] += 1;
-        }
-        n
     }
 
     #[test]
@@ -5804,29 +5568,27 @@ mod tests {
     }
 
     #[test]
-    fn use_brings_a_setting_closer_one_layer_at_a_time() {
+    fn use_brings_a_setting_forward_in_the_grid() {
         let mut p = panel();
-        let now = 1_000_000;
-        let far = p.pills.iter().position(|q| q.group == 2).unwrap();
-        // Seeded: a never-used middle setting holds 1, a near one 2.
-        p.record_use(far, now);
-        assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
-        p.record_use(far, now);
-        assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
-        assert_eq!(layer_sizes(&p), [5, 11, 18], "the layers keep their sizes");
-        p.record_use(far, now);
-        assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
-        assert_eq!(layer_sizes(&p), [5, 11, 18]);
-        // Whoever it passed stepped back exactly one layer.
-        let back: Vec<(&str, u8, u8)> = p
-            .pills
-            .iter()
-            .zip(SETTINGS)
-            .filter(|(q, s)| q.group != s.1 && q.label != p.pills[far].label)
-            .map(|(q, s)| (q.label, s.1, q.group))
-            .collect();
-        assert_eq!(back.len(), 2, "two settings stepped back: {back:?}");
-        assert!(back.iter().all(|&(_, from, to)| to == from + 1), "{back:?}");
+        let now = now_secs();
+        let last = p.pills.len() - 1;
+        let label = p.pills[last].label;
+        let place = |p: &Panel| shown_order(p).iter().position(|l| *l == label).unwrap();
+        assert_eq!(place(&p), last, "Privacy starts last");
+        // Seeded: a never-used far setting holds 0, a middle one 1, a near one 2.
+        p.record_use(last, now);
+        assert!(place(&p) < last && place(&p) >= 5, "one use passes the far ones only: {}", place(&p));
+        p.record_use(last, now);
+        p.record_use(last, now);
+        assert_eq!(place(&p), 0, "three uses bring it to the front");
+        assert_clean(&p, "after uses");
+        // Everyone else keeps their order among themselves.
+        let rest: Vec<&str> = shown_order(&p).into_iter().filter(|l| *l != label).collect();
+        let first: Vec<&str> = SETTINGS.iter().map(|s| s.0).filter(|l| *l != label).collect();
+        let by_seed = |l: &str| SETTINGS.iter().find(|s| s.0 == l).map_or(0, |s| s.1);
+        let mut expect = first.clone();
+        expect.sort_by_key(|l| by_seed(l));
+        assert_eq!(rest, expect);
     }
 
     #[test]
@@ -5836,15 +5598,15 @@ mod tests {
         assert!((st.score_at(two_weeks) - 2.0).abs() < 1e-9, "a use counts half after the half-life");
 
         let mut p = panel();
-        let far = p.pills.iter().position(|q| q.group == 2).unwrap();
-        p.record_use(far, 1_000);
-        p.record_use(far, 1_000);
+        let last = p.pills.len() - 1;
+        let now = now_secs();
+        p.record_use(last, now);
+        p.record_use(last, now);
         let json = serde_json::to_string(&p.usage).unwrap();
         let mut again = Panel { items: &SETTINGS, usage: serde_json::from_str(&json).unwrap(), ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
         again.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
-        let groups = |p: &Panel| p.pills.iter().map(|q| q.group).collect::<Vec<_>>();
-        assert_eq!(groups(&again), groups(&p), "the saved arrangement comes back");
+        assert_eq!(shown_order(&again), shown_order(&p), "the saved order comes back");
     }
 
     #[test]
@@ -5859,8 +5621,9 @@ mod tests {
             p.step(1.0 / 60.0, None);
         }
         assert!(p.open.as_ref().is_some_and(|o| o.k > 0.95));
-        p.shift_layers(1);
-        assert_eq!(p.shift, 0, "an open setting holds the layers still");
+        // The wheel over an open setting moves no tile.
+        p.wheel(30.0);
+        assert!(p.pills.iter().all(|q| q.pos == q.home));
         assert!(p.escape());
         for _ in 0..60 {
             p.step(1.0 / 60.0, None);
