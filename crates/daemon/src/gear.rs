@@ -88,6 +88,8 @@ pub(crate) const G_GO: &str = "\u{f0142}";
 const G_REFRESH: &str = "\u{f021}";
 const G_PLUS: &str = "\u{f067}";
 const G_EYE: &str = "\u{f06e}";
+/// Being visible to others (Bluetooth): a broadcast.
+const G_BROADCAST: &str = "\u{f1720}";
 const G_QR: &str = "\u{f029}";
 const G_LINK: &str = "\u{f0c1}";
 const G_UNLINK: &str = "\u{f127}";
@@ -1406,7 +1408,13 @@ impl App {
         View {
             items,
             footer: vec![
-                btn(Hit::WifiScan, G_REFRESH),
+                // (Lit while it searches, as Bluetooth's: a fill is a state.)
+                Btn {
+                    hit: Hit::WifiScan,
+                    glyph: G_REFRESH,
+                    lit: g.net_scanning,
+                    ..Default::default()
+                },
                 btn(Hit::Hidden, G_PLUS),
                 Btn {
                     hit: Hit::Hotspot,
@@ -1826,7 +1834,9 @@ impl App {
                 },
                 Btn {
                     hit: Hit::BtVisible,
-                    glyph: G_EYE,
+                    // (Not the eye: the eye shows a password. THE KIT: one
+                    // symbol, one meaning.)
+                    glyph: G_BROADCAST,
                     lit: snap.discoverable,
                     ..Default::default()
                 },

@@ -1490,12 +1490,15 @@ impl App {
                     .iter()
                     .find(|e| &e.id == id)
                     .map_or_else(|| id.clone(), |e| e.name.clone());
-                items.push(Item::Toggle {
-                    hit: sys(SysHit::Fast(id.clone())),
-                    label: name,
-                    hint: String::new(),
-                    on: true,
-                });
+                // (An app on the list, not a switch that is always on: THE KIT.
+                // The can, on hover, takes it off the list.)
+                items.push(row_with(
+                    row(Some(monogram(&name)), name, ""),
+                    Hit::None,
+                    Some((sys(SysHit::Fast(id.clone())), G_TRASH)),
+                    Trail::None,
+                    Tone::Normal,
+                ));
             }
             items.push(row_with(
                 row(
