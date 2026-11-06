@@ -193,15 +193,18 @@ fn change_password() {
 fn passwd(current: &str, new: &str) -> Result<(), String> {
     let answers = [("current", current), ("old", current), ("new", new), ("retype", new), ("again", new), ("password:", current)];
     let (status, out) = run_on_tty("passwd", &[], &answers, Duration::from_secs(20))?;
-    info!("account: passwd ended {status:?}");
+    // (What it printed holds no password: the prompts, its own words.)
+    info!("account: passwd ended {status:?}: {}", out.replace('\n', " / ").trim());
     if status == Some(0) {
         return Ok(());
     }
     // Its own reason: the current password wrong (PAM's words for it), a
     // new one it will not take (its "BAD PASSWORD" line), else the last
     // line that says something.
+    // (It never got to ask for a new one: the current one was refused —
+    // "Permission denied" on this PAM, other words elsewhere.)
     let low = out.to_lowercase();
-    if low.contains("authentication token manipulation error") || low.contains("incorrect") || low.contains("authentication failure") {
+    if !low.contains("new password") || low.contains("authentication token manipulation error") || low.contains("incorrect") || low.contains("authentication failure") || low.contains("permission denied") {
         return Err(tr("the current password is not right").to_owned());
     }
     if let Some(bad) = out.lines().map(str::trim).find(|l| l.to_uppercase().contains("BAD PASSWORD")) {
