@@ -6309,6 +6309,9 @@ impl App {
                     win.layer_of(&chrome::glyph(name))
                 }
             };
+            if let Some(r) = win.renderer.as_ref() {
+                menu.measure_search(&|t, px| r.measure_text(t, px, None));
+            }
             menu.push(&mut scene, &self.filer_panel_paint(menu.rect, ground), &glyph);
         }
         if let Some(props) = win.props.as_ref() {

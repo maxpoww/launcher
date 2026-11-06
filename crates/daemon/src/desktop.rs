@@ -327,9 +327,13 @@ impl Drop for DragIcon {
 pub(crate) struct Rename {
     pub item: usize,
     pub text: String,
-    /// The whole name is selected (as it opens): the first key replaces
-    /// it, a Backspace clears it.
-    pub all: bool,
+    /// How much of the name is selected from its start, in bytes: as it
+    /// opens, its STEM (a file's ending stays out, as in Files) — the first
+    /// key replaces it, a Backspace clears it.
+    pub picked: usize,
+    /// Where the typing goes (a byte index of `text`; THE KIT's field: a
+    /// caret the arrows move).
+    pub caret: usize,
 }
 
 /// A press of the left button, until it is a click or a drag.
@@ -1990,7 +1994,7 @@ struct Tile<'a> {
     cover: Option<Rect>,
     /// This item's name is being typed: `(text, all selected, text width)`
     /// — a field replaces the name.
-    rename: Option<(&'a str, bool, f32)>,
+    rename: Option<(&'a str, f32, f32, f32)>,
     /// How much bigger than its own size the name is written (the desktop's
     /// zoom; 0 = as it is).
     text: f32,
@@ -2004,7 +2008,6 @@ const FIELD_PAD_Y: f32 = 2.0;
 const FIELD_RADIUS: f32 = 7.0;
 const FIELD_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.6];
 const FIELD_RIM: [f32; 4] = [1.0, 1.0, 1.0, 0.18];
-const FIELD_SEL: [f32; 4] = [1.0, 1.0, 1.0, 0.22];
 
 /// One tile — icon (if its picture has arrived) and shadowed name — into
 /// the scene.
@@ -2043,9 +2046,10 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
     if tile.cover.is_some_and(|c| intersects(&c, &name_rect)) {
         return;
     }
-    if let Some((text, all, w)) = tile.rename {
+    if let Some((text, picked, caret, w)) = tile.rename {
         // The field: a dark pill around the text (never narrower than the
-        // name's room), the text washed while it is all selected, a caret.
+        // name's room); THE KIT's field: the selected part in the accent, a
+        // caret where the typing goes.
         let inner_w = w.max(24.0);
         let field = Rect::new(
             cx - inner_w / 2.0 - FIELD_PAD_X,
@@ -2062,17 +2066,18 @@ fn push_tile(scene: &mut Scene, tile: &Tile) {
                 border,
             });
         }
-        if all && w > 0.0 {
+        if picked > 0.0 {
+            let a = crate::kit::linear(crate::kit::accent());
             scene.rects.push(crate::content::RectInst {
-                rect: Rect::new(cx - w / 2.0, top + 1.0, w, line_px - 2.0),
+                rect: Rect::new(cx - w / 2.0, top + 1.0, picked, line_px - 2.0),
                 radius: 2.0,
-                color: FIELD_SEL,
+                color: [a[0], a[1], a[2], 0.9],
                 glass: 0.0,
                 border: 0.0,
             });
         }
         scene.rects.push(crate::content::RectInst {
-            rect: Rect::new(cx + w / 2.0 + 1.0, top + 2.0, 1.0, line_px - 4.0),
+            rect: Rect::new(cx - w / 2.0 + caret, top + 2.0, 1.5, line_px - 4.0),
             radius: 0.0,
             color: INK,
             glass: 0.0,
@@ -2147,9 +2152,9 @@ pub(crate) struct Live<'a> {
     pub props: Option<(&'a Props, MenuPaint)>,
     /// How much bigger than its own size a name is written (0 = as it is).
     pub text: f32,
-    /// A name being typed: the item, the text, whether all of it is
-    /// selected, and the text's measured width.
-    pub rename: Option<(usize, &'a str, bool, f32)>,
+    /// A name being typed: the item, the text, and measured: how wide its
+    /// selected start is, where its caret stands, how wide it is.
+    pub rename: Option<(usize, &'a str, f32, f32, f32)>,
 }
 
 /// One frame of the desktop: every placed item in its cell (its icon where
@@ -2266,7 +2271,7 @@ pub(crate) fn scene(
                 rename: live
                     .rename
                     .filter(|(r, ..)| *r == i)
-                    .map(|(_, text, all, w)| (text, all, w)),
+                    .map(|(_, text, picked, caret, w)| (text, picked, caret, w)),
                 ink: live.ink,
             },
         );
@@ -4433,10 +4438,16 @@ impl App {
         info!("desktop: renaming {file_name}");
         self.desktop.selected.clear();
         self.desktop.selected.insert(it.path.clone());
+        // (A folder or a volume is named whole; a file's ending stays out.)
+        let stem = match ending(&file_name).filter(|_| it.kind == Kind::File) {
+            Some(end) => file_name.len() - end.len() - 1,
+            None => file_name.len(),
+        };
         self.desktop.rename = Some(Rename {
             item: i,
             text: file_name,
-            all: true,
+            picked: stem,
+            caret: stem,
         });
         crate::surface::set_interactive(layer, true);
         let _ = self.conn.flush();
@@ -4525,33 +4536,68 @@ impl App {
         let Some(rename) = self.desktop.rename.as_mut() else {
             return;
         };
+        // (Files' own keys for a name: `filer_rename_key`.)
         match keysym {
-            Keysym::Return | Keysym::KP_Enter => self.desktop_end_rename(true),
-            Keysym::Escape => self.desktop_end_rename(false),
+            Keysym::Return | Keysym::KP_Enter => return self.desktop_end_rename(true),
+            Keysym::Escape => return self.desktop_end_rename(false),
             Keysym::BackSpace => {
-                if rename.all {
-                    rename.text.clear();
-                    rename.all = false;
-                } else {
-                    rename.text.pop();
+                if rename.picked > 0 {
+                    rename.text.replace_range(..rename.picked, "");
+                    rename.caret = 0;
+                } else if let Some((at, _)) = rename.text[..rename.caret].char_indices().next_back() {
+                    rename.text.replace_range(at..rename.caret, "");
+                    rename.caret = at;
                 }
-                self.request_desktop_draw();
+                rename.picked = 0;
+            }
+            Keysym::Delete => {
+                if rename.picked > 0 {
+                    rename.text.replace_range(..rename.picked, "");
+                    rename.caret = 0;
+                } else if let Some(c) = rename.text[rename.caret..].chars().next() {
+                    rename.text.replace_range(rename.caret..rename.caret + c.len_utf8(), "");
+                }
+                rename.picked = 0;
+            }
+            Keysym::Left => {
+                rename.caret = if rename.picked > 0 {
+                    0
+                } else {
+                    rename.text[..rename.caret].char_indices().next_back().map_or(0, |(at, _)| at)
+                };
+                rename.picked = 0;
+            }
+            Keysym::Right => {
+                if rename.picked == 0 {
+                    rename.caret += rename.text[rename.caret..].chars().next().map_or(0, char::len_utf8);
+                }
+                rename.picked = 0;
+            }
+            Keysym::Home => {
+                rename.caret = 0;
+                rename.picked = 0;
+            }
+            Keysym::End => {
+                rename.caret = rename.text.len();
+                rename.picked = 0;
             }
             _ => {
-                let Some(s) = utf8.filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) else {
+                let Some(typed) = utf8.filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) else {
                     return;
                 };
                 if self.modifiers.ctrl {
                     return;
                 }
-                if rename.all {
-                    rename.text.clear();
-                    rename.all = false;
+                if rename.picked > 0 {
+                    rename.text.replace_range(..rename.picked, "");
+                    rename.caret = 0;
+                    rename.picked = 0;
                 }
-                rename.text.push_str(s);
-                self.request_desktop_draw();
+                rename.text.insert_str(rename.caret, typed);
+                rename.caret += typed.len();
             }
         }
+        self.request_desktop_draw();
     }
 
     /// A click on the desktop gives it the keyboard, so the shortcuts a
@@ -5072,7 +5118,12 @@ impl App {
             .desktop
             .rename
             .as_ref()
-            .map(|r| (r.item, r.text.as_str(), r.all, renderer.measure_text(&r.text, name_px, None)));
+            .map(|r| {
+                let w = renderer.measure_text(&r.text, name_px, None);
+                let picked = if r.picked > 0 { renderer.measure_text(&r.text[..r.picked], name_px, None) } else { 0.0 };
+                let caret = renderer.measure_text(&r.text[..r.caret], name_px, None);
+                (r.item, r.text.as_str(), picked, caret, w)
+            });
         let max_w = label_max_w(&self.desktop.grid.rect((0, 0)));
         // Names on up to TWO lines, as in Files (Max, 2026-10-22: "the same
         // 2-line rule as the grid"), cut in the middle past that; a line
@@ -6444,10 +6495,28 @@ impl App {
                 "right" => Keysym::Right,
                 "up" => Keysym::Up,
                 "down" => Keysym::Down,
+                "home" => Keysym::Home,
+                "end" => Keysym::End,
+                "backspace" => Keysym::BackSpace,
+                "enter" => Keysym::Return,
+                "f2" => Keysym::F2,
                 other => return format!("no key {other}"),
             };
-            self.desktop_shortcut(key);
+            // (A name being typed takes the keys first, as `handle_key_event` does.)
+            if self.desktop.rename.is_some() {
+                self.desktop_key(key, None);
+            } else {
+                self.desktop_shortcut(key);
+            }
             return format!("key {}", rest.trim());
+        }
+        // `type <text>`: into the name being typed.
+        if let Some(rest) = what.strip_prefix("type ") {
+            if self.desktop.rename.is_none() {
+                return "no name is being typed".to_owned();
+            }
+            self.desktop_key(Keysym::NoSymbol, Some(rest));
+            return format!("typed {rest}");
         }
         // `menu [n]`: the menu on item n (or the wallpaper's, mid-surface);
         // `pick <row>`: choose that row of the open menu.

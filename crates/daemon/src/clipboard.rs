@@ -2602,9 +2602,25 @@ impl App {
             border: 0.0,
         });
         let field_font = FONT_PX * 1.12;
-        let tx = field.x + PILL_PAD_X + 4.0;
         let ty = field.y + (field.h - LINE_PX) / 2.0;
         let fclip = Rect::new(field.x, field.y, field.w, field.h);
+        // THE KIT's field: its symbol first, saying what is typed (the book,
+        // the footer button's own), as the clipboard's search has its magnifier.
+        let gx = field.x + PILL_PAD_X + 2.0;
+        scene.labels.push(Label {
+            text: GLYPH_BOOK.to_owned(),
+            pos: (gx, ty),
+            max_w: FONT_PX * 2.0,
+            font_px: FONT_PX * 0.95,
+            line_px: LINE_PX,
+            centered: false,
+            dim: false,
+            cache: true,
+            family: Some(NERD),
+            color: Some([dim_ink[0], dim_ink[1], dim_ink[2], dim_ink[3] * a]),
+            clip: Some(fclip),
+        });
+        let tx = gx + FONT_PX * 1.7;
         let empty = self.clip.dict_query.is_empty();
         let (text, col) = if empty {
             (crate::i18n::tr("Type a word…").to_owned(), dim_ink)
@@ -2624,13 +2640,16 @@ impl App {
             color: Some([col[0], col[1], col[2], col[3] * a]),
             clip: Some(fclip),
         });
-        // Caret: a thin bar after the estimated query width (no live measure on a
-        // `&self` draw — the half-em estimate matches the row-time width guess).
-        let cw = self.clip.dict_query.chars().count() as f32 * field_font * 0.5;
-        let caret_x = (tx + cw).min(field.x + field.w - PILL_PAD_X);
+        // Caret: a thin bar after the query, measured (`measure_text` takes
+        // `&self`), else the half-em estimate.
+        let cw = match self.options_renderer.as_ref() {
+            Some(r) => r.measure_text(&self.clip.dict_query, field_font, None),
+            None => self.clip.dict_query.chars().count() as f32 * field_font * 0.5,
+        };
+        let caret_x = (tx + cw + 1.0).min(field.x + field.w - PILL_PAD_X);
         scene.rects.push(RectInst {
-            rect: Rect::new(caret_x, field.y + field.h * 0.26, 2.0, field.h * 0.48),
-            radius: 1.0,
+            rect: Rect::new(caret_x, field.y + field.h * 0.26, 1.5, field.h * 0.48),
+            radius: 0.75,
             color: [ink[0], ink[1], ink[2], ink[3] * a * 0.8],
             glass: 0.0,
             border: 0.0,

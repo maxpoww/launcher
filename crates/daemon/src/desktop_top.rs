@@ -222,6 +222,9 @@ impl App {
                 let key = if name.contains(':') { name.to_owned() } else { crate::glyphs::key(name) };
                 layers.iter().position(|k| *k == key).map(|l| l as u32)
             };
+            if let Some(r) = self.desktop_top.renderer.as_ref() {
+                menu.measure_search(&|t, px| r.measure_text(t, px, None));
+            }
             menu.push(scene, &self.shell_panel_paint(menu.rect), &glyph);
         }
         if let Some(props) = self.desktop.props.as_ref() {

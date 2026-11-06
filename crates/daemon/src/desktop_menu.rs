@@ -1159,6 +1159,9 @@ pub(crate) struct Menu {
     /// Held by a box (the phone pill's): its width and its tallest are the
     /// box's (`fit`).
     held: Option<(f32, f32)>,
+    /// The search's words as wide as the host measured them (`measure_search`):
+    /// where THE KIT's caret stands. Unmeasured, no caret.
+    search_w: std::cell::Cell<Option<f32>>,
 }
 
 impl Menu {
@@ -1212,6 +1215,7 @@ impl Menu {
             capped: false,
             other: None,
             held: None,
+            search_w: std::cell::Cell::new(None),
         };
         menu.place();
         menu
@@ -1668,6 +1672,13 @@ impl Menu {
         names
     }
 
+    /// The host measures the search's words (it has the renderer; the menu
+    /// does not), before drawing: the caret goes after them.
+    pub fn measure_search(&self, measure: &dyn Fn(&str, f32) -> f32) {
+        let w = self.other.as_ref().filter(|_| self.page == Page::OtherApp).map(|o| measure(&o.query, FONT_PX * self.scale));
+        self.search_w.set(w);
+    }
+
     /// Draw the menu over everything in `scene`. `glyph` gives the icon
     /// layer a symbol is in (none: the row has words alone).
     pub fn push(&self, scene: &mut Scene, paint: &MenuPaint, glyph: &dyn Fn(&str) -> Option<u32>) {
@@ -1837,6 +1848,17 @@ impl Menu {
                         ink,
                         clip,
                     ));
+                    // THE KIT's field: a caret where the typing goes.
+                    if let Some(w) = self.search_w.get() {
+                        let x = rect.x + TEXT_X * s + if typed.is_empty() { 0.0 } else { w } + 1.0 * s;
+                        grid.rects.push(RectInst {
+                            rect: Rect::new(x.min(field.x + field.w - 6.0 * s), cy - LINE_PX * s / 2.0 + 2.0 * s, 1.5 * s, LINE_PX * s - 4.0 * s),
+                            radius: 0.0,
+                            color: fade(paint.ink),
+                            glass: 0.0,
+                            border: 0.0,
+                        });
+                    }
                 }
                 Row::Item {
                     label: words,
