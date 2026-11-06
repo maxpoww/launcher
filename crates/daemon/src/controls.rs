@@ -24,7 +24,7 @@ use calloop::channel::Sender;
 use tracing::{debug, info, warn};
 
 use crate::display::GolemSettings;
-use crate::i18n::tr;
+use crate::i18n::{fill, tr};
 
 /// One choice of a setting.
 #[derive(Debug, Clone, PartialEq)]
@@ -783,6 +783,7 @@ pub(crate) fn ui_key(key: &str) -> bool {
         || key.starts_with("idle-")
         || matches!(key, "printers-add" | "printers-scan-app")
         || matches!(key, "access-text" | "access-motion" | "access-reader-install" | "startup-add" | "notif-app" | "account-fields")
+        || matches!(key, "night-auto" | "notif-hours" | "notif-hours-from" | "notif-hours-to")
         || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
@@ -1283,6 +1284,35 @@ pub(crate) fn parse_recording(dump: &serde_json::Value) -> Vec<String> {
     apps.sort();
     apps.dedup();
     apps
+}
+
+/// How many apps' sliders the Volume page shows.
+const APP_STREAMS: usize = 6;
+
+/// The apps playing sound now: (the stream's id, the app's name, its level
+/// 0..1), by name. Read from the same dump the devices come from.
+fn app_streams() -> Vec<(u64, String, f64)> {
+    let dump = sound_dump();
+    let mut out: Vec<(u64, String, f64)> = dump
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let props = &o["info"]["props"];
+            if props["media.class"].as_str() != Some("Stream/Output/Audio") {
+                return None;
+            }
+            let id = o["id"].as_u64()?;
+            let name = props["application.name"].as_str().or_else(|| props["node.name"].as_str()).unwrap_or(tr("An app")).to_owned();
+            if matches!(name.as_str(), "cava" | "waverunner") {
+                return None;
+            }
+            let (level, _) = parse_volume(&self::out("wpctl", &["get-volume", &id.to_string()])?)?;
+            Some((id, name, level))
+        })
+        .collect();
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
 }
 
 /// Whether some program holds a camera open.
@@ -2173,6 +2203,16 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 view.subtitle = if muted { tr("Muted").to_owned() } else { format!("{:.0}%", level * 100.0) };
                 view.groups.push(Group { caption: None, ..levels });
                 view.groups.push(mute);
+                // EACH APP PLAYING (2026-11-06): its own slider, the level
+                // sent with the stream's id.
+                for (id, name, level) in app_streams().into_iter().take(APP_STREAMS) {
+                    let mut g = slider("app-volume", (level * 100.0).round().clamp(0.0, 100.0) as u8);
+                    g.caption = Some(format!("{name} · {:.0}%", level * 100.0));
+                    for c in &mut g.choices {
+                        c.value = format!("{id}:{}", c.value);
+                    }
+                    view.groups.push(g);
+                }
             }
             None => view.subtitle = tr("Nothing to play sound through.").to_owned(),
         },
@@ -2374,6 +2414,16 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 110.0,
                 stops.iter().enumerate().map(|(i, (s, name))| choice(tr(name), i == lit, s.to_string())).collect(),
             ));
+            // BY ITSELF (2026-11-06): on at dusk, off at dawn, at the warmth
+            // chosen above (the sun's place comes from the time zone).
+            let s = GolemSettings::load();
+            let mut auto = on_off(Some("At night"), "night-auto", s.night_auto == Some(true));
+            if let Some(on) = auto.choices.first_mut() {
+                let warm = s.night_k.unwrap_or(crate::screen::NIGHT_DEFAULT_K);
+                let name = stops.iter().find(|(k, _)| *k == warm).map_or("Warmer", |(_, n)| n);
+                on.hint = Some(fill(tr("From dusk to dawn, {warmth}."), &[("warmth", &tr(name).to_lowercase())]));
+            }
+            view.groups.push(auto);
         }
         "Notifications" => {
             view.subtitle = tr(if ui.dnd {
@@ -2383,6 +2433,17 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             })
             .to_owned();
             view.groups.push(on_off(Some("Do not disturb"), "dnd", ui.dnd));
+            // QUIET HOURS (2026-11-06): nothing pops up at night.
+            let dock = crate::settings::Settings::load();
+            view.groups.push(on_off(Some("Quiet at night"), "notif-hours", dock.notif_quiet_hours));
+            if dock.notif_quiet_hours {
+                let (from, to) = (dock.notif_quiet_from.unwrap_or(crate::notif::QUIET_FROM), dock.notif_quiet_to.unwrap_or(crate::notif::QUIET_TO));
+                let hour = |h: u8| format!("{h}:00");
+                let froms = [20u8, 21, 22, 23, 0].iter().map(|h| choice(hour(*h), *h == from, h.to_string())).collect();
+                view.groups.push(Group { labelled: true, ..group(Some("From"), "notif-hours-from", 0.0, froms) });
+                let tos = [6u8, 7, 8, 9, 10].iter().map(|h| choice(hour(*h), *h == to, h.to_string())).collect();
+                view.groups.push(Group { labelled: true, ..group(Some("Until"), "notif-hours-to", 0.0, tos) });
+            }
             // QUIET APPS (2026-11-06): each app that has sent one, lit while
             // its notifications pop up; a click makes it quiet (they wait in
             // the bell) or lets it pop again.
@@ -2871,6 +2932,13 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             s.clock_12h = Some(value == "12");
             s.store();
         }),
+        "app-volume" => {
+            if let Some((id, level)) = value.split_once(':') {
+                if id.parse::<u64>().is_ok() && level.parse::<u8>().is_ok_and(|l| l <= 100) {
+                    run("wpctl", &["set-volume", id, &format!("{level}%")]);
+                }
+            }
+        }
         k if crate::input_page::apply(k, value)
             || crate::access_page::apply(k, value)
             || crate::idle_page::apply(k, value)

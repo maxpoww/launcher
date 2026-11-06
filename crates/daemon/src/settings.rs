@@ -44,6 +44,12 @@ pub(crate) struct Settings {
     /// notifications never pop up — they wait in the bell, read. By the
     /// app's name as the notification carries it, folded (`notif::app_key`).
     pub(crate) notif_quiet: Vec<String>,
+    /// QUIET HOURS (the Notifications page, 2026-11-06): between these two
+    /// hours nothing pops up (the bell blinks, as under Do not disturb).
+    /// `None` = the shipped 22 → 7.
+    pub(crate) notif_quiet_hours: bool,
+    pub(crate) notif_quiet_from: Option<u8>,
+    pub(crate) notif_quiet_to: Option<u8>,
     /// Closing the lid does nothing.
     pub(crate) lid_nothing: bool,
     /// Apps (desktop ids) that are opened on the fast graphics card.

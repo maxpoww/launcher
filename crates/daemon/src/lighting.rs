@@ -590,6 +590,8 @@ impl App {
         }
         // What a fade owes the apps, if the room has gone quiet since.
         self.lighting_apply_if_due();
+        // The night light by itself rides this tick too (`screen.rs`).
+        self.night_light_tick();
         if !self.lighting.on {
             return;
         }

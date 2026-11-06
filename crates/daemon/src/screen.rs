@@ -60,7 +60,51 @@ impl ScreenState {
     }
 }
 
+/// Which side of dusk the night light's tick last saw: 0 none yet, 1 day,
+/// 2 night. It acts on a change of side only, so a warmth the owner picks by
+/// hand meanwhile stands until the next dusk or dawn.
+static NIGHT_SIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Civil dusk: the sun this far under the horizon.
+const DUSK_DEG: f64 = -6.0;
+
+/// The warmth the night gets when none was ever chosen.
+pub(crate) const NIGHT_DEFAULT_K: u32 = 4000;
+
 impl App {
+    /// THE NIGHT LIGHT BY ITSELF (the Controls gap audit, 2026-11-06: every
+    /// settings app turns it on at sunset): with "At night" on, the warmth
+    /// last chosen goes on at dusk and off at dawn — the sun's elevation from
+    /// the time zone, asked by the lighting's own tick (every 30 s). At the
+    /// dock's start the sky's side is taken as it is (a laptop opened at
+    /// night comes up warm). "At night" turned on or off is a fresh look.
+    pub(crate) fn night_light_tick(&mut self) {
+        let s = crate::display::GolemSettings::load();
+        if s.night_auto != Some(true) {
+            NIGHT_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let Some(elevation) = options_engine::sun_elevation_deg(now) else {
+            return;
+        };
+        let side = if elevation < DUSK_DEG { 2 } else { 1 };
+        if NIGHT_SIDE.swap(side, std::sync::atomic::Ordering::Relaxed) == side {
+            return;
+        }
+        let want = if side == 2 { s.night_k.unwrap_or(NIGHT_DEFAULT_K).clamp(1000, NEUTRAL_K) } else { NEUTRAL_K };
+        if self.screen.temperature_k.unwrap_or(NEUTRAL_K) != want {
+            tracing::info!("screen: night light {} by itself (sun at {elevation:.1}°)", if side == 2 { "on" } else { "off" });
+            self.set_screen_temperature(want);
+        }
+    }
+
+    /// "At night" was turned on or off: the sky is looked at again now.
+    pub(crate) fn night_auto_changed(&mut self) {
+        NIGHT_SIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.night_light_tick();
+    }
+
     /// Remember a screen temperature and put it on. The one way a temperature
     /// is ever set — the sunset prompt's [turn on] and the panel's presets both
     /// come through here, so the memory can never disagree with the screen.

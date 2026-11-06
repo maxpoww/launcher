@@ -846,8 +846,8 @@ impl App {
             // (or, under DND, blinks the bell) — and only for a fresh message, not
             // a cross-source echo of one just shown.
             if fresh_pop && !busy {
-                if self.notif.muted {
-                    // DND on: no pill — just blink the bell icon.
+                if self.notif.muted || self.notif_quiet_hours_now() {
+                    // DND on (or the quiet hours): no pill — just blink the bell icon.
                     self.notif_blink();
                 } else {
                     // DND off: pop the preview pill.
@@ -3570,7 +3570,39 @@ pub(crate) fn app_shown(n: &ActiveNotification) -> String {
     if name.eq_ignore_ascii_case("waverunner") { "Golem".to_owned() } else { name }
 }
 
+/// Whether `hour` lies in the quiet hours `from` → `to` (a span that may
+/// cross midnight; `from == to` is never).
+pub(crate) fn in_quiet_hours(hour: u8, from: u8, to: u8) -> bool {
+    if from == to {
+        return false;
+    }
+    if from < to {
+        (from..to).contains(&hour)
+    } else {
+        hour >= from || hour < to
+    }
+}
+
+/// The shipped quiet hours: ten at night to seven.
+pub(crate) const QUIET_FROM: u8 = 22;
+pub(crate) const QUIET_TO: u8 = 7;
+
 impl App {
+    /// Whether it is the quiet hours now (the Notifications page's switch).
+    fn notif_quiet_hours_now(&self) -> bool {
+        if !self.settings.notif_quiet_hours {
+            return false;
+        }
+        // SAFETY: `localtime_r` fills a caller-owned `tm`; `time` takes null.
+        let hour = unsafe {
+            let t = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::localtime_r(&t, &mut tm);
+            tm.tm_hour as u8
+        };
+        in_quiet_hours(hour, self.settings.notif_quiet_from.unwrap_or(QUIET_FROM), self.settings.notif_quiet_to.unwrap_or(QUIET_TO))
+    }
+
     /// Whether `n`'s app is on the quiet list.
     fn notif_app_quiet(&self, n: &ActiveNotification) -> bool {
         let key = app_key(n);
@@ -4060,6 +4092,17 @@ mod tests {
 
     /// A hyperlinked body (KDE Connect / WhatsApp) renders as just its anchor
     /// text — the `<a href>` tag is stripped, not shown as source.
+    #[test]
+    fn the_quiet_hours_cross_midnight() {
+        assert!(in_quiet_hours(23, 22, 7));
+        assert!(in_quiet_hours(0, 22, 7));
+        assert!(in_quiet_hours(6, 22, 7));
+        assert!(!in_quiet_hours(7, 22, 7));
+        assert!(!in_quiet_hours(12, 22, 7));
+        assert!(in_quiet_hours(2, 1, 5) && !in_quiet_hours(5, 1, 5));
+        assert!(!in_quiet_hours(3, 3, 3));
+    }
+
     #[test]
     fn strip_markup_keeps_anchor_text() {
         assert_eq!(strip_markup("<a href=\"https://x/y\">Photo</a>"), "Photo");

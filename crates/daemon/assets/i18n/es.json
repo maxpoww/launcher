@@ -1728,5 +1728,10 @@
  "Last updated {when}.": "Última actualización: {when}.",
  "The last try failed ({when}). It tries again every day; a connection is all it needs.": "El último intento falló ({when}). Vuelve a intentar todos los días; solo necesita conexión.",
  "the current password is not right": "la contraseña actual no es la correcta",
- "that one is too weak ({why})": "esa es demasiado débil ({why})"
+ "that one is too weak ({why})": "esa es demasiado débil ({why})",
+ "At night": "De noche",
+ "From dusk to dawn, {warmth}.": "Del anochecer al amanecer, {warmth}.",
+ "Quiet at night": "Silencio de noche",
+ "From": "Desde",
+ "Until": "Hasta"
 }

@@ -74,14 +74,14 @@ const SETTINGS: [Item; 34] = [
     // look for it by). 5 near, 11 middle, 18 far.
     ("Resolution", 0, "display screen monitor size pixels"),
     ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
-    ("Wi-Fi", 0, "wifi wireless network internet connection"),
+    ("Wi-Fi", 0, "wifi wireless network internet connection hotspot share airplane ip address dns wired ethernet"),
     ("Sound output", 0, "audio speakers speaker headphones output"),
     ("Colours", 0, "dark mode light theme appearance night colors colour color accent palette highlight dynamic websites web apps"),
-    ("Brightness", 1, "display screen backlight dim"),
-    ("Bluetooth", 1, "wireless devices headphones pairing"),
-    ("Volume", 1, "audio sound loud quiet mute"),
+    ("Brightness", 1, "display screen backlight dim auto sensor light"),
+    ("Bluetooth", 1, "wireless devices headphones pairing send receive files"),
+    ("Volume", 1, "audio sound loud quiet mute apps mixer per app"),
     ("Wallpaper", 1, "background desktop picture image appearance"),
-    ("Night light", 1, "display screen warm blue light sunset eyes"),
+    ("Night light", 1, "display screen warm blue light sunset eyes night automatic schedule"),
     // How the windows sit: where they open, how they stick, the side column…
     // (Max, 2026-10-14: "a control called Tiles… we will start dumping
     // controls in there").
@@ -94,7 +94,7 @@ const SETTINGS: [Item; 34] = [
     ("Printers", 2, "printers printer print printing prints queue cancel paper ink toner colour color black white quality draft test page pause resume default scanner"),
     ("Notifications", 1, "alerts do not disturb dnd messages mute silence app quiet"),
     ("Keyboard layout", 1, "input language typing keys layouts switch repeat delay caps lock compose"),
-    ("Power mode", 1, "battery performance energy saver"),
+    ("Power mode", 1, "battery performance energy saver fans fast slow"),
     // THE CONTROLS GAP AUDIT (Max, 2026-11-06, "quiero todo lo necesario, en
     // Controls": what every settings app has and this one lacked): the
     // owner's account, the mouse and touchpad whole, the keys, what starts
@@ -5011,7 +5011,36 @@ impl App {
         match key {
             "night" => {
                 if let Ok(k) = value.parse::<u32>() {
-                    self.set_screen_temperature(k.clamp(1000, crate::screen::NEUTRAL_K));
+                    let k = k.clamp(1000, crate::screen::NEUTRAL_K);
+                    self.set_screen_temperature(k);
+                    // (A warmth chosen is the night's warmth from then on.)
+                    if k != crate::screen::NEUTRAL_K {
+                        crate::display::GolemSettings::change(|s| {
+                            s.night_k = Some(k);
+                            s.store();
+                        });
+                    }
+                }
+            }
+            "night-auto" => {
+                crate::display::GolemSettings::change(|s| {
+                    s.night_auto = Some(value == "on");
+                    s.store();
+                });
+                self.night_auto_changed();
+            }
+            "notif-hours" => {
+                self.settings.notif_quiet_hours = value == "on";
+                self.settings.save();
+            }
+            "notif-hours-from" | "notif-hours-to" => {
+                if let Ok(h) = value.parse::<u8>().filter(|h| *h < 24) {
+                    if key == "notif-hours-from" {
+                        self.settings.notif_quiet_from = Some(h);
+                    } else {
+                        self.settings.notif_quiet_to = Some(h);
+                    }
+                    self.settings.save();
                 }
             }
             // A click on a text field: it takes the keys (`colours_type`).

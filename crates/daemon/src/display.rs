@@ -482,6 +482,12 @@ pub(crate) struct GolemSettings {
     /// THE CLOCK in twelve hours (the bar's pill, `options.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_12h: Option<bool>,
+    /// THE NIGHT LIGHT BY ITSELF (`screen.rs` `night_light_tick`): on at
+    /// dusk, off at dawn, at the warmth last chosen (`night_k`, kelvin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_auto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_k: Option<u32>,
     /// The apps' look: dark, or light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dark: Option<bool>,
