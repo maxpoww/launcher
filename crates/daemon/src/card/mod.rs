@@ -52,7 +52,7 @@ use crate::App;
 mod bar;
 pub(crate) mod dictate;
 mod dnd;
-mod model;
+pub(crate) mod model;
 mod place;
 mod view;
 mod voice;

@@ -1646,7 +1646,21 @@ fn clock_now() -> String {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+        clock_text(tm.tm_hour, tm.tm_min)
+    }
+}
+
+/// `14:05`, or `2:05 pm` when the owner chose twelve hours (the Time zone
+/// page's Clock, 2026-11-06).
+fn clock_text(hour: i32, min: i32) -> String {
+    if crate::display::GolemSettings::load().clock_12h == Some(true) {
+        let h = match hour % 12 {
+            0 => 12,
+            h => h,
+        };
+        format!("{h}:{min:02} {}", if hour < 12 { "am" } else { "pm" })
+    } else {
+        format!("{hour:02}:{min:02}")
     }
 }
 

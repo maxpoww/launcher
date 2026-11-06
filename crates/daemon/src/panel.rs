@@ -69,9 +69,9 @@ type Item = (&'static str, u8, &'static str);
 /// The settings and the layer each starts on (0 near, 1 middle, 2 far):
 /// the ones people reach for float nearest. Placeholders until each becomes
 /// a real setting.
-const SETTINGS: [Item; 27] = [
+const SETTINGS: [Item; 34] = [
     // (name, first layer, search keywords: what else people call it or
-    // look for it by). 5 near, 9 middle, 13 far.
+    // look for it by). 5 near, 11 middle, 18 far.
     ("Resolution", 0, "display screen monitor size pixels"),
     ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
     ("Wi-Fi", 0, "wifi wireless network internet connection"),
@@ -92,17 +92,29 @@ const SETTINGS: [Item; 27] = [
     ("Monitors", 2, "monitors screens displays external tv projector arrange mirror extend isolated rotate turn resolution scale lid"),
     // Printing (2026-10-21): the printers, their prints and what a print gets.
     ("Printers", 2, "printers printer print printing prints queue cancel paper ink toner colour color black white quality draft test page pause resume default scanner"),
-    ("Notifications", 1, "alerts do not disturb dnd messages"),
-    ("Keyboard layout", 1, "input language typing keys"),
+    ("Notifications", 1, "alerts do not disturb dnd messages mute silence app quiet"),
+    ("Keyboard layout", 1, "input language typing keys layouts switch repeat delay caps lock compose"),
     ("Power mode", 1, "battery performance energy saver"),
-    ("Touchpad speed", 2, "trackpad mouse pointer cursor gestures"),
+    // THE CONTROLS GAP AUDIT (Max, 2026-11-06, "quiero todo lo necesario, en
+    // Controls": what every settings app has and this one lacked): the
+    // owner's account, the mouse and touchpad whole, the keys, what starts
+    // with the session, the lock screen, accessibility, VPNs; and the
+    // choices that lived only in the gear box found from here by their words.
+    ("Your account", 1, "user account password name photo picture avatar fingerprint finger login sign in"),
+    ("Mouse and touchpad", 1, "trackpad mouse pointer cursor speed tap click right click left handed scrolling natural size"),
+    ("Shortcuts", 2, "keyboard shortcuts keys hotkeys super combinations binds"),
+    ("Accessibility", 2, "accessibility text size bigger larger magnifier zoom reduce motion animations contrast pointer cursor screen reader"),
+    ("Startup apps", 2, "autostart startup login start boot open at start apps run automatically"),
+    ("Lock screen", 2, "lock screen password sleep idle minutes security away"),
+    ("Sleep", 2, "sleep suspend screen off idle lid close minutes power saving"),
+    ("VPN", 2, "vpn wireguard openvpn tunnel private network connection"),
     ("Language", 2, "region locale translation input"),
-    ("Time zone", 2, "clock date time region"),
+    ("Time zone", 2, "clock date time region 24 12 hour am pm format"),
     ("Natural scrolling", 2, "touchpad trackpad mouse scroll direction"),
     ("Updates", 2, "upgrade system software version"),
-    ("About Golem", 2, "system version info hardware computer"),
+    ("About Golem", 2, "system version info hardware computer name"),
     ("Microphone", 2, "audio input mic recording sound"),
-    ("Battery", 2, "power charge energy"),
+    ("Battery", 2, "power charge energy health"),
     ("Default apps", 2, "applications browser open with"),
     ("Privacy", 2, "security permissions camera location"),
 ];
@@ -113,6 +125,11 @@ pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
     // (Dark mode was a page of its own until 2026-10-15: it is Colours' now.)
     if flat(name) == "darkmode" {
         return Some("Colours");
+    }
+    // (Touchpad speed was a page of its own until 2026-11-06: the mouse and
+    // touchpad have one page now.)
+    if flat(name) == "touchpadspeed" {
+        return Some("Mouse and touchpad");
     }
     SETTINGS.iter().map(|s| s.0).find(|label| flat(label) == flat(name))
 }
@@ -4893,6 +4910,7 @@ impl App {
             has_bt: self.stats_page_for(PageKind::Bt).is_some(),
             has_battery: self.stats_page_for(PageKind::Battery).is_some(),
             apps: self.colours_apps(),
+            notif_apps: self.notif_apps(),
         }
     }
 
@@ -5087,6 +5105,80 @@ impl App {
                 if self.notif_muted() != (value == "on") {
                     self.toggle_notif_mute();
                 }
+            }
+            // THE CONTROLS GAP AUDIT'S PAGES (2026-11-06), the keys that are
+            // this thread's: the idle times (the gear's own machinery), the
+            // text size (the shell's zooms), less motion (the shell's flag),
+            // the reader's install, an app added to the startup folder, a
+            // quiet app.
+            "idle-lock" | "idle-screen" | "idle-sleep" => {
+                if let Ok(secs) = value.parse::<u32>() {
+                    match key {
+                        "idle-lock" => self.settings.lock_secs = Some(secs),
+                        "idle-screen" => self.settings.screen_off_secs = Some(secs),
+                        _ => self.settings.sleep_secs = Some(secs),
+                    }
+                    self.settings.save();
+                    self.apply_idle();
+                }
+            }
+            "idle-lid" => {
+                let nothing = value == "on";
+                self.settings.lid_nothing = nothing;
+                self.settings.save();
+                self.hold_lid(nothing);
+            }
+            "access-text" => {
+                if let Ok(f) = value.parse::<f64>().map(|f| f.clamp(0.7, 2.0)) {
+                    for what in ["bar", "menu", "files", "fast", "desktop"] {
+                        self.zoom(what, &format!("{f:.2}"));
+                    }
+                    crate::display::GolemSettings::change(|s| {
+                        s.text_scale = Some(f);
+                        s.store();
+                    });
+                    let _ = std::thread::Builder::new().name("access-text".into()).spawn(move || {
+                        crate::controls::dconf_write("/org/gnome/desktop/interface/text-scaling-factor", &format!("{f:.2}"));
+                    });
+                }
+            }
+            "access-motion" => {
+                let on = value == "on";
+                crate::animation::set_reduce_motion(on || self.config.accessibility.reduce_motion);
+                crate::display::GolemSettings::change(|s| {
+                    s.reduce_motion = Some(on);
+                    s.store_input();
+                });
+                if !on {
+                    crate::hypr::reload_config();
+                }
+                let _ = std::thread::Builder::new().name("access-motion".into()).spawn(move || {
+                    crate::controls::dconf_write("/org/gnome/desktop/interface/enable-animations", if on { "false" } else { "true" });
+                });
+            }
+            "access-reader-install" => {
+                crate::access_page::INSTALLING.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.start_managed_install(crate::access_page::READER_ATTR, vec![crate::access_page::READER_ID.to_owned()]);
+            }
+            "startup-add" => {
+                if let Some(e) = self.entries.iter().find(|e| e.id == value) {
+                    crate::startup_page::add(&e.id, &e.name, &e.exec, e.icon.as_deref(), e.needs_terminal);
+                    let exec = e.exec.clone();
+                    let terminal = e.needs_terminal;
+                    if let Err(err) = crate::launch::launch(&exec, terminal, &self.config.launch.terminal) {
+                        info!("startup apps: {value} added, not started now: {err:#}");
+                    }
+                }
+            }
+            "notif-app" => {
+                let list = &mut self.settings.notif_quiet;
+                match list.iter().position(|k| *k == value) {
+                    Some(i) => {
+                        list.remove(i);
+                    }
+                    None => list.push(value.clone()),
+                }
+                self.settings.save();
             }
             "open" => {
                 let kind = match value.as_str() {
@@ -5553,9 +5645,9 @@ mod tests {
     #[test]
     fn the_field_is_balanced_inside_its_gaps_without_overlaps() {
         let p = panel();
-        assert_eq!(p.pills.len(), 27);
+        assert_eq!(p.pills.len(), 34);
         let per_layer = [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
-        assert_eq!(per_layer, [5, 9, 13]);
+        assert_eq!(per_layer, [5, 11, 18]);
         assert_clean(&p, "at rest");
         // Up under the dock: the heap starts at the top gap.
         let top = p.pills.iter().map(|q| q.home.1 - q.size().1 / 2.0).fold(f32::MAX, f32::min);
@@ -5567,14 +5659,14 @@ mod tests {
         let mut p = panel();
         let counts = |p: &Panel| [0, 1, 2].map(|l| p.pills.iter().filter(|q| q.layer == l).count());
         p.shift_layers(1);
-        assert_eq!(counts(&p), [9, 13, 5], "down: the near group goes to the back");
+        assert_eq!(counts(&p), [11, 18, 5], "down: the near group goes to the back");
         assert_clean(&p, "one step down");
         p.shift_layers(1);
-        assert_eq!(counts(&p), [13, 5, 9]);
+        assert_eq!(counts(&p), [18, 5, 11]);
         assert_clean(&p, "two steps down");
         p.shift_layers(-1);
         p.shift_layers(-1);
-        assert_eq!(counts(&p), [5, 9, 13], "up undoes it");
+        assert_eq!(counts(&p), [5, 11, 18], "up undoes it");
         // The near group left from the front, so it is leaving now.
         assert!(p.pills.iter().any(|q| q.exit.is_some()));
     }
@@ -5680,10 +5772,10 @@ mod tests {
         assert_eq!(p.pills[far].group, 2, "one use does not yet pass a middle setting");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 1, "two uses step it to the middle");
-        assert_eq!(layer_sizes(&p), [5, 9, 13], "the layers keep their sizes");
+        assert_eq!(layer_sizes(&p), [5, 11, 18], "the layers keep their sizes");
         p.record_use(far, now);
         assert_eq!(p.pills[far].group, 0, "a third steps it to the front");
-        assert_eq!(layer_sizes(&p), [5, 9, 13]);
+        assert_eq!(layer_sizes(&p), [5, 11, 18]);
         // Whoever it passed stepped back exactly one layer.
         let back: Vec<(&str, u8, u8)> = p
             .pills

@@ -448,7 +448,23 @@ pub(crate) fn idle_base(config: &str) -> (Option<u32>, Option<u32>) {
 
 /// The base config with the owner's times put in (`Some(0)` = never: that
 /// step is left out).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn idle_with(config: &str, screen: Option<u32>, sleep: Option<u32>) -> String {
+    idle_with_lock(config, screen, sleep, None)
+}
+
+/// The lock's own step too (the Lock screen page, 2026-11-06): the
+/// listener that runs the lock screen.
+pub(crate) fn idle_lock_base(config: &str) -> Option<u32> {
+    config.split("listener").skip(1).find(|b| b.contains("golem-lock")).and_then(|block| {
+        block
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("timeout"))
+            .and_then(|v| v.trim().trim_start_matches('=').trim().parse::<u32>().ok())
+    })
+}
+
+pub(crate) fn idle_with_lock(config: &str, screen: Option<u32>, sleep: Option<u32>, lock: Option<u32>) -> String {
     let mut parts = config.split("listener");
     let mut out = parts.next().unwrap_or("").to_owned();
     for block in parts {
@@ -456,6 +472,8 @@ pub(crate) fn idle_with(config: &str, screen: Option<u32>, sleep: Option<u32>) -
             screen
         } else if block.contains("golem-idle-suspend") {
             sleep
+        } else if block.contains("golem-lock") {
+            lock
         } else {
             None
         };
@@ -515,7 +533,7 @@ fn config_home() -> PathBuf {
     )
 }
 
-fn idle_base_text() -> Option<String> {
+pub(crate) fn idle_base_text() -> Option<String> {
     std::fs::read_to_string(config_home().join("hypr/hypridle.conf")).ok()
 }
 
@@ -706,7 +724,7 @@ impl App {
         // An erase the dock did not live to finish leaves its file behind,
         // holding the very space it was writing over.
         crate::sys::remove_erase_leftover();
-        if self.settings.screen_off_secs.is_some() || self.settings.sleep_secs.is_some() {
+        if self.settings.screen_off_secs.is_some() || self.settings.sleep_secs.is_some() || self.settings.lock_secs.is_some() {
             self.apply_idle();
         }
         if self.settings.lid_nothing {
@@ -729,13 +747,13 @@ impl App {
 
     /// Write the idle config with the owner's times and point hypridle at it
     /// (a drop-in on its unit); with no choice left, both are removed.
-    fn apply_idle(&mut self) {
+    pub(crate) fn apply_idle(&mut self) {
         let Some(base) = idle_base_text() else { return };
-        let (screen, sleep) = (self.settings.screen_off_secs, self.settings.sleep_secs);
+        let (screen, sleep, lock) = (self.settings.screen_off_secs, self.settings.sleep_secs, self.settings.lock_secs);
         let conf = config_home().join("golem/hypridle.conf");
         let dropin_dir = config_home().join("systemd/user/hypridle.service.d");
         let dropin = dropin_dir.join("50-golem-idle.conf");
-        if screen.is_none() && sleep.is_none() {
+        if screen.is_none() && sleep.is_none() && lock.is_none() {
             let _ = std::fs::remove_file(&dropin);
             let _ = std::fs::remove_file(&conf);
         } else {
@@ -754,7 +772,7 @@ impl App {
                 warn!("gear: cannot find hypridle's own command; idle times not applied");
                 return;
             };
-            crate::persist::write_text("idle config", &conf, &idle_with(&base, screen, sleep));
+            crate::persist::write_text("idle config", &conf, &idle_with_lock(&base, screen, sleep, lock));
             let _ = std::fs::create_dir_all(&dropin_dir);
             crate::persist::write_text(
                 "idle drop-in",
@@ -778,7 +796,7 @@ impl App {
     }
 
     /// Hold (or let go of) the inhibitor that makes closing the lid do nothing.
-    fn hold_lid(&mut self, hold: bool) {
+    pub(crate) fn hold_lid(&mut self, hold: bool) {
         if let Some(mut child) = self.gear.pages.lid_guard.take() {
             let _ = child.kill();
             let _ = child.wait();

@@ -1827,6 +1827,30 @@ pub fn monitors_all_json() -> Option<serde_json::Value> {
     serde_json::from_str(&request("j/monitors all").ok()?).ok()
 }
 
+/// The names of the mice the compositor sees, a touchpad's own mouse face
+/// left out (`…-mouse` beside `…-touchpad` is the same hardware).
+pub(crate) fn mouse_names() -> Vec<String> {
+    let Some(d) = reply_json("j/devices") else { return Vec::new() };
+    let names = |kind: &str| -> Vec<String> {
+        d[kind].as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect()).unwrap_or_default()
+    };
+    let mice = names("mice");
+    let pads: Vec<String> = mice.iter().filter(|n| n.contains("touchpad") || n.contains("trackpad")).cloned().collect();
+    mice.into_iter()
+        .filter(|n| !pads.contains(n))
+        .filter(|n| !pads.iter().any(|p| p.trim_end_matches("-touchpad").trim_end_matches("-trackpad") == n.trim_end_matches("-mouse")))
+        .collect()
+}
+
+/// The pointer's size, now: the compositor's own command, with the theme
+/// the session runs.
+pub(crate) fn set_cursor_size(size: u32) {
+    let theme = std::env::var("XCURSOR_THEME").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "phinger-cursors-light".to_owned());
+    if let Err(e) = request(&format!("setcursor {theme} {size}")) {
+        warn!("Hyprland setcursor failed: {e:#}");
+    }
+}
+
 /// The names of the switches the compositor sees (a laptop's "Lid Switch").
 pub fn switch_names() -> Vec<String> {
     reply_json("j/devices")
@@ -2249,7 +2273,7 @@ pub fn clear_stage_gaps() {
 /// `/etc/nixos/hyprland.lua:172-188` by hand.
 /// The animation leaves a task switch goes through: the maximize/un-maximize,
 /// the workspace change, the fades and the border transition.
-const STAGE_LEAVES: &[&str] = &[
+pub(crate) const STAGE_LEAVES: &[&str] = &[
     "global",
     "windows",
     "windowsIn",

@@ -440,6 +440,48 @@ pub(crate) struct GolemSettings {
     /// The pointer's speed, -1..1 (the compositor's `input.sensitivity`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer_speed: Option<f64>,
+    /// THE MOUSE AND TOUCHPAD WHOLE (the Controls gap audit, 2026-11-06;
+    /// `input_page.rs`): tap to click, how the right click is made ("two"
+    /// fingers or the "corner"), the left hand, the touchpad still while
+    /// typing, and the mouse's own speed, given to the mice by name
+    /// (`mouse_names`: read as it is set and at every start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_to_click: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_click: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_handed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing_stills_touchpad: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mouse_names: Vec<String>,
+    /// THE KEYS: how often a held key repeats (a second) and after how long
+    /// (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_delay: Option<u32>,
+    /// THE AIDS (`access_page.rs`): the pointer's size (the cursor theme's
+    /// pixels), the screen magnified round the pointer (the compositor's
+    /// zoom, 1 = off), less motion, and the text's size — one factor the
+    /// apps (dconf) and the shell's own zooms share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magnifier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_motion: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_scale: Option<f64>,
+    /// THE LOCK SCREEN as the session starts (`idle_page.rs`): the password
+    /// asked when the computer is turned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_at_start: Option<bool>,
+    /// THE CLOCK in twelve hours (the bar's pill, `options.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_12h: Option<bool>,
     /// The apps' look: dark, or light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dark: Option<bool>,
@@ -548,7 +590,7 @@ impl GolemSettings {
         }
         out.push_str(&self.colours_lua());
         out.push('\n');
-        for line in self.input_lua() {
+        for line in self.input_lua().into_iter().chain(self.start_lua()) {
             out.push_str(&line);
             out.push('\n');
         }
@@ -596,7 +638,79 @@ impl GolemSettings {
         if let Some(speed) = self.pointer_speed.filter(|s| (-1.0..=1.0).contains(s)) {
             lines.push(format!("hl.config({{ [\"input.sensitivity\"] = {speed} }})"));
         }
+        // The mouse and touchpad whole, the keys, the aids (2026-11-06).
+        if let Some(on) = self.tap_to_click {
+            lines.push(format!("hl.config({{ [\"input.touchpad.tap_to_click\"] = {on} }})"));
+        }
+        if let Some(way) = &self.right_click {
+            let n = u8::from(way != "corner");
+            lines.push(format!("hl.config({{ [\"input.touchpad.clickfinger_behavior\"] = {n} }})"));
+        }
+        if let Some(on) = self.left_handed {
+            lines.push(format!("hl.config({{ [\"input.left_handed\"] = {on} }})"));
+        }
+        if let Some(on) = self.typing_stills_touchpad {
+            lines.push(format!("hl.config({{ [\"input.touchpad.disable_while_typing\"] = {on} }})"));
+        }
+        if let Some(speed) = self.mouse_speed.filter(|s| (-1.0..=1.0).contains(s)) {
+            for name in self.mouse_names.iter().filter(|n| !n.is_empty() && n.len() <= 120) {
+                lines.push(format!("hl.device({{ name = {}, sensitivity = {speed} }})", lua_quote(name)));
+            }
+        }
+        if let Some(rate) = self.repeat_rate.filter(|r| (1..=200).contains(r)) {
+            lines.push(format!("hl.config({{ [\"input.repeat_rate\"] = {rate} }})"));
+        }
+        if let Some(delay) = self.repeat_delay.filter(|d| (50..=5000).contains(d)) {
+            lines.push(format!("hl.config({{ [\"input.repeat_delay\"] = {delay} }})"));
+        }
+        if let Some(zoom) = self.magnifier.filter(|z| (1.0..=8.0).contains(z)) {
+            lines.push(format!("hl.config({{ [\"cursor.zoom_factor\"] = {zoom} }})"));
+        }
+        if self.reduce_motion == Some(true) {
+            // (The master flag alone leaves every leaf the config turned on
+            // animating — measured for the stage, `hypr::silence_animations`.)
+            lines.push("hl.config({ [\"animations.enabled\"] = false })".to_owned());
+            for leaf in hypr::STAGE_LEAVES {
+                lines.push(format!("hl.animation({{ leaf = \"{leaf}\", enabled = false }})"));
+            }
+        }
         lines
+    }
+
+    /// What `settings.lua` holds beyond the config calls: things done AS
+    /// THE COMPOSITOR STARTS (its own `hyprland.start` handlers run first,
+    /// so these win): the pointer's size, the lock screen asked for at
+    /// start. Not evaluated live (a start handler fires once).
+    fn start_lua(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(size) = self.cursor_size.filter(|s| (16..=96).contains(s)) {
+            let theme = cursor_theme();
+            lines.push(format!(
+                "hl.on(\"hyprland.start\", function() hl.exec_cmd({}) end)",
+                lua_quote(&format!("hyprctl setcursor {theme} {size}"))
+            ));
+        }
+        if self.lock_at_start == Some(true) {
+            lines.push("hl.on(\"hyprland.start\", function() hl.exec_cmd(\"sh -c 'pidof hyprlock || hyprlock'\") end)".to_owned());
+        }
+        lines
+    }
+
+    /// Save the file and put the input choices on the compositor now (the
+    /// pages' own module's way in).
+    pub(crate) fn store_input(&self) {
+        self.store_and_apply_input();
+    }
+
+    /// Several layouts at once (`us,es` / `,cat`), and the keys that switch
+    /// them as xkb options.
+    pub(crate) fn set_keyboards(&mut self, layouts: &[(String, String)], options: &str) {
+        let layout = layouts.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(",");
+        let variant = layouts.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(",");
+        // (Every variant empty: the plain form, as a layout picked alone has.)
+        let variant = if variant.chars().all(|c| c == ',') { String::new() } else { variant };
+        self.keyboard = Some(KeyboardChoice { layout, variant, options: options.to_owned() });
+        self.store_and_apply_input();
     }
 
     /// Save the file and put the input choices on the compositor now.
@@ -613,7 +727,7 @@ impl GolemSettings {
     /// compositor's copy of the file in step with them — at start, for a
     /// `settings.json` written by something else (the installer's seed).
     pub(crate) fn reassert_input(&self) {
-        if self.input_lua().is_empty() {
+        if self.input_lua().is_empty() && self.start_lua().is_empty() {
             return;
         }
         let lua = self.lua();
@@ -692,6 +806,12 @@ impl GolemSettings {
 }
 
 /// A string as a Lua literal.
+/// The cursor theme the session runs with (the compositor's environment,
+/// which this process inherited), else Golem's own.
+fn cursor_theme() -> String {
+    std::env::var("XCURSOR_THEME").ok().filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).unwrap_or_else(|| "phinger-cursors-light".to_owned())
+}
+
 fn lua_quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');

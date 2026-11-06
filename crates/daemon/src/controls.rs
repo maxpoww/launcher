@@ -207,6 +207,7 @@ pub(crate) fn field_start(key: &str) -> Option<(&'static str, String)> {
         "colors-apps-find" => Some(("colors-apps-find", APPS_FIND.lock().ok()?.clone())),
         // (The Printers page's address: typed afresh each time.)
         "printers-add" => Some(("printers-add", String::new())),
+        k if k.starts_with("account-") => crate::account_page::field_start(k),
         _ => None,
     }
 }
@@ -232,6 +233,7 @@ pub(crate) fn field_typed(key: &str, text: &str, done: bool) {
             }
         }
         "printers-add" if done => crate::printers_page::add_typed(text),
+        k if k.starts_with("account-") && done => crate::account_page::field_typed(k, text),
         "colors-edit-name" if done => {
             if let Ok(mut g) = EDITOR.lock() {
                 if let Some(e) = g.as_mut() {
@@ -254,6 +256,10 @@ pub(crate) fn typing_commit() -> bool {
     let typed = TYPING.lock().ok().and_then(|mut t| t.take());
     match typed {
         Some((key @ ("colors-edit-hex" | "colors-edit-name"), text)) => {
+            field_typed(key, &text, true);
+            true
+        }
+        Some((key, text)) if key.starts_with("account-") => {
             field_typed(key, &text, true);
             true
         }
@@ -452,6 +458,8 @@ pub(crate) struct UiFacts {
     /// The apps in the grid, most used first: (desktop id, name, the app
     /// entry — its icon on the Apps page's cards).
     pub apps: Vec<(String, String, usize)>,
+    /// The apps that have sent notifications (key, name), for the quiet list.
+    pub notif_apps: Vec<(String, String)>,
 }
 
 /// The Colours page shows its APPS LIST (the "+" beside Apps) instead.
@@ -753,6 +761,14 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Launcher"
             | "Monitors"
             | "Printers"
+            | "Shortcuts"
+            | "Your account"
+            | "Mouse and touchpad"
+            | "Accessibility"
+            | "Startup apps"
+            | "Lock screen"
+            | "Sleep"
+            | "VPN"
     )
 }
 
@@ -762,7 +778,9 @@ pub(crate) fn ui_key(key: &str) -> bool {
     key.starts_with("colors-")
         || key.starts_with("launcher-")
         || key.starts_with("monitors-")
+        || key.starts_with("idle-")
         || matches!(key, "printers-add" | "printers-scan-app")
+        || matches!(key, "access-text" | "access-motion" | "access-reader-install" | "startup-add" | "notif-app")
         || matches!(
         key,
         "open" | "night" | "dnd" | "restart" | "colors-wallpaper" | "colors-lighting" | "colors-lighting-auto" | "colors-lighting-veil" | "colors-edit-text" | "colors-edit-hex" | "colors-edit-name" | "colors-apps-find" | "colors-edit" | "colors-edit-role" | "colors-edit-colour" | "colors-edit-hue" | "colors-apps-list" | "colors-skip" | "colors-apps" | "colors-palette" | "colors-web" | "colors-icons"
@@ -844,6 +862,26 @@ fn run(program: &str, args: &[&str]) -> bool {
 
 fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice {
     Choice { text: text.into(), on, value: value.into(), swatch: Vec::new(), caption: false, icon: None, hint: None }
+}
+
+/// [`choice`], [`out`], [`run`] and a dconf write, for the pages built in
+/// their own modules.
+pub(crate) fn choice_of(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice {
+    choice(text, on, value)
+}
+
+pub(crate) fn out_of(program: &str, args: &[&str]) -> Option<String> {
+    out(program, args)
+}
+
+pub(crate) fn run_of(program: &str, args: &[&str]) -> bool {
+    run(program, args)
+}
+
+/// A dconf key for the apps (Golem's session has no GSettings schemas on
+/// its path: `dconf` it is, the value as GVariant text).
+pub(crate) fn dconf_write(key: &str, value: &str) -> bool {
+    run("dconf", &["write", key, value])
 }
 
 fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: Vec<Choice>) -> Group {
@@ -1092,7 +1130,7 @@ pub(crate) fn valid_xkb_options(text: &str) -> bool {
 }
 
 /// The keyboard layout in use: the saved choice, else the compositor's.
-fn keyboard_now() -> (String, String) {
+pub(crate) fn keyboard_now() -> (String, String) {
     if let Some(k) = GolemSettings::load().keyboard {
         return (k.layout, k.variant);
     }
@@ -1105,8 +1143,7 @@ fn keyboard_now() -> (String, String) {
     (get("input:kb_layout").unwrap_or_else(|| "us".into()), get("input:kb_variant").unwrap_or_default())
 }
 
-const SPEEDS: [(f64, &str); 5] =
-    [(-0.6, "Slowest"), (-0.3, "Slow"), (0.0, "Normal"), (0.3, "Fast"), (0.6, "Fastest")];
+
 
 // ------------------------------------------------------------------- look
 
@@ -1167,6 +1204,26 @@ fn battery_line() -> Option<String> {
 }
 
 // ------------------------------------------------------------------ about
+
+/// When the system last updated, or how long it has been failing, from
+/// Golem's own marks (`/var/lib/golem-notices/update-ok` and `update-failed`,
+/// unix seconds) and the newest system's own time.
+fn update_marks_text() -> Option<String> {
+    let mark = |name: &str| std::fs::read_to_string(format!("/var/lib/golem-notices/{name}")).ok().and_then(|t| t.trim().parse::<u64>().ok());
+    let newest = std::fs::read_link("/nix/var/nix/profiles/system")
+        .ok()
+        .and_then(|l| std::fs::symlink_metadata(std::path::Path::new("/nix/var/nix/profiles").join(l)).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let ok = mark("update-ok").max(newest)?;
+    let now = crate::usage::now_secs() as u64;
+    let when = crate::card::model::when_text(ok, now);
+    match mark("update-failed") {
+        Some(failed) if failed > ok => Some(crate::i18n::fill(tr("The last try failed ({when}). It tries again every day; a connection is all it needs."), &[("when", &crate::card::model::when_text(failed, now))])),
+        _ => Some(crate::i18n::fill(tr("Last updated {when}."), &[("when", &when)])),
+    }
+}
 
 fn os_name() -> String {
     std::fs::read_to_string("/etc/os-release")
@@ -2324,20 +2381,17 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             })
             .to_owned();
             view.groups.push(on_off(Some("Do not disturb"), "dnd", ui.dnd));
-        }
-        "Keyboard layout" => {
-            let (layout, variant) = keyboard_now();
-            let known = LAYOUTS.iter().find(|(_, l, v)| *l == layout && *v == variant);
-            view.subtitle = known.map_or_else(|| format!("{layout} {variant}").trim().to_owned(), |k| k.0.to_owned());
-            let mut choices: Vec<Choice> = LAYOUTS
-                .iter()
-                .map(|(name, l, v)| choice(*name, *l == layout && *v == variant, format!("{l}:{v}")))
-                .collect();
-            if known.is_none() {
-                choices.insert(0, choice(view.subtitle.clone(), true, format!("{layout}:{variant}")));
+            // QUIET APPS (2026-11-06): each app that has sent one, lit while
+            // its notifications pop up; a click makes it quiet (they wait in
+            // the bell) or lets it pop again.
+            if !ui.notif_apps.is_empty() {
+                let quiet = crate::settings::Settings::load().notif_quiet;
+                let words = ui.notif_apps.iter().map(|(key, name)| choice(name.clone(), !quiet.contains(key), key.clone())).collect();
+                view.groups.push(Group { labelled: true, ..group(Some("Pops up from"), "notif-app", 0.0, words) });
+                view.groups.push(Group { centred: true, ..line(tr("A quiet app's notifications wait in the bell.").to_owned()) });
             }
-            view.groups.push(group(None, "keyboard", 170.0, choices));
         }
+        "Keyboard layout" => crate::input_page::keyboard_view(&mut view),
         "Power mode" => match crate::power_profiles::names() {
             Some(names) => {
                 let now = crate::power_profiles::active().unwrap_or_default();
@@ -2360,18 +2414,13 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             }
             None => view.subtitle = tr("This computer has one power mode.").to_owned(),
         },
-        "Touchpad speed" => {
-            let now = GolemSettings::load().pointer_speed.unwrap_or(0.0);
-            let stops: Vec<f64> = SPEEDS.iter().map(|s| s.0).collect();
-            let lit = nearest(&stops, now);
-            view.subtitle = tr("How far the pointer moves. The mouse follows it too.").to_owned();
-            view.groups.push(group(
-                None,
-                "speed",
-                110.0,
-                SPEEDS.iter().enumerate().map(|(i, (v, name))| choice(tr(name), i == lit, v.to_string())).collect(),
-            ));
-        }
+        "Mouse and touchpad" => crate::input_page::mouse_view(&mut view),
+        "Accessibility" => crate::access_page::view(&mut view),
+        "Lock screen" => crate::idle_page::lock_view(&mut view),
+        "Sleep" => crate::idle_page::sleep_view(&mut view),
+        "Startup apps" => crate::startup_page::view(&mut view, ui),
+        "Your account" => crate::account_page::view(&mut view),
+        "VPN" => crate::vpn_page::view(&mut view),
         "Natural scrolling" => {
             let on = GolemSettings::load().natural_scroll.unwrap_or(true);
             view.subtitle = tr(if on {
@@ -2382,9 +2431,21 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             .to_owned();
             view.groups.push(on_off(None, "natural", on));
         }
+        // UPDATES, HONEST (the Controls gap audit, 2026-11-06: it said "Up to
+        // date" whatever happened): the system's name, when it last updated
+        // or how long it has been failing (Golem's own marks, `base/autoupdate.nix`
+        // writes them in /var/lib/golem-notices), and Update now — a run of the
+        // update service, which the owner may start (`desktop/care.nix`), at
+        // once when the system has `golem-update-now.service`.
         "Updates" => {
             view.subtitle = if ui.updates.is_empty() { tr("Up to date").to_owned() } else { ui.updates.clone() };
-            view.groups.push(group(None, "update", 150.0, vec![choice(tr("Check now"), false, "check")]));
+            view.groups.push(line(os_name()));
+            if let Some(said) = update_marks_text() {
+                view.groups.push(line(said));
+            }
+            let running = out("systemctl", &["is-active", "golem-autoupdate.service"]).is_some_and(|s| matches!(s.trim(), "active" | "activating"));
+            let word = if running { tr("Updating…") } else { tr("Update now") };
+            view.groups.push(Group { buttons: true, ..group(None, "update", 0.0, vec![choice(word, false, "now")]) });
             view.groups.push(more("gear"));
         }
         // How the windows sit and stick. Empty for now: the window controls
@@ -2452,6 +2513,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         }
         "Monitors" => crate::monitors_page::view(&mut view),
         "Printers" => crate::printers_page::view(&mut view),
+        "Shortcuts" => crate::shortcuts_page::view(&mut view),
         "About Golem" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));
@@ -2497,7 +2559,13 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 ));
             }
         }
-        "Time zone" => read_zone(&mut view, zone),
+        "Time zone" => {
+            read_zone(&mut view, zone);
+            // THE CLOCK (2026-11-06): twenty-four hours, or twelve with am/pm.
+            let twelve = GolemSettings::load().clock_12h == Some(true);
+            let ways = vec![choice(tr("24 hours"), !twelve, "24"), choice(tr("12 hours"), twelve, "12")];
+            view.groups.push(Group { labelled: true, ..group(Some("Clock"), "clock", 0.0, ways) });
+        }
         "Language" => {
             let now = language_now();
             let now_lang = now.split(['_', '.']).next().unwrap_or("en").to_owned();
@@ -2694,7 +2762,11 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             GolemSettings::change(|s| s.set_natural_scroll(on));
         }
         "update" => {
-            run("systemctl", &["start", "--no-block", "golem-autoupdate.service"]);
+            // (A system that has the "now" unit skips the machine's wave;
+            // an older one runs the nightly service, which waits its turn.)
+            let now = out("systemctl", &["list-unit-files", "golem-update-now.service", "--no-legend"]).is_some_and(|s| s.contains("golem-update-now"));
+            let unit = if now { "golem-update-now.service" } else { "golem-autoupdate.service" };
+            run("systemctl", &["start", "--no-block", unit]);
         }
         "charge-limit" => {
             set_charge_limit(on);
@@ -2793,6 +2865,16 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             }
         }
         k if k.starts_with("printers-") => crate::printers_page::apply(k, value),
+        "clock" => GolemSettings::change(|s| {
+            s.clock_12h = Some(value == "12");
+            s.store();
+        }),
+        k if crate::input_page::apply(k, value)
+            || crate::access_page::apply(k, value)
+            || crate::idle_page::apply(k, value)
+            || crate::startup_page::apply(k, value)
+            || crate::account_page::apply(k, value)
+            || crate::vpn_page::apply(k, value) => {}
         _ => debug!("controls: nothing sets {key:?}"),
     }
     Applied::Done

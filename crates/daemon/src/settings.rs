@@ -37,6 +37,13 @@ pub(crate) struct Settings {
     /// `Some(0)` = never.
     pub(crate) screen_off_secs: Option<u32>,
     pub(crate) sleep_secs: Option<u32>,
+    /// …and after how long the screen LOCKS (the Lock screen page,
+    /// 2026-11-06), the same way.
+    pub(crate) lock_secs: Option<u32>,
+    /// QUIET APPS (the Notifications page, 2026-11-06): the apps whose
+    /// notifications never pop up — they wait in the bell, read. By the
+    /// app's name as the notification carries it, folded (`notif::app_key`).
+    pub(crate) notif_quiet: Vec<String>,
     /// Closing the lid does nothing.
     pub(crate) lid_nothing: bool,
     /// Apps (desktop ids) that are opened on the fast graphics card.

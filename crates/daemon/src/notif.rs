@@ -727,11 +727,17 @@ impl App {
                                 let nk = stack_key(n);
                                 self.notif.history.iter().any(|h| stack_key(h) == nk)
                             };
+                            // A QUIET APP (the Notifications page, 2026-11-06):
+                            // its card goes to the bell, read, and nothing pops.
+                            let quiet = self.notif_app_quiet(n);
+                            if quiet {
+                                self.notif.read_ms.insert(n.timestamp_ms);
+                            }
                             self.notif.history.insert(0, n.clone());
                             arrived = true;
                             changed = true;
                             new_rows += 1;
-                            fresh_pop |= !echo;
+                            fresh_pop |= !echo && !quiet;
                         }
                     } else if let Some(slot) = self.notif.history.iter_mut().find(|h| h.id == n.id)
                     {
@@ -3546,6 +3552,56 @@ fn conversation_key(n: &ActiveNotification) -> Option<(String, String)> {
 /// conversation, or — for everything else — identical content (app + summary +
 /// body). The content key is namespaced (`\u{1}`) so it can never collide with a
 /// conversation key.
+/// An app as the quiet list names it: its name folded (a web notification's
+/// browser name stands for its site, as the bell shows it).
+pub(crate) fn app_key(n: &ActiveNotification) -> String {
+    if let Some(web) = notif_app_keyword(&n.body).filter(|w| !w.is_empty()) {
+        return web.to_lowercase();
+    }
+    collapse_ws(&strip_markup(&n.app_name)).to_lowercase()
+}
+
+/// An app's name as the Notifications page shows it.
+pub(crate) fn app_shown(n: &ActiveNotification) -> String {
+    if let Some(web) = notif_app_keyword(&n.body).filter(|w| !w.is_empty()) {
+        return friendly_service(&web);
+    }
+    let name = collapse_ws(&strip_markup(&n.app_name));
+    if name.eq_ignore_ascii_case("waverunner") { "Golem".to_owned() } else { name }
+}
+
+impl App {
+    /// Whether `n`'s app is on the quiet list.
+    fn notif_app_quiet(&self, n: &ActiveNotification) -> bool {
+        let key = app_key(n);
+        !key.is_empty() && self.settings.notif_quiet.contains(&key)
+    }
+
+    /// The apps that have sent notifications, with the quiet list's (so a
+    /// quiet app stays listed once its cards are gone): (key, name), by
+    /// name. For the Notifications page (`UiFacts`).
+    pub(crate) fn notif_apps(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for n in &self.notif.history {
+            let key = app_key(n);
+            if !key.is_empty() && !out.iter().any(|(k, _)| *k == key) {
+                out.push((key, app_shown(n)));
+            }
+        }
+        for q in &self.settings.notif_quiet {
+            if !out.iter().any(|(k, _)| k == q) {
+                let mut name = q.clone();
+                if let Some(first) = name.get_mut(0..1) {
+                    first.make_ascii_uppercase();
+                }
+                out.push((q.clone(), name));
+            }
+        }
+        out.sort_by_key(|(_, name)| name.to_lowercase());
+        out
+    }
+}
+
 fn stack_key(n: &ActiveNotification) -> (String, String) {
     if let Some(key) = conversation_key(n) {
         return key;
