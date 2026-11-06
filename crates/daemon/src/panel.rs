@@ -5034,7 +5034,7 @@ impl App {
                 self.settings.save();
             }
             "notif-hours-from" | "notif-hours-to" => {
-                if let Ok(h) = value.parse::<u8>().filter(|h| *h < 24) {
+                if let Some(h) = value.parse::<u8>().ok().filter(|h| *h < 24) {
                     if key == "notif-hours-from" {
                         self.settings.notif_quiet_from = Some(h);
                     } else {
