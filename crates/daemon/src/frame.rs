@@ -98,10 +98,25 @@ impl App {
     pub(crate) fn apps_trim_target(&self) -> (f32, f32) {
         // (Beside a side dock the sections stand side by side: nothing to trim.
         // The terminal takes the whole box.)
-        if self.control_panel || self.dock_side() != crate::launcher_prefs::Side::Bottom || self.term_on() {
+        if self.dock_side() != crate::launcher_prefs::Side::Bottom || self.term_on() {
             return (0.0, 0.0);
         }
         let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
+        if self.control_panel {
+            // THE CONTROL PANEL'S SECTIONS (Max, 2026-11-07): the card GROWS
+            // to hold every section, as far as the screen over it lets it
+            // (a lone app's recents' way); never shorter than its untrimmed
+            // self — an open setting is laid out for that.
+            let dock_h = self.config.window.input_bar_height as f32 * self.icon_scale();
+            let have = layout.card_h + self.ui.open_trim() - dock_h;
+            let want = self.panel.wanted_h(layout.card_w, self.icon_scale());
+            let missing = want - have;
+            if missing <= 0.0 {
+                return (0.0, 0.0);
+            }
+            let over = layout.card_top - self.ui.open_trim() - self.dock_top_reserved() - LONE_GROW_AIR;
+            return ((-missing).max(-over.max(0.0)), 0.0);
+        }
         let sec = &layout.sections[content::SECTION_APPS];
         let cell = content::GRID_CELL_H * self.icon_scale();
         // (The deep search's folded shelves gave the first their room.)
@@ -1874,8 +1889,10 @@ impl App {
         let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
-            // (The grid's box under the pointer and its plates are the apps grid's.)
-            let paint = crate::panel::PanelPaint { ink: dock_ink, bright, highlight: dock_highlight, plate: icon_plate };
+            // (The grid's box under the pointer, its plates and its sections'
+            // words are the apps grid's.)
+            let title_ink = content::faded_on(dock_ink, dock_seen, content::TITLE_ALPHA, 3.0);
+            let paint = crate::panel::PanelPaint { ink: dock_ink, bright, highlight: dock_highlight, plate: icon_plate, title_ink };
             let draw = self.panel_frame(&layout, if open { dt } else { 0.0 }, paint);
             // Frames keep coming while the panel is up — but when nothing of
             // it moves except the pills' orbit (a pixel round their spots, a
@@ -1937,7 +1954,8 @@ impl App {
         let (quick_bg, quick_ink, quick_moving) = self.quick_colours(dt, dock_bg, dock_ink);
         let quick = {
             let bright = quick_ink[0] + quick_ink[1] + quick_ink[2] < 1.5;
-            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright, highlight: dock_highlight, plate: icon_plate })
+            let title_ink = content::faded_on(quick_ink, dock_seen, content::TITLE_ALPHA, 3.0);
+            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright, highlight: dock_highlight, plate: icon_plate, title_ink })
         };
         if quick.is_some() || quick_moving {
             fit_animating = true;
