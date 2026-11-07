@@ -56,7 +56,7 @@ type Item = (&'static str, u8, &'static str);
 /// The settings in the order they stand on the grid — kin beside kin: how
 /// Golem looks, the screen and the sound, the connections, power, the
 /// owner's security, the keys and the system. Fixed: use moves nothing.
-const SETTINGS: [Item; 34] = [
+const SETTINGS: [Item; 38] = [
     // (name, kin, search keywords: what else people call it or look for
     // it by).
     // How Golem looks.
@@ -109,8 +109,44 @@ const SETTINGS: [Item; 34] = [
     ("Notifications", 5, "alerts do not disturb dnd messages mute silence app quiet"),
     ("Default apps", 5, "applications browser open with"),
     ("Startup apps", 5, "autostart startup login start boot open at start apps run automatically"),
-    ("About Golem", 5, "system version info hardware computer name"),
+    ("About Golem", 5, "system version info hardware computer name this computer model serial"),
+    // THE MACHINE'S PAGES, the gear box's until 2026-11-07 (Max: "the banner
+    // box should be the quick settings, the more should be on controls"):
+    // hosted here on the gear's own engine (`hosted_kind`).
+    ("Storage", 5, "disk drive space free files clean trash cache"),
+    ("Processor", 5, "cpu speed load temperature apps tasks performance"),
+    ("Memory", 5, "ram memory used free apps"),
+    ("Graphics", 5, "gpu video card driver screen games"),
 ];
+
+/// The gear box's page a setting IS (Max, 2026-11-07: the box's pages moved
+/// into Controls): shown by the gear's own engine, hosted in the open
+/// setting (`App::gear_host`).
+pub(crate) fn hosted_kind(label: &str) -> Option<PageKind> {
+    Some(match label {
+        "Wi-Fi" => PageKind::Net,
+        "Bluetooth" => PageKind::Bt,
+        "Battery" => PageKind::Battery,
+        "About Golem" => PageKind::About,
+        "Storage" => PageKind::Disk,
+        "Processor" => PageKind::Cpu,
+        "Memory" => PageKind::Ram,
+        "Graphics" => PageKind::Gpu,
+        _ => return None,
+    })
+}
+
+/// The setting that hosts the gear page `kind`, if one does (the quick
+/// settings' own page has none: it is the box's).
+pub(crate) fn label_for(kind: PageKind) -> Option<&'static str> {
+    SETTINGS.iter().map(|s| s.0).find(|l| hosted_kind(l) == Some(kind))
+}
+
+/// Where a hosted gear page lays out in the open setting's field (design
+/// px): in from the sides, under the title; under it the Search pill's room
+/// (`GRID_BOTTOM`).
+const HOST_X: f32 = 22.0;
+const HOST_TOP: f32 = 70.0;
 
 /// The setting whose name, without spaces or capitals, is `name`.
 pub(crate) fn setting_named(name: &str) -> Option<&'static str> {
@@ -422,6 +458,10 @@ fn symbol_of(label: &str) -> &'static str {
         "Battery" => "ctl-battery",
         "Default apps" => "ctl-apps",
         "Privacy" => "ctl-privacy",
+        "Storage" => "ctl-storage",
+        "Processor" => "ctl-cpu",
+        "Memory" => "ctl-memory",
+        "Graphics" => "ctl-graphics",
         _ => "package",
     }
 }
@@ -1010,6 +1050,8 @@ pub(crate) struct PanelPaint {
     pub highlight: [f32; 4],
     /// The plate under every app's icon in the box: the tiles' too.
     pub plate: [f32; 4],
+    /// The card's own fill (a hosted gear page's zebra reads it).
+    pub fill: [f32; 4],
 }
 
 /// The settings field: its pills, their layout and motion, the layer cycle
@@ -1294,6 +1336,22 @@ impl Panel {
             let first = chips.iter().position(in_last).unwrap_or(0);
             self.focus = Some(chips.iter().enumerate().position(|(i, c)| i >= first && in_last(c) && c.1).unwrap_or(first));
         }
+    }
+
+    /// Whether a setting is up (open, or opening — not folding back).
+    pub(crate) fn open_up(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.want > 0.5)
+    }
+
+    /// The open setting's name, while one is.
+    pub(crate) fn open_label(&self) -> Option<&'static str> {
+        self.open.as_ref().map(|o| self.pills[o.pill].label)
+    }
+
+    /// How much of the open setting's content shows (its morph's alpha, as
+    /// `draw_open` fades it in): 0 with nothing open.
+    pub(crate) fn open_content_alpha(&self) -> f32 {
+        self.open.as_ref().map_or(0.0, |o| ((o.k - 0.25) / 0.55).clamp(0.0, 1.0))
     }
 
     /// Fold the solo box away.
@@ -1678,7 +1736,7 @@ impl Panel {
         if is_display_setting(self.pills[i].label) {
             self.display_at = Some(Instant::now());
         }
-        if !self.modules && crate::controls::is_control(self.pills[i].label) {
+        if !self.modules && crate::controls::is_control(self.pills[i].label) && hosted_kind(self.pills[i].label).is_none() {
             self.control = None;
             self.control_ask = true;
         }
@@ -2870,6 +2928,11 @@ impl Panel {
             screens_view: None,
         };
         let mut out = blank();
+        // A hosted gear page: the title alone here, the page is the engine's
+        // (`App::panel_frame` draws it under it).
+        if !self.modules && hosted_kind(label).is_some() {
+            return Some(out);
+        }
         if !self.modules && crate::controls::is_control(label) {
             // Not read yet: the bare card, for the moment the read takes.
             let Some(view) = self.control.as_ref().filter(|v| v.label == label) else {
@@ -3509,8 +3572,9 @@ impl Panel {
             }
         }
         // The page dots under the grid, the one up lit, its neighbours less
-        // as the slide passes them.
-        if !self.solo && g.n_pages > 1 {
+        // as the slide passes them (gone with the tiles under an open
+        // setting).
+        if !self.solo && g.n_pages > 1 && open_k < 0.999 {
             let page_w = g.page_w();
             let total = g.n_pages as f32 * page_w;
             let page_frac = self.pages.pos.rem_euclid(total) / page_w;
@@ -3523,7 +3587,7 @@ impl Panel {
                 rects.push(RectInst {
                     rect: Rect::new(x - DOT_R, dot_y - DOT_R, DOT_R * 2.0, DOT_R * 2.0),
                     radius: DOT_R,
-                    color: [hl[0], hl[1], hl[2], hl[3] * (1.0 - dist * 0.72)],
+                    color: [hl[0], hl[1], hl[2], hl[3] * (1.0 - dist * 0.72) * (1.0 - open_k)],
                     glass: 0.0,
                     border: 0.0,
                 });
@@ -4174,7 +4238,10 @@ impl Panel {
             for l in &content.lines {
                 rect(out, l.x, l.y, l.w, l.h, l.w.min(l.h) / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.95 * ca]);
             }
-            text(out, crate::controls::closing_hint().to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
+            // (A hosted gear page has its own foot: no hint under it.)
+            if hosted_kind(self.pills[open.pill].label).is_none() {
+                text(out, crate::controls::closing_hint().to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
+            }
             return;
         }
         text(out, crate::i18n::tr(p.label).to_owned(), cx, y, 30.0, 36.0, 1.0);
@@ -4663,7 +4730,41 @@ impl App {
         self.panel.keep_turn = self.monitors_turn.is_some();
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
+        // A GEAR PAGE HOSTED (Wi-Fi, Bluetooth, the machine's): the engine is
+        // pointed at it while its setting is up, back to the box as it folds.
+        let host = if self.control_panel && self.panel.open_up() { self.panel.open_label().and_then(hosted_kind) } else { None };
+        if host != self.gear_host {
+            if host.is_some() {
+                self.set_stats_box(false);
+            }
+            self.gear_host = host;
+            self.gear_sync();
+        }
+        if self.gear_host.is_some() {
+            if self.gear_tick(dt) {
+                self.schedule_frame();
+            }
+            if self.update_gear_hit() {
+                self.schedule_frame();
+            }
+        }
         let mut draw = self.panel.draw(paint);
+        if self.gear_host.is_some() {
+            // Drawn by the gear's own painter into the setting's field, then
+            // carried with the panel's parts (its clip, its reveal, its fade).
+            let ca = self.panel.open_content_alpha();
+            if ca > 0.004 {
+                let rect = self.panel_host_rect();
+                let mut tmp = content::Scene::default();
+                self.push_gear_page_at(&mut tmp, ca, rect, rect.y + rect.h, (paint.fill, paint.ink, paint.bright));
+                // (Everything of it cut at the page's window: what the engine
+                // draws loose — its words, its sheet — too.)
+                draw.clipped.push((rect, std::mem::take(&mut tmp.rects), std::mem::take(&mut tmp.labels), Vec::new()));
+                for g in tmp.grids {
+                    draw.clipped.push((g.clip, g.rects, g.labels, Vec::new()));
+                }
+            }
+        }
         // Settings <-> modules (Max, 2026-10-03: the first motion "sucks"):
         // the two fields cross as wholes — the old one sinks back a little
         // and fades, the new one settles in from a touch closer and fades up.
@@ -4691,10 +4792,49 @@ impl App {
         draw
     }
 
-    /// Wheel over the open panel: move through its layers.
+    /// Wheel over the open panel: a hosted gear page's list travels; else
+    /// the grid's pages turn.
     pub(crate) fn panel_wheel(&mut self, value: f64) {
+        if self.gear_host.is_some() && self.panel_host_up() {
+            self.gear_axis(value as f32);
+            return;
+        }
         self.panel.wheel(value);
         self.schedule_frame();
+    }
+
+    /// Whether the control panel's open setting is up (not folding): what a
+    /// hosted gear page answers the pointer by.
+    pub(crate) fn panel_host_up(&self) -> bool {
+        self.control_panel && self.panel.open_up() && self.panel.open_content_alpha() > 0.5
+    }
+
+    /// Where a hosted gear page lays out: in the open setting's field under
+    /// its title, as tall as its content wants within the field (surface
+    /// coordinates).
+    pub(crate) fn panel_host_rect(&self) -> Rect {
+        let s = self.options_scale();
+        let f = self.panel.field;
+        let x = f.x + HOST_X * s;
+        let w = (f.w - 2.0 * HOST_X * s).max(1.0);
+        let top = f.y + HOST_TOP * s;
+        // (Over the Search pill's room at the card's foot.)
+        let room = (f.y + f.h - GRID_BOTTOM - top).max(1.0);
+        let want = self.gear_host_h(Rect::new(x, top, w, room));
+        Rect::new(x, top, w, want.clamp(1.0, room))
+    }
+
+    /// How much shorter than the untrimmed card a hosted page lets the card
+    /// be: the room under it the page does not use (`apps_trim_target`);
+    /// `None` with none hosted.
+    pub(crate) fn host_trim(&self) -> Option<f32> {
+        if self.gear_host.is_none() || !self.panel.open_up() {
+            return None;
+        }
+        let f = self.panel.field;
+        let top = f.y + HOST_TOP * self.options_scale();
+        let room = (f.y + f.h - GRID_BOTTOM - top).max(1.0);
+        Some((room - self.panel_host_rect().h).max(0.0))
     }
 
     /// A click on the panel (below the dock band, inside the card).
@@ -4788,6 +4928,16 @@ impl App {
     }
 
     pub(crate) fn panel_click(&mut self, pos: (f32, f32)) {
+        // A hosted gear page takes the click first (its rows, buttons, field);
+        // off every one of them the setting folds, as any does.
+        if self.gear_host.is_some() && self.panel_host_up() {
+            let hit = self.gear_hit_now();
+            if hit != crate::gear::Hit::None {
+                self.gear_click(hit);
+                self.schedule_frame();
+                return;
+            }
+        }
         if self.panel.click(pos) {
             // A module's Apply: the wanted set goes to the system side, and
             // the card folds away.
@@ -5214,25 +5364,6 @@ impl App {
                     None => list.push(value.clone()),
                 }
                 self.settings.save();
-            }
-            "open" => {
-                let kind = match value.as_str() {
-                    "net" => PageKind::Net,
-                    "bt" => PageKind::Bt,
-                    "bat" => PageKind::Battery,
-                    _ => PageKind::Gear,
-                };
-                // The card (or the quick box) folds away and the gear box
-                // takes over.
-                if quick {
-                    self.close_fast_launch();
-                } else {
-                    self.handle_command(Command::Collapse);
-                }
-                if !self.stats_show_page(kind) {
-                    info!("control panel: this machine has no {value} page");
-                }
-                return;
             }
             // A scanner and nothing to scan with (the Printers page): Simple
             // Scan, the way any app is installed.
@@ -5717,7 +5848,7 @@ mod tests {
     #[test]
     fn the_grid_is_the_apps_grids_cells_at_the_icon_scale() {
         let p = panel();
-        assert_eq!(p.pills.len(), 34);
+        assert_eq!(p.pills.len(), SETTINGS.len());
         assert_clean(&p, "at rest");
         let g = p.grid;
         // A 960 card: as many across as the apps grid puts there, every
@@ -5779,13 +5910,13 @@ mod tests {
         for _ in 0..40 {
             p.key_move(1, 0);
         }
-        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(33));
-        assert_eq!(p.pages.page(g.page_w()), 33 / g.per_page());
+        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(SETTINGS.len() - 1));
+        assert_eq!(p.pages.page(g.page_w()), (SETTINGS.len() - 1) / g.per_page());
         assert!(p.key_move(0, -1));
-        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(33 - g.cols));
+        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(SETTINGS.len() - 1 - g.cols));
         // Enter opens the tile the keys are on (a use: the order moves
         // behind the setting growing over the field).
-        let expect = shown_order(&p)[33 - g.cols];
+        let expect = shown_order(&p)[SETTINGS.len() - 1 - g.cols];
         assert!(p.key_pick());
         assert_eq!(p.open.as_ref().map(|o| p.pills[o.pill].label), Some(expect));
     }
@@ -5829,7 +5960,7 @@ mod tests {
     fn the_card_is_cut_to_the_rows_the_grid_stands_in() {
         let mut p = panel();
         // 34 tiles at eight across: five rows; a search leaves fewer.
-        assert_eq!(p.rows_wanted(), Some(34_usize.div_ceil(p.grid.cols)));
+        assert_eq!(p.rows_wanted(), Some(SETTINGS.len().div_ceil(p.grid.cols)));
         p.set_query("sound");
         assert_eq!(p.rows_wanted(), Some(1));
         p.set_query("");
@@ -5842,7 +5973,7 @@ mod tests {
         // Folding back, the grid's rows again.
         assert!(p.escape());
         assert_eq!(p.open_wanted_h(), None);
-        assert_eq!(p.rows_wanted(), Some(34_usize.div_ceil(p.grid.cols)));
+        assert_eq!(p.rows_wanted(), Some(SETTINGS.len().div_ceil(p.grid.cols)));
         // More pages than one: every page keeps the full page's rows.
         let big = panel_in(960.0, 400.0, 1.65);
         assert!(big.grid.n_pages > 1);
@@ -6336,7 +6467,7 @@ mod tests {
         assert!((c.chips[0].rect.x - 2.0 * MARGIN).abs() < 0.01 && (c.chips[6].rect.x + c.chips[6].rect.w - (2400.0 - 2.0 * MARGIN)).abs() < 0.01, "as wide as the rows");
         assert_eq!(c.dots.map(|d| (d.1, d.2)), Some((2, 0)), "two pages, the first up");
         // Drawn at rest: the icons through the dock's layers, the hint on its card.
-        let draw = wide.draw(PanelPaint { ink: [1.0; 4], bright: false, highlight: [1.0, 1.0, 1.0, 0.12], plate: [0.5, 0.5, 0.5, 1.0] });
+        let draw = wide.draw(PanelPaint { ink: [1.0; 4], bright: false, highlight: [1.0, 1.0, 1.0, 0.12], plate: [0.5, 0.5, 0.5, 1.0], fill: [0.0, 0.0, 0.0, 1.0] });
         assert_eq!(draw.icons.len(), 28);
         assert!((draw.icons[0].1.w - TILE_ICON).abs() < 0.01 && draw.icons[0].0 == 0);
         assert!(draw.labels.iter().any(|l| l.text == "Own colours · Light"));
@@ -6483,7 +6614,7 @@ mod tests {
     #[test]
     fn an_open_display_setting_draws_its_choices() {
         let p = display_open("Scale", 1.0);
-        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false, highlight: [1.0, 1.0, 1.0, 0.12], plate: [0.5, 0.5, 0.5, 1.0] });
+        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false, highlight: [1.0, 1.0, 1.0, 0.12], plate: [0.5, 0.5, 0.5, 1.0], fill: [0.0, 0.0, 0.0, 1.0] });
         for want in ["Scale", "Built-in screen · looks like 1440 × 900", "100%", "150%"] {
             assert!(draw.labels.iter().any(|l| l.text == want), "{want:?} is drawn");
         }

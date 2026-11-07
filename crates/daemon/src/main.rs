@@ -1109,6 +1109,7 @@ fn main() -> anyhow::Result<()> {
         module_debug: None,
         stats: stats::StatsState::default(),
         gear: gear::GearState::default(),
+        gear_host: None,
         sunset_acted: false,
         sunset_recalled: false,
         module_box_open: false,
@@ -2639,6 +2640,10 @@ pub struct App {
     stats: stats::StatsState,
     /// The gear box's pages with content (Wi-Fi, Bluetooth) — see `gear.rs`.
     gear: gear::GearState,
+    /// The gear page the CONTROL PANEL hosts as its open setting (Wi-Fi,
+    /// Bluetooth, the machine's pages): the engine answers for it instead of
+    /// the box (`gear_page`); `None` = the box's own.
+    gear_host: Option<gear::PageKind>,
     /// Whether the user already resolved the sunset offer (clicked [turn on] /
     /// dismissed), so it stays down until the Mind withdraws and re-offers it.
     sunset_acted: bool,

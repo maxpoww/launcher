@@ -121,6 +121,9 @@ pub(crate) enum PageKind {
     Ram,
     Gpu,
     Battery,
+    /// This computer (the machine's details): a page of the control panel
+    /// only, hosted there (`App::gear_host`); the box has no button for it.
+    About,
     Other,
 }
 
@@ -861,10 +864,64 @@ impl App {
         self.stats_kind_of_page(self.stats_page())
     }
 
-    /// The page with content that is on screen, if one is.
+    /// The page with content that is on screen, if one is: the one the
+    /// CONTROL PANEL hosts (Max, 2026-11-07: "the banner box should be the
+    /// quick settings, the more should be on controls" — the Wi-Fi, Bluetooth
+    /// and machine pages open as Controls' own settings, on the same engine),
+    /// else the box's.
     pub(crate) fn gear_page(&self) -> Option<PageKind> {
+        if let Some(kind) = self.gear_host {
+            return Some(kind);
+        }
         let kind = self.stats_page_kind();
         (self.stats.open && kind != PageKind::Other).then_some(kind)
+    }
+
+    /// The pointer the page answers to: the bar's, or the dock's while the
+    /// control panel hosts the page.
+    fn gear_ptr(&self) -> Option<(f32, f32)> {
+        if self.gear_host.is_some() {
+            self.pointer_pos
+        } else {
+            self.options_ptr
+        }
+    }
+
+    /// Whether the page is far enough out to be touched: the box half open,
+    /// or the control panel's setting up.
+    fn gear_shown(&self) -> bool {
+        if self.gear_host.is_some() {
+            self.panel_host_up()
+        } else {
+            self.stats_open_t() >= 0.5
+        }
+    }
+
+    /// Leave the page: fold the control panel's setting it is hosted in, or
+    /// shut the box.
+    fn gear_leave(&mut self) {
+        if self.gear_host.is_some() {
+            self.panel_escape();
+        } else {
+            self.set_stats_box(false);
+        }
+    }
+
+    /// How tall a hosted page is in a window `rect` wide: its strip, its
+    /// items and its footer or field (the control panel cuts its card to it).
+    pub(crate) fn gear_host_h(&self, rect: Rect) -> f32 {
+        let s = self.options_scale();
+        let view = self.gear_view();
+        // (Each item its own height — an `Empty` its line, not the room
+        // left, which is what the card is being sized to.)
+        let items: f32 = view.items.iter().map(|i| item_h(i, s, rect.w)).sum();
+        let strip_h = if view.strip.is_empty() { 0.0 } else { STRIP_H * s };
+        let foot_h = if view.footer.is_empty() && self.gear.field.is_none() && self.gear.arm.is_none() {
+            0.0
+        } else {
+            self.gear_footer_h()
+        };
+        strip_h + items + foot_h
     }
 
     /// Whether the open page must not fold when the pointer wanders off: a
@@ -1205,12 +1262,18 @@ impl App {
     // --- the pages -----------------------------------------------------------
 
     pub(crate) fn gear_view(&self) -> View {
-        match self.gear_page() {
+        let mut view = match self.gear_page() {
             Some(PageKind::Net) => self.net_view(),
             Some(PageKind::Bt) => self.bt_view(),
             Some(kind) => self.pages_view(kind),
             None => View::default(),
+        };
+        // A hosted page at its root: its setting is the way back (the panel's
+        // own Escape), not a "‹ Back" that leads nowhere.
+        if self.gear_host.is_some() && self.pages_at_root() && view.strip.first().is_some_and(|b| b.hit == Hit::Back) {
+            view.strip.remove(0);
         }
+        view
     }
 
     /// The compact page both radios share while airplane mode is on.
@@ -2041,7 +2104,9 @@ impl App {
 
     pub(crate) fn gear_layout(&self, view: &View, rect: Rect) -> Layout {
         let s = self.options_scale();
-        let band = self.options_pill_h();
+        // (The band is the box's readout; a hosted page has the setting's
+        // title over it instead.)
+        let band = if self.gear_host.is_some() { 0.0 } else { self.options_pill_h() };
         let d = self.gear_footer_d();
         let has_field = self.gear.field.is_some();
         let armed = self.gear.arm.is_some();
@@ -2158,12 +2223,18 @@ impl App {
     /// The box's rect as the page lays out in it: always the settled height,
     /// so nothing inside shifts while the box is still growing.
     fn gear_rect(&self) -> Rect {
+        if self.gear_host.is_some() {
+            return self.panel_host_rect();
+        }
         let r = self.stats_geom();
         // (The settled width too: the box narrows as it opens — `stats_open_w`.)
         Rect::new(r.x, r.y, self.stats_open_w(), self.gear_target_h())
     }
 
     fn gear_target_h(&self) -> f32 {
+        if self.gear_host.is_some() {
+            return self.panel_host_rect().h;
+        }
         if self.gear_page().is_some() && self.gear_view().compact {
             COMPACT_H * self.options_scale()
         } else {
@@ -2193,7 +2264,7 @@ impl App {
     /// Where the pointer stands along the track of the level `hit`, 0..1
     /// (`None`: no such level on the page).
     pub(crate) fn gear_level_at_ptr(&self, hit: &Hit) -> Option<f32> {
-        let p = self.options_ptr?;
+        let p = self.gear_ptr()?;
         let view = self.gear_view();
         let lay = self.gear_layout(&view, self.gear_rect());
         let s = self.options_scale();
@@ -2207,10 +2278,10 @@ impl App {
     }
 
     fn gear_hit_at(&self) -> Hit {
-        let (Some(p), Some(_)) = (self.options_ptr, self.gear_page()) else {
+        let (Some(p), Some(_)) = (self.gear_ptr(), self.gear_page()) else {
             return Hit::None;
         };
-        if self.stats_open_t() < 0.5 {
+        if !self.gear_shown() {
             return Hit::None;
         }
         let s = self.options_scale();
@@ -2278,7 +2349,7 @@ impl App {
         // An icon button rested on says its name (THE KIT): a frame is asked
         // for when its wait is over.
         let button = self.gear_button_rect(&hit).map(|_| hit.clone());
-        let among = self.options_ptr.is_some() && self.gear_page().is_some();
+        let among = self.gear_ptr().is_some() && self.gear_page().is_some();
         let named = self.gear.names.shown().cloned();
         if let Some(wait) = self.gear.names.follow(button, among) {
             let timer = calloop::timer::Timer::from_duration(wait);
@@ -2306,10 +2377,10 @@ impl App {
     /// Which footer button with buttons behind it the pointer is on, or on
     /// those — the gaps between included, so crossing them is not leaving.
     fn gear_behind_ptr_on(&self) -> Option<usize> {
-        let (Some(p), Some(_)) = (self.options_ptr, self.gear_page()) else {
+        let (Some(p), Some(_)) = (self.gear_ptr(), self.gear_page()) else {
             return None;
         };
-        if self.gear.field.is_some() || self.gear.arm.is_some() || self.stats_open_t() < 0.5 {
+        if self.gear.field.is_some() || self.gear.arm.is_some() || !self.gear_shown() {
             return None;
         }
         let view = self.gear_view();
@@ -2349,15 +2420,21 @@ impl App {
     /// Draw the open page under the band. `a` is the box's own content fade.
     pub(crate) fn push_gear_page(&self, scene: &mut Scene, a: f32) {
         let rect = self.gear_rect();
+        let (fill, ink) = self.box_surface_at(rect);
+        // The box is still growing: nothing below its current edge is drawn.
+        let live = self.stats_geom();
+        self.push_gear_page_at(scene, a, rect, live.y + live.h, (fill, ink, self.options_bar_is_bright()));
+    }
+
+    /// Draw the page laid out in `rect`, cut at `bottom`, on a `surface` of
+    /// (fill, ink, bright — dark ink) — the box's, or the control panel's
+    /// card for a hosted page.
+    pub(crate) fn push_gear_page_at(&self, scene: &mut Scene, a: f32, rect: Rect, bottom: f32, surface: ([f32; 4], [f32; 4], bool)) {
+        let (fill, ink, bright) = surface;
         let s = self.options_scale();
         let view = self.gear_view();
         let lay = self.gear_layout(&view, rect);
-        let (fill, ink) = self.box_surface_at(rect);
-        let bright = self.options_bar_is_bright();
         let stripe = self.zebra_stripe(fill);
-        // The box is still growing: nothing below its current edge is drawn.
-        let live = self.stats_geom();
-        let bottom = live.y + live.h;
         let content = Rect::new(
             lay.content.x,
             lay.content.y,
@@ -3441,7 +3518,7 @@ impl App {
         self.gear.view_t = v;
         moving |= m;
         if self.gear.field.is_some() {
-            let w = self.stats_geom().w;
+            let w = self.gear_rect().w;
             let (t, m) = ease_toward(self.gear.field_t, 1.0, dt, MORPH_RATE, settle_t(w));
             self.gear.field_t = t;
             moving |= m;
@@ -3484,6 +3561,12 @@ impl App {
         if want == self.gear.keyboard_held {
             return;
         }
+        // Hosted in the control panel: the dock's box holds the keyboard
+        // already; only who answers the keys changes (`gear_wants_keys`).
+        if self.gear_host.is_some() {
+            self.gear.keyboard_held = want;
+            return;
+        }
         // (The bar's surface is shared: the clipboard box may hold it too.)
         let others = self.clip.keyboard_held
             || self.phone_box_keys()
@@ -3510,7 +3593,7 @@ impl App {
     /// away at once (the field holds the keyboard exclusively, so the click
     /// comes to the bar wherever it lands). Whether it did.
     pub(crate) fn gear_click_off(&mut self, on_box: bool) -> bool {
-        if on_box || self.gear.field.is_none() || self.gear_page().is_none() || self.gear.debug_hold {
+        if on_box || self.gear_host.is_some() || self.gear.field.is_none() || self.gear_page().is_none() || self.gear.debug_hold {
             return false;
         }
         self.stats_put_away();
@@ -3566,7 +3649,7 @@ impl App {
                     };
                     self.gear_click(hit);
                 } else {
-                    self.set_stats_box(false);
+                    self.gear_leave();
                 }
             }
             Keysym::Return | Keysym::KP_Enter => {
@@ -3803,8 +3886,8 @@ impl App {
         if hit == Hit::None {
             // A press on the page's empty space is still the page's: it must
             // not fall through and turn the page.
-            let p = self.options_ptr.unwrap_or((0.0, 0.0));
-            return p.1 > self.stats_geom().y + self.options_pill_h();
+            let p = self.gear_ptr().unwrap_or((0.0, 0.0));
+            return p.1 > self.gear_rect().y + if self.gear_host.is_some() { 0.0 } else { self.options_pill_h() };
         }
         self.gear_click(hit);
         true

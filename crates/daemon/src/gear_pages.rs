@@ -68,7 +68,6 @@ const FAST_CARD_ENV: &str =
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SysHit {
     // this computer
-    About,
     Float,
     Awake,
     AutoBright,
@@ -134,7 +133,6 @@ pub(crate) enum SysHit {
 enum PView {
     #[default]
     List,
-    About,
     App(String),
     Health,
     Card(usize),
@@ -180,7 +178,7 @@ fn uuid_of(dev: &str) -> Option<String> {
 /// What the worker polls for the gear's page `page`.
 fn sys_page_of(page: Option<PageKind>) -> Option<SysPage> {
     match page {
-        Some(PageKind::Gear) => Some(SysPage::Machine),
+        Some(PageKind::Gear | PageKind::About) => Some(SysPage::Machine),
         Some(PageKind::Disk) => Some(SysPage::Disk),
         Some(PageKind::Cpu) => Some(SysPage::Cpu),
         Some(PageKind::Ram) => Some(SysPage::Ram),
@@ -829,7 +827,6 @@ impl App {
         let p = &self.gear.pages;
         match (&p.view, kind) {
             (PView::App(key), _) => self.app_detail_view(key),
-            (PView::About, _) => self.about_view(),
             (PView::Health, _) => self.health_view(),
             (PView::Card(i), _) => self.card_view(*i),
             (PView::Folder(i), _) => self.folder_view(*i),
@@ -839,6 +836,8 @@ impl App {
             (PView::Video, _) => self.video_view(),
             (PView::List, PageKind::Gear) if self.gear.quick.output_page => self.quick_output_view(),
             (PView::List, PageKind::Gear) => self.machine_view(),
+            // This computer, as a setting of the control panel's.
+            (PView::List, PageKind::About) => self.about_view(),
             (PView::List, PageKind::Disk) => self.disk_view(),
             (PView::List, PageKind::Cpu) => self.cpu_view(),
             (PView::List, PageKind::Ram) => self.ram_view(),
@@ -1271,32 +1270,14 @@ impl App {
     fn machine_view(&self) -> View {
         let p = &self.gear.pages;
         let m = &p.machine;
-        let state = self.update_state();
-        let mut items = vec![
-            row_with(
-                row(
-                    Some(G_LAPTOP),
-                    if m.host.is_empty() {
-                        tr("This computer").to_owned()
-                    } else {
-                        m.host.clone()
-                    },
-                    // "Golem 26.05 (Yarara)": the release's own name is for the
-                    // details view; the row has room for the version, and
-                    // whether it is up to date (Max, 2026-11-05: "nothing about
-                    // update, golem takes care of update, lets put an 'up to
-                    // date' on the system info" — no row, no button for it).
-                    format!("{} · {state}", m.os.split(" (").next().unwrap_or(&m.os)),
-                ),
-                sys(SysHit::About),
-                Some((sys(SysHit::About), crate::gear::G_GO)),
-                Trail::None,
-                Tone::Normal,
-            ),
-        ];
-        // SOUND AND SCREEN and the first MODES (`quick.rs`), then the rest of
-        // the modes, each a row with its switch (THE KIT: one idiom).
-        items.extend(self.quick_items());
+        // THE QUICK SETTINGS and nothing else (Max, 2026-11-07: "the banner
+        // box should be the quick settings"): this computer's details, the
+        // idle times and the machine's pages are Controls' own now
+        // (`PageKind::About`, hosted there). SOUND AND SCREEN and the first
+        // MODES (`quick.rs`), then the rest of the modes, each a row with its
+        // switch (THE KIT: one idiom), and the way to the rest.
+        let _ = (m, self.update_state());
+        let mut items = self.quick_items();
         items.push(switch_row(
             G_PLANE,
             tr("Airplane mode"),
@@ -1317,11 +1298,8 @@ impl App {
         if let Some(profile) = &p.live.profile {
             items.push(self.mode_choice(profile));
         }
-        if self.stats_page_for(PageKind::Battery).is_none() {
-            items.extend(self.idle_rows());
-        }
         items.push(row_with(
-            row(Some(G_COG), tr("All settings"), tr("Screen, sound and the rest")),
+            row(Some(G_COG), tr("More…"), tr("Screen, sound and the rest")),
             sys(SysHit::AllSettings),
             Some((sys(SysHit::AllSettings), crate::gear::G_GO)),
             Trail::None,
@@ -1970,13 +1948,17 @@ impl App {
         true
     }
 
+    /// Whether the machine pages stand at their list (no details view up).
+    pub(crate) fn pages_at_root(&self) -> bool {
+        self.gear.pages.view == PView::List
+    }
+
     fn open_path(path: &std::path::Path) {
         run_detached("xdg-open", vec![path.to_string_lossy().into_owned()]);
     }
 
     pub(crate) fn sys_click(&mut self, hit: SysHit) {
         match hit {
-            SysHit::About => self.page_view(PView::About),
             SysHit::Float => self.toggle_floating_mode(),
             SysHit::Awake => {
                 let on = Self::caffeine_path().exists();
@@ -2442,7 +2424,6 @@ impl App {
     /// `debug-gear page <what>`: reach a details view without a pointer.
     pub(crate) fn pages_debug(&mut self, what: &str) -> bool {
         let v = match what {
-            "about" => PView::About,
             "health" => PView::Health,
             "clean" => PView::Clean,
             "drive" => {

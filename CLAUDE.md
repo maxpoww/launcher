@@ -362,9 +362,17 @@ The big daemon files are cohesive but long — go straight to the function:
   not on the list (`restore_install_state` stages only live ones; the krita of 2026-10-26 hid krita for
   good) and Install on its page or a drag retries it (`retry_failed_install`).
 - `hypr.rs` — all compositor IPC (dispatch + JSON reads).
-- `panel.rs` — the control panel (the card as a field of settings pills); an open setting's
-  content is `open_content`: Scale and Resolution from `display.rs`, every other setting from
-  `controls.rs` (no placeholder is left: Colours was the last, 2026-10-14).
+- `panel.rs` — the control panel: THE APPS GRID of settings (2026-11-07, Max: "que se parezca y comporte
+  como el grid de apps"; one grid, fixed order kin beside kin, as wide as the card, the card cut to its
+  rows — sections and a taller card were tried and refused the same day); an open setting's content is
+  `open_content`: Scale and Resolution from `display.rs`, every other setting from `controls.rs`, and
+  the GEAR BOX'S PAGES HOSTED (2026-11-07, Max: "the banner box should be the quick settings, the more
+  should be on controls"): Wi-Fi, Bluetooth, Battery, About Golem (`PageKind::About`), Storage,
+  Processor, Memory, Graphics are `hosted_kind` labels — `App::gear_host` points the gear engine at the
+  open setting (`gear_page`, `gear_rect` = `panel_host_rect`, `gear_ptr` = the dock's pointer, keys via
+  `gear_wants_keys`, the page drawn by `push_gear_page_at` into the panel's clipped parts, the card cut
+  by `host_trim`); the banner box keeps only the quick settings and "More…" → Controls, and a readout
+  pill opens its page in Controls (`stats_open_page` → `label_for`).
 - `controls.rs` — THE OTHER SETTINGS (2026-10-13): what each one shows open and what a click on
   a choice does, in the idiom Scale and Resolution set — a subtitle, then groups of choice pills,
   the one in use lit (`ControlView { subtitle, groups: [Group { caption, key, width, choices }] }`).

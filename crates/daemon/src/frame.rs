@@ -110,6 +110,10 @@ impl App {
             // its last section. A setting open has the whole card.
             // An open setting: as tall as its content, to under its closing
             // hint (Max: "es dinámica en el grid pero no en las cajas").
+            // (A hosted gear page: the card shorter by the room it leaves.)
+            if let Some(trim) = self.host_trim() {
+                return (trim, 0.0);
+            }
             let body = match (self.panel.open_wanted_h(), self.panel.rows_wanted()) {
                 (Some(h), _) => h,
                 (None, Some(rows)) => {
@@ -1899,7 +1903,7 @@ impl App {
             let open = self.ui.target() == Target::Open;
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
             // (The grid's box under the pointer and its plates are the apps grid's.)
-            let paint = crate::panel::PanelPaint { ink: dock_ink, bright, highlight: dock_highlight, plate: icon_plate };
+            let paint = crate::panel::PanelPaint { ink: dock_ink, bright, highlight: dock_highlight, plate: icon_plate, fill: dock_bg };
             let draw = self.panel_frame(&layout, if open { dt } else { 0.0 }, paint);
             // Frames keep coming while the panel is up — but when nothing of
             // it moves except the pills' orbit (a pixel round their spots, a
@@ -1961,7 +1965,7 @@ impl App {
         let (quick_bg, quick_ink, quick_moving) = self.quick_colours(dt, dock_bg, dock_ink);
         let quick = {
             let bright = quick_ink[0] + quick_ink[1] + quick_ink[2] < 1.5;
-            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright, highlight: dock_highlight, plate: icon_plate })
+            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright, highlight: dock_highlight, plate: icon_plate, fill: quick_bg })
         };
         if quick.is_some() || quick_moving {
             fit_animating = true;

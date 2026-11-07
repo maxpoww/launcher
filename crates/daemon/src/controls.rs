@@ -953,11 +953,6 @@ fn on_off(caption: Option<&'static str>, key: &'static str, on: bool) -> Group {
     group(caption, key, 96.0, vec![choice(tr("On"), on, "on"), choice(tr("Off"), !on, "off")])
 }
 
-/// The way into a page of the gear box.
-fn more(page: &'static str) -> Group {
-    group(None, "open", 150.0, vec![choice(tr("More…"), false, page)])
-}
-
 /// The stop of `stops` nearest `value`.
 fn nearest(stops: &[f64], value: f64) -> usize {
     stops
@@ -2183,7 +2178,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                     (true, None) => tr("Not connected").to_owned(),
                 };
                 view.groups.push(on_off(None, "wifi", on));
-                view.groups.push(more("net"));
             }
             None => view.subtitle = tr("This computer has no Wi-Fi.").to_owned(),
         },
@@ -2192,7 +2186,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 view.subtitle = tr(if on { "Bluetooth is on" } else { "Bluetooth is off" }).to_owned();
                 view.groups.push(on_off(None, "bluetooth", on));
                 if ui.has_bt {
-                    view.groups.push(more("bt"));
                 }
             }
             None => view.subtitle = tr("This computer has no Bluetooth.").to_owned(),
@@ -2398,7 +2391,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                     .map(|(i, l)| choice(format!("{:.0}%", l * 100.0), i == lit, format!("{:.0}", l * 100.0)))
                     .collect();
                 view.groups.push(group(None, "brightness", 76.0, levels));
-                view.groups.push(more("gear"));
             }
             None => view.subtitle = tr("This screen sets its own brightness.").to_owned(),
         },
@@ -2472,7 +2464,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                     names.iter().map(|n| choice(label(n), n == now, n.clone())).collect(),
                 ));
                 if ui.has_battery {
-                    view.groups.push(more("bat"));
                 }
             }
             None => view.subtitle = tr("This computer has one power mode.").to_owned(),
@@ -2509,7 +2500,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let running = out("systemctl", &["is-active", "golem-autoupdate.service"]).is_some_and(|s| matches!(s.trim(), "active" | "activating"));
             let word = if running { tr("Updating…") } else { tr("Update now") };
             view.groups.push(Group { buttons: true, ..group(None, "update", 0.0, vec![choice(word, false, "now")]) });
-            view.groups.push(more("gear"));
         }
         // How the windows sit and stick. Empty for now: the window controls
         // come here as they are made (Max, 2026-10-14).
@@ -2580,7 +2570,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "About Golem" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));
-            view.groups.push(more("gear"));
         }
         "Battery" => match battery_line() {
             Some(text) => {
@@ -2594,7 +2583,6 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                     ));
                 }
                 if ui.has_battery {
-                    view.groups.push(more("bat"));
                 }
             }
             None => view.subtitle = tr("No battery in this computer").to_owned(),

@@ -124,6 +124,11 @@ const CTL_UPDATES: &str = r#"<path d="M13.7 8a5.7 5.7 0 0 1-10 3.8M2.3 8a5.7 5.7
 const CTL_MIC: &str = r#"<rect x="5.8" y="1.8" width="4.4" height="7.6" rx="2.2"/><path d="M3.5 7.4a4.5 4.5 0 0 0 9 0M8 11.9v2.3M5.9 14.2h4.2"/>"#;
 const CTL_BATTERY: &str = r#"<rect x="1.6" y="5" width="10.8" height="6" rx="1.4"/><path d="M12.4 7h1.1a.7.7 0 0 1 .7.7v.6a.7.7 0 0 1-.7.7h-1.1M3.8 7v2h4.4V7z"/>"#;
 const CTL_APPS: &str = r#"<rect x="2" y="2.6" width="12" height="10.8" rx="1.6"/><path d="M2 5.8h12M5.8 9.6l1.6 1.6 3-3"/>"#;
+// The machine's pages (2026-11-07, the gear box's moved into Controls): a
+// chip with its pins, a memory stick, a card with its fan.
+const CTL_CPU: &str = r#"<rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.2"/><rect x="6.6" y="6.6" width="2.8" height="2.8" rx=".5"/><path d="M6 1.8v2.4M10 1.8v2.4M6 11.8v2.4M10 11.8v2.4M1.8 6h2.4M1.8 10h2.4M11.8 6h2.4M11.8 10h2.4"/>"#;
+const CTL_MEMORY: &str = r#"<rect x="1.8" y="5" width="12.4" height="5.4" rx="1"/><path d="M4.4 7v1.6M6.8 7v1.6M9.2 7v1.6M11.6 7v1.6M3.6 10.4v1.6M12.4 10.4v1.6"/>"#;
+const CTL_GRAPHICS: &str = r#"<rect x="1.8" y="4.2" width="12.4" height="7.4" rx="1.2"/><circle cx="9.6" cy="7.9" r="2.2"/><path d="M4 6.4h1.8M4 9.4h1.8M3.8 11.6v1.6M12.2 11.6v1.6"/>"#;
 
 /// Every symbol an action can wear, in the order of their texture layers.
 const SYMBOLS: &[(&str, Symbol)] = &[
@@ -196,6 +201,10 @@ const SYMBOLS: &[(&str, Symbol)] = &[
     ("ctl-battery", Symbol::Lines(CTL_BATTERY)),
     ("ctl-apps", Symbol::Lines(CTL_APPS)),
     ("ctl-privacy", Symbol::Glyph("eye")),
+    ("ctl-storage", Symbol::Glyph("drive")),
+    ("ctl-cpu", Symbol::Lines(CTL_CPU)),
+    ("ctl-memory", Symbol::Lines(CTL_MEMORY)),
+    ("ctl-graphics", Symbol::Lines(CTL_GRAPHICS)),
     // Nothing at all: drawn on a plate, it is the plate alone (the control
     // panel's tiles wear the apps' plate under their symbol).
     ("blank", Symbol::Lines(BLANK)),
