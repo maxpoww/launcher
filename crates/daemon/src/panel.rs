@@ -11,48 +11,22 @@
 //! opened the panel is the one that closes it.
 //!
 //! THE GRID (Max, 2026-11-06: "cambiar el look de controls por iconos como
-//! el grid de apps"; the lab https://claude.ai/artifact/88EjbxM9Tv71byaNmmPDEz,
-//! direction A, "dale, hacé la A"): the field is a GRID OF TILES — a glyph
-//! on a plate, the name under it — seven across, in the order use brings
-//! them: the game's standings below are now the ORDER (every use scores,
-//! scores fade, the grid is sorted by them, so what you reach for comes
-//! first). No layers, no orbit: tiles glide to a new order and lift under
-//! the pointer; a click grows the tile's plate into the setting, as the
-//! pill did; the search still lights the matches and dims the rest. What
-//! follows about the three layers is how it was until then; the layer
-//! constants stay because fast launch's pills wear them.
+//! el grid de apps"; 2026-11-07: "que se parezca y comporte como el grid de
+//! apps… todo el mismo tamaño y disposición y comportamiento"): the field
+//! is THE APPS GRID — its cells, its plates, its names, its box under the
+//! pointer, its pages and dots, its keys (`content.rs`'s own numbers at the
+//! box's icon scale), each setting's symbol on the dock's plate, as wide as
+//! the card is (a wider dock gives it more columns, as the apps'). Every
+//! setting stands in its FIXED place, kin beside kin ([`SETTINGS`]' order;
+//! Max, 2026-11-07: "no más el juego de más usado sube, poné todo en su
+//! lugar y queda así" — the standings below still count uses for the quick
+//! controls' three most used, they move nothing here; a sectioned field was
+//! tried the same day and taken back: "it uses too much of the screen"). A
+//! click grows the tile's plate into the setting; a search leaves only the
+//! matches, in their places, the best one lit for Enter.
 //!
-//! The field (designed in a browser mockup with Max, 2026-09-29):
-//!
-//! - **Three lit layers.** Every setting is an OPTIONS pill on one of three
-//!   depth layers: near (large, most lit, a glow), middle (the bar's own pill
-//!   size and wash), far (small, dim, no glow). Light, not blur, carries the
-//!   depth.
-//! - **Balanced.** The pills relax apart like soft discs until the spacing is
-//!   even, then the heap is fitted up under the dock with more air below
-//!   than above.
-//! - **Still, not static.** Each pill circles its own spot on a tiny, slow
-//!   orbit. Under the pointer it settles, comes 7% closer and takes the bar's
-//!   hover wash.
-//! - **Scroll moves through the layers.** Down: the near layer falls away past
-//!   the viewer and returns at the back, everything behind steps closer. Up
-//!   undoes it. Each step re-lays the field and every pill glides.
-//! - **A click becomes the setting.** The pill grows into the whole card; the
-//!   others open away from it and fade; the setting's content expands out of
-//!   the pill and floats in the air. Escape or a click on the empty space
-//!   folds it back.
-//! - **The game: use brings a setting closer** (Max, 2026-09-30). Every use
-//!   of a setting (a click, or Enter on a search) scores it, and old uses fade
-//!   (a two-week half-life). When a pill outscores the weakest pill one layer
-//!   nearer, the two swap: it steps one layer closer, the other steps back.
-//!   The layers keep their sizes (5 · 8 · 11). The swap happens while the
-//!   setting is open, so the field is rearranged when it folds back — nothing
-//!   re-flows under the eye. The arrangement and the scores are saved
-//!   (`control-panel.json`), starting from [`SETTINGS`]' order.
-//! - **The first real settings: Scale and Resolution** (2026-10-01). Open,
-//!   they show the screen's choices as floating pills, the one in use lit
-//!   (the settings boxes' preset idiom); a click sets it live (see
-//!   [`crate::display`]). The rest still show the placeholder controls.
+//! The settings themselves: Scale and Resolution show the screen's choices
+//! (see [`crate::display`]); every other one is `controls.rs`'s.
 
 use std::collections::BTreeMap;
 use std::f32::consts::TAU;
@@ -74,61 +48,68 @@ use crate::{apps, groups, App};
 use waverunner_proto::Command;
 use crate::i18n::tr;
 
-/// One pill of a field: its name, the layer it starts on (0 near, 1
-/// middle, 2 far), and its search keywords.
+/// One pill of a field: its name, the kin it stands with (only the order
+/// of the table places it: the modules' field keeps a number too), and its
+/// search keywords.
 type Item = (&'static str, u8, &'static str);
 
-/// The settings and the layer each starts on (0 near, 1 middle, 2 far):
-/// the ones people reach for float nearest. Placeholders until each becomes
-/// a real setting.
+/// The settings in the order they stand on the grid — kin beside kin: how
+/// Golem looks, the screen and the sound, the connections, power, the
+/// owner's security, the keys and the system. Fixed: use moves nothing.
 const SETTINGS: [Item; 34] = [
-    // (name, first layer, search keywords: what else people call it or
-    // look for it by). 5 near, 11 middle, 18 far.
-    ("Resolution", 0, "display screen monitor size pixels"),
-    ("Scale", 0, "display screen zoom size hidpi text bigger smaller"),
-    ("Wi-Fi", 0, "wifi wireless network internet connection hotspot share airplane ip address dns wired ethernet"),
-    ("Sound output", 0, "audio speakers speaker headphones output"),
+    // (name, kin, search keywords: what else people call it or look for
+    // it by).
+    // How Golem looks.
     ("Colours", 0, "dark mode light theme appearance night colors colour color accent palette highlight dynamic websites web apps"),
-    ("Brightness", 1, "display screen backlight dim auto sensor light"),
-    ("Bluetooth", 1, "wireless devices headphones pairing send receive files"),
-    ("Volume", 1, "audio sound loud quiet mute apps mixer per app"),
-    ("Wallpaper", 1, "background desktop picture image appearance"),
-    ("Night light", 1, "display screen warm blue light sunset eyes night automatic schedule"),
+    ("Wallpaper", 0, "background desktop picture image appearance"),
     // How the windows sit: where they open, how they stick, the side column…
     // (Max, 2026-10-14: "a control called Tiles… we will start dumping
     // controls in there").
-    ("Tiles", 1, "windows tiling tile floating snap magnets magnetism layout arrange side column"),
+    ("Tiles", 0, "windows tiling tile floating snap magnets magnetism layout arrange side column"),
     // The dock and its box (Max, 2026-10-20: "we will call it Launcher").
-    ("Launcher", 2, "dock launcher apps box hide hidden stay away position left right bottom side monitors screens displays animated icons motion arrange sort order"),
+    ("Launcher", 0, "dock launcher apps box hide hidden stay away position left right bottom side monitors screens displays animated icons motion arrange sort order"),
+    // The screen and the sound.
+    ("Resolution", 1, "display screen monitor size pixels"),
+    ("Scale", 1, "display screen zoom size hidpi text bigger smaller"),
     // The screens together (Max, 2026-10-21): arranged, mirrored, what goes where.
-    ("Monitors", 2, "monitors screens displays external tv projector arrange mirror extend isolated rotate turn resolution scale lid"),
+    ("Monitors", 1, "monitors screens displays external tv projector arrange mirror extend isolated rotate turn resolution scale lid"),
+    ("Brightness", 1, "display screen backlight dim auto sensor light"),
+    ("Night light", 1, "display screen warm blue light sunset eyes night automatic schedule"),
+    ("Sound output", 1, "audio speakers speaker headphones output"),
+    ("Volume", 1, "audio sound loud quiet mute apps mixer per app"),
+    ("Microphone", 1, "audio input mic recording sound"),
+    // The connections.
+    ("Wi-Fi", 2, "wifi wireless network internet connection hotspot share airplane ip address dns wired ethernet"),
+    ("Bluetooth", 2, "wireless devices headphones pairing send receive files"),
+    ("VPN", 2, "vpn wireguard openvpn tunnel private network connection"),
     // Printing (2026-10-21): the printers, their prints and what a print gets.
     ("Printers", 2, "printers printer print printing prints queue cancel paper ink toner colour color black white quality draft test page pause resume default scanner"),
-    ("Notifications", 1, "alerts do not disturb dnd messages mute silence app quiet"),
-    ("Keyboard layout", 1, "input language typing keys layouts switch repeat delay caps lock compose"),
-    ("Power mode", 1, "battery performance energy saver fans fast slow"),
+    // Power.
+    ("Power mode", 3, "battery performance energy saver fans fast slow"),
+    ("Battery", 3, "power charge energy health"),
+    ("Sleep", 3, "sleep suspend screen off idle lid close minutes power saving"),
+    // The owner's security.
+    ("Lock screen", 4, "lock screen password sleep idle minutes security away"),
     // THE CONTROLS GAP AUDIT (Max, 2026-11-06, "quiero todo lo necesario, en
     // Controls": what every settings app has and this one lacked): the
     // owner's account, the mouse and touchpad whole, the keys, what starts
     // with the session, the lock screen, accessibility, VPNs; and the
     // choices that lived only in the gear box found from here by their words.
-    ("Your account", 1, "user account password name photo picture avatar fingerprint finger login sign in"),
-    ("Mouse and touchpad", 1, "trackpad mouse pointer cursor speed tap click right click left handed scrolling natural size"),
-    ("Shortcuts", 2, "keyboard shortcuts keys hotkeys super combinations binds"),
-    ("Accessibility", 2, "accessibility text size bigger larger magnifier zoom reduce motion animations contrast pointer cursor screen reader"),
-    ("Startup apps", 2, "autostart startup login start boot open at start apps run automatically"),
-    ("Lock screen", 2, "lock screen password sleep idle minutes security away"),
-    ("Sleep", 2, "sleep suspend screen off idle lid close minutes power saving"),
-    ("VPN", 2, "vpn wireguard openvpn tunnel private network connection"),
-    ("Language", 2, "region locale translation input"),
-    ("Time zone", 2, "clock date time region 24 12 hour am pm format"),
-    ("Natural scrolling", 2, "touchpad trackpad mouse scroll direction"),
-    ("Updates", 2, "upgrade system software version"),
-    ("About Golem", 2, "system version info hardware computer name"),
-    ("Microphone", 2, "audio input mic recording sound"),
-    ("Battery", 2, "power charge energy health"),
-    ("Default apps", 2, "applications browser open with"),
-    ("Privacy", 2, "security permissions camera location"),
+    ("Your account", 4, "user account password name photo picture avatar fingerprint finger login sign in"),
+    ("Privacy", 4, "security permissions camera location"),
+    ("Updates", 4, "upgrade system software version"),
+    // The keys and the system.
+    ("Keyboard layout", 5, "input language typing keys layouts switch repeat delay caps lock compose"),
+    ("Mouse and touchpad", 5, "trackpad mouse pointer cursor speed tap click right click left handed scrolling natural size"),
+    ("Natural scrolling", 5, "touchpad trackpad mouse scroll direction"),
+    ("Shortcuts", 5, "keyboard shortcuts keys hotkeys super combinations binds"),
+    ("Accessibility", 5, "accessibility text size bigger larger magnifier zoom reduce motion animations contrast pointer cursor screen reader"),
+    ("Language", 5, "region locale translation input"),
+    ("Time zone", 5, "clock date time region 24 12 hour am pm format"),
+    ("Notifications", 5, "alerts do not disturb dnd messages mute silence app quiet"),
+    ("Default apps", 5, "applications browser open with"),
+    ("Startup apps", 5, "autostart startup login start boot open at start apps run automatically"),
+    ("About Golem", 5, "system version info hardware computer name"),
 ];
 
 /// The setting whose name, without spaces or capitals, is `name`.
@@ -459,12 +440,9 @@ const OPEN_RATE: f32 = 14.0;
 // ---- The game ------------------------------------------------------------
 /// Uses fade: one counts half after this many days.
 const USE_HALF_LIFE_DAYS: f64 = 14.0;
-/// The score each layer starts with, so the first order has a little
-/// weight: a far setting needs two uses to pass a middle one that is never
-/// used, and three to reach the front. It fades like any use.
-const SEED_SCORE: [f64; 3] = [2.0, 1.0, 0.0];
-
-/// A setting's place in the game: its layer and its fading score.
+/// A setting's standing: its fading score (the quick controls' "three used
+/// most"), and the layer it had when the field was layers (kept in the
+/// file, read by nothing).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 struct Standing {
     layer: u8,
@@ -1065,9 +1043,13 @@ pub(crate) struct Panel {
     /// Seconds the panel has been up (what breathes in an open setting
     /// reads it).
     clock: f32,
-    /// The grid as laid out (`grid_metrics`), and its pages: which is up
-    /// and its slide, the apps grid's own pager.
+    /// The grid as laid out (`grid_metrics`) for a field `grid_w` wide —
+    /// `grid_field` is that field this frame, in surface coordinates: the
+    /// card's whole width (the open setting's `field` is narrower, centred);
+    /// and its pages: which is up and its slide, the apps grid's own pager.
     grid: Grid,
+    grid_w: f32,
+    grid_field: Rect,
     pages: crate::pager::Pager,
     /// The tile under the pointer.
     hot: Option<usize>,
@@ -1401,7 +1383,7 @@ impl Panel {
 
     /// Build (or rebuild for a new field size or bar scale) the pills:
     /// measure every label at every layer's size, then lay them out.
-    fn ensure(&mut self, size: (f32, f32), scale: f32, icon_scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
+    fn ensure(&mut self, size: (f32, f32), grid_w: f32, scale: f32, icon_scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
         let key = (size.0, size.1, scale, icon_scale);
         let fresh = self.pills.is_empty();
         if !fresh
@@ -1409,25 +1391,18 @@ impl Panel {
             && (self.key.1 - key.1).abs() < 0.5
             && (self.key.2 - key.2).abs() < 0.001
             && (self.key.3 - key.3).abs() < 0.001
+            && (self.grid_w - grid_w).abs() < 0.5
         {
             return;
         }
         tracing::debug!(
-            "control panel: field laid out for {:.0}x{:.0} at scale {:.2}, icons {:.2} (fresh {fresh})",
+            "control panel: field laid out for {:.0}x{:.0} (grid {grid_w:.0} wide) at scale {:.2}, icons {:.2} (fresh {fresh})",
             key.0, key.1, key.2, key.3
         );
         self.key = key;
+        self.grid_w = grid_w;
         self.scale = scale;
         if fresh {
-            // Every setting with a standing: the saved scores, each never
-            // scored one seeded by its first layer (so the first order has
-            // a little weight, fading like any use).
-            let now = now_secs();
-            for &(name, layer, _) in self.items {
-                let st = self.usage.settings.entry(name.to_owned()).or_default();
-                let earned = st.score_at(now);
-                *st = Standing { layer: st.layer, score: earned.max(SEED_SCORE[layer as usize]), at: now };
-            }
             self.pills = self
                 .items
                 .iter()
@@ -1449,7 +1424,9 @@ impl Panel {
         // The apps grid's cells at the box's icon scale, and each name
         // fitted to its cell at the names' type size (the apps' own, not
         // scaled with the icons).
-        self.grid = grid_metrics(size, icon_scale);
+        // (As wide as the card: the sections of the apps gain columns with
+        // it, so does this.)
+        self.grid = grid_metrics((grid_w, size.1), icon_scale);
         let room = self.grid.cell_w - 12.0;
         for p in &mut self.pills {
             let name = crate::i18n::tr(p.label);
@@ -1484,22 +1461,14 @@ impl Panel {
             return Vec::new();
         }
         let items = self.items;
-        // Among equal matches, the order use brings them (the grid's own).
-        let now = now_secs();
-        let score = |label: &str| self.usage.settings.get(label).map_or(0.0, |st| st.score_at(now));
-        let mut by_use: Vec<usize> = (0..items.len()).collect();
-        by_use.sort_by(|&a, &b| score(items[b].0).total_cmp(&score(items[a].0)).then(a.cmp(&b)));
-        let mut place = vec![0u8; items.len()];
-        for (k, &i) in by_use.iter().enumerate() {
-            place[i] = k.min(255) as u8;
-        }
-        let mut hits: Vec<(u8, u8, usize)> = items
+        // (Among equal matches, the grid's own order.)
+        let mut hits: Vec<(u8, usize)> = items
             .iter()
             .enumerate()
-            .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, place[i], i)))
+            .filter_map(|(i, &(label, _, keywords))| Some((match_rank(label, keywords, &q)?, i)))
             .collect();
         hits.sort();
-        hits.into_iter().map(|(rank, _, i)| (rank, items[i].0)).collect()
+        hits.into_iter().map(|(rank, i)| (rank, items[i].0)).collect()
     }
 
     /// Open the setting named `label` (from the apps grid's search): now if
@@ -1516,26 +1485,19 @@ impl Panel {
         }
     }
 
-    /// Lay the grid out: the tiles in the order use brings them (the
-    /// standings' scores, the first order among equals), row by row, page
-    /// by page; with a search on, only its matches — the best first (a name
-    /// beginning so, a name holding it, a keyword), then by use — the rest
-    /// leave. `snap` puts every tile there at once; otherwise they glide.
+    /// Lay the grid out: every tile in its fixed place (the table's order),
+    /// row by row, page by page; with a search on, only its matches, in
+    /// their order — the rest leave. `snap` puts every tile there at once;
+    /// otherwise they glide.
     fn compose(&mut self, snap: bool) {
-        let now = now_secs();
-        let scores: Vec<f64> = self.pills.iter().map(|p| self.usage.settings.get(p.label).map_or(0.0, |st| st.score_at(now))).collect();
-        let mut order: Vec<(u8, usize)> = self
-            .pills
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| if self.query.is_empty() { Some((0, i)) } else { Some((match_rank(p.label, p.keywords, &self.query)?, i)) })
+        let order: Vec<usize> = (0..self.pills.len())
+            .filter(|&i| self.query.is_empty() || match_rank(self.pills[i].label, self.pills[i].keywords, &self.query).is_some())
             .collect();
-        order.sort_by(|&(ra, a), &(rb, b)| ra.cmp(&rb).then(scores[b].total_cmp(&scores[a])).then(a.cmp(&b)));
         self.grid.n_pages = order.len().div_ceil(self.grid.per_page()).max(1);
         for p in &mut self.pills {
             p.shown = false;
         }
-        for (k, &(_, i)) in order.iter().enumerate() {
+        for (k, &i) in order.iter().enumerate() {
             let c = self.grid.cell_of(k);
             let p = &mut self.pills[i];
             p.shown = true;
@@ -1565,12 +1527,13 @@ impl Panel {
         Rect::new(p.pos.0 - g.cell_w / 2.0 + rel, p.pos.1 - g.cell_h / 2.0, g.cell_w, g.cell_h)
     }
 
-    /// Its icon's place — the plate an app's icon would fill — in field
-    /// coordinates: what its setting opens out of.
+    /// Its icon's place — the plate an app's icon would fill — in the open
+    /// setting's field coordinates: what its setting opens out of.
     fn icon_rect(&self, p: &Pill) -> Rect {
         let c = self.cell_now(p);
         let g = &self.grid;
-        Rect::new(c.x + (c.w - g.icon) / 2.0, c.y + g.icon_top, g.icon, g.icon)
+        let (dx, dy) = (self.grid_field.x - self.field.x, self.grid_field.y - self.field.y);
+        Rect::new(c.x + (c.w - g.icon) / 2.0 + dx, c.y + g.icon_top + dy, g.icon, g.icon)
     }
 
     /// Wheel travel over the panel: an open module's list scrolls; the grid
@@ -1594,7 +1557,7 @@ impl Panel {
 
     /// The tile whose cell is under `pos` (surface coordinates).
     fn pill_at(&self, pos: (f32, f32)) -> Option<usize> {
-        let fp = (pos.0 - self.field.x, pos.1 - self.field.y);
+        let fp = (pos.0 - self.grid_field.x, pos.1 - self.grid_field.y);
         if !self.grid.vp.contains(fp) {
             return None;
         }
@@ -3012,8 +2975,7 @@ impl Panel {
         if let Some(path) = &self.store {
             crate::persist::write_json("control panel", path, &self.usage);
         }
-        // Its place in the order may have moved: the grid glides to it.
-        self.compose(false);
+        // (A use moves nothing on the grid: every setting keeps its place.)
     }
 
     /// Set the search (from the card's search pill): the grid shows its
@@ -3032,22 +2994,29 @@ impl Panel {
         // Entering or leaving a search: back to the first page.
         self.pages.reset();
         self.keyed = false;
-        self.sel = if self.query.is_empty() { None } else { self.first_shown() };
+        self.sel = if self.query.is_empty() { None } else { self.best_match() };
     }
 
-    /// The tile in the grid's first slot (the best match of a search).
-    fn first_shown(&self) -> Option<usize> {
-        self.pills.iter().position(|p| p.shown && p.slot == 0)
+    /// The best match of the search among the tiles shown: a name that
+    /// starts with it, then a name that contains it, then a keyword match;
+    /// the first in the grid among equals.
+    fn best_match(&self) -> Option<usize> {
+        self.pills
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.shown)
+            .filter_map(|(i, p)| Some((match_rank(p.label, p.keywords, &self.query)?, p.slot, i)))
+            .min()
+            .map(|(.., i)| i)
     }
 
-    /// Open the best match of the search: a name that starts with it, then
-    /// a name that contains it, then a keyword match; the most used among
-    /// equals (the grid's first tile). Returns whether there was one.
+    /// Open the best match of the search (`best_match`). Returns whether
+    /// there was one.
     fn open_best(&mut self) -> bool {
         if self.query.is_empty() || self.open.is_some() {
             return false;
         }
-        match self.first_shown() {
+        match self.best_match() {
             Some(i) => {
                 match self.boxed(i) {
                     Some(label) => self.action = Some(PanelAction::Boxed(label)),
@@ -3406,11 +3375,13 @@ impl Panel {
     fn draw(&self, paint: PanelPaint) -> PanelDraw {
         let mut out = PanelDraw::default();
         let s = self.scale;
-        let f = self.field;
+        // (The grid's field: the card's width; the open setting's is centred in it.)
+        let f = self.grid_field;
         let g = self.grid;
         let open_k = self.open.as_ref().map_or(0.0, |o| o.k);
         let open_pill = self.open.as_ref().map(|o| o.pill);
-        let open_from = self.open.as_ref().map(|o| o.from);
+        // (The open box's start, in the grid field's coordinates.)
+        let open_from = self.open.as_ref().map(|o| Rect::new(o.from.x + self.field.x - f.x, o.from.y + self.field.y - f.y, o.from.w, o.from.h));
         let ink = paint.ink;
         let hl = paint.highlight;
         let blank = crate::app_actions::symbol("blank");
@@ -4626,15 +4597,29 @@ impl App {
         )
     }
 
+    /// THE GRID'S field: the card's whole width under the dock, the field's
+    /// height — the grid gains columns with the card as the apps' sections
+    /// do (Max, 2026-11-07: "respect the box wide").
+    fn panel_grid_rect(&self, layout: &Layout) -> Rect {
+        let field = self.panel_field(layout);
+        let settled = self.layout_at_rest(self.ui.extent_of(Target::Open));
+        if settled.sideways() {
+            return field;
+        }
+        Rect::new(settled.card_x, field.y, settled.card_w, field.h)
+    }
+
     /// Advance the panel by `dt` and return what it draws this frame.
     pub(crate) fn panel_frame(&mut self, layout: &Layout, dt: f32, paint: PanelPaint) -> PanelDraw {
         let field = self.panel_field(layout);
+        let grid = self.panel_grid_rect(layout);
         let scale = self.options_scale();
         // (The grid at the box's icon size, as the apps are: Ctrl +/−.)
         let icon_scale = self.icon_scale();
+        self.panel.grid_field = grid;
         if let Some(r) = self.renderer.as_mut() {
             let mut measure = |t: &str, px: f32| r.measure_text(t, px, TEXT_FONT);
-            self.panel.ensure((field.w, field.h), scale, icon_scale, &mut measure);
+            self.panel.ensure((field.w, field.h), grid.w, scale, icon_scale, &mut measure);
         }
         self.panel.field = field;
         // An open display setting shows the screen as it is: read it when
@@ -5387,9 +5372,10 @@ impl App {
             let mut measure = |t: &str, px: f32| r.measure_text(t, px, TEXT_FONT);
             // (Laid out for the box's WIDTH only: its height follows the
             // setting, and a new height must not lay the field out again.)
-            self.quick.ensure((rect.w, QUICK_MIN_H * scale), scale, icon_scale, &mut measure);
+            self.quick.ensure((rect.w, QUICK_MIN_H * scale), rect.w, scale, icon_scale, &mut measure);
         }
         self.quick.field = rect;
+        self.quick.grid_field = rect;
     }
 
     /// The quick box of `label` was left.
@@ -5645,9 +5631,17 @@ mod tests {
     /// A panel laid out at bar scale 1 over a typical card field, with
     /// estimated label widths (no text shaper in tests).
     fn panel() -> Panel {
+        panel_in(960.0, 560.0, 1.0)
+    }
+
+    /// …over a field `w` × `h` at icon scale `is` (the grid's field the
+    /// same, at the origin).
+    fn panel_in(w: f32, h: f32, is: f32) -> Panel {
         let mut p = Panel { items: &SETTINGS, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((960.0, 560.0), 1.0, 1.0, &mut est);
+        p.field = Rect::new(0.0, 0.0, w, h);
+        p.grid_field = p.field;
+        p.ensure((w, h), w, 1.0, is, &mut est);
         p
     }
 
@@ -5712,8 +5706,12 @@ mod tests {
         assert!((top - GRID_TOP).abs() < 0.5, "first row at {top}");
         assert!((g.vp.x + g.vp.w / 2.0 - 480.0).abs() < 0.5, "the page is centred");
         assert_eq!(p.pills.iter().filter(|q| q.slot < g.cols).count(), g.cols, "a full first row");
-        // The first order: the near layer's five first (their seeds).
-        assert_eq!(&shown_order(&p)[..5], &["Resolution", "Scale", "Wi-Fi", "Sound output", "Colours"]);
+        // The fixed order: how Golem looks first, then the screen's.
+        assert_eq!(&shown_order(&p)[..5], &["Colours", "Wallpaper", "Tiles", "Launcher", "Resolution"]);
+        // A wider card: more columns, the same order.
+        let wide = panel_in(1400.0, 560.0, 1.0);
+        assert!(wide.grid.cols > g.cols);
+        assert_eq!(shown_order(&wide), shown_order(&p));
         // Every name fits its cell on one line, cut if it must; the long
         // ones have their two lines too.
         let room = g.cell_w - 12.0;
@@ -5725,10 +5723,7 @@ mod tests {
     #[test]
     fn more_tiles_than_a_page_holds_turn_pages_under_the_wheel_and_the_keys() {
         // Big icons on a short field: fewer cells a page than tiles.
-        let mut p = Panel { items: &SETTINGS, ..Panel::default() };
-        let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((960.0, 400.0), 1.0, 1.65, &mut est);
-        p.field = Rect::new(0.0, 0.0, 960.0, 400.0);
+        let mut p = panel_in(960.0, 400.0, 1.65);
         let g = p.grid;
         assert!(g.n_pages > 1, "{g:?}");
         assert_clean(&p, "paged");
@@ -5788,13 +5783,15 @@ mod tests {
             }
         }
         assert_clean(&p, "searched");
-        // Its best match is lit, softly, for Enter; the hand over another
-        // tile takes it.
-        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(0));
-        assert!(!p.keyed);
-        // "sc" matches Scale by name, Resolution by a keyword: Scale first.
+        // Its best match is lit, softly, for Enter — the first of the
+        // keyword matches, where they all are.
+        assert_eq!(p.sel, p.best_match());
+        assert!(p.sel.is_some() && !p.keyed);
+        // "sc" matches Scale by name, Resolution by a keyword: Scale, though
+        // Launcher ("screens") stands first on the grid.
         p.set_query("sc");
-        assert_eq!(shown_order(&p)[0], "Scale");
+        assert_eq!(p.best_match().map(|i| p.pills[i].label), Some("Scale"));
+        assert_eq!(shown_order(&p)[0], "Launcher", "the matches keep their places");
         p.set_query("");
         for _ in 0..90 {
             p.step(1.0 / 60.0, None);
@@ -5855,7 +5852,7 @@ mod tests {
     fn the_modules_field_lays_out_clean_and_searches_its_own() {
         let mut p = Panel { items: crate::modules::items(), modules: true, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((960.0, 560.0), 1.0, 1.0, &mut est);
+        p.ensure((960.0, 560.0), 960.0, 1.0, 1.0, &mut est);
         assert!(p.is_modules());
         assert_eq!(p.pills.len(), crate::modules::items().len());
         assert_clean(&p, "the modules field");
@@ -5864,27 +5861,19 @@ mod tests {
     }
 
     #[test]
-    fn use_brings_a_setting_forward_in_the_grid() {
+    fn a_use_counts_for_the_quick_controls_and_moves_nothing() {
         let mut p = panel();
+        let before = shown_order(&p);
         let now = now_secs();
         let last = p.pills.len() - 1;
         let label = p.pills[last].label;
-        let place = |p: &Panel| shown_order(p).iter().position(|l| *l == label).unwrap();
-        assert_eq!(place(&p), last, "Privacy starts last");
-        // Seeded: a never-used far setting holds 0, a middle one 1, a near one 2.
-        p.record_use(last, now);
-        assert!(place(&p) < last && place(&p) >= 5, "one use passes the far ones only: {}", place(&p));
+        let count = p.use_count(label);
         p.record_use(last, now);
         p.record_use(last, now);
-        assert_eq!(place(&p), 0, "three uses bring it to the front");
+        p.record_use(last, now);
+        assert!(p.use_count(label) > count, "{} counts", p.use_count(label));
+        assert_eq!(shown_order(&p), before, "every setting keeps its place");
         assert_clean(&p, "after uses");
-        // Everyone else keeps their order among themselves.
-        let rest: Vec<&str> = shown_order(&p).into_iter().filter(|l| *l != label).collect();
-        let first: Vec<&str> = SETTINGS.iter().map(|s| s.0).filter(|l| *l != label).collect();
-        let by_seed = |l: &str| SETTINGS.iter().find(|s| s.0 == l).map_or(0, |s| s.1);
-        let mut expect = first.clone();
-        expect.sort_by_key(|l| by_seed(l));
-        assert_eq!(rest, expect);
     }
 
     #[test]
@@ -5901,18 +5890,19 @@ mod tests {
         let json = serde_json::to_string(&p.usage).unwrap();
         let mut again = Panel { items: &SETTINGS, usage: serde_json::from_str(&json).unwrap(), ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        again.ensure((960.0, 560.0), 1.0, 1.0, &mut est);
+        again.ensure((960.0, 560.0), 960.0, 1.0, 1.0, &mut est);
         assert_eq!(shown_order(&again), shown_order(&p), "the saved order comes back");
     }
 
     #[test]
     fn a_click_opens_the_pill_and_escape_folds_it_back() {
         let mut p = panel();
-        p.field = Rect::new(0.0, 0.0, 960.0, 560.0);
         p.step(0.0, None);
-        let target = p.pills[0].pos;
+        // (Not Colours, the first tile: it opens in a box of its own.)
+        let i = p.pills.iter().position(|q| q.label == "Resolution").unwrap();
+        let target = p.pills[i].pos;
         assert!(p.click(target), "a click on a pill opens it");
-        assert_eq!(p.open.as_ref().map(|o| o.pill), Some(0));
+        assert_eq!(p.open.as_ref().map(|o| o.pill), Some(i));
         for _ in 0..30 {
             p.step(1.0 / 60.0, None);
         }
@@ -6072,7 +6062,7 @@ mod tests {
     fn colours_open(groups: Vec<crate::controls::Group>, (w, h): (f32, f32)) -> Panel {
         let mut p = Panel { items: &SETTINGS, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((w, h), 1.0, 1.0, &mut est);
+        p.ensure((w, h), w, 1.0, 1.0, &mut est);
         p.field = Rect::new(40.0, 90.0, w, h);
         p.step(0.0, None);
         p.open_named("Colours");
