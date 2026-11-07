@@ -119,9 +119,11 @@ const SETTINGS: [Item; 38] = [
     ("Graphics", 5, "gpu video card driver screen games"),
 ];
 
-/// The gear box's page a setting IS (Max, 2026-11-07: the box's pages moved
-/// into Controls): shown by the gear's own engine, hosted in the open
-/// setting (`App::gear_host`).
+/// The gear box's page a setting IS (Max, 2026-11-07: the box's pages are
+/// Controls' too): shown by the gear's own engine, hosted in the open
+/// setting (`App::gear_host`). The box keeps its own way to them — a
+/// readout's pill opens its page there, never the dock (Max: "in bluetooth
+/// it opens the dock right away. wtf").
 pub(crate) fn hosted_kind(label: &str) -> Option<PageKind> {
     Some(match label {
         "Wi-Fi" => PageKind::Net,
@@ -134,12 +136,6 @@ pub(crate) fn hosted_kind(label: &str) -> Option<PageKind> {
         "Graphics" => PageKind::Gpu,
         _ => return None,
     })
-}
-
-/// The setting that hosts the gear page `kind`, if one does (the quick
-/// settings' own page has none: it is the box's).
-pub(crate) fn label_for(kind: PageKind) -> Option<&'static str> {
-    SETTINGS.iter().map(|s| s.0).find(|l| hosted_kind(l) == Some(kind))
 }
 
 /// Where a hosted gear page lays out in the open setting's field (design

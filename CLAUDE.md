@@ -371,8 +371,9 @@ The big daemon files are cohesive but long — go straight to the function:
   Processor, Memory, Graphics are `hosted_kind` labels — `App::gear_host` points the gear engine at the
   open setting (`gear_page`, `gear_rect` = `panel_host_rect`, `gear_ptr` = the dock's pointer, keys via
   `gear_wants_keys`, the page drawn by `push_gear_page_at` into the panel's clipped parts, the card cut
-  by `host_trim`); the banner box keeps only the quick settings and "More…" → Controls, and a readout
-  pill opens its page in Controls (`stats_open_page` → `label_for`).
+  by `host_trim`); the banner box's own page is the quick settings and "More…" → Controls; a readout
+  pill still opens its page IN THE BOX (sending it to the dock was refused: "it opens the dock right
+  away. wtf") — one page at a time on the engine, so hosting shuts the box and the box folds a hosted one.
 - `controls.rs` — THE OTHER SETTINGS (2026-10-13): what each one shows open and what a click on
   a choice does, in the idiom Scale and Resolution set — a subtitle, then groups of choice pills,
   the one in use lit (`ControlView { subtitle, groups: [Group { caption, key, width, choices }] }`).

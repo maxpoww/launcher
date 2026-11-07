@@ -577,14 +577,6 @@ impl App {
             self.set_stats_box(false);
             return;
         }
-        // A reading's page is a setting of the control panel's now (Max,
-        // 2026-11-07: "the banner box should be the quick settings"): the box
-        // goes, Controls opens on it.
-        if let Some(label) = crate::panel::label_for(self.stats_kind_of_page(page)) {
-            self.set_stats_box(false);
-            self.open_control_from_bar(label);
-            return;
-        }
         self.stats.page = page;
         if self.stats.open {
             // Already open: just turn the page. The page may need things of
@@ -598,15 +590,6 @@ impl App {
         }
     }
 
-    /// Open the control panel on `label` from the bar: the card up as the
-    /// panel first when it is not (a readout's page, a drive's ask).
-    fn open_control_from_bar(&mut self, label: &'static str) {
-        if self.ui.target() != crate::state::Target::Open || !self.control_panel {
-            self.toggle_control_panel();
-        }
-        self.open_control(label);
-    }
-
     /// How long a page opened from elsewhere waits for the hand.
     const ARRIVE_HOLD: Duration = Duration::from_secs(4);
 
@@ -614,12 +597,6 @@ impl App {
     /// panel's "More…"): out and open, and held long enough for the hand to
     /// arrive. `false`: this machine has no such page.
     pub(crate) fn stats_show_page(&mut self, kind: PageKind) -> bool {
-        // (A page that is Controls' own opens there.)
-        if let Some(label) = crate::panel::label_for(kind) {
-            self.set_stats_box(false);
-            self.open_control_from_bar(label);
-            return true;
-        }
         let Some(page) = self.stats_page_for(kind) else {
             return false;
         };
