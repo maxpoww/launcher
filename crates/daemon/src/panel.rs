@@ -1519,6 +1519,19 @@ impl Panel {
         self.pills.iter().filter(|p| p.shown).count()
     }
 
+    /// The rows the grid stands in now — what the card is cut to (Max,
+    /// 2026-11-07: "la altura no es dinámica, hay aire abajo de los
+    /// iconos"), as the card shrinks to the apps' rows: `None` keeps the
+    /// card whole — a setting open (or on its way: its content is laid out
+    /// for the whole card), or more pages than one (every page keeps the
+    /// full page's rows, the apps' rule).
+    pub(crate) fn rows_wanted(&self) -> Option<usize> {
+        if self.pills.is_empty() || self.open.is_some() || self.grid.n_pages > 1 {
+            return None;
+        }
+        Some(self.shown().div_ceil(self.grid.cols.max(1)).max(1))
+    }
+
     /// The cell of tile `p` as drawn now (field coordinates): where it
     /// stands, on its page as the pager has slid it.
     fn cell_now(&self, p: &Pill) -> Rect {
@@ -5798,6 +5811,24 @@ mod tests {
         }
         assert!(p.pills.iter().all(|q| q.shown && q.op > 0.95), "clearing brings every tile back");
         assert_eq!(p.sel, None);
+    }
+
+    #[test]
+    fn the_card_is_cut_to_the_rows_the_grid_stands_in() {
+        let mut p = panel();
+        // 34 tiles at eight across: five rows; a search leaves fewer.
+        assert_eq!(p.rows_wanted(), Some(34_usize.div_ceil(p.grid.cols)));
+        p.set_query("sound");
+        assert_eq!(p.rows_wanted(), Some(1));
+        p.set_query("");
+        // A setting open (or on its way) has the whole card.
+        let i = p.pills.iter().position(|q| q.label == "Resolution").unwrap();
+        p.open_pill(i);
+        assert_eq!(p.rows_wanted(), None);
+        // More pages than one: every page keeps the full page's rows.
+        let big = panel_in(960.0, 400.0, 1.65);
+        assert!(big.grid.n_pages > 1);
+        assert_eq!(big.rows_wanted(), None);
     }
 
     #[test]

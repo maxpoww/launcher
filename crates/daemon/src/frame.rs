@@ -98,10 +98,28 @@ impl App {
     pub(crate) fn apps_trim_target(&self) -> (f32, f32) {
         // (Beside a side dock the sections stand side by side: nothing to trim.
         // The terminal takes the whole box.)
-        if self.control_panel || self.dock_side() != crate::launcher_prefs::Side::Bottom || self.term_on() {
+        if self.dock_side() != crate::launcher_prefs::Side::Bottom || self.term_on() {
             return (0.0, 0.0);
         }
         let layout = self.layout_at_rest(self.ui.extent_of(Target::Open));
+        if self.control_panel {
+            // THE CONTROL PANEL (Max, 2026-11-07: "la altura no es dinámica,
+            // hay aire abajo de los iconos"): the card is cut to the rows its
+            // grid stands in, as it is to the apps' — the first row where the
+            // apps' first stands, under the last the foot the box keeps under
+            // its last section. A setting open has the whole card.
+            let Some(rows) = self.panel.rows_wanted() else {
+                return (0.0, 0.0);
+            };
+            let files = &layout.sections[content::SECTION_FILES];
+            let foot = layout.card_top + layout.card_h - (files.viewport.y + files.viewport.h + content::DOT_ROOM);
+            let dock_h = self.config.window.input_bar_height as f32 * self.icon_scale();
+            let cell = content::GRID_CELL_H * self.icon_scale();
+            let need = dock_h + content::GRID_TOP_GAP + content::SECTION_TITLE_H + rows as f32 * cell + content::DOT_ROOM + foot;
+            // (The card untrimmed: the trim in use shortened it by as much.)
+            let have = layout.card_h + self.ui.open_trim();
+            return ((have - need).max(0.0), 0.0);
+        }
         let sec = &layout.sections[content::SECTION_APPS];
         let cell = content::GRID_CELL_H * self.icon_scale();
         // (The deep search's folded shelves gave the first their room.)
