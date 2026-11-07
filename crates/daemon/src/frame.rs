@@ -108,14 +108,20 @@ impl App {
             // grid stands in, as it is to the apps' — the first row where the
             // apps' first stands, under the last the foot the box keeps under
             // its last section. A setting open has the whole card.
-            let Some(rows) = self.panel.rows_wanted() else {
-                return (0.0, 0.0);
+            // An open setting: as tall as its content, to under its closing
+            // hint (Max: "es dinámica en el grid pero no en las cajas").
+            let body = match (self.panel.open_wanted_h(), self.panel.rows_wanted()) {
+                (Some(h), _) => h,
+                (None, Some(rows)) => {
+                    let cell = content::GRID_CELL_H * self.icon_scale();
+                    content::GRID_TOP_GAP + content::SECTION_TITLE_H + rows as f32 * cell
+                }
+                (None, None) => return (0.0, 0.0),
             };
             let files = &layout.sections[content::SECTION_FILES];
             let foot = layout.card_top + layout.card_h - (files.viewport.y + files.viewport.h + content::DOT_ROOM);
             let dock_h = self.config.window.input_bar_height as f32 * self.icon_scale();
-            let cell = content::GRID_CELL_H * self.icon_scale();
-            let need = dock_h + content::GRID_TOP_GAP + content::SECTION_TITLE_H + rows as f32 * cell + content::DOT_ROOM + foot;
+            let need = dock_h + body + content::DOT_ROOM + foot;
             // (The card untrimmed: the trim in use shortened it by as much.)
             let have = layout.card_h + self.ui.open_trim();
             return ((have - need).max(0.0), 0.0);

@@ -1522,14 +1522,26 @@ impl Panel {
     /// The rows the grid stands in now — what the card is cut to (Max,
     /// 2026-11-07: "la altura no es dinámica, hay aire abajo de los
     /// iconos"), as the card shrinks to the apps' rows: `None` keeps the
-    /// card whole — a setting open (or on its way: its content is laid out
-    /// for the whole card), or more pages than one (every page keeps the
-    /// full page's rows, the apps' rule).
+    /// card whole — a setting open (`open_wanted_h` says its height then),
+    /// or more pages than one (every page keeps the full page's rows, the
+    /// apps' rule). A setting folding back is the grid's again.
     pub(crate) fn rows_wanted(&self) -> Option<usize> {
-        if self.pills.is_empty() || self.open.is_some() || self.grid.n_pages > 1 {
+        if self.pills.is_empty() || self.grid.n_pages > 1 || self.open.as_ref().is_some_and(|o| o.want > 0.5) {
             return None;
         }
         Some(self.shown().div_ceil(self.grid.cols.max(1)).max(1))
+    }
+
+    /// How tall the open setting's content is, from the field's top to
+    /// under its closing hint — what the card is cut to while it is open
+    /// (Max, 2026-11-07: "es dinámica en el grid pero no en las cajas,
+    /// adentro de cada ícono"); `None` with nothing open, or a module's page
+    /// (laid out for the whole card).
+    pub(crate) fn open_wanted_h(&self) -> Option<f32> {
+        if self.modules || !self.open.as_ref().is_some_and(|o| o.want > 0.5) {
+            return None;
+        }
+        Some(self.open_height()? + LINE_PX * self.scale)
     }
 
     /// The cell of tile `p` as drawn now (field coordinates): where it
@@ -5821,10 +5833,16 @@ mod tests {
         p.set_query("sound");
         assert_eq!(p.rows_wanted(), Some(1));
         p.set_query("");
-        // A setting open (or on its way) has the whole card.
+        // A setting open: the card is as tall as its content, no more.
         let i = p.pills.iter().position(|q| q.label == "Resolution").unwrap();
         p.open_pill(i);
         assert_eq!(p.rows_wanted(), None);
+        let h = p.open_wanted_h().unwrap();
+        assert!(h > 0.0 && h < 560.0, "{h}");
+        // Folding back, the grid's rows again.
+        assert!(p.escape());
+        assert_eq!(p.open_wanted_h(), None);
+        assert_eq!(p.rows_wanted(), Some(34_usize.div_ceil(p.grid.cols)));
         // More pages than one: every page keeps the full page's rows.
         let big = panel_in(960.0, 400.0, 1.65);
         assert!(big.grid.n_pages > 1);
