@@ -68,7 +68,7 @@ use crate::content::{self, Label, Layout, Rect, RectInst, ShadowInst};
 use crate::controls::{ControlCommand, ControlEvent, ControlView, UiFacts};
 use crate::gear::PageKind;
 use crate::display::DisplayView;
-use crate::options::{FONT_PX, LINE_PX, NERD, TEXT_FONT};
+use crate::options::{FONT_PX, LINE_PX, TEXT_FONT};
 use crate::state::Target;
 use crate::{apps, groups, App};
 use waverunner_proto::Command;
@@ -374,13 +374,13 @@ const FIELD_MAX: (f32, f32) = (960.0, 845.0);
 const GAP_TOP: f32 = 32.0;
 
 // ---- The grid (2026-11-06) ----------------------------------------------
-/// Tiles across at most; the plate under a glyph and its corner; the glyph's
-/// size; the name's type, line and air under the plate; the air between
-/// tiles across and down.
+/// Tiles across at most; the plate under a symbol and its corner; the
+/// symbol's share of the plate; the name's type, line and air under the
+/// plate; the air between tiles across and down.
 const GRID_COLS: usize = 7;
 const PLATE: f32 = 54.0;
 const PLATE_RADIUS: f32 = 16.0;
-const GLYPH_PX: f32 = 24.0;
+const SYMBOL_SHARE: f32 = 0.6;
 const NAME_PX: f32 = 12.0;
 const NAME_LINE: f32 = 14.0;
 const NAME_GAP: f32 = 7.0;
@@ -394,46 +394,46 @@ const PLATE_WASH: f32 = 0.085;
 const PLATE_HOVER: f32 = 0.2;
 const NAME_INK: f32 = 0.84;
 
-/// The glyph a setting wears on its tile — the gear box's symbol font, the
-/// kit's one language for symbols; a module, or a setting not listed, the
-/// cog.
-fn glyph_of(label: &str) -> &'static str {
+/// The symbol a setting wears on its tile: Golem's own line symbols
+/// (`app_actions::SYMBOLS`, the `ctl-*` ones and the menu's), by name; a
+/// module, or a setting not listed, the package.
+fn symbol_of(label: &str) -> &'static str {
     match label {
-        "Resolution" => "\u{f0379}",
-        "Scale" => "\u{f0616}",
-        "Wi-Fi" => "\u{f05a9}",
-        "Sound output" => "\u{f04c3}",
-        "Colours" => "\u{f03d8}",
-        "Brightness" => "\u{f00df}",
-        "Bluetooth" => "\u{f00af}",
-        "Volume" => "\u{f057e}",
-        "Wallpaper" => "\u{f021f}",
-        "Night light" => "\u{f0594}",
-        "Tiles" => "\u{f0570}",
-        "Launcher" => "\u{f056e}",
-        "Monitors" => "\u{f0502}",
-        "Printers" => "\u{f042a}",
-        "Notifications" => "\u{f009a}",
-        "Keyboard layout" => "\u{f030c}",
-        "Power mode" => "\u{f0241}",
-        "Your account" => "\u{f0004}",
-        "Mouse and touchpad" => "\u{f037d}",
-        "Shortcuts" => "\u{f11c}",
-        "Accessibility" => "\u{f02e6}",
-        "Startup apps" => "\u{f040d}",
-        "Lock screen" => "\u{f033e}",
-        "Sleep" => "\u{f0904}",
-        "VPN" => "\u{f0499}",
-        "Language" => "\u{f01e7}",
-        "Time zone" => "\u{f0954}",
-        "Natural scrolling" => "\u{f04e1}",
-        "Updates" => "\u{f06b0}",
-        "About Golem" => "\u{f02fd}",
-        "Microphone" => "\u{f036c}",
-        "Battery" => "\u{f0079}",
-        "Default apps" => "\u{f003b}",
-        "Privacy" => "\u{f0208}",
-        _ => "\u{f0493}",
+        "Resolution" => "ctl-resolution",
+        "Scale" => "ctl-scale",
+        "Wi-Fi" => "ctl-wifi",
+        "Sound output" => "ctl-sound",
+        "Colours" => "ctl-colours",
+        "Brightness" => "ctl-brightness",
+        "Bluetooth" => "ctl-bluetooth",
+        "Volume" => "ctl-volume",
+        "Wallpaper" => "ctl-wallpaper",
+        "Night light" => "ctl-night",
+        "Tiles" => "ctl-tiles",
+        "Launcher" => "ctl-launcher",
+        "Monitors" => "ctl-monitors",
+        "Printers" => "ctl-printers",
+        "Notifications" => "bell",
+        "Keyboard layout" => "ctl-keyboard",
+        "Power mode" => "ctl-power",
+        "Your account" => "person",
+        "Mouse and touchpad" => "ctl-mouse",
+        "Shortcuts" => "ctl-shortcuts",
+        "Accessibility" => "ctl-access",
+        "Startup apps" => "play",
+        "Lock screen" => "ctl-lock",
+        "Sleep" => "ctl-sleep",
+        "VPN" => "ctl-vpn",
+        "Language" => "ctl-language",
+        "Time zone" => "clock",
+        "Natural scrolling" => "ctl-scroll",
+        "Updates" => "ctl-updates",
+        "About Golem" => "ctl-about",
+        "Microphone" => "ctl-mic",
+        "Battery" => "ctl-battery",
+        "Default apps" => "ctl-apps",
+        "Privacy" => "ctl-privacy",
+        _ => "package",
     }
 }
 
@@ -924,6 +924,9 @@ pub(crate) struct PanelDraw {
     /// Apps' icons to draw (the Colours Apps tiles): the app entry and
     /// where — drawn through the dock's icon layers, as fast launch's are.
     pub icons: Vec<(usize, Rect)>,
+    /// The tiles' SYMBOLS (the grid): which of `app_actions::SYMBOLS`,
+    /// where, and the colour it is washed with (its alpha how much it shows).
+    pub symbols: Vec<(usize, Rect, [f32; 4])>,
 }
 
 /// The card's colours the panel draws in.
@@ -3291,20 +3294,13 @@ impl Panel {
             // cache with one entry per frame.
             let resting = (k - 1.0).abs() < 0.001;
             let ink_k = lerp(lerp(NAME_INK, 1.0, rise), 1.0, p.lift);
-            let glyph = GLYPH_PX * ts * k;
-            out.labels.push(Label {
-                text: glyph_of(p.label).to_owned(),
-                pos: (plate.x + side / 2.0, plate.y + (side - glyph * 1.2) / 2.0),
-                max_w: side,
-                font_px: glyph,
-                line_px: glyph * 1.2,
-                centered: true,
-                dim: false,
-                cache: resting,
-                family: Some(NERD),
-                color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * lerp(0.92, 1.0, p.lift) * a]),
-                clip: None,
-            });
+            // The symbol, in the card's ink, on the plate's middle.
+            let inner = side * SYMBOL_SHARE;
+            out.symbols.push((
+                crate::app_actions::symbol(symbol_of(p.label)),
+                Rect::new(plate.x + (side - inner) / 2.0, plate.y + (side - inner) / 2.0, inner, inner),
+                [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * lerp(0.9, 1.0, p.lift) * a],
+            ));
             let (name_px, name_line) = (NAME_PX * ts * k, NAME_LINE * ts * k);
             let mut y = f.y + cell_top + (PLATE + NAME_GAP) * ts * k;
             for line in &p.lines {
@@ -5474,6 +5470,16 @@ mod tests {
         let mut v: Vec<&Pill> = p.pills.iter().collect();
         v.sort_by(|a, b| (a.home.1 as i32, a.home.0 as i32).cmp(&(b.home.1 as i32, b.home.0 as i32)));
         v.iter().map(|q| q.label).collect()
+    }
+
+    #[test]
+    fn every_setting_has_a_symbol_of_its_own() {
+        for (label, ..) in SETTINGS {
+            let name = symbol_of(label);
+            assert!(crate::app_actions::has_symbol(name), "{label}: no symbol {name:?}");
+            assert_ne!(name, "package", "{label} wears the fallback");
+        }
+        assert_eq!(symbol_of("Gaming"), "package", "a module wears the package");
     }
 
     #[test]

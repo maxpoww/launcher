@@ -1980,6 +1980,7 @@ impl App {
             names: &quick_names,
             ink: quick_ink,
             bg: quick_bg,
+            symbol_base: self.act_symbol_layer,
         });
         let fast_draw = (self.fast.visible() && self.fast.boxed.is_none()).then_some(content::FastDraw {
             card: if self.fast.controls { fast_pill_card } else { fast_view.card },
@@ -2134,6 +2135,7 @@ impl App {
                 panel: push >= 0.999,
                 panel_mix: push,
                 panel_draw: panel_draw.as_ref(),
+                symbol_base: self.act_symbol_layer,
                 panel_images: &panel_images,
                 open_box_disp: &open_box_disp,
                 open_box_pages,

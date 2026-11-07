@@ -99,6 +99,32 @@ const PERSON: &str = r#"<circle cx="8" cy="5.4" r="2.6"/><path d="M2.8 13.6c.6-2
 const BOOKMARK: &str = r#"<path d="M4.2 2.4h7.6v11.2L8 10.8l-3.8 2.8z"/>"#;
 const PACKAGE: &str = r#"<path d="M8 1.9l5.6 2.9v6.4L8 14.1l-5.6-2.9V4.8z"/><path d="M2.4 4.8 8 7.7l5.6-2.9M8 7.7v6.4"/>"#;
 
+// THE CONTROL PANEL'S OWN (Max, 2026-11-06: "los iconos no me gustan, hacé
+// los de golem"): one line symbol a setting, in the shell's own hand — the
+// Files mockup's 16-unit box, strokes 1.5 wide, round ends (`glyphs.rs`),
+// several of them the menu's own strokes by name. Drawn on the panel's
+// tiles in the card's ink (`panel.rs`, `PanelDraw::symbols`).
+const CTL_MONITOR: &str = r#"<rect x="1.8" y="3" width="12.4" height="8.2" rx="1.3"/><path d="M5.8 13.6h4.4M8 11.2v2.4"/>"#;
+const CTL_SCALE: &str = r#"<path d="M2.2 9.8v4h4M13.8 6.2v-4h-4M2.2 13.8l4.4-4.4M13.8 2.2 9.4 6.6"/>"#;
+const CTL_WIFI: &str = r##"<path d="M1.8 6.3a9.3 9.3 0 0 1 12.4 0M4.1 8.7a5.9 5.9 0 0 1 7.8 0M6.3 11.1a2.6 2.6 0 0 1 3.4 0"/><circle cx="8" cy="13.3" r=".7" fill="#fff" stroke="none"/>"##;
+const CTL_SOUND: &str = r#"<path d="M2.4 6.2v3.6h2.6l3.4 3V3.2L5 6.2z"/><path d="M11 6.2a2.6 2.6 0 0 1 0 3.6"/>"#;
+const CTL_VOLUME: &str = r#"<path d="M1.8 6.2v3.6h2.4l3 3V3.2l-3 3z"/><path d="M9.6 6.2a2.6 2.6 0 0 1 0 3.6M11.8 4.4a5.2 5.2 0 0 1 0 7.2"/>"#;
+const CTL_BRIGHTNESS: &str = r#"<circle cx="8" cy="8" r="2.8"/><path d="M8 1.6v1.7M8 12.7v1.7M1.6 8h1.7M12.7 8h1.7M3.5 3.5l1.2 1.2M11.3 11.3l1.2 1.2M3.5 12.5l1.2-1.2M11.3 4.7l1.2-1.2"/>"#;
+const CTL_BLUETOOTH: &str = r#"<path d="M4.4 4.8 11.4 11l-3.4 3V2l3.4 3-7 6.2"/>"#;
+const CTL_NIGHT: &str = r#"<path d="M13 9.7A5.7 5.7 0 0 1 6.3 3a5.7 5.7 0 1 0 6.7 6.7z"/>"#;
+const CTL_LAUNCHER: &str = r##"<rect x="1.8" y="10.4" width="12.4" height="3.4" rx="1.7"/><circle cx="5" cy="12.1" r=".7" fill="#fff" stroke="none"/><circle cx="8" cy="12.1" r=".7" fill="#fff" stroke="none"/><circle cx="11" cy="12.1" r=".7" fill="#fff" stroke="none"/><path d="M8 2.2v5.4M5.8 5.4 8 7.6l2.2-2.2"/>"##;
+const CTL_MONITORS: &str = r#"<rect x="1.6" y="3.2" width="8" height="6" rx="1"/><path d="M9.6 5.4h3.6a1.2 1.2 0 0 1 1.2 1.2v4.2a1.2 1.2 0 0 1-1.2 1.2H8.4a1.2 1.2 0 0 1-1.2-1.2V9.2M5.6 9.2v2.4M3.6 11.6h4"/>"#;
+const CTL_POWER: &str = r#"<path d="M8.8 1.8 3.4 8.8h4.2l-.8 5.4 5.4-7H8z"/>"#;
+const CTL_MOUSE: &str = r#"<rect x="4.6" y="1.8" width="6.8" height="12.4" rx="3.4"/><path d="M8 1.8v4M4.6 5.8h6.8"/>"#;
+const CTL_SHORTCUTS: &str = r#"<rect x="1.8" y="4.4" width="12.4" height="7.4" rx="1.6"/><path d="M4.8 7.2h6.4M4.8 9.4h2.4"/>"#;
+const CTL_ACCESS: &str = r##"<circle cx="8" cy="8" r="6.2"/><circle cx="8" cy="4.9" r=".9" fill="#fff" stroke="none"/><path d="M4.9 6.8l3.1.7 3.1-.7M8 7.5v2.5l-1.5 2.7M8 10l1.5 2.7"/>"##;
+const CTL_SLEEP: &str = r#"<path d="M1.8 13.6h4.4l-4.4-4.8h4.4"/><path d="M8 7h6l-6-5h6"/>"#;
+const CTL_SCROLL: &str = r#"<path d="M5.2 2.2v11.6M2.5 4.9l2.7-2.7 2.7 2.7M10.8 13.8V2.2M8.1 11.1l2.7 2.7 2.7-2.7"/>"#;
+const CTL_UPDATES: &str = r#"<path d="M13.7 8a5.7 5.7 0 0 1-10 3.8M2.3 8a5.7 5.7 0 0 1 10-3.8"/><path d="M12.4 1.6v2.8H9.6M3.6 14.4v-2.8h2.8"/>"#;
+const CTL_MIC: &str = r#"<rect x="5.8" y="1.8" width="4.4" height="7.6" rx="2.2"/><path d="M3.5 7.4a4.5 4.5 0 0 0 9 0M8 11.9v2.3M5.9 14.2h4.2"/>"#;
+const CTL_BATTERY: &str = r#"<rect x="1.6" y="5" width="10.8" height="6" rx="1.4"/><path d="M12.4 7h1.1a.7.7 0 0 1 .7.7v.6a.7.7 0 0 1-.7.7h-1.1M3.8 7v2h4.4V7z"/>"#;
+const CTL_APPS: &str = r#"<rect x="2" y="2.6" width="12" height="10.8" rx="1.6"/><path d="M2 5.8h12M5.8 9.6l1.6 1.6 3-3"/>"#;
+
 /// Every symbol an action can wear, in the order of their texture layers.
 const SYMBOLS: &[(&str, Symbol)] = &[
     ("window", Symbol::Filled(CHROME_WINDOW)),
@@ -139,6 +165,37 @@ const SYMBOLS: &[(&str, Symbol)] = &[
     ("eye", Symbol::Glyph("eye")),
     ("folder", Symbol::Glyph("folder")),
     ("copy", Symbol::Glyph("copy")),
+    // The control panel's tiles (`panel::symbol_of`).
+    ("ctl-resolution", Symbol::Lines(CTL_MONITOR)),
+    ("ctl-scale", Symbol::Lines(CTL_SCALE)),
+    ("ctl-wifi", Symbol::Lines(CTL_WIFI)),
+    ("ctl-sound", Symbol::Lines(CTL_SOUND)),
+    ("ctl-colours", Symbol::Glyph("palette")),
+    ("ctl-brightness", Symbol::Lines(CTL_BRIGHTNESS)),
+    ("ctl-bluetooth", Symbol::Lines(CTL_BLUETOOTH)),
+    ("ctl-volume", Symbol::Lines(CTL_VOLUME)),
+    ("ctl-wallpaper", Symbol::Glyph("pic")),
+    ("ctl-night", Symbol::Lines(CTL_NIGHT)),
+    ("ctl-tiles", Symbol::Glyph("grid")),
+    ("ctl-launcher", Symbol::Lines(CTL_LAUNCHER)),
+    ("ctl-monitors", Symbol::Lines(CTL_MONITORS)),
+    ("ctl-printers", Symbol::Glyph("print")),
+    ("ctl-keyboard", Symbol::Glyph("keyboard")),
+    ("ctl-power", Symbol::Lines(CTL_POWER)),
+    ("ctl-mouse", Symbol::Lines(CTL_MOUSE)),
+    ("ctl-shortcuts", Symbol::Lines(CTL_SHORTCUTS)),
+    ("ctl-access", Symbol::Lines(CTL_ACCESS)),
+    ("ctl-lock", Symbol::Glyph("lock")),
+    ("ctl-sleep", Symbol::Lines(CTL_SLEEP)),
+    ("ctl-vpn", Symbol::Glyph("shield")),
+    ("ctl-language", Symbol::Glyph("net")),
+    ("ctl-scroll", Symbol::Lines(CTL_SCROLL)),
+    ("ctl-updates", Symbol::Lines(CTL_UPDATES)),
+    ("ctl-about", Symbol::Glyph("info")),
+    ("ctl-mic", Symbol::Lines(CTL_MIC)),
+    ("ctl-battery", Symbol::Lines(CTL_BATTERY)),
+    ("ctl-apps", Symbol::Lines(CTL_APPS)),
+    ("ctl-privacy", Symbol::Glyph("eye")),
 ];
 
 #[derive(Clone, Copy)]

@@ -963,6 +963,8 @@ pub struct QuickDraw<'a> {
     /// Its own colour this frame (the dock's, or — a wallpaper changing —
     /// already the new picture's: `App::quick_colours`).
     pub bg: [f32; 4],
+    /// The action symbols' first layer (the tiles' symbols, `FrameInput`'s).
+    pub symbol_base: Option<u32>,
 }
 
 impl std::fmt::Debug for QuickDraw<'_> {
@@ -2623,6 +2625,9 @@ pub struct FrameInput<'a> {
     pub panel: bool,
     /// The control panel's field this frame (see `panel.rs`).
     pub panel_draw: Option<&'a crate::panel::PanelDraw>,
+    /// The first texture layer of the action symbols (`app_actions`): the
+    /// control panel's tiles wear symbols among them (`PanelDraw::symbols`).
+    pub symbol_base: Option<u32>,
     /// The pictures of the panel's open setting: where, which layer.
     pub panel_images: &'a [(Rect, u32, f32)],
     /// Apps ↔ settings: 0 = the apps, 1 = the panel. Between, the settings
@@ -2909,6 +2914,7 @@ pub fn scene(
         open_box_members,
         panel,
         panel_draw,
+        symbol_base,
         panel_images,
         panel_mix,
         open_box_disp,
@@ -4966,6 +4972,17 @@ pub fn scene(
             ring: -1.0,
             plate: NO_PLATE,
         }));
+        // The tiles' symbols: a white stroke washed with the card's ink
+        // (`icon.wgsl`'s GHOST, as the menus' symbols are drawn).
+        if let Some(base) = symbol_base {
+            field.icons.extend(pd.symbols.iter().map(|&(i, r, c)| IconInst {
+                rect: Rect::new(r.x, r.y + rise, r.w, r.h),
+                layer: base + i as u32,
+                tint: [c[0], c[1], c[2], 1.0],
+                ring: -1.17,
+                plate: [0.0, 0.0, 0.0, c[3] * arrive],
+            }));
+        }
         scene.grids.push(field);
         // Parts that scroll inside their own window (an open module's list).
         for (clip, rects, labels) in &pd.clipped {
@@ -5411,6 +5428,11 @@ pub fn scene(
             picture_tiles_as(&mut scene, q.images, q.draw.picture_radius * k, q.draw.card_chroma, place);
             for &(entry, r) in &q.draw.icons {
                 scene.overlay.push(IconInst { rect: place(r), layer: layer_of(entry), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
+            }
+            if let Some(base) = q.symbol_base {
+                for &(i, r, c) in &q.draw.symbols {
+                    scene.overlay.push(IconInst { rect: place(r), layer: base + i as u32, tint: [c[0], c[1], c[2], 1.0], ring: -1.17, plate: [0.0, 0.0, 0.0, c[3]] });
+                }
             }
             for (tile, name) in q.names {
                 let px = (tile.h * 0.11).clamp(9.0, 14.0);
