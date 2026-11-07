@@ -196,7 +196,13 @@ const SYMBOLS: &[(&str, Symbol)] = &[
     ("ctl-battery", Symbol::Lines(CTL_BATTERY)),
     ("ctl-apps", Symbol::Lines(CTL_APPS)),
     ("ctl-privacy", Symbol::Glyph("eye")),
+    // Nothing at all: drawn on a plate, it is the plate alone (the control
+    // panel's tiles wear the apps' plate under their symbol).
+    ("blank", Symbol::Lines(BLANK)),
 ];
+
+/// A figure that draws nothing (a path with no stroke and no fill).
+const BLANK: &str = r#"<path d="M0 0h16v16H0z" fill="none" stroke="none"/>"#;
 
 #[derive(Clone, Copy)]
 enum Symbol {

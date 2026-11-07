@@ -274,7 +274,7 @@ const SECTION_TITLES: [&str; N_SECTIONS] = ["Apps", "Install", "Files"];
 /// Grid rows per section (Apps is a cap; it shrinks on short cards).
 const SECTION_ROWS: [usize; N_SECTIONS] = [4, 1, 1];
 /// Height of a section's title line above its grid.
-const SECTION_TITLE_H: f32 = 5.0;
+pub(crate) const SECTION_TITLE_H: f32 = 5.0;
 /// The spacing of Max's framed-sections mockup (2026-09-30), kept without
 /// the frames ("only the positions"): the gap between one section and the
 /// next, the room under a grid where its page dots sit, and the air kept
@@ -282,12 +282,12 @@ const SECTION_TITLE_H: f32 = 5.0;
 /// their titles, the titles staying put: the band 14 -> 10, the gap
 /// 20 -> 24; then 3 px more: 7 and 27; then 2 more: 5 and 29.)
 const SECTION_GAP: f32 = 29.0;
-const DOT_ROOM: f32 = 6.0;
+pub(crate) const DOT_ROOM: f32 = 6.0;
 /// How much further below its title the Controls row sits than icons do.
 const CONTROLS_EXTRA_DROP: f32 = 8.0;
 /// The page dots sit this much above the middle of their room (Max: "the
 /// dots slightly higher").
-const DOTS_RAISE: f32 = 1.5;
+pub(crate) const DOTS_RAISE: f32 = 1.5;
 const LAST_SECTION_AIR: f32 = 6.0;
 
 /// Fixed layout metrics (logical px). Config-independent for now; can
@@ -307,7 +307,7 @@ pub const GRID_ICON: f32 = 54.0;
 /// Vertical padding inside a grid cell: from the cell top to the icon,
 /// and from the icon bottom to its label. Kept tight so more rows fit.
 pub const GRID_ICON_TOP: f32 = 9.0;
-const GRID_LABEL_GAP: f32 = 5.0;
+pub(crate) const GRID_LABEL_GAP: f32 = 5.0;
 /// A closed box tile's side (the folder-style square that holds the 2×2
 /// mini preview) — the size the magnified box grows out of / collapses to.
 pub const BOX_TILE: f32 = GRID_ICON * 1.15;
@@ -318,8 +318,8 @@ pub const OPEN_BOX_COLS: usize = 3;
 /// Members per open-box page — the box grid's capacity, and the page
 /// size of a group's member list (`groups::PAGE_CAP` re-exports it).
 pub const OPEN_BOX_CAP: usize = OPEN_BOX_COLS * OPEN_BOX_COLS;
-const GRID_PAD_X: f32 = 14.0;
-const GRID_TOP_GAP: f32 = 13.0;
+pub(crate) const GRID_PAD_X: f32 = 14.0;
+pub(crate) const GRID_TOP_GAP: f32 = 13.0;
 const GRID_BOTTOM_PAD: f32 = 6.0;
 /// How far the search pill lifts off the card's floor into spare room above
 /// it — never closer than [`SEARCH_LIFT_AIR`] to the Files row, so it never
@@ -774,9 +774,24 @@ const MIN_TILE_PAD: f32 = 8.0;
 const MIN_BADGE_FRAC: f32 = 0.45;
 const MIN_BADGE_INSET: f32 = 2.0;
 /// Peak scale of a grid icon under the cursor.
-const GRID_MAGNIFY: f32 = 1.22;
+pub(crate) const GRID_MAGNIFY: f32 = 1.22;
 /// Radial falloff radius of grid magnification, in pixels.
-const GRID_MAG_RADIUS: f32 = 95.0;
+pub(crate) const GRID_MAG_RADIUS: f32 = 95.0;
+
+/// One of the control panel's symbols as the icon pipeline draws it, `rise`
+/// lower (the panel's reveal) and `arrive` of its alpha: washed with its
+/// colour (`icon.wgsl`'s GHOST), or, a plate, the layer over a plate of
+/// that colour as an app's icon is drawn (`symbol_base` = the symbols'
+/// first layer, `App::act_symbol_layer`).
+fn panel_symbol(base: u32, s: &crate::panel::PanelSymbol, rise: f32, arrive: f32) -> IconInst {
+    let c = s.color;
+    let rect = Rect::new(s.rect.x, s.rect.y + rise, s.rect.w, s.rect.h);
+    if s.plate {
+        IconInst { rect, layer: base + s.sym as u32, tint: [0.0; 4], ring: -1.0, plate: [c[0], c[1], c[2], c[3] * arrive] }
+    } else {
+        IconInst { rect, layer: base + s.sym as u32, tint: [c[0], c[1], c[2], 1.0], ring: -1.17, plate: [0.0, 0.0, 0.0, c[3] * arrive] }
+    }
+}
 
 /// Cosine ease from 1.0 at `d == 0` to 0.0 at `d >= radius`.
 pub(crate) fn falloff(d: f32, radius: f32) -> f32 {
@@ -2391,7 +2406,7 @@ pub struct NameFit {
 
 /// How far under the first line a grid name's second sits: a little closer
 /// than a line, so it stays clear of the next row's icons.
-const SECOND_LINE: f32 = 14.0;
+pub(crate) const SECOND_LINE: f32 = 14.0;
 
 /// A lone app's RECENTS as drawn (`app_actions.rs`): the page shown, the
 /// shapes of their pictures, and the slide between pages.
@@ -4972,20 +4987,16 @@ pub fn scene(
             ring: -1.0,
             plate: NO_PLATE,
         }));
-        // The tiles' symbols: a white stroke washed with the card's ink
-        // (`icon.wgsl`'s GHOST, as the menus' symbols are drawn).
+        // The panel's symbols: a white stroke washed with the card's ink
+        // (`icon.wgsl`'s GHOST, as the menus' symbols are drawn), or on a
+        // plate as an app's icon is (the grid's tiles).
         if let Some(base) = symbol_base {
-            field.icons.extend(pd.symbols.iter().map(|&(i, r, c)| IconInst {
-                rect: Rect::new(r.x, r.y + rise, r.w, r.h),
-                layer: base + i as u32,
-                tint: [c[0], c[1], c[2], 1.0],
-                ring: -1.17,
-                plate: [0.0, 0.0, 0.0, c[3] * arrive],
-            }));
+            field.icons.extend(pd.symbols.iter().map(|s| panel_symbol(base, s, rise, arrive)));
         }
         scene.grids.push(field);
-        // Parts that scroll inside their own window (an open module's list).
-        for (clip, rects, labels) in &pd.clipped {
+        // Parts cut at their own window's edges (the grid's pages, an open
+        // module's scrolling list).
+        for (clip, rects, labels, symbols) in &pd.clipped {
             let mut c = *clip;
             c.y += rise;
             let (x0, y0) = (c.x.max(reveal_rect.x), c.y.max(reveal_rect.y));
@@ -5004,6 +5015,9 @@ pub fn scene(
                 l.pos.1 += rise;
                 l
             }));
+            if let Some(base) = symbol_base {
+                g.icons.extend(symbols.iter().map(|s| panel_symbol(base, s, rise, arrive)));
+            }
             scene.grids.push(g);
         }
     }
@@ -5430,8 +5444,9 @@ pub fn scene(
                 scene.overlay.push(IconInst { rect: place(r), layer: layer_of(entry), tint: [0.0; 4], ring: -1.0, plate: NO_PLATE });
             }
             if let Some(base) = q.symbol_base {
-                for &(i, r, c) in &q.draw.symbols {
-                    scene.overlay.push(IconInst { rect: place(r), layer: base + i as u32, tint: [c[0], c[1], c[2], 1.0], ring: -1.17, plate: [0.0, 0.0, 0.0, c[3]] });
+                for s in &q.draw.symbols {
+                    let placed = crate::panel::PanelSymbol { rect: place(s.rect), ..*s };
+                    scene.overlay.push(panel_symbol(base, &placed, 0.0, 1.0));
                 }
             }
             for (tile, name) in q.names {

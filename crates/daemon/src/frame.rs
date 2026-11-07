@@ -1864,10 +1864,18 @@ impl App {
         // (Set when this frame is drawn for the panel's orbit alone: the
         // glass's light then stands still — `Renderer::hold_lights`.)
         let mut orbit_only = false;
+        // Plates only when the theme wants them at all — `icon_plate` off
+        // means raw un-normalized tiles, which a plate would look wrong on.
+        let icon_plate = if self.config.theme.icon_plate {
+            paint.plate
+        } else {
+            content::NO_PLATE
+        };
         let panel_draw = if self.control_panel || self.panel_mix > 0.001 {
             let open = self.ui.target() == Target::Open;
             let bright = dock_ink[0] + dock_ink[1] + dock_ink[2] < 1.5;
-            let paint = crate::panel::PanelPaint { ink: dock_ink, bright };
+            // (The grid's box under the pointer and its plates are the apps grid's.)
+            let paint = crate::panel::PanelPaint { ink: dock_ink, bright, highlight: dock_highlight, plate: icon_plate };
             let draw = self.panel_frame(&layout, if open { dt } else { 0.0 }, paint);
             // Frames keep coming while the panel is up — but when nothing of
             // it moves except the pills' orbit (a pixel round their spots, a
@@ -1897,13 +1905,6 @@ impl App {
         if paint.moving {
             self.dirty = true;
         }
-        // Plates only when the theme wants them at all — `icon_plate` off
-        // means raw un-normalized tiles, which a plate would look wrong on.
-        let icon_plate = if self.config.theme.icon_plate {
-            paint.plate
-        } else {
-            content::NO_PLATE
-        };
         // FAST LAUNCH: the card and its icons (their motion lives in
         // `fast_launch.rs`).
         let fast_geo = self.fast_geometry();
@@ -1936,7 +1937,7 @@ impl App {
         let (quick_bg, quick_ink, quick_moving) = self.quick_colours(dt, dock_bg, dock_ink);
         let quick = {
             let bright = quick_ink[0] + quick_ink[1] + quick_ink[2] < 1.5;
-            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright })
+            self.quick_frame(dt, crate::panel::PanelPaint { ink: quick_ink, bright, highlight: dock_highlight, plate: icon_plate })
         };
         if quick.is_some() || quick_moving {
             fit_animating = true;

@@ -249,10 +249,16 @@ fn transform_draw(d: &mut PanelDraw, centre: (f32, f32), scale: f32, alpha: f32)
         g.radius *= scale;
         g.color[3] *= alpha;
     }
-    for (clip, rects, labels) in &mut d.clipped {
+    let fix_symbol = |s: &mut PanelSymbol| {
+        s.rect = rect(s.rect);
+        s.color[3] *= alpha;
+    };
+    d.symbols.iter_mut().for_each(fix_symbol);
+    for (clip, rects, labels, symbols) in &mut d.clipped {
         *clip = rect(*clip);
         rects.iter_mut().for_each(fix_rect);
         labels.iter_mut().for_each(fix_label);
+        symbols.iter_mut().for_each(fix_symbol);
     }
 }
 
@@ -370,29 +376,31 @@ const STICK: f32 = 10.0;
 /// card when he set it as the maximum (2026-09-30: "i dont want it wider or
 /// taller no matter how big the box gets"). Smaller cards shrink it.
 const FIELD_MAX: (f32, f32) = (960.0, 845.0);
-/// Air under the dock before the first row.
-const GAP_TOP: f32 = 32.0;
 
-// ---- The grid (2026-11-06) ----------------------------------------------
-/// Tiles across at most; the plate under a symbol and its corner; the
-/// symbol's share of the plate; the name's type, line and air under the
-/// plate; the air between tiles across and down.
-const GRID_COLS: usize = 7;
-const PLATE: f32 = 54.0;
-const PLATE_RADIUS: f32 = 16.0;
+// ---- The grid (2026-11-06/07): THE APPS GRID'S OWN -----------------------
+// Max, 2026-11-07: "que se parezca y comporte como el grid de apps, los
+// iconos los platos, todo el mismo tamaño y disposición y comportamiento":
+// the cells, the icons and their plates, the names, the box under the
+// pointer, the magnifying, the pages and their dots are `content.rs`'s
+// (`GRID_CELL_W`, `GRID_ICON`, `LABEL_FONT_PX`…), at the box's icon scale as
+// the apps are — nothing of its own but the symbol on each plate.
+/// The symbol's share of its plate (an app's icon fills it; a line symbol
+/// wants air round it).
 const SYMBOL_SHARE: f32 = 0.6;
-const NAME_PX: f32 = 12.0;
-const NAME_LINE: f32 = 14.0;
-const NAME_GAP: f32 = 7.0;
-const CELL_GAP: f32 = 8.0;
-const ROW_GAP: f32 = 12.0;
-/// Air under the last row: the Search pill's room at the card's foot.
+/// Air under the dock before the first row: where the apps grid's first row
+/// stands (its gap and its title line).
+const GRID_TOP: f32 = content::GRID_TOP_GAP + content::SECTION_TITLE_H;
+/// Air under the last row's dots: the Search pill's room at the card's foot.
 const GRID_BOTTOM: f32 = 56.0;
-/// The plate's wash at rest and under the pointer (white on a dark card,
-/// black on a bright one), and the name's ink at rest.
-const PLATE_WASH: f32 = 0.085;
-const PLATE_HOVER: f32 = 0.2;
-const NAME_INK: f32 = 0.84;
+/// The box under the pointer: its inset in the cell and its corner.
+const CELL_INSET: f32 = 4.0;
+const CELL_RADIUS: f32 = 14.0;
+/// The plate's corner as a share of its side (what a setting's box grows
+/// out of).
+const PLATE_CORNER: f32 = 0.22;
+/// The page dots: radius and pitch.
+const DOT_R: f32 = 3.0;
+const DOT_PITCH: f32 = 10.0;
 
 /// The symbol a setting wears on its tile: Golem's own line symbols
 /// (`app_actions::SYMBOLS`, the `ctl-*` ones and the menu's), by name; a
@@ -441,15 +449,10 @@ fn symbol_of(label: &str) -> &'static str {
 const GLIDE_RATE: f32 = 24.0;
 const SIZE_RATE: f32 = 26.0;
 const FADE_IN_RATE: f32 = 22.0;
-/// Hover: how fast a tile comes closer (and by how much).
+/// How fast a pill comes closer under the pointer, and by how much: the
+/// search pill's and fast launch's (`frame.rs`, `content.rs`).
 pub(crate) const LIFT_RATE: f32 = 12.0;
 pub(crate) const LIFT: f32 = 0.07;
-/// Search: how fast pills rise or sink as the query changes, how much a
-/// miss shrinks, and how far it dims.
-const SEARCH_RATE: f32 = 14.0;
-const SEARCH_SHRINK: f32 = 0.15;
-const SEARCH_LIFT: f32 = 0.08;
-const SEARCH_DIM: f32 = 0.85;
 /// The open-box morph's rate.
 const OPEN_RATE: f32 = 14.0;
 
@@ -526,49 +529,121 @@ struct Pill {
     label: &'static str,
     /// What else people call it or look for it by (search).
     keywords: &'static str,
-    /// Search focus, easing: +1 a match (it lights up), -1 a miss (it dims),
-    /// 0 no search.
-    focus: f32,
-    /// One layer now — the bar's own pill size, the second — kept for what
-    /// still reads a layer.
-    drawn: u8,
-    /// The tile's size (the same at every layer).
-    w: [f32; 3],
-    h: [f32; 3],
-    /// Its name, wrapped to the tile (two lines at most).
-    lines: Vec<String>,
-    /// The tile's centre the grid wants it at; `anchor` glides there, `pos`
-    /// is the drawn centre this frame.
+    /// In the grid: every tile with no search on, the matches of one (a
+    /// miss fades out where it stands, as the apps grid leaves out what a
+    /// search does not find).
+    shown: bool,
+    /// Its slot in the grid, counted across the pages (`Grid::cell_of`).
+    slot: usize,
+    /// Its name fitted to the cell at the names' type size: on one line (cut
+    /// with …) and, when it needs them, on two (the second cut) — drawn on
+    /// two only where the cell under it is free, as the apps' names are.
+    one: String,
+    two: Option<(String, String)>,
+    /// The cell's centre the grid wants it at (on its page, as if that page
+    /// were the first); `anchor` glides there, `pos` is the drawn centre
+    /// this frame.
     home: (f32, f32),
     anchor: (f32, f32),
     pos: (f32, f32),
-    /// Size multiplier easing home, and presence.
+    /// Size multiplier easing home, and presence (0 while not shown).
     sc: f32,
     op: f32,
-    lift: f32,
 }
 
-impl Pill {
-    /// The extra size its search focus gives it: a match comes a touch
-    /// closer (the grid has no room for more: it lights up instead), a miss
-    /// shrinks a little.
-    fn focus_scale(&self) -> f32 {
-        if self.focus >= 0.0 {
-            lerp(1.0, 1.0 + SEARCH_LIFT, self.focus)
+/// The grid as laid out: the apps grid's own numbers (`content::GRID_*`) at
+/// the box's icon scale, in FIELD coordinates.
+#[derive(Clone, Copy, Debug, Default)]
+struct Grid {
+    cols: usize,
+    rows: usize,
+    /// A cell; the icon's side and how far under the cell's top it sits.
+    cell_w: f32,
+    cell_h: f32,
+    icon: f32,
+    icon_top: f32,
+    /// One page's cells.
+    vp: Rect,
+    /// Pages of tiles now (the shown ones).
+    n_pages: usize,
+}
+
+impl Grid {
+    fn per_page(&self) -> usize {
+        (self.cols * self.rows).max(1)
+    }
+
+    fn page_w(&self) -> f32 {
+        self.vp.w.max(1.0)
+    }
+
+    /// The cell of slot `k` on its page, as if that page were the first.
+    fn cell_of(&self, k: usize) -> Rect {
+        let within = k % self.per_page();
+        let cols = self.cols.max(1);
+        let (row, col) = (within / cols, within % cols);
+        Rect::new(self.vp.x + col as f32 * self.cell_w, self.vp.y + row as f32 * self.cell_h, self.cell_w, self.cell_h)
+    }
+
+    /// How far page `page` stands from the viewport's left edge with the
+    /// pager at `scroll`: the pages go round, so the far side comes back
+    /// from the other end (the apps grid's `cell_pos`).
+    fn page_rel(&self, page: usize, scroll: f32) -> f32 {
+        let (page_w, total) = (self.page_w(), self.n_pages.max(1) as f32 * self.page_w());
+        let rel = (page as f32 * page_w - scroll.rem_euclid(total)).rem_euclid(total);
+        if rel >= page_w {
+            rel - total
         } else {
-            1.0 - SEARCH_SHRINK * -self.focus
+            rel
         }
     }
 
-    /// Whether it matches a (lowercased) search: in its name or any of its
-    /// keywords.
-    fn matches(&self, query: &str) -> bool {
-        // In English and in the shell's language: either finds it.
-        self.label.to_lowercase().contains(query)
-            || self.keywords.contains(query)
-            || crate::i18n::tr(self.label).to_lowercase().contains(query)
-            || crate::i18n::tr(self.keywords).contains(query)
+    /// Whether a cell at `x` (field coordinates) has any part on the page
+    /// shown (the apps grid's culling).
+    fn on_page(&self, x: f32) -> bool {
+        let dx = x - self.vp.x;
+        dx > -self.cell_w && dx < self.page_w()
     }
+}
+
+/// The grid for a field of `size` at the box's icon scale: as many cells
+/// across as the apps grid puts in a card this wide, as many rows as fit
+/// over the Search pill's room, the page centred.
+fn grid_metrics(size: (f32, f32), icon_scale: f32) -> Grid {
+    let (w, h) = size;
+    let (cell_w, cell_h) = (content::GRID_CELL_W * icon_scale, content::GRID_CELL_H * icon_scale);
+    let inner_w = (w - 2.0 * content::GRID_PAD_X).max(cell_w);
+    let cols = ((inner_w / cell_w).floor() as usize).max(1);
+    let room = h - GRID_TOP - content::DOT_ROOM - GRID_BOTTOM;
+    let rows = ((room / cell_h).floor() as usize).max(1);
+    let vp_w = cols as f32 * cell_w;
+    Grid {
+        cols,
+        rows,
+        cell_w,
+        cell_h,
+        icon: content::GRID_ICON * icon_scale,
+        icon_top: content::GRID_ICON_TOP * icon_scale,
+        vp: Rect::new((w - vp_w) / 2.0, GRID_TOP, vp_w, rows as f32 * cell_h),
+        n_pages: 1,
+    }
+}
+
+/// `text` on one line of `room`: whole when it fits, else cut with "…".
+fn fit_line(text: &str, room: f32, width: &mut dyn FnMut(&str) -> f32) -> String {
+    if width(text) <= room {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut n = chars.len();
+    while n > 1 {
+        n -= 1;
+        let cut = format!("{}…", chars[..n].iter().collect::<String>().trim_end());
+        if width(&cut) <= room {
+            return cut;
+        }
+    }
+    "…".to_owned()
 }
 
 // ---- An open setting's choices ------------------------------------------
@@ -910,9 +985,10 @@ pub(crate) struct PanelDraw {
     pub rects: Vec<RectInst>,
     pub labels: Vec<Label>,
     pub glows: Vec<ShadowInst>,
-    /// Drawn clipped to their rect (an open module's scrolling list: the
-    /// pill at its foot is cut in half, which is what says "more below").
-    pub clipped: Vec<(Rect, Vec<RectInst>, Vec<Label>)>,
+    /// Drawn clipped to their rect (the grid, cut at its page's edges as
+    /// the apps' sections are; an open module's scrolling list: the pill at
+    /// its foot is cut in half, which is what says "more below").
+    pub clipped: Vec<Clipped>,
     /// Pictures to draw (a wallpaper's preview): where, and which file —
     /// whoever puts the panel on the screen finds each its texture.
     pub images: Vec<(Rect, String)>,
@@ -924,9 +1000,25 @@ pub(crate) struct PanelDraw {
     /// Apps' icons to draw (the Colours Apps tiles): the app entry and
     /// where — drawn through the dock's icon layers, as fast launch's are.
     pub icons: Vec<(usize, Rect)>,
-    /// The tiles' SYMBOLS (the grid): which of `app_actions::SYMBOLS`,
-    /// where, and the colour it is washed with (its alpha how much it shows).
-    pub symbols: Vec<(usize, Rect, [f32; 4])>,
+    /// Symbols drawn through the dock's figure layers (none of the grid's:
+    /// those ride `clipped`).
+    pub symbols: Vec<PanelSymbol>,
+}
+
+/// A part of the panel cut at its own window's edges: the window, its
+/// rects, its words and its symbols.
+pub(crate) type Clipped = (Rect, Vec<RectInst>, Vec<Label>, Vec<PanelSymbol>);
+
+/// A symbol of `app_actions::SYMBOLS` on the panel: where, and its colour —
+/// washed with it, its alpha how much it shows (the menus' symbols' way);
+/// or, `plate`, drawn as an app's icon is: the layer over a plate of that
+/// colour (the tiles' plates, under their symbols).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PanelSymbol {
+    pub sym: usize,
+    pub rect: Rect,
+    pub color: [f32; 4],
+    pub plate: bool,
 }
 
 /// The card's colours the panel draws in.
@@ -935,6 +1027,11 @@ pub(crate) struct PanelPaint {
     pub ink: [f32; 4],
     /// The card reads bright (dark ink): black washes and shadows.
     pub bright: bool,
+    /// The box under the pointer and the page dots: the apps grid's own
+    /// (`dock_highlight`).
+    pub highlight: [f32; 4],
+    /// The plate under every app's icon in the box: the tiles' too.
+    pub plate: [f32; 4],
 }
 
 /// The settings field: its pills, their layout and motion, the layer cycle
@@ -959,17 +1056,27 @@ pub(crate) struct Panel {
     /// The search, lowercased (empty: none).
     query: String,
     pills: Vec<Pill>,
-    /// Field size and bar scale the pills were measured and laid out for.
-    key: (f32, f32, f32),
+    /// Field size, bar scale and icon scale the pills were measured and laid
+    /// out for.
+    key: (f32, f32, f32, f32),
     /// The field this frame, in surface coordinates.
     field: Rect,
     scale: f32,
     /// Seconds the panel has been up (what breathes in an open setting
     /// reads it).
     clock: f32,
-    /// The tiles' scale against their full size (`grid_metrics`).
-    tile_k: f32,
+    /// The grid as laid out (`grid_metrics`), and its pages: which is up
+    /// and its slide, the apps grid's own pager.
+    grid: Grid,
+    pages: crate::pager::Pager,
+    /// The tile under the pointer.
     hot: Option<usize>,
+    /// THE SELECTION on the grid, the apps grid's (`SearchState::selected`):
+    /// the tile under the pointer (softly), or the one the keys walked to
+    /// (`keyed`: stronger); with a search on, its best match until the hand
+    /// or the keys move it. Enter opens it.
+    sel: Option<usize>,
+    keyed: bool,
     open: Option<OpenBox>,
     /// The game's standings, and where they are saved (`None`: not saved,
     /// as in tests).
@@ -1074,6 +1181,9 @@ impl Panel {
     /// (round the ends); up and down go to the nearest choice of the next
     /// row. Returns whether there was anything to move on.
     pub(crate) fn key_move(&mut self, dx: i32, dy: i32) -> bool {
+        if self.open.is_none() && !self.solo {
+            return self.grid_key_move(dx, dy);
+        }
         let chips = self.key_chips();
         if chips.is_empty() {
             return false;
@@ -1126,9 +1236,54 @@ impl Panel {
         true
     }
 
+    /// An arrow on the grid (nothing open): the selection walks the tiles as
+    /// the apps grid's does — a step sideways, a row up or down, held at the
+    /// ends; the first key lands on the first tile whatever it is — and the
+    /// page it is on comes up. Returns whether there was a tile to walk.
+    fn grid_key_move(&mut self, dx: i32, dy: i32) -> bool {
+        let shown = self.shown();
+        if shown == 0 {
+            return false;
+        }
+        let last = shown - 1;
+        let g = self.grid;
+        let to = match self.sel.and_then(|i| self.pills.get(i)).filter(|p| p.shown).map(|p| p.slot) {
+            Some(at) if dx < 0 => at.saturating_sub(1),
+            Some(at) if dx > 0 => (at + 1).min(last),
+            Some(at) if dy < 0 => at.saturating_sub(g.cols),
+            Some(at) => (at + g.cols).min(last),
+            None => 0,
+        };
+        self.sel = self.pills.iter().position(|p| p.shown && p.slot == to);
+        self.keyed = true;
+        let page = to / g.per_page();
+        if self.pages.page(g.page_w()) != page {
+            self.pages.target = page as f32 * g.page_w();
+        }
+        true
+    }
+
+    /// Whether the keys drive the grid's selection (an open setting's keys
+    /// are its own): then Space, too, opens the tile they are on.
+    pub(crate) fn grid_keyed(&self) -> bool {
+        self.open.is_none() && !self.solo && self.keyed && self.sel.is_some()
+    }
+
     /// Enter or Space: the choice the keys are on is picked (the one in use
-    /// when no key has moved yet). Returns whether a choice was there.
+    /// when no key has moved yet); on the grid, the tile the keys or the
+    /// hand are on opens — with a search on and neither, its best match.
+    /// Returns whether a choice was there.
     pub(crate) fn key_pick(&mut self) -> bool {
+        if self.open.is_none() && !self.solo {
+            if let Some(i) = self.sel.filter(|&i| self.pills.get(i).is_some_and(|p| p.shown)) {
+                match self.boxed(i) {
+                    Some(label) => self.action = Some(PanelAction::Boxed(label)),
+                    None => self.open_pill(i),
+                }
+                return true;
+            }
+            return self.open_best();
+        }
         let chips = self.key_chips();
         if chips.is_empty() {
             return false;
@@ -1246,19 +1401,20 @@ impl Panel {
 
     /// Build (or rebuild for a new field size or bar scale) the pills:
     /// measure every label at every layer's size, then lay them out.
-    fn ensure(&mut self, size: (f32, f32), scale: f32, _pill_h: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
-        let key = (size.0, size.1, scale);
+    fn ensure(&mut self, size: (f32, f32), scale: f32, icon_scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) {
+        let key = (size.0, size.1, scale, icon_scale);
         let fresh = self.pills.is_empty();
         if !fresh
             && (self.key.0 - key.0).abs() < 0.5
             && (self.key.1 - key.1).abs() < 0.5
             && (self.key.2 - key.2).abs() < 0.001
+            && (self.key.3 - key.3).abs() < 0.001
         {
             return;
         }
         tracing::debug!(
-            "control panel: field laid out for {:.0}x{:.0} at scale {:.2} (fresh {fresh})",
-            key.0, key.1, key.2
+            "control panel: field laid out for {:.0}x{:.0} at scale {:.2}, icons {:.2} (fresh {fresh})",
+            key.0, key.1, key.2, key.3
         );
         self.key = key;
         self.scale = scale;
@@ -1278,33 +1434,29 @@ impl Panel {
                 .map(|&(label, _, keywords)| Pill {
                     label,
                     keywords,
-                    focus: 0.0,
-                    drawn: 1,
-                    w: [0.0; 3],
-                    h: [0.0; 3],
-                    lines: Vec::new(),
+                    shown: true,
+                    slot: 0,
+                    one: String::new(),
+                    two: None,
                     home: (0.0, 0.0),
                     anchor: (0.0, 0.0),
                     pos: (0.0, 0.0),
                     sc: 1.0,
                     op: 1.0,
-                    lift: 0.0,
                 })
                 .collect();
         }
-        // The tile's size, and each name wrapped to it.
-        let (_, cw, ch, _, _, _, k) = grid_metrics(size, scale, self.pills.len());
-        self.tile_k = k;
+        // The apps grid's cells at the box's icon scale, and each name
+        // fitted to its cell at the names' type size (the apps' own, not
+        // scaled with the icons).
+        self.grid = grid_metrics(size, icon_scale);
+        let room = self.grid.cell_w - 12.0;
         for p in &mut self.pills {
-            p.w = [cw; 3];
-            p.h = [ch; 3];
-            let room = cw - 4.0 * scale;
-            let mut lines = wrap_words(crate::i18n::tr(p.label), room, |s| measure(s, NAME_PX * scale * k));
-            if lines.len() > 2 {
-                let rest = lines.split_off(1).join(" ");
-                lines.push(format!("{rest}…"));
-            }
-            p.lines = lines;
+            let name = crate::i18n::tr(p.label);
+            let mut width = |s: &str| measure(s, content::LABEL_FONT_PX);
+            let lines = wrap_words(name, room, &mut width);
+            p.one = fit_line(name, room, &mut width);
+            p.two = (lines.len() > 1).then(|| (lines[0].clone(), fit_line(&lines[1..].join(" "), room, &mut width)));
         }
         if self.modules {
             self.name_w.clear();
@@ -1314,7 +1466,7 @@ impl Panel {
                 }
             }
         }
-        self.compose(size, true);
+        self.compose(true);
         if let Some(label) = self.pending_open.take() {
             self.open_named(label);
         }
@@ -1365,66 +1517,88 @@ impl Panel {
     }
 
     /// Lay the grid out: the tiles in the order use brings them (the
-    /// standings' scores, the first order among equals), seven across from
-    /// under the dock down. `snap` puts every tile there at once; otherwise
-    /// they glide.
-    fn compose(&mut self, size: (f32, f32), snap: bool) {
-        let s = self.scale.max(0.01);
-        let (cols, cw, ch, x0, y0, pitch_y, _) = grid_metrics(size, s, self.pills.len());
+    /// standings' scores, the first order among equals), row by row, page
+    /// by page; with a search on, only its matches — the best first (a name
+    /// beginning so, a name holding it, a keyword), then by use — the rest
+    /// leave. `snap` puts every tile there at once; otherwise they glide.
+    fn compose(&mut self, snap: bool) {
         let now = now_secs();
         let scores: Vec<f64> = self.pills.iter().map(|p| self.usage.settings.get(p.label).map_or(0.0, |st| st.score_at(now))).collect();
-        let mut order: Vec<usize> = (0..self.pills.len()).collect();
-        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
-        for (k, &i) in order.iter().enumerate() {
-            let (col, row) = (k % cols, k / cols);
+        let mut order: Vec<(u8, usize)> = self
+            .pills
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| if self.query.is_empty() { Some((0, i)) } else { Some((match_rank(p.label, p.keywords, &self.query)?, i)) })
+            .collect();
+        order.sort_by(|&(ra, a), &(rb, b)| ra.cmp(&rb).then(scores[b].total_cmp(&scores[a])).then(a.cmp(&b)));
+        self.grid.n_pages = order.len().div_ceil(self.grid.per_page()).max(1);
+        for p in &mut self.pills {
+            p.shown = false;
+        }
+        for (k, &(_, i)) in order.iter().enumerate() {
+            let c = self.grid.cell_of(k);
             let p = &mut self.pills[i];
-            p.home = (x0 + col as f32 * (cw + CELL_GAP * s) + cw / 2.0, y0 + row as f32 * pitch_y + ch / 2.0);
+            p.shown = true;
+            p.slot = k;
+            p.home = (c.x + c.w / 2.0, c.y + c.h / 2.0);
             if snap {
                 p.anchor = p.home;
                 p.pos = p.home;
             }
         }
+        // (Fewer pages than the pager stands on: back to the first.)
+        if self.pages.page(self.grid.page_w()) >= self.grid.n_pages {
+            self.pages.reset();
+        }
     }
 
-    /// The plate of tile `p` as drawn now: the square at the top of its cell,
-    /// grown by what lifts it.
-    fn plate_rect(&self, p: &Pill) -> Rect {
-        let ts = self.scale * self.tile_k.max(0.01);
-        let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
-        let side = PLATE * ts * k;
-        let top = p.pos.1 - p.h[1] / 2.0;
-        Rect::new(p.pos.0 - side / 2.0, top + (PLATE * ts - side) / 2.0, side, side)
+    /// How many tiles the grid shows (the slots are `0..shown`).
+    fn shown(&self) -> usize {
+        self.pills.iter().filter(|p| p.shown).count()
+    }
+
+    /// The cell of tile `p` as drawn now (field coordinates): where it
+    /// stands, on its page as the pager has slid it.
+    fn cell_now(&self, p: &Pill) -> Rect {
+        let g = &self.grid;
+        let rel = g.page_rel(p.slot / g.per_page(), self.pages.pos);
+        Rect::new(p.pos.0 - g.cell_w / 2.0 + rel, p.pos.1 - g.cell_h / 2.0, g.cell_w, g.cell_h)
+    }
+
+    /// Its icon's place — the plate an app's icon would fill — in field
+    /// coordinates: what its setting opens out of.
+    fn icon_rect(&self, p: &Pill) -> Rect {
+        let c = self.cell_now(p);
+        let g = &self.grid;
+        Rect::new(c.x + (c.w - g.icon) / 2.0, c.y + g.icon_top, g.icon, g.icon)
     }
 
     /// Wheel travel over the panel: an open module's list scrolls; the grid
-    /// has nothing to scroll (every tile is on it).
+    /// turns its pages as the apps' sections do (round the ends).
     fn wheel(&mut self, value: f64) {
-        if self.modules {
-            if let Some(m) = self.open.as_ref().filter(|o| o.want > 0.5).and_then(|o| crate::modules::module(self.pills[o.pill].label)) {
-                let max = self.mod_layout(m).max_scroll;
-                self.mods.scroll = (self.mods.scroll + value as f32 * MOD_WHEEL).clamp(0.0, max);
+        if self.open.is_some() {
+            if self.modules {
+                if let Some(m) = self.open.as_ref().filter(|o| o.want > 0.5).and_then(|o| crate::modules::module(self.pills[o.pill].label)) {
+                    let max = self.mod_layout(m).max_scroll;
+                    self.mods.scroll = (self.mods.scroll + value as f32 * MOD_WHEEL).clamp(0.0, max);
+                }
+            }
+            return;
+        }
+        if self.grid.n_pages > 1 {
+            if let Some(dir) = self.pages.wheel(value) {
+                self.pages.turn(dir, true, self.grid.n_pages, self.grid.page_w());
             }
         }
     }
 
-    /// The pill under `pos` (surface coordinates), nearest layer first.
+    /// The tile whose cell is under `pos` (surface coordinates).
     fn pill_at(&self, pos: (f32, f32)) -> Option<usize> {
-        let (fx, fy) = (pos.0 - self.field.x, pos.1 - self.field.y);
-        let mut best: Option<(usize, u8)> = None;
-        for (i, p) in self.pills.iter().enumerate() {
-            if p.op < 0.5 {
-                continue;
-            }
-            let d = p.drawn as usize;
-            let k = p.sc * p.focus_scale() * (1.0 + LIFT * p.lift);
-            let (hw, hh) = (p.w[d] * k / 2.0, p.h[d] * k / 2.0);
-            // Nearest layer first; a risen search match counts as near.
-            let depth = if p.focus > 0.5 { 0 } else { p.drawn };
-            if (fx - p.pos.0).abs() <= hw && (fy - p.pos.1).abs() <= hh && best.is_none_or(|(_, l)| depth < l) {
-                best = Some((i, depth));
-            }
+        let fp = (pos.0 - self.field.x, pos.1 - self.field.y);
+        if !self.grid.vp.contains(fp) {
+            return None;
         }
-        best.map(|(i, _)| i)
+        self.pills.iter().position(|p| p.shown && p.op >= 0.5 && self.cell_now(p).contains(fp))
     }
 
     /// A click on the card below the dock. Returns whether it did anything.
@@ -1489,7 +1663,7 @@ impl Panel {
 
     /// Grow pill `i` into its setting.
     fn open_pill(&mut self, clicked: usize) {
-        let from = self.plate_rect(&self.pills[clicked]);
+        let from = self.icon_rect(&self.pills[clicked]);
         // (Wallpaper's pill opens the Colours box on its Wallpaper tab,
         // grown out of its own pill: `controls::box_of`.)
         let i = if self.modules { clicked } else { self.box_pill(clicked) };
@@ -1562,7 +1736,7 @@ impl Panel {
 
     /// The language changed: the pills are measured and laid out again.
     pub(crate) fn relabel(&mut self) {
-        self.key = (0.0, 0.0, 0.0);
+        self.key = (0.0, 0.0, 0.0, 0.0);
     }
 
     /// The open setting, when it is one of [`crate::controls`]'.
@@ -2826,7 +3000,7 @@ impl Panel {
                 let corner = content.chips.iter().filter(|c| matches!(c.style, Style::Corner { .. })).find(at);
                 corner.or_else(|| content.chips.iter().find(at)).map(|c| Some(c.action))
             }
-            None => content_hit(self.key, self.scale, pos, f).then_some(None),
+            None => content_hit((self.key.0, self.key.1, self.key.2), self.scale, pos, f).then_some(None),
         }
     }
 
@@ -2839,41 +3013,41 @@ impl Panel {
             crate::persist::write_json("control panel", path, &self.usage);
         }
         // Its place in the order may have moved: the grid glides to it.
-        let size = (self.key.0, self.key.1);
-        self.compose(size, false);
+        self.compose(false);
     }
 
-    /// Set the search (from the card's search pill): matches rise to the
-    /// front, the rest sink back and dim.
+    /// Set the search (from the card's search pill): the grid shows its
+    /// matches, best first, the rest leave; its best match is lit, softly,
+    /// for Enter — the apps grid's way.
     pub(crate) fn set_query(&mut self, query: &str) {
-        self.query = query.trim().to_lowercase();
+        let q = query.trim().to_lowercase();
+        if q == self.query {
+            return;
+        }
+        self.query = q;
+        if self.pills.is_empty() {
+            return;
+        }
+        self.compose(false);
+        // Entering or leaving a search: back to the first page.
+        self.pages.reset();
+        self.keyed = false;
+        self.sel = if self.query.is_empty() { None } else { self.first_shown() };
     }
 
-    /// Where a pill's search focus is heading: see [`Pill::focus`].
-    fn focus_target(&self, p: &Pill) -> f32 {
-        if self.query.is_empty() {
-            0.0
-        } else if p.matches(&self.query) {
-            1.0
-        } else {
-            -1.0
-        }
+    /// The tile in the grid's first slot (the best match of a search).
+    fn first_shown(&self) -> Option<usize> {
+        self.pills.iter().position(|p| p.shown && p.slot == 0)
     }
 
     /// Open the best match of the search: a name that starts with it, then
-    /// a name that contains it, then a keyword match; nearest layer first
-    /// among equals. Returns whether there was one.
+    /// a name that contains it, then a keyword match; the most used among
+    /// equals (the grid's first tile). Returns whether there was one.
     fn open_best(&mut self) -> bool {
         if self.query.is_empty() || self.open.is_some() {
             return false;
         }
-        let q = &self.query;
-        // (Among equals the first in the grid: the most used.)
-        let best = (0..self.pills.len())
-            .filter_map(|i| Some((match_rank(self.pills[i].label, self.pills[i].keywords, q)?, self.pills[i].home.1 as i32, self.pills[i].home.0 as i32, i)))
-            .min()
-            .map(|(.., i)| i);
-        match best {
+        match self.first_shown() {
             Some(i) => {
                 match self.boxed(i) {
                     Some(label) => self.action = Some(PanelAction::Boxed(label)),
@@ -3104,18 +3278,18 @@ impl Panel {
         // (A screen of the Monitors page let go outside: not still in hand.)
         self.screen_drag = None;
         self.hot = None;
+        self.sel = None;
+        self.keyed = false;
         self.query.clear();
+        self.pages.reset();
         if self.pills.is_empty() {
             return;
         }
+        self.compose(true);
         for p in &mut self.pills {
-            p.focus = 0.0;
             p.sc = 1.0;
             p.op = 1.0;
-            p.lift = 0.0;
         }
-        let size = (self.key.0, self.key.1);
-        self.compose(size, true);
         info!("control panel: panel reset, every tile home");
     }
 
@@ -3135,6 +3309,7 @@ impl Panel {
         };
         self.pointer = pointer;
         self.tiles.ease(dt);
+        self.pages.ease(dt);
         if moved && !self.tiles.is_settling() && self.open.as_ref().is_some_and(|o| o.want > 0.5) {
             let chips = self.key_chips();
             if !chips.is_empty() {
@@ -3143,15 +3318,12 @@ impl Panel {
                     .and_then(|pos| chips.iter().position(|c| Rect::new(f.x + c.0.x, f.y + c.0.y, c.0.w, c.0.h).contains(pos)));
             }
         }
+        // Folding back: into where the tile's plate is now — the order may
+        // have moved it while it was open.
+        let fold_to = self.open.as_ref().filter(|o| o.want == 0.0 && !self.solo).map(|o| self.icon_rect(&self.pills[o.pill]));
         if let Some(open) = &mut self.open {
-            if open.want == 0.0 && !self.solo {
-                // Fold back into where the tile's plate is now: the order
-                // may have moved it while it was open.
-                let p = &self.pills[open.pill];
-                let ts = self.scale * self.tile_k.max(0.01);
-                let side = PLATE * ts * p.sc * p.focus_scale();
-                let top = p.pos.1 - p.h[1] / 2.0;
-                open.from = Rect::new(p.pos.0 - side / 2.0, top + (PLATE * ts - side) / 2.0, side, side);
+            if let Some(from) = fold_to {
+                open.from = from;
             }
             if self.solo {
                 // A box of its own: the content stands as at rest; the whole
@@ -3183,15 +3355,25 @@ impl Panel {
             }
         }
         self.hot = if self.open.is_none() { pointer.and_then(|p| self.pill_at(p)) } else { None };
-        let focus_to: Vec<f32> = self.pills.iter().map(|p| self.focus_target(p)).collect();
-        for (i, p) in self.pills.iter_mut().enumerate() {
-            let hot = self.hot == Some(i);
-            p.focus = approach(p.focus, focus_to[i], SEARCH_RATE, dt);
+        // THE SELECTION follows the hand as the apps grid's does
+        // (`pointer_takes_selection`): on a tile it is that tile, softly;
+        // off every tile with no search on, nothing — the keys' choice stays
+        // until the pointer moves.
+        if moved && self.open.is_none() {
+            match self.hot {
+                Some(i) => {
+                    self.sel = Some(i);
+                    self.keyed = false;
+                }
+                None if self.query.is_empty() => self.sel = None,
+                None => {}
+            }
+        }
+        for p in &mut self.pills {
             p.anchor.0 = approach(p.anchor.0, p.home.0, GLIDE_RATE, dt);
             p.anchor.1 = approach(p.anchor.1, p.home.1, GLIDE_RATE, dt);
-            p.lift = approach(p.lift, if hot { 1.0 } else { 0.0 }, LIFT_RATE, dt);
             p.sc = approach(p.sc, 1.0, SIZE_RATE, dt);
-            p.op = approach(p.op, 1.0, FADE_IN_RATE, dt);
+            p.op = approach(p.op, if p.shown { 1.0 } else { 0.0 }, FADE_IN_RATE, dt);
             p.pos = p.anchor;
         }
     }
@@ -3210,15 +3392,13 @@ impl Panel {
             }
         });
         !self.tiles.is_settling()
+            && !self.pages.is_settling()
             && open_still
-            && self.pills.iter().enumerate().all(|(i, p)| {
-                let hot = self.hot == Some(i);
+            && self.pills.iter().all(|p| {
                 (p.anchor.0 - p.home.0).abs() < 0.05
                     && (p.anchor.1 - p.home.1).abs() < 0.05
-                    && still(p.focus, self.focus_target(p))
-                    && still(p.lift, if hot { 1.0 } else { 0.0 })
                     && still(p.sc, 1.0)
-                    && still(p.op, 1.0)
+                    && still(p.op, if p.shown { 1.0 } else { 0.0 })
             })
     }
 
@@ -3227,21 +3407,21 @@ impl Panel {
         let mut out = PanelDraw::default();
         let s = self.scale;
         let f = self.field;
-        let wash = |a: f32| crate::options::wash(!paint.bright, a);
-        let glow_rgb = if paint.bright { [0.0, 0.0, 0.0] } else { [1.0, 1.0, 1.0] };
+        let g = self.grid;
         let open_k = self.open.as_ref().map_or(0.0, |o| o.k);
         let open_pill = self.open.as_ref().map(|o| o.pill);
         let open_from = self.open.as_ref().map(|o| o.from);
+        let ink = paint.ink;
+        let hl = paint.highlight;
+        let blank = crate::app_actions::symbol("blank");
+        // (The pointer in field coordinates, for the magnifying.)
+        let pointer = self.pointer.map(|(x, y)| (x - f.x, y - f.y));
+        let shown = self.shown();
 
-        // A lifted tile on top; the rest in their order.
-        let mut order: Vec<usize> = (0..self.pills.len()).collect();
-        order.sort_by_key(|&i| u8::from(self.pills[i].lift > 0.02));
+        // THE GRID, cut at its page's edges as the apps' sections are.
+        let (mut rects, mut labels, mut symbols) = (Vec::new(), Vec::new(), Vec::new());
         // (One setting in a box of its own: no field behind it.)
-        if self.solo {
-            order.clear();
-        }
-        let plate_a = |rise: f32, lift: f32| lerp(lerp(PLATE_WASH, PLATE_WASH * 1.6, rise), PLATE_HOVER, lift);
-        let ts = s * self.tile_k.max(0.01);
+        let order: Vec<usize> = if self.solo { Vec::new() } else { (0..self.pills.len()).collect() };
         for i in order {
             let p = &self.pills[i];
             let (mut dx, mut dy, mut fade, mut shrink) = (0.0, 0.0, 1.0, 1.0);
@@ -3261,64 +3441,108 @@ impl Panel {
                     shrink = 1.0 - 0.12 * open_k;
                 }
             }
-            // Search: a match lights up, a miss dims and shrinks a little.
-            let rise = p.focus.max(0.0);
-            let a = p.op.max(0.0) * fade * (1.0 - SEARCH_DIM * (-p.focus).max(0.0));
+            let a = p.op.max(0.0) * fade;
             if a < 0.004 {
                 continue;
             }
-            let k = p.sc * shrink * p.focus_scale() * (1.0 + LIFT * p.lift);
-            let side = PLATE * ts * k;
-            let cell_top = p.pos.1 + dy - p.h[1] / 2.0;
-            let cx = p.pos.0 + dx;
-            let plate = Rect::new(f.x + cx - side / 2.0, f.y + cell_top + (PLATE * ts - side) / 2.0, side, side);
-            let c = wash(plate_a(rise, p.lift));
-            out.rects.push(RectInst {
-                rect: plate,
-                radius: PLATE_RADIUS * ts * k,
-                color: [c[0], c[1], c[2], c[3] * a],
-                glass: 0.0,
-                border: 0.0,
+            let c0 = self.cell_now(p);
+            let cell = Rect::new(c0.x + dx, c0.y + dy, c0.w, c0.h);
+            if !g.on_page(cell.x) {
+                continue;
+            }
+            let k = p.sc * shrink;
+            let cx = cell.x + cell.w / 2.0;
+            let icon_cy = cell.y + g.icon_top + g.icon / 2.0;
+            // The box under the pointer, or where the keys are (stronger),
+            // or on a search's best match: the apps grid's own.
+            if self.sel == Some(i) || (self.sel.is_none() && self.hot == Some(i)) {
+                let strong = self.sel == Some(i) && self.keyed;
+                let alpha = if strong { (hl[3] * 1.8).min(0.4) } else { hl[3] };
+                rects.push(RectInst {
+                    rect: Rect::new(f.x + cell.x + CELL_INSET, f.y + cell.y + CELL_INSET, cell.w - 2.0 * CELL_INSET, cell.h - 2.0 * CELL_INSET),
+                    radius: CELL_RADIUS,
+                    color: [hl[0], hl[1], hl[2], alpha * a],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            // The icon grows a little under the pointer, as the apps do.
+            let mag = pointer.map_or(1.0, |(px, py)| {
+                let d = (px - cx).hypot(py - icon_cy);
+                1.0 + (content::GRID_MAGNIFY - 1.0) * content::falloff(d, content::GRID_MAG_RADIUS)
             });
-            if p.lift > 0.02 {
-                let (blur, glow_a) = LAYER_GLOW[1];
-                out.glows.push(ShadowInst {
-                    rect: plate,
-                    radius: PLATE_RADIUS * ts * k,
-                    blur: blur * s,
-                    color: [glow_rgb[0], glow_rgb[1], glow_rgb[2], glow_a * a * p.lift],
-                    edges: [1.0, 1.0, 1.0, 1.0],
+            let size = g.icon * k * mag;
+            let icon = Rect::new(f.x + cx - size / 2.0, f.y + icon_cy - size / 2.0, size, size);
+            // Its plate — the dock's, under every app's icon — and the
+            // setting's symbol on it, in the card's ink.
+            symbols.push(PanelSymbol { sym: blank, rect: icon, color: [paint.plate[0], paint.plate[1], paint.plate[2], paint.plate[3] * a], plate: true });
+            let inner = size * SYMBOL_SHARE;
+            symbols.push(PanelSymbol {
+                sym: crate::app_actions::symbol(symbol_of(p.label)),
+                rect: Rect::new(icon.x + (size - inner) / 2.0, icon.y + (size - inner) / 2.0, inner, inner),
+                color: [ink[0], ink[1], ink[2], ink[3] * a],
+                plate: false,
+            });
+            // Its name: on two lines where the cell under it is free (the
+            // last row with no dots under it, or nothing there), else one.
+            let row = (p.slot % g.per_page()) / g.cols.max(1);
+            let bottom = row + 1 >= g.rows;
+            let room_under = if bottom { g.n_pages <= 1 } else { p.slot + g.cols >= shown };
+            let (first, second) = match (&p.two, room_under) {
+                (Some((a, b)), true) => (a.as_str(), Some(b.as_str())),
+                _ => (p.one.as_str(), None),
+            };
+            let ly = f.y + cell.y + g.icon_top + g.icon + content::GRID_LABEL_GAP;
+            let colour = Some([ink[0], ink[1], ink[2], ink[3] * a]);
+            let name = |text: &str, y: f32| Label {
+                text: text.to_owned(),
+                pos: (f.x + cx, y),
+                max_w: cell.w - 12.0,
+                font_px: content::LABEL_FONT_PX,
+                line_px: content::LABEL_LINE_PX,
+                centered: true,
+                dim: false,
+                cache: true,
+                family: None,
+                color: colour,
+                clip: None,
+            };
+            labels.push(name(first, ly));
+            if let Some(second) = second {
+                labels.push(name(second, ly + content::SECOND_LINE));
+            }
+        }
+        // The page dots under the grid, the one up lit, its neighbours less
+        // as the slide passes them.
+        if !self.solo && g.n_pages > 1 {
+            let page_w = g.page_w();
+            let total = g.n_pages as f32 * page_w;
+            let page_frac = self.pages.pos.rem_euclid(total) / page_w;
+            let span = g.n_pages as f32 * DOT_PITCH - (DOT_PITCH - DOT_R * 2.0);
+            let (dot_cx, dot_y) = (f.x + g.vp.x + g.vp.w / 2.0, f.y + g.vp.y + g.vp.h + content::DOT_ROOM / 2.0 - content::DOTS_RAISE);
+            for page in 0..g.n_pages {
+                let x = dot_cx - span / 2.0 + page as f32 * DOT_PITCH + DOT_R;
+                let raw = (page as f32 - page_frac).abs();
+                let dist = raw.min(g.n_pages as f32 - raw).min(1.0);
+                rects.push(RectInst {
+                    rect: Rect::new(x - DOT_R, dot_y - DOT_R, DOT_R * 2.0, DOT_R * 2.0),
+                    radius: DOT_R,
+                    color: [hl[0], hl[1], hl[2], hl[3] * (1.0 - dist * 0.72)],
+                    glass: 0.0,
+                    border: 0.0,
                 });
             }
-            // Glyphs are cached only at rest: an easing size would fill the
-            // cache with one entry per frame.
-            let resting = (k - 1.0).abs() < 0.001;
-            let ink_k = lerp(lerp(NAME_INK, 1.0, rise), 1.0, p.lift);
-            // The symbol, in the card's ink, on the plate's middle.
-            let inner = side * SYMBOL_SHARE;
-            out.symbols.push((
-                crate::app_actions::symbol(symbol_of(p.label)),
-                Rect::new(plate.x + (side - inner) / 2.0, plate.y + (side - inner) / 2.0, inner, inner),
-                [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * lerp(0.9, 1.0, p.lift) * a],
-            ));
-            let (name_px, name_line) = (NAME_PX * ts * k, NAME_LINE * ts * k);
-            let mut y = f.y + cell_top + (PLATE + NAME_GAP) * ts * k;
-            for line in &p.lines {
-                out.labels.push(Label {
-                    text: line.clone(),
-                    pos: (f.x + cx, y),
-                    max_w: p.w[1] * k,
-                    font_px: name_px,
-                    line_px: name_line,
-                    centered: true,
-                    dim: false,
-                    cache: resting,
-                    family: TEXT_FONT,
-                    color: Some([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * ink_k * a]),
-                    clip: None,
-                });
-                y += name_line;
-            }
+        }
+        if !(rects.is_empty() && labels.is_empty() && symbols.is_empty()) {
+            // (Room over the first row for a magnified icon, under the last
+            // for a second line of name and the dots.)
+            let clip = Rect::new(
+                f.x + g.vp.x,
+                f.y + g.vp.y - g.icon_top,
+                g.vp.w,
+                g.vp.h + g.icon_top + content::DOT_ROOM + content::LABEL_LINE_PX,
+            );
+            out.clipped.push((clip, rects, labels, symbols));
         }
 
         if let Some(open) = &self.open {
@@ -3333,7 +3557,8 @@ impl Panel {
         let f = self.field;
         let k = open.k;
         let p = &self.pills[open.pill];
-        let d = p.drawn as usize;
+        // (The one layer the pills ever wear now: the bar's own pill size.)
+        let d = 1usize;
         let (fw, fh) = (f.w, f.h);
         // The box: the pill's rect easing to the whole field, its stadium
         // easing to the card's corner.
@@ -3349,7 +3574,7 @@ impl Panel {
         let layer_wash = if paint.bright { LAYER_WASH_BRIGHT } else { LAYER_WASH_DARK };
         let c = crate::options::wash(!paint.bright, layer_wash[d]);
         if clear < 0.999 {
-            let radius = lerp(PLATE_RADIUS * s * self.tile_k.max(0.01), content::BOX_CORNER_RADIUS, k);
+            let radius = lerp(open.from.w * PLATE_CORNER, content::BOX_CORNER_RADIUS, k);
             out.rects.push(RectInst {
                 rect: r,
                 radius,
@@ -4039,7 +4264,7 @@ impl Panel {
                     rect(&mut inside, tx + 4.0 * s, ty + 4.0 * s, knob, knob, knob / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.75]);
                 }
             }
-            out.clipped.push((clip, inside.rects, inside.labels));
+            out.clipped.push((clip, inside.rects, inside.labels, Vec::new()));
             // The one button and what it means.
             let b = l.button;
             let hot = resting && self.pointer.is_some_and(|pos| Rect::new(f.x + b.x, f.y + b.y, b.w, b.h).contains(pos));
@@ -4172,28 +4397,6 @@ fn content_hit(key: (f32, f32, f32), scale: f32, pos: (f32, f32), field: Rect) -
         y += rh + 22.0 * s;
     }
     false
-}
-
-/// The grid for `n` tiles in a field of `size` at bar scale `s`: columns,
-/// the tile's width and height, where the first tile's cell begins (x, y),
-/// the pitch from one row to the next, and the TILE SCALE — 1, or less in
-/// a field too short for every row at full size (a small screen): the
-/// tiles shrink together, never overlap, never leave the field.
-fn grid_metrics(size: (f32, f32), s: f32, n: usize) -> (usize, f32, f32, f32, f32, f32, f32) {
-    let (w, h) = size;
-    let margin = MARGIN * s;
-    let cols = GRID_COLS.min(n.max(1));
-    let cw = ((w - 2.0 * margin - (cols - 1) as f32 * CELL_GAP * s) / cols as f32).max(PLATE * s);
-    let rows = n.max(1).div_ceil(cols);
-    let (top, bottom) = (GAP_TOP * s, GRID_BOTTOM * s);
-    let room = (h - top - bottom).max(1.0);
-    let full_h = (PLATE + NAME_GAP + 2.0 * NAME_LINE + 4.0) * s;
-    let needed = rows as f32 * full_h + (rows - 1) as f32 * ROW_GAP * s;
-    let k = if needed > room { (room / needed).clamp(0.5, 1.0) } else { 1.0 };
-    let ch = full_h * k;
-    let pitch = ch + ROW_GAP * s * k;
-    let used = (cols as f32 * cw + (cols - 1) as f32 * CELL_GAP * s).min(w);
-    (cols, cw, ch, (w - used) / 2.0, top, pitch, k)
 }
 
 impl App {
@@ -4427,10 +4630,11 @@ impl App {
     pub(crate) fn panel_frame(&mut self, layout: &Layout, dt: f32, paint: PanelPaint) -> PanelDraw {
         let field = self.panel_field(layout);
         let scale = self.options_scale();
-        let pill_h = self.options_pill_h();
+        // (The grid at the box's icon size, as the apps are: Ctrl +/−.)
+        let icon_scale = self.icon_scale();
         if let Some(r) = self.renderer.as_mut() {
             let mut measure = |t: &str, px: f32| r.measure_text(t, px, TEXT_FONT);
-            self.panel.ensure((field.w, field.h), scale, pill_h, &mut measure);
+            self.panel.ensure((field.w, field.h), scale, icon_scale, &mut measure);
         }
         self.panel.field = field;
         // An open display setting shows the screen as it is: read it when
@@ -4469,6 +4673,8 @@ impl App {
             old.labels.append(&mut draw.labels);
             old.glows.append(&mut draw.glows);
             old.clipped.append(&mut draw.clipped);
+            old.icons.append(&mut draw.icons);
+            old.symbols.append(&mut draw.symbols);
             draw = old;
             self.schedule_frame();
         }
@@ -5176,12 +5382,12 @@ impl App {
             self.quick.wall_h = Some(h);
         }
         let scale = self.options_scale() * self.fast_zoom();
-        let pill_h = self.options_pill_h() * self.fast_zoom();
+        let icon_scale = self.icon_scale();
         if let Some(r) = self.renderer.as_mut() {
             let mut measure = |t: &str, px: f32| r.measure_text(t, px, TEXT_FONT);
             // (Laid out for the box's WIDTH only: its height follows the
             // setting, and a new height must not lay the field out again.)
-            self.quick.ensure((rect.w, QUICK_MIN_H * scale), scale, pill_h, &mut measure);
+            self.quick.ensure((rect.w, QUICK_MIN_H * scale), scale, icon_scale, &mut measure);
         }
         self.quick.field = rect;
     }
@@ -5306,7 +5512,10 @@ impl App {
             Keysym::ISO_Left_Tab => panel.key_move(-1, 0),
             Keysym::Up => panel.key_move(0, -1),
             Keysym::Down => panel.key_move(0, 1),
-            Keysym::Return | Keysym::KP_Enter | Keysym::space => panel.key_pick(),
+            Keysym::Return | Keysym::KP_Enter => panel.key_pick(),
+            // (On the grid a space is typed into the search unless the keys
+            // are walking the tiles.)
+            Keysym::space => (panel.open.is_some() || panel.grid_keyed()) && panel.key_pick(),
             _ => false,
         };
         if used {
@@ -5438,37 +5647,41 @@ mod tests {
     fn panel() -> Panel {
         let mut p = Panel { items: &SETTINGS, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
+        p.ensure((960.0, 560.0), 1.0, 1.0, &mut est);
         p
     }
 
-    /// A tile's cell, from its home.
-    fn cell(p: &Pill) -> Rect {
-        Rect::new(p.home.0 - p.w[1] / 2.0, p.home.1 - p.h[1] / 2.0, p.w[1], p.h[1])
+    /// A tile's cell, from its home (on its page, as if it were the first).
+    fn cell(p: &Panel, q: &Pill) -> Rect {
+        let g = p.grid;
+        Rect::new(q.home.0 - g.cell_w / 2.0, q.home.1 - g.cell_h / 2.0, g.cell_w, g.cell_h)
     }
 
+    /// Every shown tile in its own slot, inside the field, over the Search
+    /// pill's room.
     fn assert_clean(p: &Panel, what: &str) {
         let (w, h) = (p.key.0, p.key.1);
-        for (i, a) in p.pills.iter().enumerate() {
-            let c = cell(a);
+        let shown: Vec<&Pill> = p.pills.iter().filter(|q| q.shown).collect();
+        for (i, a) in shown.iter().enumerate() {
+            let c = cell(p, a);
             assert!(
-                c.x >= MARGIN - 0.5 && c.x + c.w <= w - MARGIN + 0.5 && c.y >= GAP_TOP - 0.5 && c.y + c.h <= h - GRID_BOTTOM + 0.5,
+                c.x >= -0.5 && c.x + c.w <= w + 0.5 && c.y >= GRID_TOP - 0.5 && c.y + c.h <= h - GRID_BOTTOM - content::DOT_ROOM + 0.5,
                 "{what}: {} leaves the field at {:?}",
                 a.label,
                 a.home
             );
-            for b in p.pills.iter().skip(i + 1) {
-                let d = cell(b);
-                let apart = c.x + c.w <= d.x + 0.5 || d.x + d.w <= c.x + 0.5 || c.y + c.h <= d.y + 0.5 || d.y + d.h <= c.y + 0.5;
-                assert!(apart, "{what}: {} and {} overlap", a.label, b.label);
+            for b in shown.iter().skip(i + 1) {
+                assert_ne!(a.slot, b.slot, "{what}: {} and {} share a slot", a.label, b.label);
             }
         }
+        let slots: Vec<usize> = shown.iter().map(|q| q.slot).collect();
+        assert!((0..shown.len()).all(|k| slots.contains(&k)), "{what}: the slots are not 0..{}: {slots:?}", shown.len());
     }
 
-    /// The tiles in the order the grid shows them (rows, then columns).
+    /// The tiles in the order the grid shows them (its slots).
     fn shown_order(p: &Panel) -> Vec<&'static str> {
-        let mut v: Vec<&Pill> = p.pills.iter().collect();
-        v.sort_by(|a, b| (a.home.1 as i32, a.home.0 as i32).cmp(&(b.home.1 as i32, b.home.0 as i32)));
+        let mut v: Vec<&Pill> = p.pills.iter().filter(|q| q.shown).collect();
+        v.sort_by_key(|q| q.slot);
         v.iter().map(|q| q.label).collect()
     }
 
@@ -5483,45 +5696,121 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_holds_every_tile_inside_the_field_seven_across() {
+    fn the_grid_is_the_apps_grids_cells_at_the_icon_scale() {
         let p = panel();
         assert_eq!(p.pills.len(), 34);
         assert_clean(&p, "at rest");
-        // Up under the dock: the first row starts at the top gap.
-        let top = p.pills.iter().map(|q| cell(q).y).fold(f32::MAX, f32::min);
-        assert!((top - GAP_TOP).abs() < 0.5, "first row at {top}");
-        let mut rows: Vec<i32> = p.pills.iter().map(|q| q.home.1 as i32).collect();
-        rows.sort_unstable();
-        rows.dedup();
-        assert_eq!(rows.len(), 5, "34 tiles in 5 rows");
-        assert_eq!(p.pills.iter().filter(|q| q.home.1 as i32 == rows[0]).count(), GRID_COLS, "seven on the first row");
+        let g = p.grid;
+        // A 960 card: as many across as the apps grid puts there, every
+        // row that fits over the Search pill's room, one page.
+        assert_eq!((g.cell_w, g.cell_h, g.icon), (content::GRID_CELL_W, content::GRID_CELL_H, content::GRID_ICON));
+        assert_eq!(g.cols, ((960.0 - 2.0 * content::GRID_PAD_X) / content::GRID_CELL_W) as usize);
+        assert_eq!(g.rows, ((560.0 - GRID_TOP - content::DOT_ROOM - GRID_BOTTOM) / content::GRID_CELL_H) as usize);
+        assert_eq!(g.n_pages, 1);
+        // Up under the dock: the first row where the apps grid's stands.
+        let top = p.pills.iter().map(|q| cell(&p, q).y).fold(f32::MAX, f32::min);
+        assert!((top - GRID_TOP).abs() < 0.5, "first row at {top}");
+        assert!((g.vp.x + g.vp.w / 2.0 - 480.0).abs() < 0.5, "the page is centred");
+        assert_eq!(p.pills.iter().filter(|q| q.slot < g.cols).count(), g.cols, "a full first row");
         // The first order: the near layer's five first (their seeds).
         assert_eq!(&shown_order(&p)[..5], &["Resolution", "Scale", "Wi-Fi", "Sound output", "Colours"]);
-        // Every name on at most two lines.
-        assert!(p.pills.iter().all(|q| (1..=2).contains(&q.lines.len())), "{:?}", p.pills.iter().map(|q| q.lines.len()).collect::<Vec<_>>());
+        // Every name fits its cell on one line, cut if it must; the long
+        // ones have their two lines too.
+        let room = g.cell_w - 12.0;
+        assert!(p.pills.iter().all(|q| crate::options::est_text_w(&q.one, content::LABEL_FONT_PX) <= room + 0.5));
+        let long = p.pills.iter().find(|q| q.label == "Mouse and touchpad").unwrap();
+        assert!(long.one.ends_with('…') && long.two.is_some(), "{:?} / {:?}", long.one, long.two);
     }
 
     #[test]
-    fn search_raises_the_matches_and_sinks_the_rest() {
+    fn more_tiles_than_a_page_holds_turn_pages_under_the_wheel_and_the_keys() {
+        // Big icons on a short field: fewer cells a page than tiles.
+        let mut p = Panel { items: &SETTINGS, ..Panel::default() };
+        let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
+        p.ensure((960.0, 400.0), 1.0, 1.65, &mut est);
+        p.field = Rect::new(0.0, 0.0, 960.0, 400.0);
+        let g = p.grid;
+        assert!(g.n_pages > 1, "{g:?}");
+        assert_clean(&p, "paged");
+        // A tile of the second page stands a page to the right until the
+        // wheel turns to it.
+        let second = p.pills.iter().position(|q| q.slot == g.per_page()).unwrap();
+        let home = p.pills[second].home;
+        // (At rest it stands a whole strip away — the pages go round, so
+        // it may be counted on the far side — and is not drawn.)
+        let before = p.cell_now(&p.pills[second]).x;
+        assert!(!g.on_page(before), "{before} is on the page {:?}", g.vp);
+        // (Its place on the page is the first tile's, which is what the
+        // pointer finds there now.)
+        assert_eq!(p.pill_at(home), p.pills.iter().position(|q| q.slot == 0), "the first page's tile is under the pointer");
+        p.wheel(30.0);
+        for _ in 0..120 {
+            p.step(1.0 / 60.0, None);
+        }
+        assert_eq!(p.pages.page(g.page_w()), 1);
+        assert!((p.cell_now(&p.pills[second]).x - (home.0 - g.cell_w / 2.0)).abs() < 1.0, "slid onto the page");
+        assert_eq!(p.pill_at(home), Some(second));
+        // The keys: the first arrow lands on the first tile (and its page
+        // comes back); Right walks on, held at the last.
+        assert!(p.key_move(1, 0));
+        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(0));
+        assert!(p.keyed && p.grid_keyed());
+        assert_eq!(p.pages.page(g.page_w()), 0);
+        for _ in 0..40 {
+            p.key_move(1, 0);
+        }
+        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(33));
+        assert_eq!(p.pages.page(g.page_w()), 33 / g.per_page());
+        assert!(p.key_move(0, -1));
+        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(33 - g.cols));
+        // Enter opens the tile the keys are on (a use: the order moves
+        // behind the setting growing over the field).
+        let expect = shown_order(&p)[33 - g.cols];
+        assert!(p.key_pick());
+        assert_eq!(p.open.as_ref().map(|o| p.pills[o.pill].label), Some(expect));
+    }
+
+    #[test]
+    fn a_search_shows_the_matches_only_best_first() {
         let mut p = panel();
         p.set_query("display");
-        for _ in 0..60 {
+        for _ in 0..90 {
             p.step(1.0 / 60.0, None);
         }
+        let shown = shown_order(&p);
+        assert!(shown.contains(&"Resolution") && shown.contains(&"Scale"), "display → {shown:?}");
+        assert!(shown.len() < p.pills.len(), "the rest leave");
         for q in &p.pills {
-            if q.matches("display") {
-                assert!(q.focus > 0.95 && q.focus_scale() >= 1.0, "{} should rise", q.label);
+            if q.shown {
+                assert!(q.op > 0.95, "{} stays", q.label);
             } else {
-                assert!(q.focus < -0.95 && q.focus_scale() < 1.0, "{} should sink", q.label);
+                assert!(q.op < 0.05, "{} should fade out", q.label);
             }
         }
-        let risen: Vec<&str> = p.pills.iter().filter(|q| q.focus > 0.5).map(|q| q.label).collect();
-        assert!(risen.contains(&"Resolution") && risen.contains(&"Scale"), "display → {risen:?}");
+        assert_clean(&p, "searched");
+        // Its best match is lit, softly, for Enter; the hand over another
+        // tile takes it.
+        assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(0));
+        assert!(!p.keyed);
+        // "sc" matches Scale by name, Resolution by a keyword: Scale first.
+        p.set_query("sc");
+        assert_eq!(shown_order(&p)[0], "Scale");
         p.set_query("");
-        for _ in 0..60 {
+        for _ in 0..90 {
             p.step(1.0 / 60.0, None);
         }
-        assert!(p.pills.iter().all(|q| q.focus.abs() < 0.01), "clearing settles every pill back");
+        assert!(p.pills.iter().all(|q| q.shown && q.op > 0.95), "clearing brings every tile back");
+        assert_eq!(p.sel, None);
+    }
+
+    #[test]
+    fn a_line_is_cut_to_its_room() {
+        let mut est = |t: &str| crate::options::est_text_w(t, 12.0);
+        assert_eq!(fit_line("Scale", 200.0, &mut est), "Scale");
+        let cut = fit_line("Mouse and touchpad", 60.0, &mut est);
+        assert!(cut.ends_with('…') && cut.len() < "Mouse and touchpad".len(), "{cut:?}");
+        assert!(est(&cut) <= 60.0);
+        assert_eq!(fit_line("Mouse", 1.0, &mut est), "…");
     }
 
     #[test]
@@ -5544,8 +5833,9 @@ mod tests {
         p.reset();
         for (q, home) in p.pills.iter().zip(&first) {
             assert!((q.home.0 - home.0).abs() < 0.5 && (q.home.1 - home.1).abs() < 0.5, "{} back home", q.label);
-            assert!(q.focus == 0.0 && q.pos == q.home);
+            assert!(q.shown && q.op == 1.0 && q.pos == q.home);
         }
+        assert!(p.query.is_empty() && p.sel.is_none());
     }
 
     #[test]
@@ -5565,7 +5855,7 @@ mod tests {
     fn the_modules_field_lays_out_clean_and_searches_its_own() {
         let mut p = Panel { items: crate::modules::items(), modules: true, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
+        p.ensure((960.0, 560.0), 1.0, 1.0, &mut est);
         assert!(p.is_modules());
         assert_eq!(p.pills.len(), crate::modules::items().len());
         assert_clean(&p, "the modules field");
@@ -5611,7 +5901,7 @@ mod tests {
         let json = serde_json::to_string(&p.usage).unwrap();
         let mut again = Panel { items: &SETTINGS, usage: serde_json::from_str(&json).unwrap(), ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        again.ensure((960.0, 560.0), 1.0, 25.0, &mut est);
+        again.ensure((960.0, 560.0), 1.0, 1.0, &mut est);
         assert_eq!(shown_order(&again), shown_order(&p), "the saved order comes back");
     }
 
@@ -5782,7 +6072,7 @@ mod tests {
     fn colours_open(groups: Vec<crate::controls::Group>, (w, h): (f32, f32)) -> Panel {
         let mut p = Panel { items: &SETTINGS, ..Panel::default() };
         let mut est = |t: &str, px: f32| crate::options::est_text_w(t, px);
-        p.ensure((w, h), 1.0, 25.0, &mut est);
+        p.ensure((w, h), 1.0, 1.0, &mut est);
         p.field = Rect::new(40.0, 90.0, w, h);
         p.step(0.0, None);
         p.open_named("Colours");
@@ -6007,7 +6297,7 @@ mod tests {
         assert!((c.chips[0].rect.x - 2.0 * MARGIN).abs() < 0.01 && (c.chips[6].rect.x + c.chips[6].rect.w - (2400.0 - 2.0 * MARGIN)).abs() < 0.01, "as wide as the rows");
         assert_eq!(c.dots.map(|d| (d.1, d.2)), Some((2, 0)), "two pages, the first up");
         // Drawn at rest: the icons through the dock's layers, the hint on its card.
-        let draw = wide.draw(PanelPaint { ink: [1.0; 4], bright: false });
+        let draw = wide.draw(PanelPaint { ink: [1.0; 4], bright: false, highlight: [1.0, 1.0, 1.0, 0.12], plate: [0.5, 0.5, 0.5, 1.0] });
         assert_eq!(draw.icons.len(), 28);
         assert!((draw.icons[0].1.w - TILE_ICON).abs() < 0.01 && draw.icons[0].0 == 0);
         assert!(draw.labels.iter().any(|l| l.text == "Own colours · Light"));
@@ -6092,7 +6382,7 @@ mod tests {
     #[test]
     fn a_narrow_field_wraps_the_choices_and_keeps_them_inside() {
         let mut p = display_open("Scale", 1.0);
-        p.key = (400.0, 560.0, 1.0);
+        p.key = (400.0, 560.0, 1.0, 1.0);
         let content = p.open_content("Scale").unwrap();
         let rows: std::collections::BTreeSet<i32> = content.chips.iter().map(|c| c.rect.y as i32).collect();
         assert!(rows.len() > 1, "seven pills do not fit one 400px row");
@@ -6154,7 +6444,7 @@ mod tests {
     #[test]
     fn an_open_display_setting_draws_its_choices() {
         let p = display_open("Scale", 1.0);
-        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false });
+        let draw = p.draw(PanelPaint { ink: [1.0; 4], bright: false, highlight: [1.0, 1.0, 1.0, 0.12], plate: [0.5, 0.5, 0.5, 1.0] });
         for want in ["Scale", "Built-in screen · looks like 1440 × 900", "100%", "150%"] {
             assert!(draw.labels.iter().any(|l| l.text == want), "{want:?} is drawn");
         }
