@@ -281,7 +281,7 @@ pub(crate) const SECTION_TITLE_H: f32 = 5.0;
 /// under the last section's dots. (Then the grids and dots 4 px closer to
 /// their titles, the titles staying put: the band 14 -> 10, the gap
 /// 20 -> 24; then 3 px more: 7 and 27; then 2 more: 5 and 29.)
-pub(crate) const SECTION_GAP: f32 = 29.0;
+const SECTION_GAP: f32 = 29.0;
 pub(crate) const DOT_ROOM: f32 = 6.0;
 /// How much further below its title the Controls row sits than icons do.
 const CONTROLS_EXTRA_DROP: f32 = 8.0;
@@ -332,9 +332,9 @@ pub const LABEL_LINE_PX: f32 = 16.0;
 /// Section titles (Apps, Install, Files, Controls), from Max's mockup
 /// (2026-09-30): small and bold, faint, raised a little in their band.
 pub(crate) const TITLE_FONT_PX: f32 = 13.0;
-pub(crate) const TITLE_LINE_PX: f32 = 16.0;
+const TITLE_LINE_PX: f32 = 16.0;
 pub(crate) const TITLE_ALPHA: f32 = 0.3;
-pub(crate) const TITLE_DROP: f32 = -1.0;
+const TITLE_DROP: f32 = -1.0;
 /// Search box: height, inner padding, text metrics.
 const SEARCH_H: f32 = 28.0;
 /// Width of the collapsed "Filter" button pill.
