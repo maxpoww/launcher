@@ -24,7 +24,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Files", "Super + F"),
     ("Voice to text (hold to dictate)", "Super + Space"),
     ("The card: clipboard · emoji · memory", "Super + . , /"),
-    ("Screenshot of a region", "Print"),
+    ("Screenshot of a region", "Print Screen"),
     ("Lock the screen", "Super + L"),
     ("Windows", ""),
     ("Close the window", "Super + Q"),
@@ -45,7 +45,9 @@ pub(crate) fn view(view: &mut ControlView) {
         if keys.is_empty() {
             view.groups.push(Group { centred: true, ..line_of(tr(what).to_owned()) });
         } else {
-            view.groups.push(line_of(format!("{keys}  ·  {}", tr(what))));
+            // The keys as the keyboard of the language names them ("Super +
+            // Espacio"); most combinations are the same everywhere.
+            view.groups.push(line_of(format!("{}  ·  {}", tr(keys), tr(what))));
         }
     }
 }
@@ -62,7 +64,7 @@ mod tests {
             if keys.is_empty() {
                 headings += 1;
             } else {
-                assert!(keys.contains("Super") || keys == &"Print", "{what}: {keys}");
+                assert!(keys.contains("Super") || keys == &"Print Screen", "{what}: {keys}");
             }
         }
         assert_eq!(headings, 3);

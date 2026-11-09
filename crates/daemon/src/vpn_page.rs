@@ -96,7 +96,10 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
                 let verb = if v.up { "down" } else { "up" };
                 if !run_of("nmcli", &["connection", verb, "uuid", &v.uuid]) {
                     if let Ok(mut s) = SAID.lock() {
-                        *s = Some(fill(tr("{name} could not be turned {verb}."), &[("name", &v.name), ("verb", &tr(if v.up { "off" } else { "on" }))]));
+                        // (A whole sentence each way: "on"/"off" slotted into one
+                        // reads wrong in every other language.)
+                        let said = if v.up { tr("{name} could not be turned off.") } else { tr("{name} could not be turned on.") };
+                        *s = Some(fill(said, &[("name", &v.name)]));
                     }
                 }
             }

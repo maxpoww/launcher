@@ -4228,7 +4228,7 @@ impl App {
             } else {
                 tr("Plugged in, files open")
             };
-            let rows = vec![(tr("Kind"), "Phone".to_owned()), (tr("State"), state.to_owned())];
+            let rows = vec![(tr("Kind"), tr("Phone").to_owned()), (tr("State"), state.to_owned())];
             let mut props = Props::open_rows(&item.path, item.name.clone(), rows.clone(), at, menu, w as f32, h as f32);
             let (path, serial) = (item.path.clone(), phone_serial_of(v));
             info!("desktop: properties of {}", props.title);

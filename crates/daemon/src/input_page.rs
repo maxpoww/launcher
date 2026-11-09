@@ -100,7 +100,7 @@ pub(crate) fn keyboard_view(view: &mut ControlView) {
     }
     view.groups.push(group_of(None, "kb-layouts", choices));
     if on.len() > 1 {
-        let switch = SWITCHES.iter().map(|(opt, name)| choice_of(*name, options.split(',').any(|o| o == *opt), *opt)).collect();
+        let switch = SWITCHES.iter().map(|(opt, name)| choice_of(tr(name), options.split(',').any(|o| o == *opt), *opt)).collect();
         view.groups.push(Group { labelled: true, ..group_of(Some("Switch with"), "kb-switch", switch) });
     }
     let rate = s.repeat_rate.unwrap_or(25);

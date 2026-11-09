@@ -104,6 +104,30 @@ fn marked(en: &str) -> &'static str {
 /// ```
 ///
 /// A hole with no value stays as written; a value with no hole is unused.
+/// A text as a search compares it: lowercase, its letters without their
+/// accents — "energia" finds "Energía", "reglages" "Réglages", "grosse"
+/// "Größe". Whoever types in a language seldom types every accent of it.
+pub fn fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().flat_map(char::to_lowercase) {
+        match c {
+            'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' | 'ā' => out.push('a'),
+            'é' | 'è' | 'ë' | 'ê' | 'ē' | 'ę' | 'ė' => out.push('e'),
+            'í' | 'ì' | 'ï' | 'î' | 'ī' => out.push('i'),
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'ø' | 'ō' => out.push('o'),
+            'ú' | 'ù' | 'ü' | 'û' | 'ū' => out.push('u'),
+            'ý' | 'ÿ' => out.push('y'),
+            'ñ' => out.push('n'),
+            'ç' => out.push('c'),
+            'ß' => out.push_str("ss"),
+            'œ' => out.push_str("oe"),
+            'æ' => out.push_str("ae"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn fill(template: &str, values: &[(&str, &(dyn std::fmt::Display + Send + Sync))]) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut rest = template;
@@ -308,6 +332,42 @@ mod tests {
                 rest = &rest[at + marker.len()..];
             }
         }
+        // `tr(if c { "a" } else { "b" })`: each branch's literal is a key
+        // as well (2026-11-08: the quick box's microphone line was English
+        // in every language, its two strings never seen here).
+        let mut rest = src;
+        while let Some(at) = rest.find("tr(if ") {
+            let whole = !rest[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+            if whole {
+                let mut chars = rest[at + "tr(".len()..].chars();
+                let mut depth = 1;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('(') => depth += 1,
+                        Some(')') => depth -= 1,
+                        Some('"') => {
+                            let mut text = String::new();
+                            loop {
+                                match chars.next() {
+                                    Some('"') | None => break,
+                                    Some('\\') => match chars.next() {
+                                        Some('n') => text.push('\n'),
+                                        Some('t') => text.push('\t'),
+                                        Some(other) => text.push(other),
+                                        None => break,
+                                    },
+                                    Some(c) => text.push(c),
+                                }
+                            }
+                            found.push(text);
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            }
+            rest = &rest[at + "tr(if ".len()..];
+        }
         found
     }
 
@@ -409,6 +469,17 @@ mod tests {
             assert_eq!(holes(en), holes(spanish), "{en:?} → {spanish:?}");
             assert!(!spanish.is_empty(), "{en:?} has an empty translation");
         }
+    }
+
+    #[test]
+    fn a_search_folds_case_and_accents() {
+        assert_eq!(fold("Energía"), "energia");
+        assert_eq!(fold("Réglages ÉCRAN"), "reglages ecran");
+        assert_eq!(fold("Größe"), "grosse");
+        assert_eq!(fold("Atualização"), "atualizacao");
+        assert_eq!(fold("Niño"), "nino");
+        // Nothing else changes: the holes and the rest of a text stay.
+        assert_eq!(fold("{n} GB · 5 GHz"), "{n} gb · 5 ghz");
     }
 
     #[test]

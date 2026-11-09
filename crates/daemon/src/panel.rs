@@ -504,14 +504,18 @@ struct Usage {
 /// How well a setting matches a (lowercased, trimmed) search: 0 its name
 /// starts with it, 1 its name contains it, 2 a keyword does; `None` no match.
 fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8> {
-    // Its name and keywords in English, and in the shell's language.
-    let name = label.to_lowercase();
-    let shown = crate::i18n::tr(label).to_lowercase();
+    // Its name and keywords in English, and in the shell's language — as a
+    // search compares them, without case or accents ("energia" finds
+    // "Modo de energía", "reglages" "Réglages").
+    let q = crate::i18n::fold(q);
+    let q = q.as_str();
+    let name = crate::i18n::fold(label);
+    let shown = crate::i18n::fold(crate::i18n::tr(label));
     if name.starts_with(q) || shown.starts_with(q) {
         Some(0)
     } else if name.contains(q) || shown.contains(q) {
         Some(1)
-    } else if keywords.contains(q) || crate::i18n::tr(keywords).contains(q) {
+    } else if keywords.contains(q) || crate::i18n::fold(crate::i18n::tr(keywords)).contains(q) {
         Some(2)
     } else {
         None
@@ -5778,6 +5782,30 @@ mod tests {
         // Every other key is itself.
         assert_eq!(left_hand(Keysym::Tab), Keysym::Tab);
         assert_eq!(left_hand(Keysym::x), Keysym::x);
+    }
+
+    /// Every setting's name and its search words have their Spanish. The
+    /// words reach the translator from this table, never from a `tr("…")`
+    /// literal, so the catalogue's own test cannot see them (2026-11-08:
+    /// 28 word lists had grown and lost their Spanish — a search typed in
+    /// Spanish found nothing by them).
+    #[test]
+    fn every_setting_and_its_words_have_their_spanish() {
+        let es: std::collections::HashMap<String, String> =
+            serde_json::from_str(include_str!("../assets/i18n/es.json")).expect("es.json parses");
+        let missing: Vec<&str> =
+            SETTINGS.iter().flat_map(|(label, _, words)| [*label, *words]).filter(|s| !es.contains_key(*s)).collect();
+        assert!(missing.is_empty(), "no Spanish for {} setting string(s): {missing:#?}", missing.len());
+    }
+
+    /// The search compares without case or accents, in English and in the
+    /// shell's language alike (tests run in English).
+    #[test]
+    fn a_search_finds_a_setting_without_its_accents() {
+        assert_eq!(match_rank("Night light", "display screen warm", "NIGHT"), Some(0));
+        assert_eq!(match_rank("Night light", "display screen warm", "light"), Some(1));
+        assert_eq!(match_rank("Night light", "display screen warm", "wárm"), Some(2));
+        assert_eq!(match_rank("Night light", "display screen warm", "zzz"), None);
     }
 
     /// A panel laid out at bar scale 1 over a typical card field, with

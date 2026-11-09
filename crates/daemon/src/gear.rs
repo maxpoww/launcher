@@ -515,7 +515,7 @@ fn bt_kind(icon: &str) -> (&'static str, &'static str) {
         "audio-card" | "audio-speakers" => (G_SPEAKER, tr("Speaker")),
         "input-mouse" | "input-tablet" => (G_MOUSE, tr("Mouse")),
         "input-keyboard" => (G_KEYBOARD, tr("Keyboard")),
-        "phone" => (G_PHONE, "Phone"),
+        "phone" => (G_PHONE, tr("Phone")),
         "input-gaming" => (G_GAMEPAD, tr("Game controller")),
         "computer" => (G_LAPTOP, tr("Computer")),
         _ => (G_BT, tr("Device")),
