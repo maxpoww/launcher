@@ -355,12 +355,16 @@ fn main() -> anyhow::Result<()> {
     // process-wide flag every animation primitive checks; reduce-transparency
     // rewrites the theme background once so the card, dock and box panels
     // all draw solid (the OPTIONS surfaces read the flag directly).
-    animation::set_reduce_motion(config.accessibility.reduce_motion);
+    // (The Accessibility page's Reduce motion counts too, 2026-11-09: only
+    // the config's was read, so after a restart the page said on, the
+    // compositor stood still and every one of ours moved again.)
+    let reduce_motion = config.accessibility.reduce_motion || display::GolemSettings::load().reduce_motion == Some(true);
+    animation::set_reduce_motion(reduce_motion);
     if config.accessibility.reduce_transparency {
         config.theme.force_opaque_background();
         info!("reduce-transparency: glass surfaces drawn opaque");
     }
-    if config.accessibility.reduce_motion {
+    if reduce_motion {
         info!("reduce-motion: animations snap to their end state");
     }
 

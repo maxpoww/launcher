@@ -530,6 +530,11 @@ impl App {
                     nix::DoneOp::Install => self.module_program_done(&id.clone(), ok),
                     nix::DoneOp::Reconcile => {}
                 }
+                // The screen reader's, well or not: the Accessibility page
+                // stops saying "Installing…" (2026-11-09).
+                if matches!(op, nix::DoneOp::Install) && id == crate::access_page::READER_ATTR {
+                    crate::access_page::install_done();
+                }
                 match op {
                     nix::DoneOp::Reconcile => {
                         if ok {

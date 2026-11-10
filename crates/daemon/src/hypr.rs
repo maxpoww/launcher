@@ -2350,6 +2350,11 @@ pub fn silence_animations() {
 /// curve** (`spring:easy` @4.79 becomes `default` @1.00), and a bare
 /// `enabled = true` does not even re-enable it. Both measured the hard way.
 pub fn restore_animations(snapshot: &[AnimLeaf]) {
+    // Reduce motion is on (2026-11-09): the animations stay off. Leaving the
+    // stage turned them back on and undid the owner's choice.
+    if crate::display::GolemSettings::load().reduce_motion == Some(true) {
+        return;
+    }
     eval("hl.config({ [\"animations.enabled\"] = true })");
     for leaf in snapshot {
         if !leaf.enabled {

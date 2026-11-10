@@ -34,6 +34,11 @@ pub(crate) const READER_ID: &str = "org.gnome.Orca.desktop";
 /// The reader's install is under way (set by the UI thread as it starts it).
 pub(crate) static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The reader was just started and does not go by its name yet (its own
+/// scope, the shell and Python come first): the switch shows it on, and a
+/// second "on" does not start a second one.
+static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn nearest(stops: &[f64], value: f64) -> usize {
     stops.iter().enumerate().min_by(|a, b| (a.1 - value).abs().total_cmp(&(b.1 - value).abs())).map_or(0, |(i, _)| i)
 }
@@ -52,7 +57,7 @@ pub(crate) fn view(view: &mut ControlView) {
     view.groups.push(Group { labelled: true, ..group_of(Some("Magnifier"), "magnifier", zooms) });
     view.groups.push(on_off_of(Some("Reduce motion"), "access-motion", s.reduce_motion.unwrap_or(false)));
     if crate::launch::on_path("orca") {
-        view.groups.push(on_off_of(Some("Screen reader"), "access-reader", reader_running()));
+        view.groups.push(on_off_of(Some("Screen reader"), "access-reader", reader_on()));
     } else {
         let installing = INSTALLING.load(std::sync::atomic::Ordering::Relaxed);
         let word = if installing { tr("Installing the screen reader…") } else { tr("Install a screen reader (Orca)") };
@@ -61,9 +66,51 @@ pub(crate) fn view(view: &mut ControlView) {
     view.groups.push(Group { centred: true, ..line_of(tr("For more contrast, choose a high-contrast palette in Colours.").to_owned()) });
 }
 
-/// Whether Orca is running for this session.
+/// Whether Orca is running for this session: this user's, and alive — a
+/// zombie matched `pgrep -x orca` too (2026-11-09: the switch stayed on
+/// after Orca was stopped, and "on" never started it again).
 fn reader_running() -> bool {
-    crate::controls::out_of("pgrep", &["-x", "orca"]).is_some_and(|o| !o.trim().is_empty())
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() }.to_string();
+    crate::controls::out_of("pgrep", &["-u", &uid, "-r", "R,S,D", "-x", "orca"]).is_some_and(|o| !o.trim().is_empty())
+}
+
+/// The switch's state: running, or on its way.
+fn reader_on() -> bool {
+    STARTING.load(std::sync::atomic::Ordering::Relaxed) || reader_running()
+}
+
+/// Start Orca the way an app is started (2026-11-09): detached, in its own
+/// scope. As the dock's own child it was never reaped (a zombie once
+/// stopped) and it went down with every restart of the dock's service.
+/// The page is read again once it goes by its name, or gave up.
+fn start_reader() {
+    if let Err(e) = crate::launch::launch("orca", false, "") {
+        tracing::warn!("accessibility: the screen reader did not start: {e:#}");
+        return;
+    }
+    STARTING.store(true, std::sync::atomic::Ordering::Relaxed);
+    let watch = std::thread::Builder::new().name("access-reader".into()).spawn(|| {
+        for _ in 0..50 {
+            if reader_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        STARTING.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::controls::read_again("Accessibility");
+    });
+    if watch.is_err() {
+        STARTING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The reader's install finished, well or not (2026-11-09: an offline
+/// install failed and the page said "Installing…" until the dock restarted).
+pub(crate) fn install_done() {
+    if INSTALLING.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        crate::controls::read_again("Accessibility");
+    }
 }
 
 /// A pick on the worker. True when the key was this page's.
@@ -79,12 +126,8 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
         }
         "access-reader" => {
             if value == "on" {
-                if !reader_running() {
-                    let _ = std::process::Command::new("orca")
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn();
+                if !reader_on() {
+                    start_reader();
                 }
             } else {
                 crate::controls::run_of("pkill", &["-x", "orca"]);

@@ -324,7 +324,10 @@ impl App {
             // The stills were up: motion is given back, ours and the
             // compositor's.
             if d.phase != Phase::Preparing {
-                crate::animation::set_reduce_motion(self.config.accessibility.reduce_motion);
+                // (The page's Reduce motion too, 2026-11-09: a scale change
+                // gave ours back to a reader who had asked for less.)
+                let saved = crate::display::GolemSettings::load().reduce_motion == Some(true);
+                crate::animation::set_reduce_motion(self.config.accessibility.reduce_motion || saved);
                 still_rules(false);
             }
             if let Some(then) = d.teardown() {
