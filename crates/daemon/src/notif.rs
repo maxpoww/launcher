@@ -686,6 +686,8 @@ impl App {
         // Whether at least one arrival should pop the preview (a genuinely new
         // message, not a cross-source echo of one just shown).
         let mut fresh_pop = false;
+        // Whether a quiet app's arrival was filed read (its mark is saved below).
+        let mut quiet_read = false;
         for ev in events {
         match ev {
             NotifEvent::Active(list) => {
@@ -731,7 +733,7 @@ impl App {
                             // its card goes to the bell, read, and nothing pops.
                             let quiet = self.notif_app_quiet(n);
                             if quiet {
-                                self.notif.read_ms.insert(n.timestamp_ms);
+                                quiet_read |= self.notif.read_ms.insert(n.timestamp_ms);
                             }
                             self.notif.history.insert(0, n.clone());
                             arrived = true;
@@ -841,6 +843,12 @@ impl App {
             // already open they're looking at it, so it's read on arrival.
             if self.notif.expanded {
                 self.mark_notif_read();
+            } else if quiet_read {
+                // A quiet app's read mark is kept as its card is (2026-11-09):
+                // only the history was saved, so a restart before the next
+                // prefs save counted the card unread and lit the bell. Once a
+                // batch, as the history — a chatty app's burst is one write.
+                self.save_notif_prefs();
             }
             // Sound is left to the posting apps; the shade only shows the preview
             // (or, under DND, blinks the bell) — and only for a fresh message, not
@@ -3552,21 +3560,74 @@ fn conversation_key(n: &ActiveNotification) -> Option<(String, String)> {
 /// conversation, or — for everything else — identical content (app + summary +
 /// body). The content key is namespaced (`\u{1}`) so it can never collide with a
 /// conversation key.
-/// An app as the quiet list names it: its name folded (a web notification's
-/// browser name stands for its site, as the bell shows it).
+/// An app as the quiet list names it, folded: a browser's web notification
+/// by its site, as the bell shows it; anything else by its desktop entry,
+/// then its name (2026-11-09: the entry was ignored, so an app that sends
+/// no name could never be made quiet).
 pub(crate) fn app_key(n: &ActiveNotification) -> String {
-    if let Some(web) = notif_app_keyword(&n.body).filter(|w| !w.is_empty()) {
+    if let Some(web) = web_keyword(n) {
         return web.to_lowercase();
+    }
+    let entry = desktop_id(n);
+    if !entry.is_empty() {
+        return entry.to_lowercase();
     }
     collapse_ws(&strip_markup(&n.app_name)).to_lowercase()
 }
 
+/// Every key the quiet list may hold `n`'s app by, [`app_key`] first. The
+/// folded name is the key the list used until 2026-11-09, kept so an app
+/// made quiet then stays quiet; never for a site, whose browser's name
+/// would quiet every site it carries.
+fn app_keys(n: &ActiveNotification) -> Vec<String> {
+    let key = app_key(n);
+    let named = collapse_ws(&strip_markup(&n.app_name)).to_lowercase();
+    let mut keys = vec![key];
+    if web_keyword(n).is_none() && !named.is_empty() && named != keys[0] {
+        keys.push(named);
+    }
+    keys.retain(|k| !k.is_empty());
+    keys
+}
+
+/// The site a browser's web notification is from ([`notif_app_keyword`]),
+/// `None` from any other sender. Only a browser leads the body with the
+/// site: before 2026-11-09 any app's first word counted, so a torrent's
+/// "debian-12.5.0-amd64-netinst.iso" was the app "0-amd64-netinst" — the
+/// app's quiet setting missed it and the list grew a bogus app.
+fn web_keyword(n: &ActiveNotification) -> Option<String> {
+    if !from_browser(n) {
+        return None;
+    }
+    notif_app_keyword(&n.body).filter(|w| !w.is_empty())
+}
+
+/// Whether a browser sent `n` — Seam (which says "Firefox"), Chrome and the
+/// rest, or a webapp — by its desktop entry or name, with the test that
+/// knows a browser's window ([`crate::hypr::is_browser_class`]).
+fn from_browser(n: &ActiveNotification) -> bool {
+    let entry = desktop_id(n);
+    entry.starts_with("webapp-") || crate::hypr::is_browser_class(entry) || crate::hypr::is_browser_class(&n.app_name)
+}
+
+/// The notification's desktop entry, without the `.desktop` some senders add.
+fn desktop_id(n: &ActiveNotification) -> &str {
+    let entry = n.desktop_entry.trim();
+    entry.strip_suffix(".desktop").unwrap_or(entry)
+}
+
 /// An app's name as the Notifications page shows it.
 pub(crate) fn app_shown(n: &ActiveNotification) -> String {
-    if let Some(web) = notif_app_keyword(&n.body).filter(|w| !w.is_empty()) {
+    if let Some(web) = web_keyword(n) {
         return friendly_service(&web);
     }
     let name = collapse_ws(&strip_markup(&n.app_name));
+    if name.is_empty() {
+        // Only a desktop entry ("org.gnome.Nautilus"): its last part, so
+        // the list has a word to click.
+        let entry = desktop_id(n);
+        return entry.rsplit('.').next().unwrap_or(entry).to_owned();
+    }
     if name.eq_ignore_ascii_case("waverunner") { "Golem".to_owned() } else { name }
 }
 
@@ -3605,8 +3666,18 @@ impl App {
 
     /// Whether `n`'s app is on the quiet list.
     fn notif_app_quiet(&self, n: &ActiveNotification) -> bool {
-        let key = app_key(n);
-        !key.is_empty() && self.settings.notif_quiet.contains(&key)
+        app_keys(n).iter().any(|k| self.settings.notif_quiet.contains(k))
+    }
+
+    /// The key `n`'s app stands on the quiet list by — an older key it was
+    /// made quiet by ([`app_keys`]), so the page's click takes that one off —
+    /// else the one it would be put on by.
+    fn notif_quiet_key(&self, n: &ActiveNotification) -> String {
+        let mut keys = app_keys(n);
+        match keys.iter().position(|k| self.settings.notif_quiet.contains(k)) {
+            Some(i) => keys.swap_remove(i),
+            None => keys.into_iter().next().unwrap_or_default(),
+        }
     }
 
     /// The apps that have sent notifications, with the quiet list's (so a
@@ -3615,7 +3686,7 @@ impl App {
     pub(crate) fn notif_apps(&self) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         for n in &self.notif.history {
-            let key = app_key(n);
+            let key = self.notif_quiet_key(n);
             if !key.is_empty() && !out.iter().any(|(k, _)| *k == key) {
                 out.push((key, app_shown(n)));
             }
@@ -4101,6 +4172,47 @@ mod tests {
         assert!(!in_quiet_hours(12, 22, 7));
         assert!(in_quiet_hours(2, 1, 5) && !in_quiet_hours(5, 1, 5));
         assert!(!in_quiet_hours(3, 3, 3));
+    }
+
+    /// The quiet list's key (2026-11-09): a site only from a browser; any
+    /// other app by its desktop entry, then its name — never by a file name
+    /// that happens to lead its body.
+    #[test]
+    fn an_app_is_keyed_by_its_sender_not_its_first_word() {
+        let from = |app: &str, entry: &str, body: &str| {
+            let mut n = sample(1, 1000, "Done");
+            n.app_name = app.into();
+            n.desktop_entry = entry.into();
+            n.body = body.into();
+            n
+        };
+        // A torrent's file name looks like a host; it is not a site.
+        let torrent = from("Transmission", "transmission-gtk", "debian-12.5.0-amd64-netinst.iso");
+        assert_eq!(app_key(&torrent), "transmission-gtk");
+        assert_eq!(app_shown(&torrent), "Transmission");
+        let pdf = from("Downloader", "", "invoice.pdf downloaded");
+        assert_eq!(app_key(&pdf), "downloader");
+        // A browser's web notification stays its site.
+        let chat = from("Google Chrome", "google-chrome", "<a href=\"https://web.whatsapp.com/\">web.whatsapp.com</a>\n\nPhoto");
+        assert_eq!(app_key(&chat), "whatsapp");
+        assert_eq!(app_shown(&chat), "WhatsApp");
+        assert_eq!(app_keys(&chat), ["whatsapp"], "the browser's name would quiet every site");
+        let webapp = from("", "webapp-instagram", "www.instagram.com liked your photo");
+        assert_eq!(app_key(&webapp), "instagram");
+        // Seam says "Firefox" and puts no site in the body.
+        let seam = from("Firefox", "firefox", "New message");
+        assert_eq!(app_key(&seam), "firefox");
+        assert_eq!(app_keys(&seam), ["firefox"]);
+        // No name, only a desktop entry: it can still be made quiet, and is listed.
+        let nameless = from("", "org.gnome.Nautilus.desktop", "Copied");
+        assert_eq!(app_key(&nameless), "org.gnome.nautilus");
+        assert_eq!(app_shown(&nameless), "Nautilus");
+        // An app made quiet by its name before the entry came first stays quiet.
+        let phone = from("KDE Connect", "org.kde.kdeconnect.daemon", "Yesi: hola");
+        assert_eq!(app_keys(&phone), ["org.kde.kdeconnect.daemon", "kde connect"]);
+        assert_eq!(app_keys(&torrent), ["transmission-gtk", "transmission"]);
+        // Nothing to key by: nothing to put on the list.
+        assert!(app_keys(&from("", "", "x")).is_empty());
     }
 
     #[test]
