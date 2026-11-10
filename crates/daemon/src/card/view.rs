@@ -702,7 +702,8 @@ const VOICE_HEAD: f32 = 35.0;
 const VOICE_FOOT: f32 = 2.0 * TILE_PAD_Y - 3.0 + VOICE_HEAD - 8.0;
 const VOICE_SAID: f32 = 4.0 + NOTE_LINE + 6.0;
 /// What a voice note with no title of its own is called (its body starts
-/// so: "Voice note · 0:07").
+/// so: "Voice note · 0:07" — the English, a mark kept on disk; it is shown
+/// translated).
 pub(crate) const VOICE_NAME: &str = "Voice note";
 /// What stands in for what a voice note says while that is being written out.
 pub(crate) const WRITING_OUT: &str = "Writing out what it says…";
@@ -1818,7 +1819,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                     Some("") => tr("Type a title"),
                     Some(words) => words,
                     None if named => item.body.as_str(),
-                    None => VOICE_NAME,
+                    None => tr(VOICE_NAME),
                 },
                 (x + 32.0, t.y + TILE_PAD_Y + 3.0),
                 text_w - 32.0 - 3.0 * CLOSE,
@@ -2827,7 +2828,7 @@ pub(crate) fn tile_picture(
             if named {
                 item.body.as_str()
             } else {
-                VOICE_NAME
+                tr(VOICE_NAME)
             },
             s(TEXT_PX + 0.5),
             None,

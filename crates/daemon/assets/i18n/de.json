@@ -2357,5 +2357,17 @@
  "Yes, uninstall 1 program": "Ja, 1 Programm deinstallieren",
  "Yes, uninstall {0} programs": "Ja, {0} Programme deinstallieren",
  "{weekday}, {day} {month} {year}": "{weekday}, {day}. {month} {year}",
- "{month} {day} · {time}": "{day}. {month} · {time}"
+ "{month} {day} · {time}": "{day}. {month} · {time}",
+ "Voice note": "Sprachnotiz",
+ "Untitled": "Ohne Titel",
+ "am": "AM",
+ "pm": "PM",
+ "Shift+W A S D": "Umschalt+W A S D",
+ "Shift+G": "Umschalt+G",
+ "Shift+T": "Umschalt+T",
+ "Delete": "Entf",
+ "Shift+`": "Umschalt+`",
+ "Space": "Leertaste",
+ "Enter": "Eingabe",
+ "Shift+F10": "Umschalt+F10"
 }

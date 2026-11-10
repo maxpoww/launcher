@@ -220,6 +220,9 @@ impl Shortcuts {
                         ));
                     }
                     Line::Keys(keys, words) => {
+                        // (A key's name as that language's keyboards print
+                        // it: Mayús, Maj, Umschalt, Supr, Entf, Espacio…)
+                        let keys = crate::i18n::tr_dyn(keys);
                         let cap_w =
                             (measure(keys, CAP_PX * s) + 2.0 * CAP_PAD * s).min(CAP_COL * s);
                         let cap = Rect::new(x, y + (ROW_H - CAP_H) / 2.0 * s, cap_w, CAP_H * s);
@@ -297,6 +300,12 @@ mod tests {
                 Line::Heading(w) | Line::Keys(_, w) => w,
             };
             assert!(es.contains_key(*words), "no Spanish for {words:?}");
+            // A key with a name of its own in Spanish (Shift, Delete, Space).
+            if let Line::Keys(keys, _) = l {
+                if ["Shift", "Delete", "Space"].iter().any(|k| keys.contains(k)) {
+                    assert!(es.contains_key(*keys), "no Spanish for the key {keys:?}");
+                }
+            }
         }
     }
 }

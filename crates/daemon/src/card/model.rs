@@ -177,9 +177,9 @@ pub(super) fn session_row(session: &Past) -> Item {
     let name = session
         .name
         .clone()
-        .unwrap_or_else(|| "Untitled".to_owned());
+        .unwrap_or_else(|| tr("Untitled").to_owned());
     let last = match session.items.last() {
-        Some(item) if item.kind == Kind::Voice => "Voice note".to_owned(),
+        Some(item) if item.kind == Kind::Voice => tr("Voice note").to_owned(),
         Some(item) => item
             .body
             .trim()

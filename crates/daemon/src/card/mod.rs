@@ -1169,7 +1169,7 @@ impl Card {
     /// Its name as the bubble shows it.
     fn open_name(&self) -> Option<String> {
         self.memory_open()
-            .map(|p| p.name.clone().unwrap_or_else(|| "Untitled".to_owned()))
+            .map(|p| p.name.clone().unwrap_or_else(|| crate::i18n::tr("Untitled").to_owned()))
     }
 
     /// What is under `pos`: the bottom (the search, the input box, New), a
@@ -4327,7 +4327,7 @@ impl App {
                 .and_then(|p| p.items.last())
         };
         match last {
-            Some(it) if it.kind == Kind::Voice => "Voice note".to_owned(),
+            Some(it) if it.kind == Kind::Voice => crate::i18n::tr("Voice note").to_owned(),
             Some(it) => it
                 .body
                 .lines()

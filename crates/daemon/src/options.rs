@@ -1658,7 +1658,7 @@ fn clock_text(hour: i32, min: i32) -> String {
             0 => 12,
             h => h,
         };
-        format!("{h}:{min:02} {}", if hour < 12 { "am" } else { "pm" })
+        format!("{h}:{min:02} {}", crate::i18n::tr(if hour < 12 { "am" } else { "pm" }))
     } else {
         format!("{hour:02}:{min:02}")
     }
