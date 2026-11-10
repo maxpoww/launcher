@@ -1654,6 +1654,8 @@
  "The screen never locks by itself.": "La pantalla nunca se bloquea sola.",
  "Away for a while, the screen locks. Your password opens it.": "Si te vas un rato, la pantalla se bloquea. Tu contraseña la abre.",
  "Lock after": "Bloquear después de",
+ "This computer does not lock or sleep on its own.": "Esta computadora no se bloquea ni se suspende sola.",
+ "The screen locks as it goes off, after {n}. Your password opens it.": "La pantalla se bloquea al apagarse, pasados {n}. Tu contraseña la abre.",
  "Ask the password when the computer starts": "Pedir la contraseña al prender la computadora",
  "Lock now": "Bloquear ahora",
  "Left alone, the screen goes off, then the computer sleeps.": "Si queda sola, la pantalla se apaga y después la computadora se suspende.",

@@ -501,6 +501,137 @@ pub(crate) fn idle_with_lock(config: &str, screen: Option<u32>, sleep: Option<u3
     out
 }
 
+/// An idle time to keep: `None` when it is the system's own (a step the
+/// system's config lacks is "never"). Kept as a number, the system's own
+/// held the override up for good, and with it the hypridle it named
+/// (2026-11-09).
+fn idle_own(picked: Option<u32>, base: Option<u32>) -> Option<u32> {
+    picked.filter(|secs| *secs != base.unwrap_or(0))
+}
+
+/// When the screen locks, given the lock's time and the screen's going off
+/// (seconds, 0 = never): no later than the screen goes dark (2026-11-09).
+/// A dark screen reads as a locked one, and a touch woke it straight into
+/// the desktop. macOS and GNOME, asking the password, ask it from the
+/// moment the display turns off; "Never" stays never, as their "no
+/// password" does.
+pub(crate) fn idle_lock_at(lock: u32, screen: u32) -> u32 {
+    if lock != 0 && screen != 0 {
+        lock.min(screen)
+    } else {
+        lock
+    }
+}
+
+/// A unit file's own `ExecStart=` in `[Service]`: the last one given (an
+/// empty one clears those before it), a line ending in `\` joined to the
+/// next, the value as written.
+fn unit_exec_start(unit: &str) -> Option<String> {
+    let (mut service, mut found) = (false, None);
+    let mut lines = unit.lines();
+    while let Some(first) = lines.next() {
+        let mut line = first.trim().to_owned();
+        while line.ends_with('\\') {
+            line.pop();
+            line.truncate(line.trim_end().len());
+            match lines.next() {
+                Some(more) => {
+                    line.push(' ');
+                    line.push_str(more.trim());
+                }
+                None => break,
+            }
+        }
+        if line.starts_with('[') {
+            service = line == "[Service]";
+        } else if let Some((key, value)) = line.split_once('=') {
+            if service && key.trim() == "ExecStart" {
+                let value = value.trim();
+                found = (!value.is_empty()).then(|| value.to_owned());
+            }
+        }
+    }
+    found
+}
+
+/// A word for a unit file, quoted: spaces kept, and the `%` and `$` systemd
+/// would read as its own taken literally.
+fn unit_quote(word: &str) -> String {
+    let escaped = word.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$");
+    format!("\"{escaped}\"")
+}
+
+/// The drop-in that runs hypridle's own command on the owner's config.
+fn idle_dropin_text(command: &str, conf: &std::path::Path) -> String {
+    format!("[Service]\nExecStart=\nExecStart={command} -c {}\n", unit_quote(&conf.to_string_lossy()))
+}
+
+/// The owner's idle config and the drop-in that points hypridle at it.
+fn idle_files() -> (PathBuf, PathBuf) {
+    let conf = config_home().join("golem/hypridle.conf");
+    let dropin = config_home().join("systemd/user/hypridle.service.d/50-golem-idle.conf");
+    (conf, dropin)
+}
+
+/// hypridle's own command, from its unit FILE (2026-11-09). What
+/// `systemctl show -p ExecStart` gives is the command in force, and once
+/// the override is in that is the override's own: every dock start wrote
+/// back the hypridle of the first pick, an update moved hypridle, the
+/// store's collection took the old one, and hypridle no longer started —
+/// no idle lock, and no lock before sleep either (its `before_sleep_cmd`).
+fn hypridle_command() -> Option<String> {
+    let out = Command::new("systemctl")
+        .args(["--user", "show", "-p", "FragmentPath", "--value", "hypridle.service"])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if path.is_empty() {
+        return None;
+    }
+    unit_exec_start(&std::fs::read_to_string(path).ok()?)
+}
+
+/// The last idle change handed to a thread: an older one still waiting
+/// leaves the files to it.
+static IDLE_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static IDLE_ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Write (or, with `None`, remove) the owner's idle config and its drop-in,
+/// then have hypridle take them. On a thread of its own: `systemctl` waits
+/// on the session bus, never the UI thread's business.
+fn write_idle(this: u64, conf_text: Option<String>) {
+    let _one = IDLE_ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if IDLE_LAST.load(std::sync::atomic::Ordering::SeqCst) != this {
+        return;
+    }
+    let (conf, dropin) = idle_files();
+    match conf_text.map(|text| (text, hypridle_command())) {
+        Some((text, Some(command))) => {
+            crate::persist::write_text("idle config", &conf, &text);
+            crate::persist::write_text("idle drop-in", &dropin, &idle_dropin_text(&command, &conf));
+        }
+        other => {
+            if other.is_some() {
+                // The system's own steps beat a drop-in that may name a
+                // hypridle the store no longer has.
+                warn!("gear: cannot find hypridle's own command; the system's idle times stay");
+            }
+            let _ = std::fs::remove_file(&dropin);
+            let _ = std::fs::remove_file(&conf);
+        }
+    }
+    let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
+    // A hypridle that died on a command gone from the store sits failed, and
+    // try-restart leaves a failed unit alone. (Under caffeine it is stopped,
+    // not failed; and its condition keeps it off even if started.)
+    let failed = Command::new("systemctl")
+        .args(["--user", "is-failed", "--quiet", "hypridle.service"])
+        .status()
+        .is_ok_and(|s| s.success());
+    let verb = if failed { "restart" } else { "try-restart" };
+    let _ = Command::new("systemctl").args(["--user", verb, "hypridle.service"]).output();
+}
+
 /// An ambient light sensor the kernel exposes through iio, the kind
 /// `golem-autobrightness` reads.
 fn has_light_sensor() -> bool {
@@ -722,7 +853,9 @@ impl App {
         // An erase the dock did not live to finish leaves its file behind,
         // holding the very space it was writing over.
         crate::sys::remove_erase_leftover();
-        if self.settings.screen_off_secs.is_some() || self.settings.sleep_secs.is_some() || self.settings.lock_secs.is_some() {
+        // A drop-in with no choice behind it goes too (2026-11-09: the
+        // system's own numbers, once kept, held one up for good).
+        if self.settings.screen_off_secs.is_some() || self.settings.sleep_secs.is_some() || self.settings.lock_secs.is_some() || idle_files().1.exists() {
             self.apply_idle();
         }
         if self.settings.lid_nothing {
@@ -747,50 +880,22 @@ impl App {
     /// (a drop-in on its unit); with no choice left, both are removed.
     pub(crate) fn apply_idle(&mut self) {
         let Some(base) = idle_base_text() else { return };
-        let (screen, sleep, lock) = (self.settings.screen_off_secs, self.settings.sleep_secs, self.settings.lock_secs);
-        let conf = config_home().join("golem/hypridle.conf");
-        let dropin_dir = config_home().join("systemd/user/hypridle.service.d");
-        let dropin = dropin_dir.join("50-golem-idle.conf");
-        if screen.is_none() && sleep.is_none() && lock.is_none() {
-            let _ = std::fs::remove_file(&dropin);
-            let _ = std::fs::remove_file(&conf);
-        } else {
-            let bin = Command::new("systemctl")
-                .args(["--user", "show", "hypridle.service", "-p", "ExecStart"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .and_then(|s| {
-                    s.split("path=")
-                        .nth(1)
-                        .and_then(|r| r.split_whitespace().next())
-                        .map(|p| p.trim_end_matches(';').to_owned())
-                });
-            let Some(bin) = bin else {
-                warn!("gear: cannot find hypridle's own command; idle times not applied");
-                return;
-            };
-            crate::persist::write_text("idle config", &conf, &idle_with_lock(&base, screen, sleep, lock));
-            let _ = std::fs::create_dir_all(&dropin_dir);
-            crate::persist::write_text(
-                "idle drop-in",
-                &dropin,
-                &format!(
-                    "[Service]\nExecStart=\nExecStart={bin} -c {}\n",
-                    conf.display()
-                ),
-            );
+        let (base_screen, base_sleep) = idle_base(&base);
+        let base_lock = idle_lock_base(&base);
+        let picked = (self.settings.screen_off_secs, self.settings.sleep_secs, self.settings.lock_secs);
+        let (screen, sleep, lock) = (idle_own(picked.0, base_screen), idle_own(picked.1, base_sleep), idle_own(picked.2, base_lock));
+        if (screen, sleep, lock) != picked {
+            (self.settings.screen_off_secs, self.settings.sleep_secs, self.settings.lock_secs) = (screen, sleep, lock);
+            self.settings.save();
         }
+        // The lock as written: no later than the screen goes off.
+        let lock_at = idle_lock_at(lock.or(base_lock).unwrap_or(0), screen.or(base_screen).unwrap_or(0));
+        let lock = (lock_at != base_lock.unwrap_or(0)).then_some(lock_at);
+        let text = (screen.is_some() || sleep.is_some() || lock.is_some()).then(|| idle_with_lock(&base, screen, sleep, lock));
+        let this = IDLE_LAST.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let _ = std::thread::Builder::new()
             .name("gear-idle".into())
-            .spawn(|| {
-                for args in [
-                    &["--user", "daemon-reload"][..],
-                    &["--user", "try-restart", "hypridle.service"][..],
-                ] {
-                    let _ = Command::new("systemctl").args(args).output();
-                }
-            });
+            .spawn(move || write_idle(this, text));
     }
 
     /// Hold (or let go of) the inhibitor that makes closing the lid do nothing.
@@ -3142,6 +3247,47 @@ mod tests {
         );
         assert_eq!(never.matches("listener").count(), 2);
         assert_eq!(idle_with(BASE, None, None), BASE, "no choice, no change");
+    }
+
+    #[test]
+    fn hypridles_command_comes_from_its_unit_file_alone() {
+        // home-manager's unit, as it is written.
+        let unit = "[Install]\nWantedBy=graphical-session.target\n\n[Service]\nExecStart=/nix/store/new-hypridle/bin/hypridle\nRestart=always\n\n[Unit]\nDescription=hypridle\n";
+        assert_eq!(unit_exec_start(unit).as_deref(), Some("/nix/store/new-hypridle/bin/hypridle"));
+        // The last one counts, an empty one clears, another section's is not it.
+        let unit = "[Service]\nExecStartPre=/bin/true\nExecStart=/old\nExecStart=\nExecStart = /bin/a \\\n  -v\n[X]\nExecStart=/no\n";
+        assert_eq!(unit_exec_start(unit).as_deref(), Some("/bin/a -v"));
+        assert_eq!(unit_exec_start("[Service]\nExecStart=/a\nExecStart=\n"), None);
+        assert_eq!(unit_exec_start("[Unit]\nDescription=x\n"), None);
+    }
+
+    #[test]
+    fn the_drop_in_quotes_the_config_path() {
+        let text = idle_dropin_text("/nix/store/h/bin/hypridle", std::path::Path::new("/home/a b/%h$x/\"q\".conf"));
+        assert_eq!(
+            text,
+            "[Service]\nExecStart=\nExecStart=/nix/store/h/bin/hypridle -c \"/home/a b/%%h$$x/\\\"q\\\".conf\"\n"
+        );
+    }
+
+    #[test]
+    fn the_systems_own_time_is_no_choice() {
+        assert_eq!(idle_own(Some(300), Some(300)), None);
+        assert_eq!(idle_own(Some(600), Some(300)), Some(600));
+        assert_eq!(idle_own(Some(0), Some(300)), Some(0));
+        assert_eq!(idle_own(Some(0), None), None, "a step the system lacks is never");
+        assert_eq!(idle_own(None, Some(300)), None);
+    }
+
+    #[test]
+    fn the_screen_never_goes_dark_unlocked() {
+        assert_eq!(idle_lock_at(600, 360), 360);
+        assert_eq!(idle_lock_at(300, 360), 300);
+        assert_eq!(idle_lock_at(0, 360), 0, "never stays never");
+        assert_eq!(idle_lock_at(600, 0), 600, "a screen never off moves nothing");
+        // Written: the lock listener goes to the screen's time.
+        let out = idle_with_lock(BASE, Some(120), None, Some(idle_lock_at(600, 120)));
+        assert_eq!(idle_lock_base(&out), Some(120));
     }
 
     #[test]

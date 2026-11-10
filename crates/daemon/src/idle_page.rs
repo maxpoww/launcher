@@ -16,9 +16,10 @@
 //! compositor's child, the one way it survives everything else). Lock now
 //! goes the same way, through the compositor.
 
-use crate::controls::{choice_of, group_of, on_off_of, ControlView, Group};
+use crate::controls::{choice_of, group_of, line_of, on_off_of, ControlView, Group};
 use crate::display::GolemSettings;
 use crate::i18n::{fill, tr};
+use crate::settings::Settings;
 
 /// The times offered, in seconds (0 = never).
 const TIMES: [u32; 7] = [0, 60, 300, 600, 900, 1800, 3600];
@@ -45,21 +46,29 @@ fn times_group(caption: &'static str, key: &'static str, now: u32) -> Group {
 }
 
 /// The system's own times, from Golem's hypridle config: (lock, screen
-/// off, sleep).
-fn base_times() -> (u32, u32, u32) {
-    let base = crate::gear_pages::idle_base_text().unwrap_or_default();
-    let (screen, sleep) = crate::gear_pages::idle_base(&base);
-    let lock = crate::gear_pages::idle_lock_base(&base);
-    (lock.unwrap_or(300), screen.unwrap_or(360), sleep.unwrap_or(900))
+/// off, sleep), a step it lacks = never. `None`: no config, idle is off on
+/// this machine (`golem.home.idle.enable = false`).
+fn base_times() -> Option<(u32, u32, u32)> {
+    crate::gear_pages::idle_base_text().map(|base| times_of(&base))
+}
+
+fn times_of(base: &str) -> (u32, u32, u32) {
+    let (screen, sleep) = crate::gear_pages::idle_base(base);
+    let lock = crate::gear_pages::idle_lock_base(base);
+    (lock.unwrap_or(0), screen.unwrap_or(0), sleep.unwrap_or(0))
+}
+
+/// Where nothing locks or sleeps on its own, one line says so in the times'
+/// place (2026-11-09): the page showed 5, 6 and 15 min lit, picks saved and
+/// lit, and none of it ever applied.
+fn no_idle(view: &mut ControlView) {
+    view.subtitle = String::new();
+    view.groups.push(Group { centred: true, ..line_of(tr("This computer does not lock or sleep on its own.").to_owned()) });
 }
 
 /// Controls → Lock screen.
 pub(crate) fn lock_view(view: &mut ControlView) {
-    let dock = crate::settings::Settings::load();
-    let (lock, _, _) = base_times();
-    let now = dock.lock_secs.unwrap_or(lock);
-    view.subtitle = tr(if now == 0 { "The screen never locks by itself." } else { "Away for a while, the screen locks. Your password opens it." }).to_owned();
-    view.groups.push(times_group("Lock after", "idle-lock", now));
+    lock_times(view, base_times(), &Settings::load());
     let at_start = GolemSettings::load().lock_at_start.unwrap_or(false);
     view.groups.push(on_off_of(Some("Ask the password when the computer starts"), "lock-start", at_start));
     if crate::launch::on_path("hyprlock") {
@@ -67,17 +76,38 @@ pub(crate) fn lock_view(view: &mut ControlView) {
     }
 }
 
+/// The lock's time, and the subtitle that says when it comes: the screen
+/// going off first locks it then (`gear_pages::idle_lock_at`), and the
+/// page says so rather than light a time that never comes.
+fn lock_times(view: &mut ControlView, base: Option<(u32, u32, u32)>, dock: &Settings) {
+    let Some((lock, screen, _)) = base else { return no_idle(view) };
+    let now = dock.lock_secs.unwrap_or(lock);
+    let at = crate::gear_pages::idle_lock_at(now, dock.screen_off_secs.unwrap_or(screen));
+    view.subtitle = if now == 0 {
+        tr("The screen never locks by itself.").to_owned()
+    } else if at < now {
+        fill(tr("The screen locks as it goes off, after {n}. Your password opens it."), &[("n", &time_word(at))])
+    } else {
+        tr("Away for a while, the screen locks. Your password opens it.").to_owned()
+    };
+    view.groups.push(times_group("Lock after", "idle-lock", now));
+}
+
 /// Controls → Sleep.
 pub(crate) fn sleep_view(view: &mut ControlView) {
-    let dock = crate::settings::Settings::load();
-    let (_, screen, sleep) = base_times();
+    let dock = Settings::load();
+    sleep_times(view, base_times(), &dock);
+    if !crate::hypr::switch_names().is_empty() {
+        view.groups.push(on_off_of(Some("Closing the lid does nothing"), "idle-lid", dock.lid_nothing));
+    }
+}
+
+fn sleep_times(view: &mut ControlView, base: Option<(u32, u32, u32)>, dock: &Settings) {
+    let Some((_, screen, sleep)) = base else { return no_idle(view) };
     let (screen, sleep) = (dock.screen_off_secs.unwrap_or(screen), dock.sleep_secs.unwrap_or(sleep));
     view.subtitle = tr("Left alone, the screen goes off, then the computer sleeps.").to_owned();
     view.groups.push(times_group("Screen off after", "idle-screen", screen));
     view.groups.push(times_group("Sleep after", "idle-sleep", sleep));
-    if !crate::hypr::switch_names().is_empty() {
-        view.groups.push(on_off_of(Some("Closing the lid does nothing"), "idle-lid", dock.lid_nothing));
-    }
 }
 
 /// A pick on the worker (the UI thread takes the `idle-*` keys). True when
@@ -106,5 +136,40 @@ mod tests {
         let g = times_group("Lock after", "idle-lock", 0);
         assert_eq!(g.choices.len(), TIMES.len());
         assert!(g.choices[0].on);
+    }
+
+    #[test]
+    fn with_no_idle_config_one_line_stands_for_the_times() {
+        let dock = Settings { lock_secs: Some(600), screen_off_secs: Some(60), ..Settings::default() };
+        for page in [lock_times as fn(&mut ControlView, Option<(u32, u32, u32)>, &Settings), sleep_times] {
+            let mut view = ControlView::default();
+            page(&mut view, None, &dock);
+            assert_eq!(view.groups.len(), 1);
+            assert!(view.groups[0].centred && view.groups[0].choices.is_empty());
+            assert!(view.subtitle.is_empty());
+        }
+        let mut view = ControlView::default();
+        sleep_times(&mut view, Some((300, 360, 900)), &dock);
+        assert_eq!(view.groups.iter().map(|g| g.key).collect::<Vec<_>>(), ["idle-screen", "idle-sleep"]);
+    }
+
+    #[test]
+    fn a_lock_after_the_screen_off_says_it_comes_with_it() {
+        let base = Some((300, 360, 900));
+        let mut view = ControlView::default();
+        lock_times(&mut view, base, &Settings { lock_secs: Some(600), ..Settings::default() });
+        assert_eq!(view.subtitle, "The screen locks as it goes off, after 6 min. Your password opens it.");
+        assert_eq!(view.groups[0].choices.iter().find(|c| c.on).map(|c| c.value.as_str()), Some("600"), "the pick stays lit");
+        let mut view = ControlView::default();
+        lock_times(&mut view, base, &Settings::default());
+        assert_eq!(view.subtitle, "Away for a while, the screen locks. Your password opens it.");
+        let mut view = ControlView::default();
+        lock_times(&mut view, base, &Settings { lock_secs: Some(600), screen_off_secs: Some(0), ..Settings::default() });
+        assert_eq!(view.subtitle, "Away for a while, the screen locks. Your password opens it.", "no screen off, the lock's own time");
+    }
+
+    #[test]
+    fn a_step_the_config_lacks_is_never() {
+        assert_eq!(times_of("general {\n}\nlistener {\n  on-timeout=/x/golem-lock\n  timeout=300\n}\n"), (300, 0, 0));
     }
 }
