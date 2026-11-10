@@ -2184,9 +2184,11 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     if page == Page::Talk {
         let mic = talk_mic(body);
         let talk = view.foot.as_ref().and_then(|f| f.bar.talk);
+        // (The line is in the shell's language: told by the English words it
+        // never lit in any other — 2026-11-09.)
         let (listening, writing) = (
-            talk.is_some_and(|t| t.starts_with("Listening")),
-            talk.is_some_and(|t| t.starts_with("Writing")),
+            talk.is_some_and(|t| t == tr("Listening…  press again to write it")),
+            talk.is_some_and(|t| t == tr("Writing what you said…")),
         );
         let hot = view.hover == Some(Hover::Mic);
         // (Quiet: a ring of the accent; filled only by what it is doing —

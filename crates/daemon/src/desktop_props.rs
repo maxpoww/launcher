@@ -388,7 +388,9 @@ impl Props {
 
     /// A folder's walk came back: its Size line.
     pub fn set_size(&mut self, bytes: u64, files: u64) {
-        if let Some(row) = self.rows.iter_mut().find(|(k, _)| *k == "Size") {
+        // (The rows hold their words as shown: "Tamaño" in Spanish — told
+        // apart by the English, the size never came in any other language.)
+        if let Some(row) = self.rows.iter_mut().find(|(k, _)| *k == tr("Size")) {
             row.1 = if files == 0 {
                 tr("Empty").to_owned()
             } else {

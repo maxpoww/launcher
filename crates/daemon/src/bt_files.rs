@@ -257,7 +257,11 @@ async fn push(
     progress: impl Fn(u64),
 ) -> zbus::Result<()> {
     let client = Proxy::new(conn, OBEX, OBEX_ROOT, "org.bluez.obex.Client1").await?;
-    let args: HashMap<&str, Value<'_>> = HashMap::from([(tr("Target"), Value::from("opp"))]);
+    // (These are BlueZ's and the notification server's NAMES — a method, a
+    // property, an argument —, never words for a person: run through the
+    // translator they were "Destino", "Estado", "Notificar" in Spanish and
+    // every send, receive and its notice failed there; 2026-11-09.)
+    let args: HashMap<&str, Value<'_>> = HashMap::from([("Target", Value::from("opp"))]);
     let session: OwnedObjectPath = client.call("CreateSession", &(address, args)).await?;
     let result = async {
         let opp = Proxy::new(conn, OBEX, session.clone(), "org.bluez.obex.ObjectPush1").await?;
@@ -285,8 +289,8 @@ async fn wait_transfer(t: &Proxy<'_>, progress: impl Fn(u64)) -> zbus::Result<()
             _ => {}
         }
         if let (Ok(done), Ok(size)) = (
-            t.get_property::<u64>(tr("Transferred")).await,
-            t.get_property::<u64>(tr("Size")).await,
+            t.get_property::<u64>("Transferred").await,
+            t.get_property::<u64>("Size").await,
         ) {
             if let Some(pct) = (done * 100).checked_div(size) {
                 progress(pct);
@@ -315,7 +319,7 @@ async fn notify(conn: &Connection, summary: &str, body: &str) {
     let actions: Vec<&str> = Vec::new();
     if let Err(e) = p
         .call::<_, _, u32>(
-            tr("Notify"),
+            "Notify",
             &(
                 tr("Bluetooth"),
                 0u32,
@@ -366,7 +370,7 @@ impl ObexAgent {
             .map_err(|e| refuse(&e.to_string()))?;
         let from = match Proxy::new(conn, OBEX, session, "org.bluez.obex.Session1").await {
             Ok(s) => s
-                .get_property::<String>(tr("Destination"))
+                .get_property::<String>("Destination")
                 .await
                 .unwrap_or_default(),
             Err(_) => String::new(),
@@ -428,12 +432,12 @@ async fn received(conn: &Connection, transfer: &str, name: &str) {
     let ok = loop {
         if stored.is_none() {
             stored = t
-                .get_property::<String>(tr("Filename"))
+                .get_property::<String>("Filename")
                 .await
                 .ok()
                 .filter(|s| !s.is_empty());
         }
-        match t.get_property::<String>(tr("Status")).await.as_deref() {
+        match t.get_property::<String>("Status").await.as_deref() {
             Ok("complete") => break true,
             Ok("error") => break false,
             // The object is gone: obexd removes it when the transfer ends.
