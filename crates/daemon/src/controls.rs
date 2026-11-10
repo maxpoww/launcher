@@ -460,6 +460,10 @@ pub(crate) struct UiFacts {
     /// The apps in the grid, most used first: (desktop id, name, the app
     /// entry — its icon on the Apps page's cards).
     pub apps: Vec<(String, String, usize)>,
+    /// Every app of the grid, most used first, for Startup apps' cards (the
+    /// Colours list leaves out what no colour reaches: Discord, Slack,
+    /// Spotify, Steam… — the apps people start at sign-in).
+    pub startup_apps: Vec<(String, String, usize)>,
     /// The apps that have sent notifications (key, name), for the quiet list.
     pub notif_apps: Vec<(String, String)>,
 }

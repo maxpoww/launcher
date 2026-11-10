@@ -5097,6 +5097,7 @@ impl App {
             has_bt: self.stats_page_for(PageKind::Bt).is_some(),
             has_battery: self.stats_page_for(PageKind::Battery).is_some(),
             apps: self.colours_apps(),
+            startup_apps: self.grid_apps(false),
             notif_apps: self.notif_apps(),
         }
     }
@@ -5104,6 +5105,13 @@ impl App {
     /// The grid's apps for the Colours list, most used first (a webapp only
     /// once it is installed).
     fn colours_apps(&self) -> Vec<(String, String, usize)> {
+        self.grid_apps(true)
+    }
+
+    /// The grid's real apps, most used first (a webapp only once it is
+    /// installed); `reachable`: only those a colour exception can reach, or
+    /// that have one.
+    fn grid_apps(&self, reachable: bool) -> Vec<(String, String, usize)> {
         let picked = crate::palette::choice();
         let mut apps: Vec<(u32, String, String, usize)> = self
             .entries
@@ -5116,7 +5124,7 @@ impl App {
             .filter(|(_, e)| !e.id.starts_with("webapp-") || self.managed_webapps.contains(&e.id["webapp-".len()..]))
             // Only an app an exception can reach (`app_caps`) — or one that
             // has an exception already, so it can be taken back.
-            .filter(|(_, e)| crate::app_caps::of(&e.id) != Some(crate::app_caps::Caps::None) || picked.skip.contains(&e.id) || picked.app_look.contains_key(&e.id))
+            .filter(|(_, e)| !reachable || crate::app_caps::of(&e.id) != Some(crate::app_caps::Caps::None) || picked.skip.contains(&e.id) || picked.app_look.contains_key(&e.id))
             .map(|(i, e)| (self.usage.count(&e.id), e.id.clone(), e.name.clone(), i))
             .collect();
         apps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
@@ -5389,12 +5397,19 @@ impl App {
                 self.start_managed_install(crate::access_page::READER_ATTR, vec![crate::access_page::READER_ID.to_owned()]);
             }
             "startup-add" => {
-                if let Some(e) = self.entries.iter().find(|e| e.id == value) {
-                    crate::startup_page::add(&e.id, &e.name, &e.exec, e.icon.as_deref(), e.needs_terminal);
-                    let exec = e.exec.clone();
-                    let terminal = e.needs_terminal;
-                    if let Err(err) = crate::launch::launch(&exec, terminal, &self.config.launch.terminal) {
-                        info!("startup apps: {value} added, not started now: {err:#}");
+                if let Some(i) = self.entries.iter().position(|e| e.id == value) {
+                    let e = &self.entries[i];
+                    let terminal = e.needs_terminal.then_some(self.config.launch.terminal.as_str());
+                    let added = crate::startup_page::add(&e.id, &e.name, &e.exec, e.icon.as_deref(), terminal);
+                    // Started now too (a pick acts at once) — not when it
+                    // could not be written, nor when it is open already (a
+                    // second window nobody asked for).
+                    let open = self.running.get(&i).is_some_and(|w| !w.is_empty());
+                    if added && !open {
+                        let (exec, needs) = (e.exec.clone(), e.needs_terminal);
+                        if let Err(err) = crate::launch::launch(&exec, needs, &self.config.launch.terminal) {
+                            info!("startup apps: {value} added, not started now: {err:#}");
+                        }
                     }
                 }
             }

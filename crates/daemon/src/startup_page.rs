@@ -55,21 +55,61 @@ pub(crate) fn entries() -> Vec<Entry> {
     out
 }
 
-/// What a desktop file says: its name (localised lines left to the
-/// plain one), and whether it is turned off.
+/// What a desktop file says: its name (the plain `Name=` of its `[Desktop
+/// Entry]` — an action's name is not the app's), and whether the session
+/// starts it, read the way systemd's xdg-autostart generator reads it (what
+/// Golem's session runs), so the lit pill is what happens at sign-in:
+/// `Hidden=true`, an `OnlyShowIn`/`NotShowIn` that leaves this desktop out,
+/// `X-systemd-skip`, a `TryExec` not found or no `Exec` mean it does not
+/// start. `X-GNOME-Autostart-enabled` is GNOME's own: the generator ignores
+/// it, so an entry "off" by it starts at every login (2026-11-09).
 pub(crate) fn parse(file: &str, text: &str) -> Entry {
-    let mut name = None;
-    let mut on = true;
+    let desktops: Vec<String> =
+        std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().split(':').filter(|d| !d.is_empty()).map(str::to_owned).collect();
+    parse_in(file, text, &desktops, &found)
+}
+
+fn parse_in(file: &str, text: &str, desktops: &[String], found: &dyn Fn(&str) -> bool) -> Entry {
+    let keys = entry_keys(text);
+    let get = |k: &str| keys.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    let yes = |k: &str| get(k).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let names_us = |k: &str| get(k).map(|v| v.split(';').any(|d| !d.is_empty() && desktops.iter().any(|x| x.eq_ignore_ascii_case(d))));
+    let shown_here = names_us("OnlyShowIn") != Some(false) && names_us("NotShowIn") != Some(true);
+    let runs = get("Exec").is_some_and(|e| !e.trim().is_empty()) && get("TryExec").is_none_or(|t| found(t.trim()));
+    let on = !yes("Hidden") && !yes("X-systemd-skip") && shown_here && runs;
+    let name = get("Name").map(str::trim).filter(|n| !n.is_empty()).map_or_else(|| file.trim_end_matches(".desktop").to_owned(), str::to_owned);
+    Entry { file: file.to_owned(), name, on }
+}
+
+/// The keys of a desktop file's `[Desktop Entry]` group, the first of each.
+fn entry_keys(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut inside = false;
     for line in text.lines() {
-        let line = line.trim();
-        if let Some(n) = line.strip_prefix("Name=") {
-            name = Some(n.trim().to_owned());
-        } else if line.eq_ignore_ascii_case("Hidden=true") || line.eq_ignore_ascii_case("X-GNOME-Autostart-enabled=false") {
-            on = false;
+        let t = line.trim();
+        if t.starts_with('[') {
+            inside = t == "[Desktop Entry]";
+            continue;
+        }
+        if !inside || t.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = t.split_once('=') {
+            let k = k.trim();
+            if !out.iter().any(|(key, _)| key == k) {
+                out.push((k.to_owned(), v.trim().to_owned()));
+            }
         }
     }
-    let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| file.trim_end_matches(".desktop").to_owned());
-    Entry { file: file.to_owned(), name, on }
+    out
+}
+
+/// A program the session would find: a path that is there, or a name on PATH.
+fn found(program: &str) -> bool {
+    if program.starts_with('/') {
+        return std::path::Path::new(program).exists();
+    }
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
 }
 
 /// Turn an entry on or off: `Hidden=` rewritten (or added), the rest kept.
@@ -83,11 +123,22 @@ fn set_on_in(dir: &std::path::Path, file: &str, on: bool) -> bool {
     }
     let path = dir.join(file);
     let Ok(text) = std::fs::read_to_string(&path) else { return false };
+    // A stub that only hides the system's entry (no Exec of its own):
+    // turned on, it goes, and the system's entry starts again.
+    if on && !entry_keys(&text).iter().any(|(k, v)| k == "Exec" && !v.trim().is_empty()) {
+        return std::fs::remove_file(&path).is_ok();
+    }
+    // Turned on, what keeps it from starting goes too; off is `Hidden=true`.
+    let drop: &[&str] = if on {
+        &["Hidden=", "X-GNOME-Autostart-enabled=", "OnlyShowIn=", "NotShowIn=", "X-systemd-skip="]
+    } else {
+        &["Hidden=", "X-GNOME-Autostart-enabled="]
+    };
     let mut lines: Vec<String> = text
         .lines()
         .filter(|l| {
             let t = l.trim();
-            !t.starts_with("Hidden=") && !t.starts_with("X-GNOME-Autostart-enabled=")
+            !drop.iter().any(|d| t.starts_with(d))
         })
         .map(str::to_owned)
         .collect();
@@ -100,27 +151,52 @@ fn set_on_in(dir: &std::path::Path, file: &str, on: bool) -> bool {
     true
 }
 
-/// The desktop file an added app gets: its name, its own command, its icon.
-pub(crate) fn file_for(id: &str, name: &str, exec: &str, icon: Option<&str>, terminal: bool) -> (String, String) {
+/// The command an added app starts with at sign-in (the index's Exec, its
+/// field codes gone): a program named by its store path
+/// (`/nix/store/…-vlc/bin/vlc`) by its name when the session finds it — the
+/// path is gone after the next update and its collection, and the generator
+/// then starts nothing, quietly —; a literal `%` written `%%` (a field code
+/// otherwise); a terminal app inside the terminal (the generator ignores
+/// `Terminal=`), as the dock starts one (`launch::launch`).
+pub(crate) fn exec_for(exec: &str, terminal: Option<&str>, found: &dyn Fn(&str) -> bool) -> String {
+    let (first, rest) = exec.split_once(' ').map_or((exec, None), |(f, r)| (f, Some(r)));
+    let program = match first.rsplit('/').next() {
+        Some(name) if first.starts_with("/nix/store/") && found(name) => name,
+        _ => first,
+    };
+    let line = rest.map_or_else(|| program.to_owned(), |r| format!("{program} {r}")).replace('%', "%%");
+    match terminal {
+        // (The desktop file's own quoting: inside double quotes \ " ` $ are
+        // escaped with a backslash.)
+        Some(term) => {
+            let quoted: String = line.chars().flat_map(|c| if matches!(c, '\\' | '"' | '`' | '$') { vec!['\\', c] } else { vec![c] }).collect();
+            format!("{term} sh -c \"{quoted}\"")
+        }
+        None => line,
+    }
+}
+
+/// The desktop file an added app gets: its name, its command, its icon.
+pub(crate) fn file_for(id: &str, name: &str, exec: &str, icon: Option<&str>) -> (String, String) {
     let file = if id.ends_with(".desktop") { id.to_owned() } else { format!("{id}.desktop") };
     let mut text = format!("[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\n");
     if let Some(icon) = icon {
         text.push_str(&format!("Icon={icon}\n"));
-    }
-    if terminal {
-        text.push_str("Terminal=true\n");
     }
     text.push_str("X-Golem-Startup=true\n");
     (file, text)
 }
 
 /// Write the file for an app of the grid. The UI thread calls it (the
-/// entries are its): `App::control_pick`, key `startup-add`.
-pub(crate) fn add(id: &str, name: &str, exec: &str, icon: Option<&str>, terminal: bool) {
-    let (file, text) = file_for(id, name, exec, icon, terminal);
+/// entries are its): `App::control_pick`, key `startup-add`. True when the
+/// file is there.
+pub(crate) fn add(id: &str, name: &str, exec: &str, icon: Option<&str>, terminal: Option<&str>) -> bool {
+    let (file, text) = file_for(id, name, &exec_for(exec, terminal, &found), icon);
     let _ = std::fs::create_dir_all(dir());
-    crate::persist::write_text("startup app", &dir().join(&file), &text);
+    let path = dir().join(&file);
+    crate::persist::write_text("startup app", &path, &text);
     ADDING.store(false, std::sync::atomic::Ordering::Relaxed);
+    path.is_file()
 }
 
 /// Controls → Startup apps.
@@ -139,7 +215,7 @@ pub(crate) fn view(view: &mut ControlView, ui: &UiFacts) {
     if ADDING.load(std::sync::atomic::Ordering::Relaxed) {
         let listed: Vec<String> = list.iter().map(|e| e.file.clone()).collect();
         let cards: Vec<_> = ui
-            .apps
+            .startup_apps
             .iter()
             .filter(|(id, _, _)| !listed.iter().any(|f| f == id || f.trim_end_matches(".desktop") == id.trim_end_matches(".desktop")))
             .take(CARDS)
@@ -176,17 +252,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_desktop_file_is_read_and_turned_off() {
-        let e = parse("x.desktop", "[Desktop Entry]\nName=X App\nName[es]=App X\nExec=x\n");
+    fn a_desktop_file_is_read_as_the_session_starts_it() {
+        let here = ["Hyprland".to_owned()];
+        let all = |_: &str| true;
+        let read = |t: &str| parse_in("x.desktop", t, &here, &all);
+        let e = read("[Desktop Entry]\nName=X App\nName[es]=App X\nExec=x\n[Desktop Action new]\nName=New Window\n");
         assert_eq!(e, Entry { file: "x.desktop".into(), name: "X App".into(), on: true });
-        let e = parse("y.desktop", "[Desktop Entry]\nHidden=true\nName=Y\n");
-        assert!(!e.on);
-        let e = parse("z.desktop", "[Desktop Entry]\nX-GNOME-Autostart-enabled=false\n");
-        assert_eq!((e.name.as_str(), e.on), ("z", false));
-        let (file, text) = file_for("org.app.desktop", "App", "app --flag", Some("app"), false);
+        assert!(!read("[Desktop Entry]\nHidden=true\nName=Y\nExec=y\n").on);
+        // GNOME's own switch: the generator starts it anyway.
+        assert!(read("[Desktop Entry]\nExec=z\nX-GNOME-Autostart-enabled=false\n").on);
+        assert!(!read("[Desktop Entry]\nExec=z\nOnlyShowIn=GNOME;KDE;\n").on);
+        assert!(read("[Desktop Entry]\nExec=z\nOnlyShowIn=Hyprland;\n").on);
+        assert!(!read("[Desktop Entry]\nExec=z\nNotShowIn=Hyprland;\n").on);
+        assert!(!read("[Desktop Entry]\nExec=z\nX-systemd-skip=true\n").on);
+        assert!(!parse_in("x.desktop", "[Desktop Entry]\nExec=z\nTryExec=zz\n", &here, &|_: &str| false).on);
+        // A stub hiding the system's entry starts nothing.
+        let e = read("[Desktop Entry]\nHidden=true\n");
+        assert_eq!((e.name.as_str(), e.on), ("x", false));
+    }
+
+    #[test]
+    fn an_added_app_starts_by_a_command_that_lasts() {
+        let on_path = |n: &str| n == "vlc";
+        assert_eq!(exec_for("/nix/store/abc-vlc-3/bin/vlc --started-from-file", None, &on_path), "vlc --started-from-file");
+        // Not found by its name: the path stays (better than nothing).
+        assert_eq!(exec_for("/nix/store/abc-x/bin/x", None, &on_path), "/nix/store/abc-x/bin/x");
+        assert_eq!(exec_for("app --rate 50%", None, &on_path), "app --rate 50%%");
+        assert_eq!(exec_for("htop", Some("foot"), &on_path), "foot sh -c \"htop\"");
+        assert_eq!(exec_for("say \"$HOME\"", Some("foot"), &on_path), "foot sh -c \"say \\\"\\$HOME\\\"\"");
+        let (file, text) = file_for("org.app.desktop", "App", "app --flag", Some("app"));
         assert_eq!(file, "org.app.desktop");
         assert!(text.contains("Exec=app --flag\n") && text.contains("Icon=app\n") && !text.contains("Terminal"));
-        assert_eq!(file_for("plain", "P", "p", None, true).0, "plain.desktop");
+        assert_eq!(file_for("plain", "P", "p", None).0, "plain.desktop");
     }
 
     #[test]
@@ -202,6 +299,13 @@ mod tests {
         let text = std::fs::read_to_string(auto.join("a.desktop")).unwrap();
         assert_eq!(text, "[Desktop Entry]\nName=A\nExec=a\n");
         assert!(!set_on_in(&auto, "../a.desktop", true));
+        // On again, what kept it from this desktop goes; a stub goes whole.
+        std::fs::write(auto.join("b.desktop"), "[Desktop Entry]\nExec=b\nOnlyShowIn=GNOME;\nHidden=true\n").unwrap();
+        assert!(set_on_in(&auto, "b.desktop", true));
+        assert_eq!(std::fs::read_to_string(auto.join("b.desktop")).unwrap(), "[Desktop Entry]\nExec=b\n");
+        std::fs::write(auto.join("c.desktop"), "[Desktop Entry]\nHidden=true\n").unwrap();
+        assert!(set_on_in(&auto, "c.desktop", true));
+        assert!(!auto.join("c.desktop").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
