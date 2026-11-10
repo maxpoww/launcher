@@ -4075,6 +4075,7 @@ impl App {
                     if self.panel_reset_due {
                         self.panel.reset();
                         self.panel_reset_due = false;
+                        self.panel_unhost();
                     }
                     // The panel opens unsearched.
                     if self.control_panel {

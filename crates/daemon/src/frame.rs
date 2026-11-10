@@ -1874,6 +1874,7 @@ impl App {
         {
             self.panel.reset();
             self.panel_reset_due = false;
+            self.panel_unhost();
         }
         // (The same for a setting open on the control panel itself.)
         // (The wallpapers' tiles carry `content::WALL`: the card grades them.)

@@ -810,7 +810,8 @@ impl App {
     }
 
     pub(crate) fn pages_can_search(&self) -> bool {
-        matches!(self.stats_page_kind(), PageKind::Cpu | PageKind::Ram)
+        // (The page on the engine: the box's, or the one Controls hosts.)
+        matches!(self.gear_page(), Some(PageKind::Cpu | PageKind::Ram))
             && self.gear.pages.view == PView::List
     }
 

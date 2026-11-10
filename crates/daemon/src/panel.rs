@@ -1171,6 +1171,14 @@ impl Panel {
     /// A panel that only ever shows one open setting, in a box of its own
     /// (see `fast_launch.rs`, the quick controls). Its standings are the
     /// settings panel's: it keeps none.
+    /// Whether an open `label` is a gear page this panel hosts. The quick
+    /// box (Super+H) hosts none — no engine draws there —, so its Wi-Fi,
+    /// Bluetooth, Battery and About Golem stay the controls' own pages
+    /// (they came up as a bare title: 2026-11-09).
+    fn hosts(&self, label: &str) -> bool {
+        !self.solo && hosted_kind(label).is_some()
+    }
+
     pub(crate) fn solo() -> Self {
         Self { items: &SETTINGS, solo: true, ..Self::default() }
     }
@@ -1745,7 +1753,7 @@ impl Panel {
         if is_display_setting(self.pills[i].label) {
             self.display_at = Some(Instant::now());
         }
-        if !self.modules && crate::controls::is_control(self.pills[i].label) && hosted_kind(self.pills[i].label).is_none() {
+        if !self.modules && crate::controls::is_control(self.pills[i].label) && !self.hosts(self.pills[i].label) {
             self.control = None;
             self.control_ask = true;
         }
@@ -2940,7 +2948,7 @@ impl Panel {
         let mut out = blank();
         // A hosted gear page: the title alone here, the page is the engine's
         // (`App::panel_frame` draws it under it).
-        if !self.modules && hosted_kind(label).is_some() {
+        if !self.modules && self.hosts(label) {
             return Some(out);
         }
         if !self.modules && crate::controls::is_control(label) {
@@ -4251,7 +4259,7 @@ impl Panel {
                 rect(out, l.x, l.y, l.w, l.h, l.w.min(l.h) / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.95 * ca]);
             }
             // (A hosted gear page has its own foot: no hint under it.)
-            if hosted_kind(self.pills[open.pill].label).is_none() {
+            if !self.hosts(self.pills[open.pill].label) {
                 text(out, crate::controls::closing_hint().to_owned(), cx, content.foot_y, 12.0, 16.0, 0.4);
             }
             return;
@@ -4714,6 +4722,17 @@ impl App {
         Rect::new(settled.card_x, field.y, settled.card_w, field.h)
     }
 
+    /// The panel was reset: a page it hosted is let go. `panel_frame` lets
+    /// it go as its setting folds, but runs only while the panel shows — a
+    /// card closed mid-fold and opened on the apps kept the host, its keys
+    /// (every letter typed went to the hidden Wi-Fi page's search, Escape no
+    /// longer closed) and its worker's watch (2026-11-09).
+    pub(crate) fn panel_unhost(&mut self) {
+        if self.gear_host.take().is_some() {
+            self.gear_sync();
+        }
+    }
+
     /// Advance the panel by `dt` and return what it draws this frame.
     pub(crate) fn panel_frame(&mut self, layout: &Layout, dt: f32, paint: PanelPaint) -> PanelDraw {
         let field = self.panel_field(layout);
@@ -4744,7 +4763,8 @@ impl App {
         let pointer = if self.ui.target() == Target::Open { self.pointer_pos } else { None };
         self.panel.step(dt, pointer);
         // A GEAR PAGE HOSTED (Wi-Fi, Bluetooth, the machine's): the engine is
-        // pointed at it while its setting is up, back to the box as it folds.
+        // pointed at it while its setting is up, back to the box as it folds
+        // (and when the panel is reset out of sight: `panel_unhost`).
         let host = if self.control_panel && self.panel.open_up() { self.panel.open_label().and_then(hosted_kind) } else { None };
         if host != self.gear_host {
             if host.is_some() {

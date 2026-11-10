@@ -1216,7 +1216,9 @@ impl App {
     /// with the question, wherever they are — the other device started it,
     /// so nobody opened this page (it stays up while the question stands).
     fn show_pairing(&mut self) {
-        if self.gear_page() == Some(PageKind::Bt) && self.stats.open {
+        // (Hosted in Controls the page is up too: a pairing asked there is
+        // answered there, not pulled into the banner's box — 2026-11-09.)
+        if self.gear_page() == Some(PageKind::Bt) && (self.stats.open || self.gear_host == Some(PageKind::Bt)) {
             return;
         }
         if let Some(page) = self.stats_page_for(PageKind::Bt) {
@@ -1270,7 +1272,15 @@ impl App {
         };
         // A hosted page at its root: its setting is the way back (the panel's
         // own Escape), not a "‹ Back" that leads nowhere.
-        if self.gear_host.is_some() && self.pages_at_root() && view.strip.first().is_some_and(|b| b.hit == Hit::Back) {
+        // (Each page knows its root: Wi-Fi's and Bluetooth's own views, not
+        // the machine pages' — a network's or a device's details lost their
+        // Back, and Connect stood where it was.)
+        let at_root = match self.gear_page() {
+            Some(PageKind::Net) => self.gear.net_view == NetView::List,
+            Some(PageKind::Bt) => self.gear.bt_view == BtView::List,
+            _ => self.pages_at_root(),
+        };
+        if self.gear_host.is_some() && at_root && view.strip.first().is_some_and(|b| b.hit == Hit::Back) {
             view.strip.remove(0);
         }
         view
