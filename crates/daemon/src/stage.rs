@@ -322,7 +322,7 @@ impl Stage {
                     hypr::unpark_window(&addr, ws);
                 }
                 self.mode = Mode::Desk;
-                self.desks = desk_order(&tasks);
+                self.desks = desk_order(&tasks, &hypr::Blocks::read());
                 self.desk = self
                     .staged
                     .as_ref()
@@ -453,7 +453,7 @@ impl Stage {
         // else — focus has to travel to it before it can be maximized there.
         let travelled = focused_live.is_none();
         self.deck = deck_order(&tasks, &self.parked);
-        self.desks = desk_order(&tasks);
+        self.desks = desk_order(&tasks, &hypr::Blocks::read());
         for (i, addr) in self.deck.iter().enumerate() {
             if let Some(t) = tasks.iter().find(|t| &t.address == addr) {
                 debug!(
@@ -952,7 +952,7 @@ impl Stage {
             return;
         }
         self.deck = deck_order(tasks, &self.parked);
-        self.desks = desk_order(tasks);
+        self.desks = desk_order(tasks, &hypr::Blocks::read());
         if self.mode == Mode::Desk {
             // The window that appeared (or the one that closed) may have changed
             // whether the shown desk is a desk of one.
@@ -978,7 +978,7 @@ impl Stage {
         }
         if self.mode == Mode::Desk {
             let tasks = hypr::stage_tasks();
-            self.desks = desk_order(&tasks);
+            self.desks = desk_order(&tasks, &hypr::Blocks::read());
             // Only an emptied desk needs anything done: the shown desk survives
             // its other windows closing, and the compositor hands focus on to a
             // sibling by itself.
@@ -1041,21 +1041,24 @@ fn deck_order(
     ordered.into_iter().map(|t| t.address.clone()).collect()
 }
 
-/// The desk deck's order: every **occupied** workspace, ascending.
+/// The desk deck's order: every **occupied** workspace of the screen the stage
+/// is on, ascending.
 ///
 /// Empty workspaces are left out — a desk with nothing on it is not a place you
 /// travel to, and the row would carry a tile you could never recognise. Ascending
 /// rather than by recency for the same reason the task deck sorts by workspace:
 /// it is the order `Super+N` already taught, so the row is a map rather than a
-/// history.
-fn desk_order(tasks: &[hypr::StageTask]) -> Vec<i64> {
+/// history. Another screen's workspaces are that screen's (Golem's blocks, see
+/// [`hypr::Blocks`]): `Super+N` never reaches them from here, and neither does
+/// the row.
+fn desk_order(tasks: &[hypr::StageTask], blocks: &hypr::Blocks) -> Vec<i64> {
     let mut out: Vec<i64> = tasks
         .iter()
         // Only real, numbered workspaces are desks. Special workspaces (negative
         // ids) are machinery — the stage's own park ([`hypr::PARK_SPECIAL`], where
         // floating siblings wait out a task stage) and minimize's shelf — never a
         // place the user made and can travel back to.
-        .filter(|t| t.workspace > 0)
+        .filter(|t| t.workspace > 0 && blocks.block_of(t.workspace) == blocks.here())
         .map(|t| t.workspace)
         .collect();
     out.sort_unstable();
@@ -1309,7 +1312,7 @@ mod tests {
             task("d", 4),
             task("e", 2),
         ];
-        assert_eq!(desk_order(&tasks), vec![1, 2, 4]);
+        assert_eq!(desk_order(&tasks, &hypr::Blocks::default()), vec![1, 2, 4]);
     }
 
     #[test]
@@ -1317,7 +1320,7 @@ mod tests {
         // `stage_tasks` hands them over most-recently-focused first; the row is
         // a map, so it sorts by number regardless.
         let tasks = vec![task("a", 10), task("b", 1), task("c", 4)];
-        assert_eq!(desk_order(&tasks), vec![1, 4, 10]);
+        assert_eq!(desk_order(&tasks, &hypr::Blocks::default()), vec![1, 4, 10]);
     }
 
     #[test]
@@ -1326,15 +1329,31 @@ mod tests {
         // own — it would be a desk the user never made and cannot get back to.
         // Parked windows sit on the special park workspace (a negative id).
         let tasks = vec![task("a", 1), task("floater", -98)];
-        assert_eq!(desk_order(&tasks), vec![1]);
+        assert_eq!(desk_order(&tasks, &hypr::Blocks::default()), vec![1]);
+    }
+
+    #[test]
+    fn desks_are_the_screens_own() {
+        // The laptop's 1.., the TV's 101..: on the TV the row is the TV's.
+        let blocks = hypr::Blocks::for_test(
+            serde_json::json!([
+                { "workspaceString": "1", "monitor": "desc:Laptop", "default": true },
+                { "workspaceString": "2", "monitor": "desc:Laptop" },
+                { "workspaceString": "101", "monitor": "desc:TV", "default": true },
+                { "workspaceString": "103", "monitor": "desc:TV" },
+            ]),
+            100,
+        );
+        let tasks = [task("a", 1), task("b", 2), task("c", 103), task("d", 101)];
+        assert_eq!(desk_order(&tasks, &blocks), vec![101, 103]);
     }
 
     #[test]
     fn a_desk_stays_in_its_slot_when_another_empties() {
         // The task deck's promise, for desks: closing everything on ws4 must not
         // move ws10's tile relative to ws1's.
-        let before = desk_order(&[task("a", 1), task("b", 4), task("c", 10)]);
-        let after = desk_order(&[task("a", 1), task("c", 10)]);
+        let before = desk_order(&[task("a", 1), task("b", 4), task("c", 10)], &hypr::Blocks::default());
+        let after = desk_order(&[task("a", 1), task("c", 10)], &hypr::Blocks::default());
         assert_eq!(before, vec![1, 4, 10]);
         assert_eq!(after, vec![1, 10]);
         assert_eq!(before.first(), after.first());

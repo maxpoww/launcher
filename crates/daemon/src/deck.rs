@@ -403,10 +403,11 @@ fn task_tile(task: &crate::hypr::StageTask) -> Tile {
 /// A tile for one workspace.
 ///
 /// A desk is named the way the user names it: by its **number** — the one
-/// `Super+N` addresses — then by the task last used on it, which is what the
-/// picture will mostly be showing. `+2` for the rest, because "how much is over
-/// there" is the other thing the row is asked at a glance.
-fn desk_tile(ws: i64, tasks: &[crate::hypr::StageTask]) -> Tile {
+/// `Super+N` addresses, counted on its own screen (`base`: the screen's block,
+/// so the TV's 103 is its 3) — then by the task last used on it, which is what
+/// the picture will mostly be showing. `+2` for the rest, because "how much is
+/// over there" is the other thing the row is asked at a glance.
+fn desk_tile(ws: i64, base: i64, tasks: &[crate::hypr::StageTask]) -> Tile {
     // `stage_tasks` is focus-recency ordered, so the first match is the task
     // last used on this desk.
     let on_desk: Vec<&crate::hypr::StageTask> =
@@ -418,10 +419,11 @@ fn desk_tile(ws: i64, tasks: &[crate::hypr::StageTask]) -> Tile {
             t.title.clone()
         }
     });
+    let n = ws - base;
     let title = match (lead, on_desk.len()) {
-        (None, _) => format!("{ws}"),
-        (Some(lead), 1) => format!("{ws} · {lead}"),
-        (Some(lead), n) => format!("{ws} · {lead}  +{}", n - 1),
+        (None, _) => format!("{n}"),
+        (Some(lead), 1) => format!("{n} · {lead}"),
+        (Some(lead), k) => format!("{n} · {lead}  +{}", k - 1),
     };
     let subject = Subject::Desk(ws);
     Tile {
@@ -616,11 +618,14 @@ impl App {
                 self.stage.staged().map(str::to_owned),
             ),
             crate::stage::Mode::Desk => (
-                self.stage
-                    .desks()
-                    .iter()
-                    .map(|ws| desk_tile(*ws, &tasks))
-                    .collect(),
+                {
+                    let blocks = crate::hypr::Blocks::read();
+                    self.stage
+                        .desks()
+                        .iter()
+                        .map(|ws| desk_tile(*ws, blocks.block_of(*ws), &tasks))
+                        .collect()
+                },
                 self.stage.desk().map(|ws| format!("ws-{ws}")),
             ),
         };
@@ -990,10 +995,10 @@ impl App {
     /// * **task mode** — the n-th tile, counted from the left. There is no other
     ///   reading: several windows can share a workspace, so no number belongs to
     ///   a window.
-    /// * **desk mode** — workspace `n`, which is the number printed on the tile
-    ///   and the one `Super+N` means everywhere else. Counting tiles instead
-    ///   would put `Super+3` on the desk labelled 4 as soon as a workspace
-    ///   between them emptied.
+    /// * **desk mode** — this screen's workspace `n` (its block's base + `n`),
+    ///   which is the number printed on the tile and the one `Super+N` means
+    ///   everywhere else. Counting tiles instead would put `Super+3` on the
+    ///   desk labelled 4 as soon as a workspace between them emptied.
     ///
     /// A number with no tile does nothing, rather than landing on the nearest
     /// one: a key that quietly picks a neighbour is worse than a key that misses.
@@ -1005,11 +1010,10 @@ impl App {
             crate::stage::Mode::Task => {
                 (n as usize <= self.deck.tiles.len()).then(|| n as usize - 1)
             }
-            crate::stage::Mode::Desk => self
-                .deck
-                .tiles
-                .iter()
-                .position(|t| t.subject == Subject::Desk(n)),
+            crate::stage::Mode::Desk => {
+                let ws = crate::hypr::Blocks::read().here() + n;
+                self.deck.tiles.iter().position(|t| t.subject == Subject::Desk(ws))
+            }
         };
         let Some(i) = found else {
             tracing::debug!("deck: nothing at {n}");

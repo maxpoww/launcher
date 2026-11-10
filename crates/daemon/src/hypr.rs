@@ -2902,6 +2902,83 @@ pub fn stage_tasks() -> Vec<StageTask> {
     out
 }
 
+/// Golem gives each screen a BLOCK of workspaces of its own (hyprland.lua,
+/// SCREENS: the laptop's 1..18, a TV's 101..118): the screen's DEFAULT
+/// workspace rule names the block's first workspace, and every workspace of
+/// the block is bound to that same screen. Read from the rules, never
+/// assumed — without them every workspace is in block 0, as before.
+#[derive(Debug, Default, Clone)]
+pub struct Blocks {
+    /// A rule's monitor string (`desc:…` or a connector) -> its block's base
+    /// (the first workspace − 1).
+    bases: Vec<(String, i64)>,
+    /// A workspace -> the monitor string its rule binds it to.
+    bound: std::collections::HashMap<i64, String>,
+    /// The focused screen's block.
+    here: i64,
+}
+
+impl Blocks {
+    /// The rules and the focused screen, as the compositor has them now.
+    pub fn read() -> Blocks {
+        let mut b = reply_json("j/workspacerules").map(|r| Self::from_rules(&r)).unwrap_or_default();
+        if let Some(mons) = reply_json("j/monitors") {
+            if let Some(m) = mons.as_array().into_iter().flatten().find(|m| m["focused"].as_bool().unwrap_or(false)) {
+                b.here = b.base_of_screen(m["name"].as_str().unwrap_or(""), m["description"].as_str().unwrap_or(""));
+            }
+        }
+        b
+    }
+
+    fn from_rules(rules: &serde_json::Value) -> Blocks {
+        let mut b = Blocks::default();
+        for r in rules.as_array().into_iter().flatten() {
+            let (Some(ws), Some(mon)) = (r["workspaceString"].as_str(), r["monitor"].as_str()) else {
+                continue;
+            };
+            let Ok(id) = ws.trim().parse::<i64>() else {
+                continue;
+            };
+            if id < 1 {
+                continue;
+            }
+            b.bound.insert(id, mon.to_owned());
+            if r["default"].as_bool().unwrap_or(false) {
+                b.bases.push((mon.to_owned(), id - 1));
+            }
+        }
+        b
+    }
+
+    /// The block of screen `name` (its connector) described as `description`.
+    pub fn base_of_screen(&self, name: &str, description: &str) -> i64 {
+        let desc = format!("desc:{description}");
+        self.bases
+            .iter()
+            .find(|(m, _)| (!description.is_empty() && *m == desc) || m == name)
+            .map_or(0, |(_, base)| *base)
+    }
+
+    /// The block workspace `ws` belongs to: that of the screen its rule binds
+    /// it to, connected or not.
+    pub fn block_of(&self, ws: i64) -> i64 {
+        self.bound
+            .get(&ws)
+            .and_then(|mon| self.bases.iter().find(|(m, _)| m == mon))
+            .map_or(0, |(_, base)| *base)
+    }
+
+    /// The focused screen's block: what `Super+N` adds `N` to.
+    pub fn here(&self) -> i64 {
+        self.here
+    }
+
+    #[cfg(test)]
+    pub fn for_test(rules: serde_json::Value, here: i64) -> Blocks {
+        Blocks { here, ..Self::from_rules(&rules) }
+    }
+}
+
 /// The class and the title of the window at `addr` (the card names a session
 /// after the window it was started in — `card/`).
 pub fn window_class_title(addr: &str) -> Option<(String, String)> {
@@ -3162,6 +3239,25 @@ fn cascade_at(m: &MonitorInfo, size: (i64, i64), i: usize) -> (i64, i64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blocks_follow_the_default_rules() {
+        let rules = serde_json::json!([
+            { "workspaceString": "w[tv1]", "gapsIn": [0, 0, 0, 0] },
+            { "workspaceString": "1", "monitor": "desc:Lenovo 0x8BA2", "default": true },
+            { "workspaceString": "2", "monitor": "desc:Lenovo 0x8BA2" },
+            { "workspaceString": "101", "monitor": "desc:SKYDATA TV-monitor", "default": true },
+            { "workspaceString": "103", "monitor": "desc:SKYDATA TV-monitor" },
+        ]);
+        let b = Blocks::from_rules(&rules);
+        assert_eq!(b.base_of_screen("eDP-1", "Lenovo 0x8BA2"), 0);
+        assert_eq!(b.base_of_screen("HDMI-A-1", "SKYDATA TV-monitor"), 100);
+        assert_eq!(b.base_of_screen("DP-9", "Unknown"), 0);
+        assert_eq!(b.block_of(2), 0);
+        assert_eq!(b.block_of(103), 100);
+        assert_eq!(b.block_of(57), 0); // no rule: block 0, as without any
+        assert_eq!(Blocks::default().block_of(103), 0);
+    }
+
     use super::*;
 
     /// One mode kills the other: whatever combination of the compositor's
