@@ -426,7 +426,9 @@ The big daemon files are cohesive but long — go straight to the function:
   left|right|up|down|tab|enter|escape` presses a key there (or on the panel's open setting).
 - `i18n.rs` + `tools/i18n/` — THE SHELL'S LANGUAGES (2026-10-13). Every visible string goes
   through `tr("English")`, a sentence with values through `fill(tr("… {name} …"), &[("name",
-  &v)])`; the catalogue is `assets/i18n/<tag>.json`, built into the binary (Spanish is whole).
+  &v)])`; the catalogue is `assets/i18n/<tag>.json`, built into the binary (Spanish is whole and required
+  by the tests; German, French, Italian and Portuguese — Brazil's `pt`, Portugal's `pt_PT` — since
+  2026-11-09, topped up in batches: a string not there yet shows in English).
   The language changes live (the control panel's Language). A string that is ALSO an id (a
   setting's name, a menu's row, a stored marker like the card's "Voice note") stays as written
   in its table and is translated where it is drawn. `tools/i18n/README.md` has the tools

@@ -44,8 +44,11 @@ static TABLE: AtomicPtr<HashMap<String, String>> = AtomicPtr::new(std::ptr::null
 /// in batches — a string not there yet shows in English
 /// (`tools/i18n/README.md`). Portuguese is Brazil's; Portugal's own wording
 /// stands beside it as `pt_PT`, tried first for a `pt_PT` locale.
-const EMBEDDED: [(&str, &str); 3] = [
+const EMBEDDED: [(&str, &str); 6] = [
     ("es", include_str!("../assets/i18n/es.json")),
+    ("de", include_str!("../assets/i18n/de.json")),
+    ("fr", include_str!("../assets/i18n/fr.json")),
+    ("it", include_str!("../assets/i18n/it.json")),
     ("pt", include_str!("../assets/i18n/pt.json")),
     ("pt_PT", include_str!("../assets/i18n/pt_PT.json")),
 ];
