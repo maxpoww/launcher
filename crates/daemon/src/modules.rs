@@ -467,6 +467,30 @@ impl crate::App {
 mod tests {
     use super::*;
 
+    /// The catalogue's words have their Spanish: the group headings and each
+    /// program's line are translated where the Modules page draws them
+    /// (`tr_dyn`), so the catalogue test of `tr` literals never sees them
+    /// (2026-11-09: none had any).
+    #[test]
+    fn every_module_word_has_its_spanish() {
+        let es: std::collections::HashMap<String, String> =
+            serde_json::from_str(include_str!("../assets/i18n/es.json")).expect("es.json parses");
+        let mut missing: Vec<&str> = Vec::new();
+        for m in &catalog().modules {
+            for g in &m.groups {
+                if !es.contains_key(&g.name) && !missing.contains(&g.name.as_str()) {
+                    missing.push(&g.name);
+                }
+                for p in &g.programs {
+                    if !p.what.is_empty() && !es.contains_key(&p.what) && !missing.contains(&p.what.as_str()) {
+                        missing.push(&p.what);
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no Spanish for {} module string(s): {missing:#?}", missing.len());
+    }
+
     #[test]
     fn a_web_program_is_its_catalog_webapp() {
         let entry = |name: &str, url: &str| crate::webapps::WebappEntry {

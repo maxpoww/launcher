@@ -3221,7 +3221,9 @@ impl Panel {
             if progs.is_empty() {
                 continue;
             }
-            captions.push((g.name.clone(), cy));
+            // The catalogue's words in the shell's language (its keys are
+            // the English, `every_module_word_has_its_spanish`).
+            captions.push((crate::i18n::tr_dyn(&g.name).to_owned(), cy));
             cy += line + 8.0 * s;
             for prog in progs {
                 rows.push(ModRow { prog, y: cy });
@@ -4305,10 +4307,11 @@ impl Panel {
                 let sw = (44.0 * s, 26.0 * s);
                 let name_w = self.name_w.get(row.prog.name.as_str()).copied().unwrap_or(0.0);
                 inside.labels.push(left(row.prog.name.clone(), pad, MOD_NAME_PX, 1.0, rw - 2.0 * pad - sw.0));
+                let said = crate::i18n::tr_dyn(&row.prog.what);
                 let what = match (on, was) {
-                    (true, false) => crate::i18n::fill(tr("will be added · {0}"), &[("0", &row.prog.what)]),
-                    (false, true) => crate::i18n::fill(tr("will be removed · {0}"), &[("0", &row.prog.what)]),
-                    _ => row.prog.what.clone(),
+                    (true, false) => crate::i18n::fill(tr("will be added · {0}"), &[("0", &said)]),
+                    (false, true) => crate::i18n::fill(tr("will be removed · {0}"), &[("0", &said)]),
+                    _ => said.to_owned(),
                 };
                 let dx = pad + name_w + 10.0 * s;
                 let room = rw - dx - pad - sw.0 - 8.0 * s;
