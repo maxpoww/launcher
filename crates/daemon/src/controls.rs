@@ -1601,11 +1601,20 @@ pub(crate) fn session_vars(s: &GolemSettings) -> Vec<(&'static str, String)> {
             vars.push(("TZDIR", d));
         }
     }
-    if let Some(l) = &s.language {
+    // A language with no locale on this computer ("fr", no country, no
+    // codeset) is the shell's alone: exported, it would be a LANG no
+    // program can take, and they would all fall back to C.
+    if let Some(l) = s.language.as_ref().filter(|l| shell_only(l).is_none()) {
         vars.push(("LANG", l.clone()));
         vars.push(("LANGUAGE", l.split(['_', '.']).next().unwrap_or("en").to_owned()));
     }
     vars
+}
+
+/// A language the shell speaks without the system: its tag ("fr"), stored
+/// when the computer has no locale for it (`locale_for` found none).
+pub(crate) fn shell_only(language: &str) -> Option<&str> {
+    (!language.contains(['.', '_', '@'])).then_some(language)
 }
 
 /// Put the owner's language and time zone where the next session, and the
@@ -1630,6 +1639,11 @@ pub(crate) fn assert_session_env(s: &GolemSettings) {
     for (k, v) in &vars {
         let pair = format!("{k}={v}");
         run("systemctl", &["--user", "set-environment", &pair]);
+    }
+    // A language the shell speaks alone: the programs go back to the
+    // system's (a language picked before had been given to them).
+    if s.language.as_deref().and_then(shell_only).is_some() {
+        run("systemctl", &["--user", "unset-environment", "LANG", "LANGUAGE"]);
     }
 }
 
@@ -2638,7 +2652,12 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             } else {
                 full.split('_').next().unwrap_or("en").to_owned()
             };
-            view.subtitle = tr("The language Golem speaks. Apps follow the next time they open.").to_owned();
+            view.subtitle = if shell_only(&now).is_some_and(|t| t != "en") {
+                tr("The language Golem speaks. Apps keep theirs: this computer does not have this one for them.")
+            } else {
+                tr("The language Golem speaks. Apps follow the next time they open.")
+            }
+            .to_owned();
             view.groups.push(group(
                 None,
                 "language",
@@ -2874,6 +2893,16 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             } else {
                 locale_for(value, &available, &current)
             };
+            // No locale for it here (a computer built with a few): the
+            // shell speaks it all the same, the programs keep theirs, and
+            // the page says so — a pick that did nothing said nothing.
+            let locale = locale.or_else(|| {
+                let known = shell_languages().iter().any(|(t, _)| t == value);
+                if known {
+                    info!("controls: this system has no locale for {value:?}; the shell speaks it alone");
+                }
+                known.then(|| value.to_owned())
+            });
             match locale {
                 Some(locale) => {
                     GolemSettings::change(|s| {
@@ -2883,7 +2912,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
                     });
                     return Applied::Language;
                 }
-                None => warn!("controls: this system has no locale for {value:?}"),
+                None => warn!("controls: not a language Golem speaks: {value:?}"),
             }
         }
         "wallpaper" => {
@@ -3328,6 +3357,16 @@ mod tests {
             None => assert_eq!(vars.len(), 1),
         }
         assert!(session_vars(&GolemSettings::default()).is_empty());
+    }
+
+    #[test]
+    fn a_language_the_computer_lacks_is_the_shells_alone() {
+        let alone = GolemSettings { language: Some("fr".into()), ..Default::default() };
+        assert!(session_vars(&alone).is_empty());
+        let both = GolemSettings { language: Some("es_BO.UTF-8".into()), ..Default::default() };
+        assert_eq!(session_vars(&both), vec![("LANG", "es_BO.UTF-8".to_owned()), ("LANGUAGE", "es".to_owned())]);
+        assert_eq!(shell_only("pt_PT.UTF-8"), None);
+        assert_eq!(shell_only("pt"), Some("pt"));
     }
 
     #[test]

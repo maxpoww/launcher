@@ -2369,5 +2369,6 @@
  "Shift+`": "Maiusc+`",
  "Space": "Spazio",
  "Enter": "Invio",
- "Shift+F10": "Maiusc+F10"
+ "Shift+F10": "Maiusc+F10",
+ "The language Golem speaks. Apps keep theirs: this computer does not have this one for them.": "La lingua che parla Golem. Le app mantengono la loro: questo computer non ha questa lingua per loro."
 }
