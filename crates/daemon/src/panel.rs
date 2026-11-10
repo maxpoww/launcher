@@ -356,10 +356,6 @@ fn names(progs: &[&crate::modules::Program], n: usize) -> String {
     }
 }
 
-fn plural(n: usize) -> &'static str {
-    if n == 1 { tr("program") } else { tr("programs") }
-}
-
 // ---- The layers --------------------------------------------------------
 /// Size of each layer against the OPTIONS bar's own pill (the middle layer
 /// IS the bar's pill).
@@ -515,7 +511,8 @@ fn field_room(key: &str) -> usize {
 fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8> {
     // Its name and keywords in English, and in the shell's language — as a
     // search compares them, without case or accents ("energia" finds
-    // "Modo de energía", "reglages" "Réglages").
+    // "Modo de energía", "reglages" "Réglages"). A module's words end in its
+    // programs' names after two spaces; those are no key.
     let q = crate::i18n::fold(q);
     let q = q.as_str();
     let name = crate::i18n::fold(label);
@@ -524,7 +521,7 @@ fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8
         Some(0)
     } else if name.contains(q) || shown.contains(q) {
         Some(1)
-    } else if keywords.contains(q) || crate::i18n::fold(crate::i18n::tr(keywords)).contains(q) {
+    } else if keywords.contains(q) || crate::i18n::fold(crate::i18n::tr(keywords.split("  ").next().unwrap_or(keywords))).contains(q) {
         Some(2)
     } else {
         None
@@ -3166,14 +3163,16 @@ impl Panel {
                     (ModButton::Apply, tr("Apply changes").to_owned(), vec![parts.join(" · ")], Some((ModLink::Undo, tr("undo"))))
                 }
                 (true, true, _) => {
-                    let mut say = Vec::new();
-                    if !add.is_empty() {
-                        say.push(format!("install {}", add.len()));
-                    }
-                    if !remove.is_empty() {
-                        say.push(format!("remove {}", remove.len()));
-                    }
-                    let n = add.len() + remove.len();
+                    // Whole sentences, so each language says them its own
+                    // way (it was "install 2 and remove 1" in English, with
+                    // a translated "programs" after it).
+                    let yes = match (add.len(), remove.len()) {
+                        (1, 0) => tr("Yes, install 1 program").to_owned(),
+                        (a, 0) => crate::i18n::fill(tr("Yes, install {0} programs"), &[("0", &a)]),
+                        (0, 1) => tr("Yes, remove 1 program").to_owned(),
+                        (0, r) => crate::i18n::fill(tr("Yes, remove {0} programs"), &[("0", &r)]),
+                        (a, r) => crate::i18n::fill(tr("Yes, install {0} and remove {1}"), &[("0", &a), ("1", &r)]),
+                    };
                     let mut sub = Vec::new();
                     if !remove.is_empty() {
                         sub.push(crate::i18n::fill(tr("{0} will be removed."), &[("0", &(names(&remove, 3)))]));
@@ -3182,7 +3181,7 @@ impl Panel {
                         sub.push(format!("{}.", names(&add, 4)));
                     }
                     let kind = if remove.is_empty() { ModButton::Confirm } else { ModButton::ConfirmRemove };
-                    (kind, crate::i18n::fill(tr("Yes, {0} {1}"), &[("0", &(say.join(" and "))), ("1", &(plural(n)))]), sub, Some((ModLink::KeepChoosing, tr("keep choosing"))))
+                    (kind, yes, sub, Some((ModLink::KeepChoosing, tr("keep choosing"))))
                 }
                 (false, _, true) => (
                     ModButton::InstallRecommended,
@@ -3198,7 +3197,11 @@ impl Panel {
                 ),
                 (false, true, false) => (
                     ModButton::ConfirmRemove,
-                    crate::i18n::fill(tr("Yes, uninstall {0} {1}"), &[("0", &have.len()), ("1", &(plural(have.len())))]),
+                    if have.len() == 1 {
+                        tr("Yes, uninstall 1 program").to_owned()
+                    } else {
+                        crate::i18n::fill(tr("Yes, uninstall {0} programs"), &[("0", &have.len())])
+                    },
                     vec![tr("Your files stay where they are.").to_owned()],
                     Some((ModLink::KeepThem, tr("keep them"))),
                 ),
@@ -5148,6 +5151,9 @@ impl App {
             ControlEvent::Language => {
                 crate::i18n::init();
                 info!("control panel: the shell speaks another language from now");
+                // The apps' names and the lock screen's word, in it.
+                self.indexer.request_rescan();
+                crate::palette::lock_screen_relabel();
                 self.panel.relabel();
                 self.panel_parked.relabel();
                 self.quick.relabel();

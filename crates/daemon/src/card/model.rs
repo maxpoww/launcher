@@ -442,7 +442,11 @@ pub(super) fn file_body(path: &Path) -> String {
         match std::fs::read_dir(path) {
             Ok(dir) => {
                 let n = dir.count();
-                crate::i18n::fill(tr("{name}/ · {n} item{0}"), &[("name", &name), ("n", &n), ("0", &(if n == 1 { "" } else { "s" }))])
+                if n == 1 {
+                    crate::i18n::fill(tr("{name}/ · 1 item"), &[("name", &name)])
+                } else {
+                    crate::i18n::fill(tr("{name}/ · {n} items"), &[("name", &name), ("n", &n)])
+                }
             }
             Err(_) => format!("{name}/"),
         }

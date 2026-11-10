@@ -5214,7 +5214,11 @@ fn fmt_datetime(ms: u64) -> String {
             .copied()
             .map(crate::i18n::tr)
             .unwrap_or("");
-        format!("{mon} {} · {:02}:{:02}", tm.tm_mday, tm.tm_hour, tm.tm_min)
+        let time = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+        crate::i18n::fill(
+            crate::i18n::tr("{month} {day} · {time}"),
+            &[("month", &mon), ("day", &tm.tm_mday), ("time", &time)],
+        )
     }
 }
 

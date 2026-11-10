@@ -184,7 +184,7 @@ impl Foot {
     /// Its icon (the round ones) or its word (Memory).
     fn word(self) -> &'static str {
         match self {
-            Foot::Memory => tr("Memory"),
+            Foot::Memory => crate::i18n::trc("Memory|the card's sessions: what it keeps"),
             Foot::Pinned => GLYPH_PIN,
             // (Max, 2026-10-12: the two sheets of fa-clipboard and the
             // boxed "A" of fa-language were not liked.)

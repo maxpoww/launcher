@@ -1434,7 +1434,7 @@ impl App {
             } else if ap.secured() {
                 (tr("Secured").to_owned(), Tone::Normal)
             } else {
-                (tr("Open").to_owned(), Tone::Normal)
+                (crate::i18n::trc("Open|a network without a password").to_owned(), Tone::Normal)
             };
             items.push(Item::Row {
                 hit: Hit::Net(ap.ssid.clone()),

@@ -1664,8 +1664,8 @@ fn clock_text(hour: i32, min: i32) -> String {
     }
 }
 
-/// Local date as `Weekday, D Month YYYY` (e.g. "Friday, 31 July 2026"), via
-/// libc so it respects the timezone.
+/// Local date as `Weekday, D Month YYYY` (e.g. "Friday, 31 July 2026") in
+/// the shell's language, via libc so it respects the timezone.
 fn date_now() -> String {
     const WD: [&str; 7] = [
         "Sunday",
@@ -1697,7 +1697,12 @@ fn date_now() -> String {
         libc::localtime_r(&t, &mut tm);
         let wd = crate::i18n::tr(WD[(tm.tm_wday as usize).min(6)]);
         let mo = crate::i18n::tr(MO[(tm.tm_mon as usize).min(11)]);
-        format!("{wd}, {} {mo} {}", tm.tm_mday, tm.tm_year + 1900)
+        // The order and the little words are the language's ("martes, 10
+        // de noviembre de 2026", "Dienstag, 10. November 2026").
+        crate::i18n::fill(
+            crate::i18n::tr("{weekday}, {day} {month} {year}"),
+            &[("weekday", &wd), ("day", &tm.tm_mday), ("month", &mo), ("year", &(tm.tm_year + 1900))],
+        )
     }
 }
 

@@ -2757,19 +2757,36 @@ fn foot_ini(t: &Theme) -> String {
 }
 
 /// hyprlock: variables its config uses (it defines the same ones first, so
-/// a missing file still locks — in Golem's own colours).
+/// a missing file still locks — in Golem's own colours and English). The
+/// password field's empty word is the shell's language's.
 fn hyprlock_conf(t: &Theme) -> String {
     let rgb = |c: Rgb| format!("rgb({}, {}, {})", c[0], c[1], c[2]);
+    // (One line, nothing hyprlang reads as a comment or another variable.)
+    let word: String = crate::i18n::tr("Password").chars().filter(|c| !matches!(c, '#' | '$' | '\n' | '\r')).collect();
     format!(
         "# Golem's palette ({}), written by the dock.\n\
-         $golem_bg = {}\n$golem_surface = {}\n$golem_ink = {}\n$golem_accent = {}\n$golem_danger = {}\n",
+         $golem_bg = {}\n$golem_surface = {}\n$golem_ink = {}\n$golem_accent = {}\n$golem_danger = {}\n\
+         $golem_password = {}\n",
         t.name,
         rgb(t.bg()),
         rgb(t.raised()),
         rgb(t.ink()),
         rgb(t.accent()),
         rgb(t.c[0x08]),
+        word,
     )
+}
+
+/// The lock screen's word in the language just picked (its colours stay).
+pub(crate) fn lock_screen_relabel() {
+    let spawned = std::thread::Builder::new().name("palette-lock".into()).spawn(|| {
+        let _one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = current();
+        crate::persist::write_text("theme", &theme_dir().join("hyprlock.conf"), &hyprlock_conf(&shell_wears(&shell)));
+    });
+    if let Err(e) = spawned {
+        warn!("palette: no thread for the lock screen's word: {e}");
+    }
 }
 
 /// libadwaita (GTK 4): its colour variables, for BOTH looks — GTK 4.16+
@@ -4770,6 +4787,7 @@ mod tests {
         assert!(gtk4_css(&t).contains("--accent-bg-color: #ffbe98;"));
         assert!(gtk4_css(&t).contains("@media (prefers-color-scheme: dark)"));
         assert!(hyprlock_conf(&t).contains("$golem_accent = rgb(255, 190, 152)"));
+        assert!(hyprlock_conf(&t).contains("$golem_password = Password\n"));
         let qt = qt_scheme(&t);
         assert_eq!(qt.lines().nth(1).unwrap().split(", ").count(), 22);
         let qt5 = qt5_scheme(&t);

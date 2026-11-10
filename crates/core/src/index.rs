@@ -9,8 +9,75 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use freedesktop_desktop_entry::{default_paths, get_languages_from_env, DesktopEntry, Iter};
+use freedesktop_desktop_entry::{default_paths, DesktopEntry, Iter};
 use serde::{Deserialize, Serialize};
+
+/// The locales an app's name is read in, set by the shell when it speaks
+/// another language than the session's (`None`: the session's).
+static LOCALES: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Read the apps' names in `locale` from now on ("es_BO.UTF-8"; `None`:
+/// the session's) — the shell's own language, picked in its panel while
+/// the session still has the old one. The next scan reads them again.
+pub fn set_locale(locale: Option<&str>) {
+    if let Ok(mut l) = LOCALES.lock() {
+        *l = locale.map(|raw| locale_keys(&[raw]));
+    }
+}
+
+/// The keys a desktop file's `Name[…]` is looked up by, most wanted first.
+fn locales() -> Vec<String> {
+    if let Some(l) = LOCALES.lock().ok().and_then(|l| l.clone()) {
+        return l;
+    }
+    // GNU gettext's order: LANGUAGE's list, then the messages' locale.
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let mut raw: Vec<String> = env("LANGUAGE").map(|v| v.split(':').map(str::to_owned).collect()).unwrap_or_default();
+    raw.extend(env("LC_ALL").or_else(|| env("LC_MESSAGES")).or_else(|| env("LANG")));
+    let raw: Vec<&str> = raw.iter().map(String::as_str).collect();
+    locale_keys(&raw)
+}
+
+/// Locale names as a desktop file writes its keys (the spec's "Localized
+/// values for keys"): `pt_BR.UTF-8` → `pt_BR`, `pt`; `sr_RS@latin` →
+/// `sr_RS@latin`, `sr_RS`, `sr@latin`, `sr`. The encoding is never part of
+/// a key — kept, it made `Name[pt_BR]` unreachable from `LANG=pt_BR.UTF-8`
+/// (the parser keeps only the keys asked for, and `pt` was the only one
+/// that matched).
+pub fn locale_keys(raw: &[&str]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for r in raw {
+        let (rest, modifier) = match r.split_once('@') {
+            Some((a, m)) => (a, Some(m)),
+            None => (*r, None),
+        };
+        let base = rest.split('.').next().unwrap_or("");
+        let (lang, country) = match base.split_once('_') {
+            Some((l, c)) => (l, Some(c)),
+            None => (base, None),
+        };
+        if lang.is_empty() || lang == "C" || lang == "POSIX" {
+            continue;
+        }
+        let mut each = Vec::new();
+        if let (Some(c), Some(m)) = (country, modifier) {
+            each.push(format!("{lang}_{c}@{m}"));
+        }
+        if let Some(c) = country {
+            each.push(format!("{lang}_{c}"));
+        }
+        if let Some(m) = modifier {
+            each.push(format!("{lang}@{m}"));
+        }
+        each.push(lang.to_owned());
+        for k in each {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+    }
+    keys
+}
 
 /// One launchable application, extracted from a `.desktop` file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +197,7 @@ impl DesktopIndex {
     /// overriding NoDisplay entry in data home is how users hide a
     /// system-wide app).
     pub fn scan_paths(paths: impl Iterator<Item = PathBuf>) -> Self {
-        let locales = get_languages_from_env();
+        let locales = locales();
         let mut seen: HashSet<String> = HashSet::new();
         let mut entries = Vec::new();
 
@@ -153,7 +220,7 @@ impl DesktopIndex {
     /// changes), any other while its length and mtime stand (one stat).
     /// Returns whether the cache changed (then it is worth saving).
     pub fn scan_cached(cache: &mut ScanCache) -> (Self, bool) {
-        let locales = get_languages_from_env();
+        let locales = locales();
         let mut changed = false;
         if cache.locales != locales {
             cache.files.clear();
@@ -215,7 +282,7 @@ impl DesktopIndex {
 /// `NoDisplay`/`Hidden` are not honoured here: those hide an app from
 /// menus, and a file the owner put on their desktop is not a menu.
 pub fn parse_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
-    let locales = get_languages_from_env();
+    let locales = locales();
     let entry = DesktopEntry::from_path(path.to_path_buf(), Some(&locales)).ok()?;
     if entry.type_().is_some_and(|t| t != "Application") {
         return None;
@@ -239,7 +306,7 @@ pub struct DesktopAction {
 /// name and something to run (the others are left out). Read when asked —
 /// the dock wants them only for the one app a search leaves.
 pub fn desktop_actions(path: &std::path::Path) -> Vec<DesktopAction> {
-    let locales = get_languages_from_env();
+    let locales = locales();
     let Ok(entry) = DesktopEntry::from_path(path.to_path_buf(), Some(&locales)) else {
         return Vec::new();
     };
@@ -320,6 +387,27 @@ fn strip_field_codes(exec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_locale_is_looked_up_as_desktop_files_write_it() {
+        assert_eq!(locale_keys(&["pt_BR.UTF-8"]), ["pt_BR", "pt"]);
+        assert_eq!(locale_keys(&["sr_RS.UTF-8@latin"]), ["sr_RS@latin", "sr_RS", "sr@latin", "sr"]);
+        assert_eq!(locale_keys(&["pt_PT", "pt", "C.UTF-8", ""]), ["pt_PT", "pt"]);
+        // A Brazilian name is found from a Brazilian session (it was not:
+        // the encoding kept every `[pt_BR]` key out of the parse).
+        let dir = std::env::temp_dir().join(format!("waverunner-locale-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.desktop");
+        std::fs::write(&file, "[Desktop Entry]\nType=Application\nName=Files\nName[pt_BR]=Arquivos\nName[es]=Archivos\nExec=x\n").unwrap();
+        let name = |l: &[&str]| {
+            let keys = locale_keys(l);
+            DesktopEntry::from_path(file.clone(), Some(&keys)).unwrap().name(&keys).unwrap().into_owned()
+        };
+        assert_eq!(name(&["pt_BR.UTF-8"]), "Arquivos");
+        assert_eq!(name(&["es_BO.UTF-8"]), "Archivos");
+        assert_eq!(name(&["de_DE.UTF-8"]), "Files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn write_apps_dir(files: &[(&str, &str)]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

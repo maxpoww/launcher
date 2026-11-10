@@ -70,6 +70,10 @@ fn table() -> Option<&'static HashMap<String, String>> {
 /// Load the translation table for the session's language. Called once at
 /// start, and again whenever the owner picks another language.
 pub fn init() {
+    // The apps' names follow a language picked in the panel at once (the
+    // session's own arrives with the next login).
+    let chosen = crate::display::GolemSettings::load().language;
+    waverunner_core::index::set_locale(chosen.as_deref());
     let map = load_table();
     let ptr = if map.is_empty() { std::ptr::null_mut() } else { Box::into_raw(Box::new(map)) };
     TABLE.store(ptr, Ordering::Release);
@@ -82,6 +86,22 @@ pub fn tr(en: &'static str) -> &'static str {
         Some(s) => s.as_str(),
         None if pseudo() => marked(en),
         None => en,
+    }
+}
+
+/// `tr` for an English word the shell uses in two senses that another
+/// language says differently ("Light": a colour scheme, or the lighter
+/// effects; "Open": the verb, or a network without a password). The key
+/// carries its sense after a `|`, which a translator sees and the English
+/// never shows: `trc("Light|effects")` is "Light" until a catalogue says
+/// otherwise.
+pub fn trc(key: &'static str) -> &'static str {
+    match table().and_then(|t| t.get(key)) {
+        Some(s) => s.as_str(),
+        None => {
+            let en = key.split('|').next().unwrap_or(key);
+            if pseudo() { marked(en) } else { en }
+        }
     }
 }
 
@@ -314,7 +334,7 @@ mod tests {
     /// The string literals handed to `tr(…)` / `tr_dyn(…)` in a source text.
     fn tr_literals(src: &str) -> Vec<String> {
         let mut found = Vec::new();
-        for marker in ["tr(\"", "tr_dyn(\""] {
+        for marker in ["tr(\"", "tr_dyn(\"", "trc(\""] {
             let mut rest = src;
             while let Some(at) = rest.find(marker) {
                 // (`str(`, `attr(`…: only the whole word.)

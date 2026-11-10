@@ -1620,7 +1620,7 @@ impl App {
             key: tr("Effects").into(),
             opts: vec![
                 (sys(SysHit::Effects(false)), tr("Full").into(), !light),
-                (sys(SysHit::Effects(true)), tr("Light").into(), light),
+                (sys(SysHit::Effects(true)), crate::i18n::trc("Light|effects").into(), light),
             ],
         });
         items.push(Item::Note(

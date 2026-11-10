@@ -143,7 +143,12 @@ pub(crate) fn items() -> &'static [(&'static str, u8, &'static str)] {
             .modules
             .iter()
             .map(|m| {
+                // The keywords, then two spaces, then the programs' names:
+                // the keywords are a catalogue key (a search finds a module
+                // by them in the shell's language too, `panel::match_rank`),
+                // the names are the same in every language.
                 let mut words = m.keywords.to_lowercase();
+                words.push(' ');
                 for p in m.groups.iter().flat_map(|g| &g.programs) {
                     words.push(' ');
                     words.push_str(&p.name.to_lowercase());
@@ -477,6 +482,10 @@ mod tests {
             serde_json::from_str(include_str!("../assets/i18n/es.json")).expect("es.json parses");
         let mut missing: Vec<&str> = Vec::new();
         for m in &catalog().modules {
+            // Its search words, too: "fotos" finds Photography.
+            if !es.contains_key(&m.keywords) {
+                missing.push(&m.keywords);
+            }
             for g in &m.groups {
                 if !es.contains_key(&g.name) && !missing.contains(&g.name.as_str()) {
                     missing.push(&g.name);
