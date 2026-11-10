@@ -2370,5 +2370,8 @@
  "Space": "Espacio",
  "Enter": "Enter",
  "Shift+F10": "Mayús+F10",
- "The language Golem speaks. Apps keep theirs: this computer does not have this one for them.": "El idioma que habla Golem. Las apps mantienen el suyo: este computador no tiene este idioma para ellas."
+ "The language Golem speaks. Apps keep theirs: this computer does not have this one for them.": "El idioma que habla Golem. Las apps mantienen el suyo: este computador no tiene este idioma para ellas.",
+ "External": "Externa",
+ "Camera": "Cámara",
+ "Window": "Ventana"
 }

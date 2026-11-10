@@ -2370,5 +2370,8 @@
  "Space": "Leertaste",
  "Enter": "Eingabe",
  "Shift+F10": "Umschalt+F10",
- "The language Golem speaks. Apps keep theirs: this computer does not have this one for them.": "Die Sprache von Golem. Apps behalten ihre: Dieser Computer hat diese Sprache nicht für sie."
+ "The language Golem speaks. Apps keep theirs: this computer does not have this one for them.": "Die Sprache von Golem. Apps behalten ihre: Dieser Computer hat diese Sprache nicht für sie.",
+ "External": "Extern",
+ "Camera": "Kamera",
+ "Window": "Fenster"
 }

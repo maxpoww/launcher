@@ -146,7 +146,7 @@ impl App {
             .unwrap_or(1.0);
         let class = class.to_owned();
         let title = parts.next().unwrap_or("").trim();
-        let title = if title.is_empty() { "Window" } else { title }.to_owned();
+        let title = if title.is_empty() { crate::i18n::tr("Window") } else { title }.to_owned();
         self.evict_minimized(&addr);
         self.minimized.push(MinimizedWin {
             addr: addr.clone(),
