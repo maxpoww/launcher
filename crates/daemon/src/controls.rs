@@ -2998,10 +2998,17 @@ pub(crate) fn reassert_wallpaper() {
 }
 
 pub(crate) fn reassert() {
+    // (The mice plugged in now get the mouse's speed too, 2026-11-09.)
+    crate::input_page::remember_mice();
     let s = GolemSettings::load();
     // The compositor's own settings: on it now, and in the file it reads at
     // its start (a settings.json the installer seeded has no such file yet).
     s.reassert_input();
+    // The pointer's size once more (2026-11-09): Golem's start handler sets
+    // 24 and `settings.lua`'s sets ours, whichever came last won.
+    if let Some(px) = s.cursor_size.filter(|p| (16..=96).contains(p)) {
+        crate::hypr::set_cursor_size(px);
+    }
     // The system's look is the Apps row's (no general toggle since 2026-10-18).
     let apps_dark = s.colors.as_ref().and_then(|c| c.apps_dark).or(s.dark);
     if apps_dark.is_none() && s.language.is_none() && s.time_zone.is_none() && s.wallpaper.is_none() {

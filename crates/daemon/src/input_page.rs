@@ -31,9 +31,16 @@ const CURSOR_SIZES: [(u32, &str); 3] = [(24, "Normal"), (32, "Big"), (48, "Bigge
 const REPEAT_RATES: [(u32, &str); 3] = [(15, "Slow"), (25, "Normal"), (40, "Fast")];
 const REPEAT_DELAYS: [(u32, &str); 3] = [(200, "Short"), (400, "Normal"), (700, "Long")];
 
-/// The keys that switch between two layouts, as xkb names them.
+/// The keys that switch between two layouts, as xkb names them. Not
+/// Super + Space (2026-11-09): it is Golem's voice to text, and the layout
+/// changed after the bind ran, so every switch started a dictation too; one
+/// saved from before shows as no switch picked.
 const SWITCHES: [(&str, &str); 3] =
-    [("grp:alt_shift_toggle", "Alt + Shift"), ("grp:win_space_toggle", "Super + Space"), ("grp:ctrl_space_toggle", "Ctrl + Space")];
+    [("grp:alt_shift_toggle", "Alt + Shift"), ("grp:ctrl_space_toggle", "Ctrl + Space"), ("grp:caps_toggle", "Caps Lock")];
+
+/// The most mice the mouse's speed is kept for (a mouse is renamed by its
+/// plug order, `…-1`, and the names are only ever added).
+const MICE_KEPT: usize = 16;
 
 fn nearest(stops: &[f64], value: f64) -> usize {
     stops.iter().enumerate().min_by(|a, b| (a.1 - value).abs().total_cmp(&(b.1 - value).abs())).map_or(0, |(i, _)| i)
@@ -53,6 +60,49 @@ pub(crate) fn cursor_group(s: &GolemSettings) -> Group {
     Group { labelled: true, ..group_of(Some("Pointer size"), "cursor-size", choices) }
 }
 
+/// How the right click is made. Unpicked, the corner is lit (2026-11-09):
+/// Golem sets no `clickfinger_behavior`, and the compositor's own is the
+/// corner — "Two fingers" was lit and did not work.
+fn right_click_group(s: &GolemSettings) -> Group {
+    let two = s.right_click.as_deref() == Some("two");
+    let ways = vec![choice_of(tr("Two fingers"), two, "two"), choice_of(tr("Bottom right corner"), !two, "corner")];
+    Group { labelled: true, ..group_of(Some("Right click"), "right-click", ways) }
+}
+
+/// The mice plugged in now added to those the mouse's speed is kept for —
+/// at every start and at each pick (2026-11-09: never read again at a start
+/// whatever the comments said, and a pick replaced the list: a mouse plugged
+/// in later, a second one or one renamed by its plug order ran at the
+/// touchpad's speed while the page showed the mouse's).
+pub(crate) fn remember_mice() {
+    if GolemSettings::load().mouse_speed.is_none() {
+        return;
+    }
+    let (mice, pads) = crate::hypr::pointers();
+    GolemSettings::change(|s| {
+        if add_mice(&mut s.mouse_names, &mice, &pads) {
+            s.store();
+        }
+    });
+}
+
+/// `seen` added to `kept`, the oldest going past [`MICE_KEPT`]; a kept name
+/// that is a touchpad now (by its name, or among `pads`) is let go. True
+/// when the list changed.
+fn add_mice(kept: &mut Vec<String>, seen: &[String], pads: &[String]) -> bool {
+    let before = kept.clone();
+    kept.retain(|n| !crate::hypr::touchpad_name(n) && !pads.contains(n));
+    for name in seen {
+        if !kept.contains(name) {
+            kept.push(name.clone());
+        }
+    }
+    if kept.len() > MICE_KEPT {
+        kept.drain(..kept.len() - MICE_KEPT);
+    }
+    *kept != before
+}
+
 /// Controls → Mouse and touchpad.
 pub(crate) fn mouse_view(view: &mut ControlView) {
     let s = GolemSettings::load();
@@ -63,9 +113,7 @@ pub(crate) fn mouse_view(view: &mut ControlView) {
         view.groups.push(speed_group("Mouse speed", "mouse-speed", s.mouse_speed.unwrap_or(0.0)));
     }
     view.groups.push(on_off_of(Some("Tap to click"), "tap", s.tap_to_click.unwrap_or(true)));
-    let two = s.right_click.as_deref() != Some("corner");
-    let ways = vec![choice_of(tr("Two fingers"), two, "two"), choice_of(tr("Bottom right corner"), !two, "corner")];
-    view.groups.push(Group { labelled: true, ..group_of(Some("Right click"), "right-click", ways) });
+    view.groups.push(right_click_group(&s));
     view.groups.push(on_off_of(Some("Natural scrolling"), "natural", s.natural_scroll.unwrap_or(true)));
     view.groups.push(on_off_of(Some("Still while typing"), "typing-still", s.typing_stills_touchpad.unwrap_or(true)));
     view.groups.push(on_off_of(Some("Left-handed"), "left-handed", s.left_handed.unwrap_or(false)));
@@ -124,16 +172,30 @@ pub(crate) fn pairs(layouts: &str, variants: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The switch between layouts that xkb `options` hold (`grp:…`), if any.
+fn switch_of(options: &str) -> Option<&str> {
+    options.split(',').map(str::trim).find(|o| o.starts_with("grp:"))
+}
+
+/// `options` with the switch put to `switch` (or taken out) and every other
+/// option kept (2026-11-09: a pick replaced them all, and `caps:escape` went
+/// with the old switch).
+fn with_switch(options: &str, switch: Option<&str>) -> String {
+    let mut kept: Vec<&str> = options.split(',').map(str::trim).filter(|o| !o.is_empty() && !o.starts_with("grp:")).collect();
+    kept.extend(switch);
+    kept.join(",")
+}
+
 /// A pick on the worker. True when the key was this page's.
 pub(crate) fn apply(key: &str, value: &str) -> bool {
     let on = value == "on";
     match key {
         "mouse-speed" => {
             if let Ok(v) = value.parse::<f64>() {
-                let names = crate::hypr::mouse_names();
+                let (mice, pads) = crate::hypr::pointers();
                 GolemSettings::change(|s| {
                     s.mouse_speed = Some(v.clamp(-1.0, 1.0));
-                    s.mouse_names = names;
+                    add_mice(&mut s.mouse_names, &mice, &pads);
                     s.store_input();
                 });
             }
@@ -187,7 +249,15 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
                 } else {
                     on.push((l.to_owned(), v.to_owned()));
                 }
-                let options = if on.len() > 1 && options.is_empty() { SWITCHES[0].0.to_owned() } else if on.len() <= 1 { String::new() } else { options };
+                // (Only the switch is ours to change: `caps:escape` and the
+                // like stay, 2026-11-09.)
+                let options = if on.len() <= 1 {
+                    with_switch(&options, None)
+                } else if switch_of(&options).is_none() {
+                    with_switch(&options, Some(SWITCHES[0].0))
+                } else {
+                    options
+                };
                 s.set_keyboards(&on, &options);
             });
         }
@@ -195,7 +265,7 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
             if SWITCHES.iter().any(|(opt, _)| *opt == value) {
                 GolemSettings::change(|s| {
                     if let Some(k) = s.keyboard.as_mut() {
-                        k.options = value.to_owned();
+                        k.options = with_switch(&k.options, Some(value));
                         s.store_input();
                     }
                 });
@@ -241,5 +311,39 @@ mod tests {
         assert!(g.labelled);
         let c = cursor_group(&GolemSettings::default());
         assert_eq!(c.choices.iter().position(|c| c.on), Some(0));
+    }
+
+    #[test]
+    fn the_right_click_is_the_corner_until_two_fingers_are_picked() {
+        let lit = |s: &GolemSettings| right_click_group(s).choices.iter().position(|c| c.on);
+        assert_eq!(lit(&GolemSettings::default()), Some(1));
+        let two = GolemSettings { right_click: Some("two".to_owned()), ..Default::default() };
+        assert_eq!(lit(&two), Some(0));
+    }
+
+    #[test]
+    fn only_the_switch_of_the_options_is_changed() {
+        assert_eq!(with_switch("caps:escape", Some("grp:alt_shift_toggle")), "caps:escape,grp:alt_shift_toggle");
+        assert_eq!(with_switch("grp:alt_shift_toggle,caps:escape", Some("grp:caps_toggle")), "caps:escape,grp:caps_toggle");
+        assert_eq!(with_switch("grp:alt_shift_toggle,caps:escape", None), "caps:escape");
+        assert_eq!(with_switch("grp:alt_shift_toggle", None), "");
+        assert_eq!(switch_of("caps:escape,grp:win_space_toggle"), Some("grp:win_space_toggle"));
+        assert_eq!(switch_of("caps:escape,grp_led:scroll"), None);
+        // Voice to text's keys are not offered.
+        assert!(SWITCHES.iter().all(|(opt, _)| *opt != "grp:win_space_toggle"));
+    }
+
+    #[test]
+    fn mice_are_added_never_replaced() {
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let mut kept = names(&["logitech-usb-receiver", "alpsps/2-alps-glidepoint", "elan0501:00-04f3:3060"]);
+        // Unplugged now: kept; a second one: added; touchpads: let go.
+        assert!(add_mice(&mut kept, &names(&["logitech-usb-receiver-1"]), &names(&["elan0501:00-04f3:3060"])));
+        assert_eq!(kept, names(&["logitech-usb-receiver", "logitech-usb-receiver-1"]));
+        assert!(!add_mice(&mut kept, &names(&["logitech-usb-receiver"]), &[]));
+        let many: Vec<String> = (0..20).map(|i| format!("mouse-{i}")).collect();
+        add_mice(&mut kept, &many, &[]);
+        assert_eq!(kept.len(), MICE_KEPT);
+        assert_eq!(kept.last().map(String::as_str), Some("mouse-19"));
     }
 }

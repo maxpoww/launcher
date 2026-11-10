@@ -631,7 +631,9 @@ impl GolemSettings {
                     lua_quote(&k.layout),
                     lua_quote(&k.variant)
                 ));
-                if !k.options.is_empty() && crate::controls::valid_xkb_options(&k.options) {
+                // Always, even empty (2026-11-09): back to one layout, the
+                // old switch stayed live until the next login.
+                if crate::controls::valid_xkb_options(&k.options) {
                     lines.push(format!("hl.config({{ [\"input.kb_options\"] = {} }})", lua_quote(&k.options)));
                 }
             } else {
@@ -663,11 +665,20 @@ impl GolemSettings {
                 lines.push(format!("hl.device({{ name = {}, sensitivity = {speed} }})", lua_quote(name)));
             }
         }
-        if let Some(rate) = self.repeat_rate.filter(|r| (1..=200).contains(r)) {
-            lines.push(format!("hl.config({{ [\"input.repeat_rate\"] = {rate} }})"));
-        }
-        if let Some(delay) = self.repeat_delay.filter(|d| (50..=5000).contains(d)) {
-            lines.push(format!("hl.config({{ [\"input.repeat_delay\"] = {delay} }})"));
+        // The delay rides with the rate in ONE call (2026-11-09): the
+        // compositor (0.55.4) refreshes the keyboards for the rate, not for
+        // the delay, so a delay sent alone did nothing until the next login.
+        let rate = self.repeat_rate.filter(|r| (1..=200).contains(r));
+        match self.repeat_delay.filter(|d| (50..=5000).contains(d)) {
+            Some(delay) => lines.push(format!(
+                "hl.config({{ [\"input.repeat_delay\"] = {delay}, [\"input.repeat_rate\"] = {} }})",
+                rate.unwrap_or(25)
+            )),
+            None => {
+                if let Some(rate) = rate {
+                    lines.push(format!("hl.config({{ [\"input.repeat_rate\"] = {rate} }})"));
+                }
+            }
         }
         if let Some(zoom) = self.magnifier.filter(|z| (1.0..=8.0).contains(z)) {
             lines.push(format!("hl.config({{ [\"cursor.zoom_factor\"] = {zoom} }})"));
@@ -1706,5 +1717,22 @@ mod tests {
         store.displays.clear();
         let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
         assert_eq!(back, serde_json::json!({ "dark": true, "gaps": { "inner": 4 } }));
+    }
+
+    #[test]
+    fn the_keys_go_to_the_compositor_whole() {
+        // One layout again: the options go out empty, so the old switch goes.
+        let mut s = GolemSettings {
+            keyboard: Some(KeyboardChoice { layout: "us".to_owned(), variant: String::new(), options: String::new() }),
+            ..Default::default()
+        };
+        assert!(s.input_lua().iter().any(|l| l == r#"hl.config({ ["input.kb_options"] = "" })"#), "{:?}", s.input_lua());
+        // A delay carries the rate with it (the default one when none is set).
+        s.repeat_delay = Some(700);
+        assert!(s.input_lua().iter().any(|l| l == r#"hl.config({ ["input.repeat_delay"] = 700, ["input.repeat_rate"] = 25 })"#));
+        s.repeat_rate = Some(40);
+        let lines = s.input_lua();
+        assert!(lines.iter().any(|l| l.ends_with(r#"["input.repeat_rate"] = 40 })"#)));
+        assert_eq!(lines.iter().filter(|l| l.contains("repeat_rate")).count(), 1, "{lines:?}");
     }
 }

@@ -1830,24 +1830,84 @@ pub fn monitors_all_json() -> Option<serde_json::Value> {
 /// The names of the mice the compositor sees, a touchpad's own mouse face
 /// left out (`…-mouse` beside `…-touchpad` is the same hardware).
 pub(crate) fn mouse_names() -> Vec<String> {
-    let Some(d) = reply_json("j/devices") else { return Vec::new() };
-    let names = |kind: &str| -> Vec<String> {
-        d[kind].as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect()).unwrap_or_default()
-    };
-    let mice = names("mice");
-    let pads: Vec<String> = mice.iter().filter(|n| n.contains("touchpad") || n.contains("trackpad")).cloned().collect();
-    mice.into_iter()
-        .filter(|n| !pads.contains(n))
+    pointers().0
+}
+
+/// The pointers the compositor sees, as (mice, touchpads).
+pub(crate) fn pointers() -> (Vec<String>, Vec<String>) {
+    let Some(d) = reply_json("j/devices") else { return (Vec::new(), Vec::new()) };
+    let all = d["mice"].as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
+    split_pointers(all, &udev_touchpads())
+}
+
+/// Mice and touchpads apart: a touchpad by its name, or by udev's word
+/// where the name does not say it; a touchpad's `…-mouse` twin goes with it.
+fn split_pointers(all: Vec<String>, udev_pads: &[String]) -> (Vec<String>, Vec<String>) {
+    let (pads, mice): (Vec<String>, Vec<String>) =
+        all.into_iter().partition(|n| touchpad_name(n) || udev_pads.iter().any(|p| same_device(p, n)));
+    let mice = mice
+        .into_iter()
         .filter(|n| !pads.iter().any(|p| p.trim_end_matches("-touchpad").trim_end_matches("-trackpad") == n.trim_end_matches("-mouse")))
+        .collect();
+    (mice, pads)
+}
+
+/// A touchpad by its name (2026-11-09: ALPS' "GlidePoint" and the
+/// MacBooks' `bcm5974` say no "touchpad", counted as mice — "Mouse speed"
+/// showed with no mouse, and its device rule took the touchpad's speed).
+pub(crate) fn touchpad_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["touchpad", "trackpad", "glidepoint", "bcm5974", "appletouch", "synaptics"].iter().any(|w| n.contains(w))
+}
+
+/// `name` is the compositor's for the device udev calls `udev` — or for its
+/// namesake, numbered (`…-1`: the compositor numbers a name already taken).
+fn same_device(udev: &str, name: &str) -> bool {
+    name == udev
+        || name
+            .strip_prefix(udev)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The touchpads udev knows (`ID_INPUT_TOUCHPAD=1`), named the compositor's
+/// way. None where udev's records cannot be read (a container).
+fn udev_touchpads() -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir("/sys/class/input") else { return Vec::new() };
+    dir.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("event"))
+        .filter_map(|e| {
+            let dev = std::fs::read_to_string(e.path().join("dev")).ok()?;
+            let record = std::fs::read_to_string(format!("/run/udev/data/c{}", dev.trim())).ok()?;
+            if !udev_touchpad(&record) {
+                return None;
+            }
+            let name = std::fs::read_to_string(e.path().join("device/name")).ok()?;
+            Some(compositor_name(name.trim_end_matches('\n')))
+        })
         .collect()
 }
 
+/// udev's record of a device says it is a touchpad.
+fn udev_touchpad(record: &str) -> bool {
+    record.lines().any(|l| l.trim() == "E:ID_INPUT_TOUCHPAD=1")
+}
+
+/// A device's name as the compositor gives it: spaces and line breaks as
+/// dashes, lowercased (its `deviceNameToInternalString`).
+fn compositor_name(name: &str) -> String {
+    name.chars().map(|c| if c == ' ' || c == '\n' { '-' } else { c.to_ascii_lowercase() }).collect()
+}
+
 /// The pointer's size, now: the compositor's own command, with the theme
-/// the session runs.
+/// the session runs. A reply other than "ok" is a refusal (2026-11-09: it
+/// went unheard).
 pub(crate) fn set_cursor_size(size: u32) {
     let theme = std::env::var("XCURSOR_THEME").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "phinger-cursors-light".to_owned());
-    if let Err(e) = request(&format!("setcursor {theme} {size}")) {
-        warn!("Hyprland setcursor failed: {e:#}");
+    match request(&format!("setcursor {theme} {size}")) {
+        Ok(reply) if reply.trim() == "ok" => {}
+        Ok(reply) => warn!("Hyprland setcursor {theme} {size} replied: {}", reply.trim()),
+        Err(e) => warn!("Hyprland setcursor failed: {e:#}"),
     }
 }
 
@@ -3224,5 +3284,33 @@ mod tests {
         assert!(!is_browser_class("foot"));
         assert!(!is_browser_class("org.gnome.Nautilus"));
         assert!(!is_browser_class(""));
+    }
+
+    #[test]
+    fn touchpads_that_do_not_say_so_are_not_mice() {
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let all = names(&[
+            "alpsps/2-alps-glidepoint",
+            "bcm5974",
+            "elan1200:00-04f3:3090-mouse",
+            "elan1200:00-04f3:3090-touchpad",
+            "logitech-usb-receiver",
+            "elan0501:00-04f3:3060-1",
+        ]);
+        // (udev's word for the one whose name says nothing, numbered here.)
+        let (mice, pads) = split_pointers(all, &names(&["elan0501:00-04f3:3060"]));
+        assert_eq!(mice, names(&["logitech-usb-receiver"]));
+        assert_eq!(pads.len(), 4, "{pads:?}");
+        assert!(touchpad_name("SynPS/2 Synaptics TouchPad"));
+        assert!(!touchpad_name("tpps/2-ibm-trackpoint"));
+        assert!(same_device("foo", "foo-2"));
+        assert!(!same_device("foo", "foo-bar"));
+    }
+
+    #[test]
+    fn udev_names_are_the_compositors() {
+        assert_eq!(compositor_name("AlpsPS/2 ALPS GlidePoint"), "alpsps/2-alps-glidepoint");
+        assert!(udev_touchpad("E:ID_INPUT=1\nE:ID_INPUT_TOUCHPAD=1\n"));
+        assert!(!udev_touchpad("E:ID_INPUT=1\nE:ID_INPUT_MOUSE=1\n"));
     }
 }
