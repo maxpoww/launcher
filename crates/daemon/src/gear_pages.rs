@@ -2204,7 +2204,7 @@ impl App {
                 if let Some(f) = self.gear.pages.disk.folders.get(i) {
                     Self::open_path(&f.path);
                 }
-                self.set_stats_box(false);
+                self.gear_step_aside();
             }
             SysHit::OpenPath(path) => {
                 // The folder that holds it: a file would open in its app.
@@ -2213,7 +2213,7 @@ impl App {
                 } else {
                     path.parent().unwrap_or(&path)
                 });
-                self.set_stats_box(false);
+                self.gear_step_aside();
             }
             SysHit::Clean => {
                 self.gear.pages.freed = None;
@@ -2259,7 +2259,7 @@ impl App {
                     .and_then(|d| d.mount.clone())
                 {
                     Self::open_path(std::path::Path::new(&m));
-                    self.set_stats_box(false);
+                    self.gear_step_aside();
                 }
             }
             SysHit::AskErase => {

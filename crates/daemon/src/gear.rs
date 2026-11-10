@@ -899,6 +899,19 @@ impl App {
 
     /// Leave the page: fold the control panel's setting it is hosted in, or
     /// shut the box.
+    /// What a page did opens a window (Files, the browser, the file picker):
+    /// the page gets out of its way. In the box that is the box shutting;
+    /// hosted in Controls it is the card going (the box was shut already, so
+    /// shutting it did nothing and the card, holding the keyboard, stayed
+    /// over the window it had just opened — 2026-11-09).
+    pub(crate) fn gear_step_aside(&mut self) {
+        if self.gear_host.is_some() {
+            self.dismiss();
+        } else {
+            self.set_stats_box(false);
+        }
+    }
+
     fn gear_leave(&mut self) {
         if self.gear_host.is_some() {
             self.panel_escape();
@@ -3939,7 +3952,7 @@ impl App {
                 {
                     info!("net: cannot open the sign-in page: {e}");
                 }
-                self.set_stats_box(false);
+                self.gear_step_aside();
             } else {
                 self.gear.net_leaving = Some(ssid);
                 self.net_send(NetCommand::Disconnect);
@@ -4191,7 +4204,7 @@ impl App {
                     // The file picker is a window: the box (which holds the
                     // keyboard and sits above windows) gets out of its way.
                     self.gear.debug_hold = false;
-                    self.set_stats_box(false);
+                    self.gear_step_aside();
                     return;
                 }
             }
