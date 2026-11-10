@@ -38,7 +38,17 @@ static TABLE: AtomicPtr<HashMap<String, String>> = AtomicPtr::new(std::ptr::null
 /// machine the shell runs on, with nothing to install beside it. A file in
 /// the data directory with the same tag wins over these (a translator's
 /// working copy).
-const EMBEDDED: [(&str, &str); 1] = [("es", include_str!("../assets/i18n/es.json"))];
+///
+/// Spanish is whole and the tests hold it so (every string handed to
+/// `tr` has its Spanish). The others (2026-11-09: the installer's languages) are topped up
+/// in batches — a string not there yet shows in English
+/// (`tools/i18n/README.md`). Portuguese is Brazil's; Portugal's own wording
+/// stands beside it as `pt_PT`, tried first for a `pt_PT` locale.
+const EMBEDDED: [(&str, &str); 3] = [
+    ("es", include_str!("../assets/i18n/es.json")),
+    ("pt", include_str!("../assets/i18n/pt.json")),
+    ("pt_PT", include_str!("../assets/i18n/pt_PT.json")),
+];
 
 /// The tag of the language whose catalogue is loaded (none: English).
 static LANG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -240,7 +250,8 @@ pub fn language_name(tag: &str) -> String {
     match tag {
         "en" => "English",
         "es" => "Español",
-        "pt" => "Português",
+        "pt" => "Português (Brasil)",
+        "pt_PT" => "Português (Portugal)",
         "fr" => "Français",
         "de" => "Deutsch",
         "it" => "Italiano",
@@ -453,7 +464,6 @@ mod tests {
     /// misspelt would show the braces, or drop a value.
     #[test]
     fn a_translation_keeps_its_holes() {
-        let es: HashMap<String, String> = serde_json::from_str(EMBEDDED[0].1).expect("es.json parses");
         let holes = |s: &str| {
             let mut found: Vec<String> = Vec::new();
             let mut rest = s;
@@ -465,10 +475,28 @@ mod tests {
             found.sort();
             found
         };
-        for (en, spanish) in &es {
-            assert_eq!(holes(en), holes(spanish), "{en:?} → {spanish:?}");
-            assert!(!spanish.is_empty(), "{en:?} has an empty translation");
+        // Every catalogue built in: a file that does not parse would leave
+        // its language English without a word.
+        for (tag, text) in EMBEDDED {
+            let table: HashMap<String, String> =
+                serde_json::from_str(text).unwrap_or_else(|e| panic!("{tag}.json does not parse: {e}"));
+            for (en, there) in &table {
+                assert_eq!(holes(en), holes(there), "{tag}: {en:?} → {there:?}");
+                assert!(!there.is_empty(), "{tag}: {en:?} has an empty translation");
+            }
         }
+    }
+
+    /// Each language on the Language page is named as its speakers write it,
+    /// and a country's wording is found before its language's.
+    #[test]
+    fn every_language_has_its_name_and_a_country_its_wording() {
+        for tag in catalogues() {
+            assert_ne!(language_name(&tag), tag, "{tag} has no name of its own");
+        }
+        assert_eq!(locale_tags(Some("pt_PT.UTF-8".into()), None, None), Some(vec!["pt_PT".to_owned(), "pt".to_owned()]));
+        assert_eq!(locale_tags(Some("pt_BR.UTF-8".into()), None, None), Some(vec!["pt_BR".to_owned(), "pt".to_owned()]));
+        assert_eq!(locale_tags(None, None, Some("fr_FR.UTF-8".into())), Some(vec!["fr_FR".to_owned(), "fr".to_owned()]));
     }
 
     #[test]

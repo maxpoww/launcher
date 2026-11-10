@@ -1646,6 +1646,12 @@ pub(crate) fn shell_languages() -> Vec<(String, String)> {
 /// the owner's own country first, then the language's home one.
 pub(crate) fn locale_for(tag: &str, available: &[String], current: &str) -> Option<String> {
     let lang = tag.split('_').next().unwrap_or(tag);
+    // A catalogue of a country's own wording names its country (pt_PT);
+    // plain Portuguese is Brazil's (its catalogue is).
+    let named = match tag {
+        "pt" => "BR",
+        _ => tag.split('_').nth(1).unwrap_or_default(),
+    };
     let utf8 = |l: &&String| l.to_lowercase().ends_with("utf8") || l.to_lowercase().ends_with("utf-8");
     let mine: Vec<&String> = available.iter().filter(utf8).filter(|l| l.split('_').next() == Some(lang)).collect();
     let country = current.split(['_', '.']).nth(1).unwrap_or_default();
@@ -1659,7 +1665,7 @@ pub(crate) fn locale_for(tag: &str, available: &[String], current: &str) -> Opti
         _ => "",
     };
     let pick = |c: &str| mine.iter().find(|l| !c.is_empty() && l.split(['_', '.']).nth(1) == Some(c));
-    pick(country).or_else(|| pick(home)).or(mine.first()).map(|l| {
+    pick(named).or_else(|| pick(country)).or_else(|| pick(home)).or(mine.first()).map(|l| {
         // `locale -a` writes `es_ES.utf8`; the environment wants `.UTF-8`.
         let base = l.split('.').next().unwrap_or(l);
         format!("{base}.UTF-8")
@@ -2619,8 +2625,15 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         }
         "Language" => {
             let now = language_now();
-            let now_lang = now.split(['_', '.']).next().unwrap_or("en").to_owned();
             let langs = shell_languages();
+            // The catalogue in use: a country's own (pt_PT) when there is
+            // one, else its language's (es_BO → es).
+            let full = now.split('.').next().unwrap_or("en");
+            let now_lang = if langs.iter().any(|(t, _)| t == full) {
+                full.to_owned()
+            } else {
+                full.split('_').next().unwrap_or("en").to_owned()
+            };
             view.subtitle = tr("The language Golem speaks. Apps follow the next time they open.").to_owned();
             view.groups.push(group(
                 None,
@@ -3230,12 +3243,16 @@ mod tests {
     #[test]
     fn a_language_finds_its_locale() {
         let have: Vec<String> =
-            ["C", "en_US.utf8", "es_ES.utf8", "es_BO.utf8", "pt_BR.utf8"].iter().map(|s| (*s).to_owned()).collect();
+            ["C", "en_US.utf8", "es_ES.utf8", "es_BO.utf8", "pt_BR.utf8", "pt_PT.utf8"].iter().map(|s| (*s).to_owned()).collect();
         // The owner's own country first.
         assert_eq!(locale_for("es", &have, "en_BO.UTF-8").as_deref(), Some("es_BO.UTF-8"));
         assert_eq!(locale_for("es", &have, "en_US.UTF-8").as_deref(), Some("es_ES.UTF-8"));
         assert_eq!(locale_for("pt", &have, "es_BO.UTF-8").as_deref(), Some("pt_BR.UTF-8"));
         assert_eq!(locale_for("de", &have, "en_US.UTF-8"), None);
+        // Portugal's wording is Portugal's, Brazil's Brazil's, wherever the
+        // owner is.
+        assert_eq!(locale_for("pt_PT", &have, "es_BO.UTF-8").as_deref(), Some("pt_PT.UTF-8"));
+        assert_eq!(locale_for("pt", &have, "pt_PT.UTF-8").as_deref(), Some("pt_BR.UTF-8"));
     }
 
     #[test]
