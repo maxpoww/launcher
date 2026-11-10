@@ -503,6 +503,15 @@ struct Usage {
 
 /// How well a setting matches a (lowercased, trimmed) search: 0 its name
 /// starts with it, 1 its name contains it, 2 a keyword does; `None` no match.
+/// How many characters a typed field takes.
+fn field_room(key: &str) -> usize {
+    match key {
+        "printers-add" => 200,
+        k if k.starts_with("account-") => 512,
+        _ => 40,
+    }
+}
+
 fn match_rank(label: &'static str, keywords: &'static str, q: &str) -> Option<u8> {
     // Its name and keywords in English, and in the shell's language — as a
     // search compares them, without case or accents ("energia" finds
@@ -1826,6 +1835,7 @@ impl Panel {
             *t = None;
         }
         crate::controls::field_typed("colors-apps-find", "", false);
+        crate::account_page::forget_typed();
         self.open_control_label()
     }
 
@@ -4979,7 +4989,9 @@ impl App {
     /// A text field of Colours (or of Printers: an address) is being typed in,
     /// and its page is up.
     pub(crate) fn colours_typing(&self) -> bool {
-        let on = |p: &Panel| matches!(p.open_control_label(), Some("Colours" | "Printers"));
+        // (Your account's password fields too: left out, every key typed
+        // into them went to the box's search instead — 2026-11-09.)
+        let on = |p: &Panel| matches!(p.open_control_label(), Some("Colours" | "Printers" | "Your account"));
         crate::controls::TYPING.lock().is_ok_and(|t| t.is_some()) && (on(&self.panel) || on(&self.quick))
     }
 
@@ -5001,8 +5013,10 @@ impl App {
                 text.pop();
             }
             _ => match utf8 {
-                // (A printer's address can be a whole URI: longer than a name.)
-                Some(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) && text.chars().count() < if key == "printers-add" { 200 } else { 40 } => text.push_str(t),
+                // (A printer's address can be a whole URI: longer than a
+                // name; a passphrase longer still — cut at 40 it was set
+                // shorter than typed, and the lock screen refused the whole.)
+                Some(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) && text.chars().count() < field_room(key) => text.push_str(t),
                 _ => return,
             },
         }
@@ -5015,7 +5029,13 @@ impl App {
             self.colors_apply(false);
         }
         let ui = self.ui_facts();
-        let label = if key.starts_with("printers-") { "Printers" } else { "Colours" };
+        let label = if key.starts_with("printers-") {
+            "Printers"
+        } else if key.starts_with("account-") {
+            "Your account"
+        } else {
+            "Colours"
+        };
         self.controls_send(ControlCommand::Read(label, ui));
         self.schedule_frame();
     }

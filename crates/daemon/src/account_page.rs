@@ -41,6 +41,36 @@ static SAID: Mutex<Option<(bool, String)>> = Mutex::new(None);
 static ENROLLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PICKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// A password change is on its way (its own thread: `passwd` takes from a
+/// third of a second to twenty, and the controls' worker serves every page).
+static CHANGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// "Forget the fingerprints" was clicked once: the next click forgets them
+/// (what cannot be undone is asked once).
+static FORGET_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The fingers registered, as last asked (`fprintd-list` is a process and
+/// the page is read at every key typed into its fields), and when.
+static FINGERS: Mutex<Option<(Instant, Option<usize>)>> = Mutex::new(None);
+
+/// How long a fingers count is trusted.
+const FINGERS_FRESH: Duration = Duration::from_secs(30);
+
+/// The page opened afresh: nothing typed before stands in its fields — a
+/// current password left in one was waiting for anyone at the session
+/// (2026-11-09) — and the last change's words are gone.
+pub(crate) fn forget_typed() {
+    if let Ok(mut t) = TYPED.lock() {
+        for f in t.iter_mut() {
+            f.clear();
+        }
+    }
+    if let Ok(mut s) = SAID.lock() {
+        *s = None;
+    }
+    FORGET_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 const FIELDS: [&str; 3] = ["account-current", "account-new", "account-again"];
 
 fn field_index(key: &str) -> Option<usize> {
@@ -85,6 +115,19 @@ pub(crate) fn whoami() -> (String, String) {
 
 /// How many fingers are registered; `None` without fprintd or a reader.
 fn fingers() -> Option<usize> {
+    if let Some((at, n)) = FINGERS.lock().ok().and_then(|f| *f) {
+        if at.elapsed() < FINGERS_FRESH {
+            return n;
+        }
+    }
+    let n = fingers_now();
+    if let Ok(mut f) = FINGERS.lock() {
+        *f = Some((Instant::now(), n));
+    }
+    n
+}
+
+fn fingers_now() -> Option<usize> {
     if !crate::launch::on_path("fprintd-list") {
         return None;
     }
@@ -122,7 +165,9 @@ pub(crate) fn view(view: &mut ControlView) {
     row.key = "account-fields";
     row.width = 180.0;
     view.groups.push(row);
-    view.groups.push(Group { buttons: true, ..group_of(None, "account-change", vec![choice_of(tr("Change the password"), false, "change")]) });
+    let changing = CHANGING.load(std::sync::atomic::Ordering::Relaxed);
+    let word = if changing { tr("Changing…") } else { tr("Change the password") };
+    view.groups.push(Group { buttons: true, ..group_of(None, "account-change", vec![choice_of(word, false, "change")]) });
     if let Some((ok, said)) = SAID.lock().ok().and_then(|s| s.clone()) {
         let text = if ok { said } else { fill(tr("Not changed: {why}"), &[("why", &said)]) };
         view.groups.push(Group { centred: true, ..line_of(text) });
@@ -138,7 +183,8 @@ pub(crate) fn view(view: &mut ControlView) {
         let enrolling = ENROLLING.load(std::sync::atomic::Ordering::Relaxed);
         let mut buttons = vec![choice_of(if enrolling { tr("Touch the reader…") } else { tr("Register a finger") }, false, "enroll")];
         if n > 0 && !enrolling {
-            buttons.push(choice_of(tr("Forget the fingerprints"), false, "forget"));
+            let armed = FORGET_ARMED.load(std::sync::atomic::Ordering::Relaxed);
+            buttons.push(choice_of(if armed { tr("Click again to forget them") } else { tr("Forget the fingerprints") }, false, "forget"));
         }
         view.groups.push(Group { buttons: true, ..group_of(None, "account-finger", buttons) });
     }
@@ -147,17 +193,49 @@ pub(crate) fn view(view: &mut ControlView) {
 /// A pick on the worker. True when the key was this page's.
 pub(crate) fn apply(key: &str, value: &str) -> bool {
     match key {
-        "account-change" => change_password(),
+        "account-change" => change_soon(),
         "account-photo" => pick_picture(),
         "account-finger" if value == "enroll" => enroll(),
         "account-finger" if value == "forget" => {
-            let user = std::env::var("USER").unwrap_or_default();
-            crate::controls::run_of("fprintd-delete", &[&user]);
+            // Every print goes at once and cannot come back: asked once.
+            if FORGET_ARMED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                let user = std::env::var("USER").unwrap_or_default();
+                crate::controls::run_of("fprintd-delete", &[&user]);
+                fingers_stale();
+            } else {
+                FORGET_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         "account-fields" | "account-face" => {}
         _ => return false,
     }
     true
+}
+
+/// The fingers count is asked again at the next read (a finger came or went).
+fn fingers_stale() {
+    if let Ok(mut f) = FINGERS.lock() {
+        *f = None;
+    }
+}
+
+/// "Change the password", on a thread of its own. A second click while one
+/// runs — or Enter held down — is nothing: the first run clears the fields,
+/// and a queued second one found them empty and said "type the new
+/// password" over a change that had worked (2026-11-09).
+fn change_soon() {
+    let empty = TYPED.lock().map(|t| t.iter().all(String::is_empty)).unwrap_or(true);
+    if empty || CHANGING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("account-passwd".into()).spawn(|| {
+        change_password();
+        CHANGING.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::controls::read_again("Your account");
+    });
+    if spawned.is_err() {
+        CHANGING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// `passwd` with the three fields: a reason under the button either way.
@@ -173,13 +251,11 @@ fn change_password() {
         passwd(&typed[0], &typed[1])
     };
     if let Ok(mut t) = TYPED.lock() {
-        // (The current one is kept only while it failed: a slip is retyped.)
-        let keep = said.is_err();
-        if !keep {
-            t[0].clear();
+        // All three go, whatever happened: a current password kept after a
+        // slip waited in its field for anyone at the session.
+        for f in t.iter_mut() {
+            f.clear();
         }
-        t[1].clear();
-        t[2].clear();
     }
     if let Ok(mut s) = SAID.lock() {
         *s = Some(match said {
@@ -193,19 +269,32 @@ fn change_password() {
 fn passwd(current: &str, new: &str) -> Result<(), String> {
     let answers = [("current", current), ("old", current), ("new", new), ("retype", new), ("again", new), ("password:", current)];
     let (status, out) = run_on_tty("passwd", &[], &answers, Duration::from_secs(20))?;
-    // (What it printed holds no password: the prompts, its own words.)
-    info!("account: passwd ended {status:?}: {}", out.replace('\n', " / ").trim());
+    // (Only how it ended: PAM prints a prompt just before it turns the
+    // echo off, so what came back is not written anywhere.)
+    info!("account: passwd ended {status:?}");
     if status == Some(0) {
         return Ok(());
     }
+    reason(&out)
+}
+
+/// Why `passwd` refused, from what it printed. A machine whose PAM ends
+/// every refusal in "Permission denied" (Golem's: one `pam_unix` line) still
+/// tells the two apart: it asks for the new password only once the current
+/// one was right.
+fn reason(out: &str) -> Result<(), String> {
     // Its own reason: the current password wrong (PAM's words for it), a
     // new one it will not take (its "BAD PASSWORD" line), else the last
     // line that says something.
     // (It never got to ask for a new one: the current one was refused —
     // "Permission denied" on this PAM, other words elsewhere.)
     let low = out.to_lowercase();
-    if !low.contains("new password") || low.contains("authentication token manipulation error") || low.contains("incorrect") || low.contains("authentication failure") || low.contains("permission denied") {
+    if !low.contains("new password") || low.contains("incorrect") || low.contains("authentication failure") {
         return Err(tr("the current password is not right").to_owned());
+    }
+    // pam_unix's words when the new one is the current one.
+    if low.contains("password unchanged") || low.contains("has not been changed") {
+        return Err(tr("the new password is the one you have").to_owned());
     }
     if let Some(bad) = out.lines().map(str::trim).find(|l| l.to_uppercase().contains("BAD PASSWORD")) {
         let bad = bad.trim_start_matches("BAD PASSWORD:").trim();
@@ -216,7 +305,12 @@ fn passwd(current: &str, new: &str) -> Result<(), String> {
         .map(|l| l.trim().trim_start_matches("passwd:").trim())
         .rfind(|l| {
             let low = l.to_lowercase();
-            !l.is_empty() && !low.ends_with("password:") && !low.ends_with("password: ") && !low.starts_with("changing password")
+            !l.is_empty()
+                && !low.ends_with("password:")
+                && !low.ends_with("password: ")
+                && !low.starts_with("changing password")
+                && low != "permission denied"
+                && low != "authentication token manipulation error"
         })
         .unwrap_or("")
         .to_owned();
@@ -235,6 +329,14 @@ pub(crate) fn run_on_tty(program: &str, args: &[&str], answers: &[(&str, &str)],
     let r = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) };
     if r != 0 {
         return Err(tr("no terminal could be made").to_owned());
+    }
+    // Neither may reach another program: an app the dock starts meanwhile
+    // (a fork on another thread) would hold the terminal the password is
+    // written to. `passwd`'s own 0/1/2 are dup2'd copies, open for it.
+    // SAFETY: fcntl on the two descriptors openpty just gave us.
+    unsafe {
+        libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
     }
     // SAFETY: both are fresh descriptors openpty gave us.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
@@ -362,6 +464,7 @@ fn enroll() {
         );
         info!("account: enroll ended: {}", ok.as_deref().unwrap_or("(nothing said)").trim());
         ENROLLING.store(false, std::sync::atomic::Ordering::Relaxed);
+        fingers_stale();
         crate::controls::read_again("Your account");
     });
     if spawned.is_err() {
@@ -372,6 +475,21 @@ fn enroll() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Golem's PAM ends every refusal in "Permission denied": whether the
+    /// new password was asked for tells a wrong current one from a new one
+    /// it would not take.
+    #[test]
+    fn a_refusal_says_why() {
+        let wrong = "Changing password for max.\r\nCurrent password: \r\npasswd: Permission denied\r\n";
+        assert_eq!(reason(wrong), Err("the current password is not right".to_owned()));
+        let same = "Current password: \r\nNew password: \r\nRetype new password: \r\nPassword unchanged\r\npasswd: Permission denied\r\n";
+        assert_eq!(reason(same), Err("the new password is the one you have".to_owned()));
+        let weak = "Current password: \r\nNew password: \r\nBAD PASSWORD: it is too simplistic\r\nRetype new password: \r\npasswd: Authentication token manipulation error\r\n";
+        assert_eq!(reason(weak), Err("that one is too weak (it is too simplistic)".to_owned()));
+        let other = "Current password: \r\nNew password: \r\nRetype new password: \r\nSorry, passwords do not match.\r\npasswd: Permission denied\r\n";
+        assert_eq!(reason(other), Err("Sorry, passwords do not match.".to_owned()));
+    }
 
     #[test]
     fn a_program_on_the_terminal_is_answered_at_its_prompt() {
