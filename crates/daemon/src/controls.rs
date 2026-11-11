@@ -118,6 +118,9 @@ pub(crate) struct Group {
     /// by dragging and pick by a click — the group's choices are the
     /// screens' picks, then the picked one's two turning corners.
     pub screens: Vec<ScreenShape>,
+    /// THE EQUALIZER'S CURVE (Controls → Equalizer, `eq_page.rs`): drawn
+    /// and moved by the panel; the group's choices are its bands.
+    pub eq: Option<Box<crate::eq::Curve>>,
 }
 
 /// One screen in the Monitors page's drawing (`monitors_page.rs`): its box
@@ -746,6 +749,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Bluetooth"
             | "Sound output"
             | "Volume"
+            | "Equalizer"
             | "Microphone"
             | "Brightness"
             | "Night light"
@@ -896,7 +900,7 @@ fn group(caption: Option<&'static str>, key: &'static str, width: f32, choices: 
     // are for the English, and another language's words run longer.
     let longest = choices.iter().map(|c| c.text.chars().count()).max().unwrap_or(0) as f32;
     let width = width.max(longest * LETTER + 2.0 * PILL_AIR).min(WIDEST_PILL);
-    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, spacer: false, hug: false, labelled: false, screens: Vec::new() }
+    Group { caption: caption.map(|c| tr(c).to_owned()), key, width, choices, tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, spacer: false, hug: false, labelled: false, screens: Vec::new(), eq: None }
 }
 
 /// [`group`], for the pages built in their own modules.
@@ -921,7 +925,7 @@ const WIDEST_PILL: f32 = 260.0;
 
 /// A line of text.
 fn line(text: String) -> Group {
-    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, spacer: false, hug: false, labelled: false, screens: Vec::new() }
+    Group { caption: Some(text), key: "", width: 0.0, choices: Vec::new(), tiles: false, slider: false, beside: false, cells: 0, field: false, main: false, buttons: false, row: false, split: false, mark: None, centred: false, grid_rows: None, spacer: false, hug: false, labelled: false, screens: Vec::new(), eq: None }
 }
 
 /// A slider's stops, and where the palette AS MADE sits on it.
@@ -2503,6 +2507,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Startup apps" => crate::startup_page::view(&mut view, ui),
         "Your account" => crate::account_page::view(&mut view),
         "VPN" => crate::vpn_page::view(&mut view),
+        "Equalizer" => crate::eq_page::view(&mut view),
         "Natural scrolling" => {
             let on = GolemSettings::load().natural_scroll.unwrap_or(true);
             view.subtitle = tr(if on {
@@ -2982,7 +2987,8 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             || crate::idle_page::apply(k, value)
             || crate::startup_page::apply(k, value)
             || crate::account_page::apply(k, value)
-            || crate::vpn_page::apply(k, value) => {}
+            || crate::vpn_page::apply(k, value)
+            || crate::eq_page::apply(k, value) => {}
         _ => debug!("controls: nothing sets {key:?}"),
     }
     Applied::Done

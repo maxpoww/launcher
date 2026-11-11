@@ -57,6 +57,8 @@ mod display;
 mod dragging;
 mod drives;
 mod emoji;
+mod eq;
+mod eq_page;
 mod emoji_table;
 mod emoji_words;
 mod filer;
@@ -8979,13 +8981,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                         }
                         // (A press on a screen of the Monitors page takes it in the hand.)
                         if let Some(p) = app.pointer_pos.filter(|_| app.control_panel) {
-                            app.panel.screen_press(p);
+                            // (…or a band of the equalizer's curve.)
+                            if !app.panel.eq_press(p) {
+                                app.panel.screen_press(p);
+                            }
                         }
                     }
                     WEnum::Value(wl_pointer::ButtonState::Released) => {
                         let slide_from = app.gesture.press_pos.filter(|&f| app.control_panel && app.panel.on_slider(f));
                         app.gesture.press_pos = None;
-                        if app.term_release() {
+                        if let Some(end) = app.panel.eq_release() {
+                            // (A press on the equalizer's curve: wherever it is let go.)
+                            app.eq_end(end);
+                        } else if app.term_release() {
                             // (The terminal's pick of text, let go: copied.)
                         } else if app.box_drag.is_some() {
                             app.drop_box_drag();

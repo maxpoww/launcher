@@ -108,6 +108,8 @@ const CTL_MONITOR: &str = r#"<rect x="1.8" y="3" width="12.4" height="8.2" rx="1
 const CTL_SCALE: &str = r#"<path d="M2.2 9.8v4h4M13.8 6.2v-4h-4M2.2 13.8l4.4-4.4M13.8 2.2 9.4 6.6"/>"#;
 const CTL_WIFI: &str = r##"<path d="M1.8 6.3a9.3 9.3 0 0 1 12.4 0M4.1 8.7a5.9 5.9 0 0 1 7.8 0M6.3 11.1a2.6 2.6 0 0 1 3.4 0"/><circle cx="8" cy="13.3" r=".7" fill="#fff" stroke="none"/>"##;
 const CTL_SOUND: &str = r#"<path d="M2.4 6.2v3.6h2.6l3.4 3V3.2L5 6.2z"/><path d="M11 6.2a2.6 2.6 0 0 1 0 3.6"/>"#;
+// The Equalizer (2026-11-11): three faders, their knobs at three heights.
+const CTL_EQ: &str = r#"<path d="M4 2.4v5M4 10.6v3M8 2.4v1.4M8 7v6.6M12 2.4v4.2M12 9.8v3.8M2.5 9h3M6.5 5.4h3M10.5 8.2h3"/>"#;
 const CTL_VOLUME: &str = r#"<path d="M1.8 6.2v3.6h2.4l3 3V3.2l-3 3z"/><path d="M9.6 6.2a2.6 2.6 0 0 1 0 3.6M11.8 4.4a5.2 5.2 0 0 1 0 7.2"/>"#;
 const CTL_BRIGHTNESS: &str = r#"<circle cx="8" cy="8" r="2.8"/><path d="M8 1.6v1.7M8 12.7v1.7M1.6 8h1.7M12.7 8h1.7M3.5 3.5l1.2 1.2M11.3 11.3l1.2 1.2M3.5 12.5l1.2-1.2M11.3 4.7l1.2-1.2"/>"#;
 const CTL_BLUETOOTH: &str = r#"<path d="M4.4 4.8 11.4 11l-3.4 3V2l3.4 3-7 6.2"/>"#;
@@ -179,6 +181,7 @@ const SYMBOLS: &[(&str, Symbol)] = &[
     ("ctl-brightness", Symbol::Lines(CTL_BRIGHTNESS)),
     ("ctl-bluetooth", Symbol::Lines(CTL_BLUETOOTH)),
     ("ctl-volume", Symbol::Lines(CTL_VOLUME)),
+    ("ctl-eq", Symbol::Lines(CTL_EQ)),
     ("ctl-wallpaper", Symbol::Glyph("pic")),
     ("ctl-night", Symbol::Lines(CTL_NIGHT)),
     ("ctl-tiles", Symbol::Glyph("grid")),

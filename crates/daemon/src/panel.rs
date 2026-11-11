@@ -56,7 +56,7 @@ type Item = (&'static str, u8, &'static str);
 /// The settings in the order they stand on the grid — kin beside kin: how
 /// Golem looks, the screen and the sound, the connections, power, the
 /// owner's security, the keys and the system. Fixed: use moves nothing.
-const SETTINGS: [Item; 38] = [
+const SETTINGS: [Item; 39] = [
     // (name, kin, search keywords: what else people call it or look for
     // it by).
     // How Golem looks.
@@ -77,6 +77,8 @@ const SETTINGS: [Item; 38] = [
     ("Night light", 1, "display screen warm blue light sunset eyes night automatic schedule"),
     ("Sound output", 1, "audio speakers speaker headphones output"),
     ("Volume", 1, "audio sound loud quiet mute apps mixer per app"),
+    // THE EQUALIZER (2026-11-11, `eq.rs`): each output's curve, the studio way.
+    ("Equalizer", 1, "audio sound equalizer eq bass treble mids tone presets voice music films speakers headphones curve frequency"),
     ("Microphone", 1, "audio input mic recording sound"),
     // The connections.
     ("Wi-Fi", 2, "wifi wireless network internet connection hotspot share airplane ip address dns wired ethernet"),
@@ -379,6 +381,11 @@ const MARGIN: f32 = 22.0;
 /// how near (field px) a screen's side comes before it sticks to another's.
 const SCREENS_H: f32 = 210.0;
 const SCREENS_MIN_H: f32 = 110.0;
+/// THE EQUALIZER'S DRAWING (Controls → Equalizer): its height; a band's
+/// point on it, and how near a press takes one.
+const EQ_H: f32 = 190.0;
+const EQ_POINT: f32 = 18.0;
+const EQ_GRAB: f32 = 16.0;
 const CORNER: f32 = 22.0;
 const STICK: f32 = 10.0;
 /// The field's largest size (px at bar scale 1): the size it had on Max's
@@ -424,6 +431,7 @@ fn symbol_of(label: &str) -> &'static str {
         "Brightness" => "ctl-brightness",
         "Bluetooth" => "ctl-bluetooth",
         "Volume" => "ctl-volume",
+        "Equalizer" => "ctl-eq",
         "Wallpaper" => "ctl-wallpaper",
         "Night light" => "ctl-night",
         "Tiles" => "ctl-tiles",
@@ -752,6 +760,10 @@ enum Style {
     Screen { rot: u16, bar: bool, dock: bool, held: bool },
     /// One of the picked screen's two turning corners (`back`: the other way).
     Corner { back: bool },
+    /// A BAND'S POINT on the equalizer's curve: a small round with its
+    /// number, filled when it is the band picked (`dim`: the equalizer is
+    /// off).
+    EqPoint { dim: bool },
 }
 
 /// Where the Monitors page's drawing puts the screens: a logical pixel is
@@ -761,6 +773,28 @@ pub(crate) struct ScreenView {
     k: f32,
     ox: f32,
     oy: f32,
+}
+
+/// A press on the equalizer's drawing (`Panel::eq_press`): the band in the
+/// hand, if the press was on one, and whether it has moved yet.
+#[derive(Clone, Debug)]
+pub(crate) struct EqDrag {
+    group: u8,
+    index: Option<usize>,
+    from: (f32, f32),
+    plot: Rect,
+    moved: bool,
+}
+
+/// How a press on the equalizer's drawing ended (`Panel::eq_release`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum EqEnd {
+    /// A band was moved: the curve as the hand left it, to keep.
+    Moved(Box<crate::eq::Curve>),
+    /// A click on a band's point: it is picked (its group, its place).
+    Point(u8, u8),
+    /// A click on the drawing between the points: nothing.
+    Plot,
 }
 
 /// A screen of the drawing in the hand (`Panel::screen_press`).
@@ -930,6 +964,11 @@ struct OpenContent {
     lines: Vec<Rect>,
     /// The Monitors page's drawing: its group and where it put the screens.
     screens_view: Option<(u8, ScreenView)>,
+    /// Thin marks in the ink at their own strength (the equalizer's grid,
+    /// its factory dots and its curve).
+    marks: Vec<(Rect, f32)>,
+    /// The equalizer's drawing: its group and its plot (field coordinates).
+    eq_view: Option<(u8, Rect)>,
 }
 
 /// The pill that became the whole card.
@@ -1159,6 +1198,8 @@ pub(crate) struct Panel {
     knob: Option<Knob>,
     /// A screen of the Monitors page's drawing in the hand.
     screen_drag: Option<ScreenDrag>,
+    /// A press on the equalizer's drawing (a band's point in the hand).
+    eq_drag: Option<EqDrag>,
     /// How tall the drawing is laid out (design px; 0: `SCREENS_H`): less
     /// in a box too short for the whole page (`open_content`).
     screens_h: std::cell::Cell<f32>,
@@ -2283,6 +2324,198 @@ impl Panel {
         Some((picked, x, y))
     }
 
+    /// THE EQUALIZER'S CURVE (Controls → Equalizer, `eq_page.rs`): a plot of
+    /// 20 Hz–20 kHz (logarithmic) by ±12 dB, its grid in hairlines, the
+    /// model's factory tuning dotted under it, the owner's curve as one line,
+    /// a numbered point a band (moved by the hand: `eq_press`…), and the band
+    /// picked in words under it.
+    fn flow_eq(&self, out: &mut OpenContent, y: f32, group: u8, c: &crate::eq::Curve) -> f32 {
+        use crate::eq::{self, Kind, G_MAX};
+        let s = self.scale;
+        let fw = self.key.0;
+        let plot = Rect::new(2.0 * MARGIN * s, y + 4.0 * s, (fw - 4.0 * MARGIN * s).max(1.0), EQ_H * s);
+        out.eq_view = Some((group, plot));
+        let pad = 12.0 * s;
+        let y_of = |db: f64| plot.y + plot.h / 2.0 - (db as f32 / G_MAX) * (plot.h / 2.0 - pad);
+        let x_of = |f: f32| plot.x + eq::x_of(f) * plot.w;
+        let t = (1.0 * s).max(1.0);
+        for (f, word) in [(50.0, "50"), (100.0, "100"), (200.0, "200"), (500.0, "500"), (1000.0, "1k"), (2000.0, "2k"), (5000.0, "5k"), (10_000.0, "10k")] {
+            let x = x_of(f);
+            out.marks.push((Rect::new(x - t / 2.0, plot.y, t, plot.h), 0.07));
+            out.texts.push(Text { text: word.to_owned(), x, y: plot.y + plot.h + 3.0 * s, px: 10.0, alpha: 0.4, centered: true });
+        }
+        for db in [-12.0_f64, -6.0, 0.0, 6.0, 12.0] {
+            let yy = y_of(db);
+            out.marks.push((Rect::new(plot.x, yy - t / 2.0, plot.w, t), if db == 0.0 { 0.2 } else { 0.06 }));
+            if db != 0.0 {
+                out.texts.push(Text { text: format!("{}{}", if db > 0.0 { "+" } else { "−" }, db.abs()), x: plot.x + 3.0 * s, y: yy - 14.0 * s, px: 9.5, alpha: 0.35, centered: false });
+            }
+        }
+        let at = |x: f32| eq::f_at((x - plot.x) / plot.w);
+        // The model's own tuning, dotted.
+        if !c.factory.is_empty() {
+            let step = 5.0 * s;
+            let mut x = plot.x;
+            while x <= plot.x + plot.w {
+                let yy = y_of(c.factory.db_at(at(x))).clamp(plot.y, plot.y + plot.h);
+                out.marks.push((Rect::new(x - s, yy - s, 2.0 * s, 2.0 * s), 0.35));
+                x += step;
+            }
+        }
+        // The owner's curve: one line of short pieces (faint while off).
+        let a = if c.eq.on { 0.95 } else { 0.25 };
+        let step = 1.5 * s;
+        let th = 1.6 * s;
+        let n = (plot.w / step).ceil() as usize;
+        let mut prev: Option<(f32, f32)> = None;
+        for i in 0..=n {
+            let x = (plot.x + i as f32 * step).min(plot.x + plot.w);
+            let yy = y_of(c.eq.db_at(at(x))).clamp(plot.y, plot.y + plot.h);
+            if let Some((px, py)) = prev {
+                let (y0, y1) = (py.min(yy), py.max(yy));
+                out.marks.push((Rect::new(px, y0 - th / 2.0, (x - px).max(t), y1 - y0 + th), a));
+            }
+            prev = Some((x, yy));
+        }
+        // The bands' points.
+        let d = EQ_POINT * s;
+        for (i, b) in c.eq.bands.iter().enumerate() {
+            let db = if b.t == Kind::Cut { c.eq.db_at(b.f) } else { f64::from(b.g) };
+            let (x, yy) = (x_of(b.f), y_of(db).clamp(plot.y, plot.y + plot.h));
+            out.chips.push(Chip {
+                rect: Rect::new(x - d / 2.0, yy - d / 2.0, d, d),
+                text: (i + 1).to_string(),
+                on: i == c.sel,
+                action: PanelAction::Pick { group, index: i as u8 },
+                image: None,
+                swatch: Vec::new(),
+                seg: false,
+                palette: false,
+                cell: false,
+                icon: None,
+                hint: None,
+                style: Style::EqPoint { dim: !c.eq.on },
+            });
+        }
+        // The band picked, in words.
+        let mut y = plot.y + plot.h + 22.0 * s;
+        if let Some(b) = c.eq.bands.get(c.sel) {
+            let level = if b.t == Kind::Cut { String::new() } else { format!(" · {}", eq::db_text(b.g)) };
+            let words = format!("{} · {} · {}{} · Q {:.1}", c.sel + 1, tr(b.t.word()), eq::hz_text(b.f), level, b.q);
+            out.texts.push(Text { text: words, x: fw / 2.0, y, px: 12.5, alpha: 0.75, centered: true });
+            y += 20.0 * s;
+        }
+        y + GROUP_GAP * s
+    }
+
+    /// A press at `pos` on the equalizer's drawing: the band whose point is
+    /// under it (or nearest, within `EQ_GRAB`) is taken in the hand. True
+    /// when the press was on the drawing at all.
+    pub(crate) fn eq_press(&mut self, pos: (f32, f32)) -> bool {
+        self.eq_drag = None;
+        let Some(label) = self.open_control_label() else { return false };
+        let Some(content) = self.open_content(label) else { return false };
+        let Some((group, plot)) = content.eq_view else { return false };
+        let f = self.field;
+        let plot = Rect::new(f.x + plot.x, f.y + plot.y, plot.w, plot.h);
+        let grab = EQ_GRAB * self.scale;
+        let near = content
+            .chips
+            .iter()
+            .filter(|c| matches!(c.style, Style::EqPoint { .. }))
+            .filter_map(|c| {
+                let PanelAction::Pick { index, .. } = c.action else { return None };
+                let (cx, cy) = (f.x + c.rect.x + c.rect.w / 2.0, f.y + c.rect.y + c.rect.h / 2.0);
+                let d = (cx - pos.0).hypot(cy - pos.1);
+                (d <= grab).then_some((d, usize::from(index)))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, i)| i);
+        let grown = Rect::new(plot.x - grab, plot.y - grab, plot.w + 2.0 * grab, plot.h + 2.0 * grab);
+        if near.is_none() && !grown.contains(pos) {
+            return false;
+        }
+        self.eq_drag = Some(EqDrag { group, index: near, from: pos, plot, moved: false });
+        true
+    }
+
+    /// Whether a press on the equalizer's drawing is held.
+    pub(crate) fn eq_pressed(&self) -> bool {
+        self.eq_drag.is_some()
+    }
+
+    /// The pointer moved with a band in the hand: its point follows —
+    /// sideways its frequency, up and down its level (a low cut only
+    /// sideways) — and the curve as it is now comes back, for the sound to
+    /// follow at once.
+    pub(crate) fn eq_drag_to(&mut self, pos: (f32, f32)) -> Option<crate::eq::Curve> {
+        use crate::eq::{self, Kind, G_MAX};
+        let s = self.scale;
+        let d = self.eq_drag.as_mut()?;
+        let index = d.index?;
+        if !d.moved && (pos.0 - d.from.0).hypot(pos.1 - d.from.1) < 4.0 * s {
+            return None;
+        }
+        d.moved = true;
+        let (group, plot) = (d.group, d.plot);
+        let c = self.control.as_mut()?.groups.get_mut(usize::from(group))?.eq.as_deref_mut()?;
+        let pad = 12.0 * s;
+        let f = eq::f_at((pos.0 - plot.x) / plot.w.max(1.0));
+        let g = ((plot.y + plot.h / 2.0 - pos.1) / (plot.h / 2.0 - pad).max(1.0) * G_MAX).clamp(-G_MAX, G_MAX);
+        let b = c.eq.bands.get_mut(index)?;
+        // (Frequencies in three figures, levels in half dB.)
+        let fig = 10f32.powf(f.log10().floor() - 2.0);
+        b.f = (f / fig).round() * fig;
+        if b.t != Kind::Cut {
+            b.g = (g * 2.0).round() / 2.0;
+        }
+        c.sel = index;
+        c.eq.on = true;
+        c.eq.settle();
+        Some(c.clone())
+    }
+
+    /// The pointer went up after a press on the equalizer's drawing.
+    pub(crate) fn eq_release(&mut self) -> Option<EqEnd> {
+        let d = self.eq_drag.take()?;
+        Some(match (d.index, d.moved) {
+            (Some(_), true) => {
+                let c = self.control.as_ref()?.groups.get(usize::from(d.group))?.eq.as_deref()?;
+                EqEnd::Moved(Box::new(c.clone()))
+            }
+            (Some(i), false) => EqEnd::Point(d.group, i as u8),
+            (None, _) => EqEnd::Plot,
+        })
+    }
+
+    /// The wheel over the equalizer's drawing: the band under the pointer —
+    /// else the one picked — grows wider (down) or narrower (up). The curve
+    /// as it is now comes back; `None`: not over the drawing.
+    pub(crate) fn eq_wheel(&mut self, pos: (f32, f32), value: f64) -> Option<crate::eq::Curve> {
+        use crate::eq::{Q_MAX, Q_MIN, Q_STEP};
+        let label = self.open_control_label()?;
+        let content = self.open_content(label)?;
+        let (group, plot) = content.eq_view?;
+        let f = self.field;
+        let grab = EQ_GRAB * self.scale;
+        if !Rect::new(f.x + plot.x - grab, f.y + plot.y - grab, plot.w + 2.0 * grab, plot.h + 2.0 * grab).contains(pos) {
+            return None;
+        }
+        let under = content.chips.iter().filter(|c| matches!(c.style, Style::EqPoint { .. })).find_map(|c| {
+            let PanelAction::Pick { index, .. } = c.action else { return None };
+            let (cx, cy) = (f.x + c.rect.x + c.rect.w / 2.0, f.y + c.rect.y + c.rect.h / 2.0);
+            ((cx - pos.0).hypot(cy - pos.1) <= grab).then_some(usize::from(index))
+        });
+        let c = self.control.as_mut()?.groups.get_mut(usize::from(group))?.eq.as_deref_mut()?;
+        let i = under.unwrap_or(c.sel);
+        let b = c.eq.bands.get_mut(i)?;
+        // (A notch of the wheel is ~10 units: one step of Q a notch.)
+        b.q = (b.q * Q_STEP.powf(-(value as f32) / 10.0)).clamp(Q_MIN, Q_MAX);
+        c.sel = i;
+        c.eq.settle();
+        Some(c.clone())
+    }
+
     /// What a group laid INLINE on a line takes: a switch (`on`/`off`) as
     /// its name and a small switch, anything else as its choices in small
     /// words (a slider's look pair).
@@ -2784,6 +3017,11 @@ impl Panel {
                 y = self.flow_slider(&mut out, y, gi as u8, g, pair);
                 continue;
             }
+            // THE EQUALIZER'S CURVE.
+            if let Some(c) = g.eq.as_deref() {
+                y = self.flow_eq(&mut out, y, gi as u8, c);
+                continue;
+            }
             // THE SCREENS, DRAWN (the Monitors page).
             if !g.screens.is_empty() {
                 y = self.flow_screens(&mut out, y, gi as u8, g);
@@ -2941,6 +3179,8 @@ impl Panel {
             texts: Vec::new(),
             lines: Vec::new(),
             screens_view: None,
+            marks: Vec::new(),
+            eq_view: None,
         };
         let mut out = blank();
         // A hosted gear page: the title alone here, the page is the engine's
@@ -3064,7 +3304,11 @@ impl Panel {
                 let at = |c: &&Chip| Rect::new(f.x + c.rect.x, f.y + c.rect.y, c.rect.w, c.rect.h).contains(pos);
                 // (A screen's turning corner is over its box: it comes first.)
                 let corner = content.chips.iter().filter(|c| matches!(c.style, Style::Corner { .. })).find(at);
-                corner.or_else(|| content.chips.iter().find(at)).map(|c| Some(c.action))
+                let chip = corner.or_else(|| content.chips.iter().find(at)).map(|c| Some(c.action));
+                // (The equalizer's drawing between its points: no choice, and
+                // not the setting's empty space either.)
+                let on_plot = content.eq_view.is_some_and(|(_, r)| Rect::new(f.x + r.x, f.y + r.y, r.w, r.h).contains(pos));
+                chip.or(on_plot.then_some(None))
             }
             None => content_hit((self.key.0, self.key.1, self.key.2), self.scale, pos, f).then_some(None),
         }
@@ -4245,6 +4489,20 @@ impl Panel {
                             label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - 11.0 * 1.3 * s) / 2.0, (r.w - 8.0 * s).max(1.0), 11.0, ink_c(if chip.on || held { 0.9 } else { 0.65 }));
                         }
                     }
+                    // A BAND'S POINT on the equalizer's curve: the panel's
+                    // ground in a ring of the ink, its number in it; the band
+                    // picked is the ink, its number the ground.
+                    Style::EqPoint { dim } => {
+                        let ground = if paint.bright { [0.96, 0.96, 0.95] } else { [0.12, 0.12, 0.13] };
+                        let lit = chip.on && !dim;
+                        let fill = if lit { ink_c(0.95) } else { [ground[0], ground[1], ground[2], ca] };
+                        rect(out, r.x, r.y, r.w, r.h, r.h / 2.0, fill);
+                        let (mx, my) = map(r.x, r.y);
+                        let edge = if dim { 0.3 } else if keyed { 1.0 } else { 0.85 };
+                        out.rects.push(RectInst { rect: Rect::new(mx, my, r.w * cs, r.h * cs), radius: r.h / 2.0 * cs, color: ink_c(edge), glass: 0.0, border: (1.2 * s * cs).max(1.0) });
+                        let words = if lit { [ground[0], ground[1], ground[2], ca] } else { ink_c(if dim { 0.4 } else { 0.9 }) };
+                        label_in(out, chip.text, r.x + r.w / 2.0, r.y + (r.h - 10.5 * 1.3 * s) / 2.0, r.w, 10.5, words);
+                    }
                     // A TURNING CORNER of the picked screen: a small round
                     // button over its corner, the way it turns on it.
                     Style::Corner { back } => {
@@ -4260,6 +4518,10 @@ impl Panel {
             // The edge two screens touch along while one is in the hand.
             for l in &content.lines {
                 rect(out, l.x, l.y, l.w, l.h, l.w.min(l.h) / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], 0.95 * ca]);
+            }
+            // The equalizer's grid, factory dots and curve.
+            for (m, a) in &content.marks {
+                rect(out, m.x, m.y, m.w, m.h, m.w.min(m.h) / 2.0, [paint.ink[0], paint.ink[1], paint.ink[2], *a]);
             }
             // (A hosted gear page has its own foot: no hint under it.)
             if !self.hosts(self.pills[open.pill].label) {
@@ -4835,6 +5097,14 @@ impl App {
             self.gear_axis(value as f32);
             return;
         }
+        // Over the equalizer's curve: a band wider or narrower, heard at
+        // once and kept.
+        if let Some(c) = self.pointer_pos.and_then(|pos| self.panel.eq_wheel(pos, value)) {
+            crate::eq::live(c.id, &c.eq);
+            self.eq_keep(&c);
+            self.schedule_frame();
+            return;
+        }
         self.panel.wheel(value);
         self.schedule_frame();
     }
@@ -4906,6 +5176,14 @@ impl App {
     /// slider drags its knob.
     pub(crate) fn panel_drag(&mut self, pos: (f32, f32)) {
         let Some(from) = self.gesture.press_pos else { return };
+        // …or a band of the equalizer's curve: the sound follows the hand.
+        if self.panel.eq_pressed() {
+            if let Some(c) = self.panel.eq_drag_to(pos) {
+                crate::eq::live(c.id, &c.eq);
+            }
+            self.schedule_frame();
+            return;
+        }
         // …or a screen of the Monitors page's drawing.
         if self.panel.screen_dragging() {
             self.panel.screen_drag_to(pos);
@@ -4994,6 +5272,25 @@ impl App {
             }
             self.schedule_frame();
         }
+    }
+
+    /// A press on the equalizer's curve ended (`Panel::eq_release`): a band
+    /// moved is kept, a click on a point picks its band.
+    pub(crate) fn eq_end(&mut self, end: EqEnd) {
+        match end {
+            EqEnd::Moved(c) => self.eq_keep(&c),
+            EqEnd::Point(group, index) => self.control_pick(group, index, false),
+            EqEnd::Plot => {}
+        }
+        self.schedule_frame();
+    }
+
+    /// Keep the curve's equalizer for its output (the worker writes it and
+    /// reads the page again).
+    fn eq_keep(&mut self, c: &crate::eq::Curve) {
+        let Ok(json) = serde_json::to_string(&c.eq) else { return };
+        let ui = self.ui_facts();
+        self.controls_send(ControlCommand::Set { label: "Equalizer", key: "eq-set", value: format!("{}\n{json}", c.node), ui });
     }
 
     /// Hand the settings' worker a command, starting it at the first one.
@@ -6305,6 +6602,7 @@ mod tests {
             hug: false,
             labelled: false,
             screens: Vec::new(),
+            eq: None,
         }
     }
 
