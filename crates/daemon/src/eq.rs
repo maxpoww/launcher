@@ -444,7 +444,9 @@ impl Factory {
 /// The tuning Golem lays under the output named `node` whose card's
 /// components are `components` (the speaker sink of a listed model).
 pub(crate) fn factory_for(node: &str, components: &str) -> Factory {
-    let Ok(text) = std::fs::read_to_string("/etc/golem/speaker-tunings.json") else { return Factory::default() };
+    // (`GOLEM_SPEAKER_TUNINGS`: another list, for a test rig.)
+    let path = std::env::var_os("GOLEM_SPEAKER_TUNINGS").map_or_else(|| PathBuf::from("/etc/golem/speaker-tunings.json"), PathBuf::from);
+    let Ok(text) = std::fs::read_to_string(path) else { return Factory::default() };
     factory_in(&text, node, components)
 }
 

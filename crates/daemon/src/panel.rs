@@ -383,7 +383,7 @@ const SCREENS_H: f32 = 210.0;
 const SCREENS_MIN_H: f32 = 110.0;
 /// THE EQUALIZER'S DRAWING (Controls → Equalizer): its height; a band's
 /// point on it, and how near a press takes one.
-const EQ_H: f32 = 190.0;
+const EQ_H: f32 = 150.0;
 const EQ_POINT: f32 = 18.0;
 const EQ_GRAB: f32 = 16.0;
 const CORNER: f32 = 22.0;
@@ -6833,6 +6833,50 @@ mod tests {
         // A press and let go without moving is a click: no move.
         assert!(p.screen_press(from));
         assert_eq!(p.screen_release(), None);
+    }
+
+    #[test]
+    fn the_equalizers_points_move_their_bands_and_the_plot_holds_its_clicks() {
+        use crate::eq::{Curve, Eq, Factory, G_MAX};
+        let curve = Curve { node: "alsa_output.x.HiFi__Speaker__sink".to_owned(), id: 7, eq: Eq::flat(), factory: Factory::default(), sel: 0 };
+        let choices = (0..5).map(|i| plain_choice(&i.to_string(), i == 0)).collect();
+        let g = crate::controls::Group { eq: Some(Box::new(curve)), choices, ..plain_group("eq-curve") };
+        let mut p = colours_open(vec![g], (900.0, 760.0));
+        let c = p.open_content("Colours").unwrap();
+        let points: Vec<Rect> = c.chips.iter().filter(|ch| matches!(ch.style, Style::EqPoint { .. })).map(|ch| ch.rect).collect();
+        assert_eq!(points.len(), 5, "a point a band");
+        let (_, plot) = c.eq_view.expect("the drawing");
+        assert!(points.windows(2).all(|w| w[0].x < w[1].x), "low to high, left to right");
+        let f = p.field;
+        let at = |r: Rect| (f.x + r.x + r.w / 2.0, f.y + r.y + r.h / 2.0);
+        // THE THIRD BAND (a bell at 1.5 kHz) TAKEN UP A QUARTER OF THE PLOT:
+        // its level rises, the frequency stays where the hand left it, and
+        // everything is lowered by the boost first.
+        let from = at(points[2]);
+        assert!(p.eq_press(from));
+        let to = (from.0, from.1 - plot.h / 4.0);
+        let live = p.eq_drag_to(to).expect("it moved");
+        let b = live.eq.bands[2];
+        assert!(b.g > 3.0 && b.g <= G_MAX, "raised: {}", b.g);
+        assert!((b.f - 1500.0).abs() / 1500.0 < 0.02, "same frequency: {}", b.f);
+        assert!(live.eq.pre < -3.0, "lowered first: {}", live.eq.pre);
+        assert_eq!(live.sel, 2);
+        match p.eq_release() {
+            Some(EqEnd::Moved(c)) => assert_eq!(c.eq.bands[2], b),
+            other => panic!("kept as moved: {other:?}"),
+        }
+        // A press and let go on a point is a click: that band is picked.
+        assert!(p.eq_press(at(points[0])));
+        assert_eq!(p.eq_release(), Some(EqEnd::Point(0, 0)));
+        // Between the points: nothing — and the setting does not fold.
+        let empty = (f.x + plot.x + plot.w * 0.5, f.y + plot.y + 6.0);
+        assert!(p.eq_press(empty));
+        assert_eq!(p.eq_release(), Some(EqEnd::Plot));
+        assert_eq!(p.open_hit("Colours", empty), Some(None));
+        // The wheel over a point widens it (down) or narrows it (up).
+        let q = p.eq_wheel(at(points[0]), 10.0).expect("over the drawing").eq.bands[0].q;
+        assert!(q < 0.7, "wider: {q}");
+        assert!(p.eq_wheel((f.x + 2.0, f.y + 2.0), 10.0).is_none(), "not over the drawing");
     }
 
     #[test]

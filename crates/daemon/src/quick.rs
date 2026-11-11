@@ -233,6 +233,7 @@ impl App {
                 word_hit: Hit::None,
                 word_on: false,
                 quiet: muted,
+                middle: false,
             });
             let out = self.brain.as_ref().and_then(|c| c.default_output());
             let picked = held(self.gear.quick.output);
@@ -278,6 +279,7 @@ impl App {
                 word_hit: if auto { quick(QuickHit::BrightAuto) } else { Hit::None },
                 word_on: auto && crate::gear_pages::autobright_on(),
                 quiet: false,
+                middle: false,
             });
         }
         if let Some(muted) = self.quick_mic_muted() {
@@ -399,6 +401,7 @@ impl App {
                 word_hit: Hit::None,
                 word_on: false,
                 quiet: !eq.on,
+                middle: true,
             });
         }
         items.push(Item::Heading { text: tr("Presets").into(), busy: false });
@@ -480,7 +483,7 @@ impl App {
             }
             QuickHit::EqMore => {
                 self.set_stats_box(false);
-                self.open_control("Equalizer");
+                self.show_control("Equalizer");
             }
             QuickHit::BrightAuto => self.sys_click(crate::gear_pages::SysHit::AutoBright),
             QuickHit::Mic => {

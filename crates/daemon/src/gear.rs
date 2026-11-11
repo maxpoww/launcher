@@ -41,6 +41,9 @@ const KV_H: f32 = 30.0;
 const LEVEL_H: f32 = 44.0;
 const LEVEL_GLYPH: f32 = 30.0;
 const LEVEL_WORD_W: f32 = 52.0;
+/// A tone control's word ("Treble −1.5"): one width for the three, so
+/// their tracks and middles line up.
+const LEVEL_TONE_W: f32 = 104.0;
 /// The › of a row with a page of its own.
 const GO_SZ: f32 = 24.0;
 /// "‹ Back"'s air at its ends.
@@ -294,6 +297,9 @@ pub(crate) enum Item {
         word_on: bool,
         /// Drawn quieter (muted: the level is kept, nothing is heard).
         quiet: bool,
+        /// Its rest is the MIDDLE (a tone control: cut to the left, boost to
+        /// the right): the accent runs from there to the knob, a notch marks it.
+        middle: bool,
     },
 }
 
@@ -631,8 +637,8 @@ fn item_zones(item: &Item, r: Rect, s: f32) -> Vec<(Hit, Rect)> {
             z
         }
         Item::Kv { hit: Some(h), .. } => vec![(h.clone(), r)],
-        Item::Level { hit, glyph_hit, word_hit, .. } => {
-            let (g, (x0, x1), word) = level_parts(r, s);
+        Item::Level { hit, glyph_hit, word_hit, middle, .. } => {
+            let (g, (x0, x1), word) = level_parts(r, s, *middle);
             let mut z = Vec::new();
             if *glyph_hit != Hit::None {
                 z.push((glyph_hit.clone(), g));
@@ -732,12 +738,13 @@ fn back_w(s: f32) -> f32 {
 
 /// A level's three parts: its symbol's circle (where a row's tile stands), the
 /// track's run `(x0, x1)`, and the word's place at the right.
-fn level_parts(r: Rect, s: f32) -> (Rect, (f32, f32), Rect) {
+fn level_parts(r: Rect, s: f32, middle: bool) -> (Rect, (f32, f32), Rect) {
     let d = LEVEL_GLYPH * s;
     let cx = r.x + ROW_PAD_X * s + TILE * s / 2.0;
     let g = Rect::new(cx - d / 2.0, r.y + (r.h - d) / 2.0, d, d);
     let wh = CHOICE_PILL_H * s;
-    let word = Rect::new(r.x + r.w - (TRAIL_PAD + LEVEL_WORD_W) * s, r.y + (r.h - wh) / 2.0, LEVEL_WORD_W * s, wh);
+    let ww = if middle { LEVEL_TONE_W } else { LEVEL_WORD_W };
+    let word = Rect::new(r.x + r.w - (TRAIL_PAD + ww) * s, r.y + (r.h - wh) / 2.0, ww * s, wh);
     let x0 = r.x + (ROW_PAD_X + TILE + TILE_GAP) * s;
     let x1 = word.x - 12.0 * s;
     (g, (x0, x1.max(x0 + 1.0)), word)
@@ -2292,8 +2299,8 @@ impl App {
         let lay = self.gear_layout(&view, self.gear_rect());
         let s = self.options_scale();
         view.items.iter().zip(&lay.items).find_map(|(item, r)| match item {
-            Item::Level { hit: h, .. } if h == hit => {
-                let (_, (x0, x1), _) = level_parts(*r, s);
+            Item::Level { hit: h, middle, .. } if h == hit => {
+                let (_, (x0, x1), _) = level_parts(*r, s, *middle);
                 Some(((p.0 - x0) / (x1 - x0)).clamp(0.0, 1.0))
             }
             _ => None,
@@ -2801,8 +2808,9 @@ impl App {
                     word_hit,
                     word_on,
                     quiet,
+                    middle,
                 } => {
-                    let (g, (x0, x1), wr) = level_parts(r, s);
+                    let (g, (x0, x1), wr) = level_parts(r, s, *middle);
                     // The symbol: a button where it does something (mute), a
                     // round wash under the pointer as every icon button.
                     let on_glyph = *glyph_hit != Hit::None && glyph_hit == hit;
@@ -2831,7 +2839,13 @@ impl App {
                         0.0,
                     );
                     let fill = if *quiet { [ink[0], ink[1], ink[2], 0.45] } else { crate::kit::accent() };
-                    pen.rect(scene, Rect::new(x0, cy - line / 2.0, kx - x0, line), line / 2.0, fill, 0.0);
+                    if *middle {
+                        let mx = (x0 + x1) / 2.0;
+                        pen.rect(scene, Rect::new(mx - 0.5 * s, cy - 5.0 * s, s, 10.0 * s), 0.0, [ink[0], ink[1], ink[2], 0.35], 0.0);
+                        pen.rect(scene, Rect::new(mx.min(kx), cy - line / 2.0, (kx - mx).abs(), line), line / 2.0, fill, 0.0);
+                    } else {
+                        pen.rect(scene, Rect::new(x0, cy - line / 2.0, kx - x0, line), line / 2.0, fill, 0.0);
+                    }
                     let k = if over { 14.0 } else { crate::kit::SWITCH_KNOB } * s;
                     let knob = if *quiet { [ink[0], ink[1], ink[2], 0.6] } else { [ink[0], ink[1], ink[2], 0.95] };
                     pen.rect(scene, Rect::new(kx - k / 2.0, cy - k / 2.0, k, k), k / 2.0, knob, 0.0);

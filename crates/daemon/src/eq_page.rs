@@ -1,9 +1,9 @@
 //! Controls → EQUALIZER (2026-11-11; the studio standard: the curve with its
 //! bands — `eq.rs` holds the model, the file and the live sound). The page:
 //! which output (when there are several: each keeps its own), on or off (to
-//! compare), THE CURVE (`Group::eq`, drawn and moved by the panel), the band
-//! picked — its shape and width —, the presets, and what was lowered so
-//! nothing saturates.
+//! compare), THE CURVE (`Group::eq`, drawn and moved by the panel; the wheel
+//! over a point sets its width), the band picked — its shape —, the presets,
+//! and what was lowered so nothing saturates.
 //!
 //! The page is read on the controls worker; a pick runs here too. A band
 //! DRAGGED on the curve changes the sound live from the UI thread
@@ -19,9 +19,6 @@ use crate::i18n::{fill, tr};
 static OUTPUT: Mutex<Option<String>> = Mutex::new(None);
 /// The band picked on the curve.
 static BAND: Mutex<usize> = Mutex::new(0);
-
-/// A width step of the band's Wider / Narrower.
-const WIDTH_STEP: f32 = 1.3;
 
 /// An output the equalizer can be on.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,8 +113,6 @@ pub(crate) fn view(view: &mut ControlView) {
     if let Some(b) = eq.bands.get(sel) {
         let shapes = Kind::ALL.iter().map(|k| choice_of(tr(k.word()), b.t == *k, k.key())).collect();
         view.groups.push(group_of(None, "eq-type", shapes));
-        let width = vec![choice_of(tr("Wider"), false, "wider"), choice_of(tr("Narrower"), false, "narrower")];
-        view.groups.push(Group { buttons: true, ..group_of(None, "eq-width", width) });
     }
     let presets = eq::PRESETS.iter().map(|(n, _)| choice_of(tr(n), eq.preset() == Some(*n), *n)).collect();
     view.groups.push(group_of(None, "eq-preset", presets));
@@ -174,14 +169,6 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
                     eq.on = true;
                 });
             }
-        }
-        "eq-width" => {
-            let sel = band();
-            change(|eq| {
-                if let Some(b) = eq.bands.get_mut(sel) {
-                    b.q = if value == "wider" { b.q / WIDTH_STEP } else { b.q * WIDTH_STEP };
-                }
-            });
         }
         "eq-preset" => change(|eq| eq.set_preset(value)),
         // A band let go on the curve (or widened by the wheel): the whole
