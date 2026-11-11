@@ -59,6 +59,15 @@ pub(crate) enum QuickHit {
     Output,
     /// An output on that page (wpctl's id).
     OutputPick(u32),
+    /// THE EQUALIZER (2026-11-11, the phones' and TVs' standard): its row
+    /// under the output (its page), on that page its switch, the three tone
+    /// controls (bass, mids, treble — levels), a preset, and the way to the
+    /// whole curve in Controls.
+    Eq,
+    EqOn,
+    EqTone(u8),
+    EqPreset(u8),
+    EqMore,
     Bright,
     BrightAuto,
     Mic,
@@ -72,6 +81,8 @@ pub(crate) enum QuickHit {
 pub(crate) enum Level {
     Volume,
     Bright,
+    /// A tone control of the equalizer's page (0 bass, 1 mids, 2 treble).
+    Tone(u8),
 }
 
 impl Level {
@@ -79,6 +90,7 @@ impl Level {
         Hit::Quick(match self {
             Level::Volume => QuickHit::Volume,
             Level::Bright => QuickHit::Bright,
+            Level::Tone(i) => QuickHit::EqTone(i),
         })
     }
 }
@@ -98,6 +110,13 @@ pub(crate) struct QuickState {
     night_was: Option<u32>,
     /// The output page is up (the machine page's own sub-view).
     pub(crate) output_page: bool,
+    /// The equalizer's page is up (likewise).
+    pub(crate) eq_page: bool,
+    /// The default output's equalizer as the hand set it lately (its node).
+    eq: Option<((String, crate::eq::Eq), Instant)>,
+    /// …and as last read from its file (the row's words; read again a
+    /// second later at most).
+    eq_read: std::cell::RefCell<Option<(String, crate::eq::Eq, Instant)>>,
     worker: Option<Sender<(&'static str, String)>>,
 }
 
@@ -234,6 +253,19 @@ impl App {
                     sel: false,
                 });
             }
+            // The equalizer: what it is set to, its page.
+            if let Some((_, _, eq)) = self.quick_eq() {
+                items.push(Item::Row {
+                    hit: quick(QuickHit::Eq),
+                    more: Some((quick(QuickHit::Eq), crate::gear::G_GO)),
+                    tile: Some(""),
+                    title: tr("Equalizer").to_owned(),
+                    sub: tr(eq.summary()).to_owned(),
+                    tone: Tone::Normal,
+                    trail: Trail::None,
+                    sel: false,
+                });
+            }
         }
         if let Some(level) = self.quick_bright() {
             let auto = crate::gear_pages::autobright_can();
@@ -318,6 +350,98 @@ impl App {
         }
     }
 
+    /// The default output's node name and id, and its equalizer — as the
+    /// hand set it lately, else as kept.
+    fn quick_eq(&self) -> Option<(String, u32, crate::eq::Eq)> {
+        let out = self.brain.as_ref().and_then(|c| c.default_output())?;
+        let (node, id) = (out.name.clone(), out.id);
+        if let Some(((n, eq), _)) = self.gear.quick.eq.as_ref().filter(|(_, at)| at.elapsed() < HOLD) {
+            if *n == node {
+                return Some((node, id, eq.clone()));
+            }
+        }
+        let mut read = self.gear.quick.eq_read.borrow_mut();
+        let fresh = read.as_ref().is_some_and(|(n, _, at)| *n == node && at.elapsed() < Duration::from_secs(1));
+        if !fresh {
+            *read = Some((node.clone(), crate::eq::load(&node), Instant::now()));
+        }
+        read.as_ref().map(|(_, eq, _)| (node, id, eq.clone()))
+    }
+
+    /// THE EQUALIZER'S PAGE: on or off, the three tone controls, the presets
+    /// (the one in use ticked), and the whole curve in Controls.
+    pub(crate) fn quick_eq_view(&self) -> View {
+        let mut items = Vec::new();
+        let Some((_, _, eq)) = self.quick_eq() else {
+            items.push(Item::Empty(tr("Nothing to play sound through").into()));
+            return View { strip: vec![crate::gear::btn(Hit::Back, crate::gear::G_BACK)], items, ..View::default() };
+        };
+        let name = self.brain.as_ref().and_then(|c| c.default_output()).map(|o| o.description.clone()).unwrap_or_default();
+        items.push(Item::Heading { text: name, busy: false });
+        items.push(Item::Row {
+            hit: quick(QuickHit::EqOn),
+            more: None,
+            tile: Some(""),
+            title: tr("Equalizer").to_owned(),
+            sub: tr(eq.summary()).to_owned(),
+            tone: Tone::Normal,
+            trail: Trail::Switch(eq.on),
+            sel: false,
+        });
+        for (i, (g, word)) in eq.tone().into_iter().zip(["Bass", "Mids", "Treble"]).enumerate() {
+            let level = if g.abs() < 0.05 { "0".to_owned() } else { format!("{}{}", if g > 0.0 { "+" } else { "−" }, (g.abs() * 10.0).round() / 10.0) };
+            items.push(Item::Level {
+                hit: quick(QuickHit::EqTone(i as u8)),
+                glyph: "",
+                glyph_hit: Hit::None,
+                value: (g + crate::eq::G_MAX) / (2.0 * crate::eq::G_MAX),
+                word: format!("{} {level}", tr(word)),
+                word_hit: Hit::None,
+                word_on: false,
+                quiet: !eq.on,
+            });
+        }
+        items.push(Item::Heading { text: tr("Presets").into(), busy: false });
+        for (i, (preset, _)) in crate::eq::PRESETS.iter().enumerate() {
+            items.push(Item::Row {
+                hit: quick(QuickHit::EqPreset(i as u8)),
+                more: None,
+                tile: Some(""),
+                title: tr(preset).to_owned(),
+                sub: String::new(),
+                tone: Tone::Normal,
+                trail: if eq.on && eq.preset() == Some(*preset) { Trail::Glyph(G_CHECK) } else { Trail::None },
+                sel: false,
+            });
+        }
+        items.push(Item::Row {
+            hit: quick(QuickHit::EqMore),
+            more: Some((quick(QuickHit::EqMore), crate::gear::G_GO)),
+            tile: Some(""),
+            title: tr("More…").to_owned(),
+            sub: tr("The whole curve, band by band").to_owned(),
+            tone: Tone::Normal,
+            trail: Trail::None,
+            sel: false,
+        });
+        View {
+            strip: vec![crate::gear::btn(Hit::Back, crate::gear::G_BACK)],
+            items,
+            ..View::default()
+        }
+    }
+
+    /// The hand changed the default output's equalizer: shown at once, kept
+    /// and heard through the quick thread (`eq_page::apply`, "eq-quick").
+    fn quick_eq_set(&mut self, f: impl FnOnce(&mut crate::eq::Eq), what: &str, arg: String) {
+        let Some((node, id, mut eq)) = self.quick_eq() else { return };
+        f(&mut eq);
+        eq.settle();
+        self.gear.quick.eq = Some(((node.clone(), eq), Instant::now()));
+        self.quick_send("eq-quick", format!("{node}|{id}|{what}|{arg}"));
+        self.gear_changed();
+    }
+
     // --- what a click does -----------------------------------------------------
 
     pub(crate) fn quick_settings_click(&mut self, hit: QuickHit) {
@@ -338,6 +462,25 @@ impl App {
                 info!("quick settings: sound through {id}");
                 self.gear.quick.output = Some((id, Instant::now()));
                 self.quick_send("sink", id.to_string());
+            }
+            QuickHit::Eq => {
+                self.gear.quick.eq_page = true;
+                self.gear.arm = None;
+                self.gear_show_view();
+            }
+            QuickHit::EqOn => {
+                let on = !self.quick_eq().is_some_and(|(_, _, eq)| eq.on);
+                self.quick_eq_set(|eq| eq.on = on, "on", if on { "on" } else { "off" }.into());
+            }
+            QuickHit::EqTone(i) => self.quick_level_to_ptr(Level::Tone(i)),
+            QuickHit::EqPreset(i) => {
+                if let Some((name, _)) = crate::eq::PRESETS.get(usize::from(i)) {
+                    self.quick_eq_set(|eq| eq.set_preset(name), "preset", (*name).to_owned());
+                }
+            }
+            QuickHit::EqMore => {
+                self.set_stats_box(false);
+                self.open_control("Equalizer");
             }
             QuickHit::BrightAuto => self.sys_click(crate::gear_pages::SysHit::AutoBright),
             QuickHit::Mic => {
@@ -365,7 +508,9 @@ impl App {
 
     /// Back from the output page; whether it was up.
     pub(crate) fn quick_back(&mut self) -> bool {
-        std::mem::take(&mut self.gear.quick.output_page)
+        let output = std::mem::take(&mut self.gear.quick.output_page);
+        let eq = std::mem::take(&mut self.gear.quick.eq_page);
+        output || eq
     }
 
     // --- a level in the hand ---------------------------------------------------
@@ -386,6 +531,12 @@ impl App {
                 self.gear.quick.bright = Some((v, now));
                 self.quick_send("brightness", format!("{:.0}", v * 100.0));
             }
+            // A tone control: −12…+12 dB, in half dB.
+            Level::Tone(i) => {
+                let g = ((v * 2.0 - 1.0) * crate::eq::G_MAX * 2.0).round() / 2.0;
+                self.quick_eq_set(|eq| eq.set_tone(usize::from(i), g), "tone", format!("{i}:{g}"));
+                return;
+            }
         }
         self.gear_changed();
     }
@@ -402,6 +553,7 @@ impl App {
         let level = match self.gear_hit_now() {
             Hit::Quick(QuickHit::Volume) => Level::Volume,
             Hit::Quick(QuickHit::Bright) => Level::Bright,
+            Hit::Quick(QuickHit::EqTone(i)) => Level::Tone(i),
             _ => return false,
         };
         self.gear.quick.drag = Some(level);
@@ -427,6 +579,10 @@ impl App {
         let (level, now) = match self.gear_hit_now() {
             Hit::Quick(QuickHit::Volume | QuickHit::Mute) => (Level::Volume, self.quick_volume().map(|v| v.0)),
             Hit::Quick(QuickHit::Bright | QuickHit::BrightAuto) => (Level::Bright, self.quick_bright()),
+            Hit::Quick(QuickHit::EqTone(i)) => {
+                let g = self.quick_eq().map(|(_, _, eq)| eq.tone()[usize::from(i).min(2)]);
+                (Level::Tone(i), g.map(|g| (g + crate::eq::G_MAX) / (2.0 * crate::eq::G_MAX)))
+            }
             _ => return false,
         };
         let Some(now) = now else { return true };

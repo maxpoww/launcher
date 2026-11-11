@@ -195,11 +195,11 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
                 eq::live(o.id, &eq);
             }
         }
-        // The gear box's tone controls and presets: `node|bass|0..2|dB` or
-        // `node|preset|<name>` on the default output.
+        // The gear box's switch, tone controls and presets on the default
+        // output: `node|id|on|on`, `node|id|tone|1:-2.5`, `node|id|preset|Voice`.
         "eq-quick" => {
-            let mut parts = value.splitn(3, '|');
-            let (Some(node), Some(what), Some(arg)) = (parts.next(), parts.next(), parts.next()) else { return true };
+            let mut parts = value.splitn(4, '|');
+            let (Some(node), Some(id), Some(what), Some(arg)) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return true };
             let mut eq = eq::load(node);
             match what {
                 "preset" => eq.set_preset(arg),
@@ -213,8 +213,8 @@ pub(crate) fn apply(key: &str, value: &str) -> bool {
             }
             eq.settle();
             eq::save(node, &eq);
-            if let Some(o) = outputs().into_iter().find(|o| o.name == node) {
-                eq::live(o.id, &eq);
+            if let Ok(id) = id.parse::<u32>() {
+                eq::live(id, &eq);
             }
         }
         _ => return false,

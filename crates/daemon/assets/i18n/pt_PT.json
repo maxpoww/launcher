@@ -2394,5 +2394,7 @@
  "Bass": "Graves",
  "Mids": "Médios",
  "Treble": "Agudos",
- "audio sound equalizer eq bass treble mids tone presets voice music films speakers headphones curve frequency": "áudio som equalizador eq graves agudos médios tom predefinições voz música filmes altifalantes auscultadores curva frequência"
+ "audio sound equalizer eq bass treble mids tone presets voice music films speakers headphones curve frequency": "áudio som equalizador eq graves agudos médios tom predefinições voz música filmes altifalantes auscultadores curva frequência",
+ "Presets": "Predefinições",
+ "The whole curve, band by band": "A curva inteira, banda a banda"
 }

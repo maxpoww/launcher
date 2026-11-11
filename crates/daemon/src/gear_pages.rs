@@ -702,6 +702,7 @@ impl App {
         let want = sys_page_of(page);
         self.gear.pages.view = PView::List;
         self.gear.quick.output_page = false;
+        self.gear.quick.eq_page = false;
         if want.is_none() && self.gear.pages.sys.is_none() {
             return;
         }
@@ -940,6 +941,7 @@ impl App {
             (PView::Drive(i), _) => self.drive_view(*i),
             (PView::Format(i), _) => self.format_view(*i),
             (PView::Video, _) => self.video_view(),
+            (PView::List, PageKind::Gear) if self.gear.quick.eq_page => self.quick_eq_view(),
             (PView::List, PageKind::Gear) if self.gear.quick.output_page => self.quick_output_view(),
             (PView::List, PageKind::Gear) => self.machine_view(),
             // This computer, as a setting of the control panel's.
