@@ -43,9 +43,13 @@ static TABLE: AtomicPtr<HashMap<String, String>> = AtomicPtr::new(std::ptr::null
 /// `tr` has its Spanish). The others (2026-11-09: the installer's languages) are topped up
 /// in batches — a string not there yet shows in English
 /// (`tools/i18n/README.md`). Portuguese is Brazil's; Portugal's own wording
-/// stands beside it as `pt_PT`, tried first for a `pt_PT` locale.
-const EMBEDDED: [(&str, &str); 6] = [
+/// stands beside it as `pt_PT`, tried first for a `pt_PT` locale. Spanish is
+/// Latin America's ("computadora"); `es_ES` holds only what Spain says
+/// otherwise ("computador", Max 2026-11-11) and is laid over it: a country's
+/// catalogue is always laid over its language's (`load_table`).
+const EMBEDDED: [(&str, &str); 7] = [
     ("es", include_str!("../assets/i18n/es.json")),
+    ("es_ES", include_str!("../assets/i18n/es_ES.json")),
     ("de", include_str!("../assets/i18n/de.json")),
     ("fr", include_str!("../assets/i18n/fr.json")),
     ("it", include_str!("../assets/i18n/it.json")),
@@ -223,26 +227,38 @@ fn load_table() -> HashMap<String, String> {
         set_lang(None);
         return HashMap::new();
     };
-    for tag in tags {
-        let path = crate::persist::data_path(&format!("i18n/{tag}.json"));
-        if let Some(map) = read_file(&path) {
-            info!("i18n: loaded {} strings from {}", map.len(), path.display());
-            set_lang(Some(&tag));
-            return map;
-        }
-        if let Some((_, text)) = EMBEDDED.iter().find(|(t, _)| *t == tag) {
-            match serde_json::from_str::<HashMap<String, String>>(text) {
-                Ok(map) => {
-                    info!("i18n: {} strings of the built-in {tag} catalogue", map.len());
-                    set_lang(Some(&tag));
-                    return map;
-                }
-                Err(e) => warn!("i18n: the built-in {tag} catalogue does not parse: {e}"),
-            }
+    // The language's catalogue first, its country's laid over it (es, then
+    // es_ES): a country's file says only what that country says otherwise.
+    let mut table = HashMap::new();
+    let mut spoken = None;
+    for tag in tags.iter().rev() {
+        if let Some(map) = catalogue(tag) {
+            table.extend(map);
+            spoken = Some(tag.clone());
         }
     }
-    set_lang(None);
-    HashMap::new()
+    set_lang(spoken.as_deref());
+    table
+}
+
+/// One tag's catalogue: a file in the data directory, else the built-in one.
+fn catalogue(tag: &str) -> Option<HashMap<String, String>> {
+    let path = crate::persist::data_path(&format!("i18n/{tag}.json"));
+    if let Some(map) = read_file(&path) {
+        info!("i18n: loaded {} strings from {}", map.len(), path.display());
+        return Some(map);
+    }
+    let (_, text) = EMBEDDED.iter().find(|(t, _)| *t == tag)?;
+    match serde_json::from_str::<HashMap<String, String>>(text) {
+        Ok(map) => {
+            info!("i18n: {} strings of the built-in {tag} catalogue", map.len());
+            Some(map)
+        }
+        Err(e) => {
+            warn!("i18n: the built-in {tag} catalogue does not parse: {e}");
+            None
+        }
+    }
 }
 
 fn set_lang(tag: Option<&str>) {
@@ -272,7 +288,8 @@ pub fn catalogues() -> Vec<String> {
 pub fn language_name(tag: &str) -> String {
     match tag {
         "en" => "English",
-        "es" => "Español",
+        "es" => "Español (Latinoamérica)",
+        "es_ES" => "Español (España)",
         "pt" => "Português (Brasil)",
         "pt_PT" => "Português (Portugal)",
         "fr" => "Français",
@@ -520,6 +537,33 @@ mod tests {
         assert_eq!(locale_tags(Some("pt_PT.UTF-8".into()), None, None), Some(vec!["pt_PT".to_owned(), "pt".to_owned()]));
         assert_eq!(locale_tags(Some("pt_BR.UTF-8".into()), None, None), Some(vec!["pt_BR".to_owned(), "pt".to_owned()]));
         assert_eq!(locale_tags(None, None, Some("fr_FR.UTF-8".into())), Some(vec!["fr_FR".to_owned(), "fr".to_owned()]));
+    }
+
+    /// Latin America says "computadora", Spain "computador" (Max,
+    /// 2026-11-11): Spain's catalogue holds only its own words, each one a
+    /// string Spanish has, and is laid over Spanish.
+    #[test]
+    fn spain_says_computador_over_latin_americas_computadora() {
+        let table = |tag: &str| -> HashMap<String, String> {
+            let (_, text) = EMBEDDED.iter().find(|(t, _)| *t == tag).expect("built in");
+            serde_json::from_str(text).expect("parses")
+        };
+        let (es, spain) = (table("es"), table("es_ES"));
+        for (en, there) in &spain {
+            assert!(es.contains_key(en), "es_ES: {en:?} is not a string Spanish has");
+            assert!(!there.to_lowercase().contains("computadora") || en.contains("computer name"), "es_ES: {en:?} → {there:?}");
+        }
+        for (en, there) in &es {
+            if !en.contains("computer name") {
+                assert!(!there.contains("computador ") && !there.ends_with("computador") && !there.contains("computadores"), "es: {en:?} → {there:?}");
+            }
+        }
+        assert_eq!(es["This computer"], "Esta computadora");
+        assert_eq!(spain["This computer"], "Este computador");
+        let mut laid = es.clone();
+        laid.extend(spain);
+        assert_eq!(laid["This computer"], "Este computador");
+        assert_eq!(laid["Wi-Fi"], es["Wi-Fi"]);
     }
 
     #[test]

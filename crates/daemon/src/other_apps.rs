@@ -87,9 +87,14 @@ pub(crate) fn kind_of(mime: &str) -> Option<String> {
         let Ok(xml) = std::fs::read_to_string(dir.join("mime").join(format!("{mime}.xml"))) else {
             continue;
         };
+        // A country's tag (es_ES), then its language's: shared-mime-info
+        // writes most comments by language alone.
         if let Some(tag) = &lang {
-            if let Some(words) = comment(&xml, Some(tag)) {
-                return Some(words);
+            let base = tag.split('_').next().unwrap_or(tag);
+            for t in [tag.as_str(), base] {
+                if let Some(words) = comment(&xml, Some(t)) {
+                    return Some(words);
+                }
             }
         }
         return comment(&xml, None).map(|w| plural(&w));

@@ -1664,18 +1664,22 @@ pub(crate) fn shell_languages() -> Vec<(String, String)> {
 /// the owner's own country first, then the language's home one.
 pub(crate) fn locale_for(tag: &str, available: &[String], current: &str) -> Option<String> {
     let lang = tag.split('_').next().unwrap_or(tag);
-    // A catalogue of a country's own wording names its country (pt_PT);
-    // plain Portuguese is Brazil's (its catalogue is).
+    // A catalogue of a country's own wording names its country (pt_PT,
+    // es_ES); plain Portuguese is Brazil's (its catalogue is).
     let named = match tag {
         "pt" => "BR",
         _ => tag.split('_').nth(1).unwrap_or_default(),
     };
     let utf8 = |l: &&String| l.to_lowercase().ends_with("utf8") || l.to_lowercase().ends_with("utf-8");
-    let mine: Vec<&String> = available.iter().filter(utf8).filter(|l| l.split('_').next() == Some(lang)).collect();
+    // Plain Spanish is Latin America's: never Spain's locale, whose catalogue
+    // (es_ES) would be laid over it and say "computador".
+    let not_spain = |l: &&String| tag != "es" || l.split(['_', '.']).nth(1) != Some("ES");
+    let mine: Vec<&String> =
+        available.iter().filter(utf8).filter(|l| l.split('_').next() == Some(lang)).filter(not_spain).collect();
     let country = current.split(['_', '.']).nth(1).unwrap_or_default();
     let home = match lang {
         "en" => "US",
-        "es" => "ES",
+        "es" => "MX",
         "pt" => "BR",
         "fr" => "FR",
         "de" => "DE",
@@ -3283,10 +3287,14 @@ mod tests {
     #[test]
     fn a_language_finds_its_locale() {
         let have: Vec<String> =
-            ["C", "en_US.utf8", "es_ES.utf8", "es_BO.utf8", "pt_BR.utf8", "pt_PT.utf8"].iter().map(|s| (*s).to_owned()).collect();
+            ["C", "en_US.utf8", "es_ES.utf8", "es_BO.utf8", "es_MX.utf8", "pt_BR.utf8", "pt_PT.utf8"].iter().map(|s| (*s).to_owned()).collect();
         // The owner's own country first.
         assert_eq!(locale_for("es", &have, "en_BO.UTF-8").as_deref(), Some("es_BO.UTF-8"));
-        assert_eq!(locale_for("es", &have, "en_US.UTF-8").as_deref(), Some("es_ES.UTF-8"));
+        // Plain Spanish is Latin America's (Mexico's at home), never Spain's,
+        // and Spain's wording is Spain's wherever the owner is.
+        assert_eq!(locale_for("es", &have, "en_US.UTF-8").as_deref(), Some("es_MX.UTF-8"));
+        assert_eq!(locale_for("es", &have, "es_ES.UTF-8").as_deref(), Some("es_MX.UTF-8"));
+        assert_eq!(locale_for("es_ES", &have, "es_BO.UTF-8").as_deref(), Some("es_ES.UTF-8"));
         assert_eq!(locale_for("pt", &have, "es_BO.UTF-8").as_deref(), Some("pt_BR.UTF-8"));
         assert_eq!(locale_for("de", &have, "en_US.UTF-8"), None);
         // Portugal's wording is Portugal's, Brazil's Brazil's, wherever the
