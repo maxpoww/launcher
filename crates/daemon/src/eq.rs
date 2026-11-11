@@ -208,7 +208,8 @@ impl Eq {
         for b in &mut self.bands {
             *b = b.clamped();
         }
-        self.pre = -self.peak_db();
+        // (0.0 − x, not −x: a flat curve keeps 0, never −0.)
+        self.pre = 0.0 - self.peak_db();
     }
 
     /// The preset the bands are, if any (the five starting frequencies and

@@ -461,6 +461,25 @@ The big daemon files are cohesive but long — go straight to the function:
   ONE MENU's accent tint, `row_tint`), red only for what cannot be undone (`danger`, the menu's red; asked
   in place on its quiet ground, `danger_tint`), the palette's warning colour for a problem (`warn`).
   Take sizes and signal colours from here; never a colour of a surface's own for these.
+- `eq.rs` + `eq_page.rs` — THE EQUALIZER (Max, 2026-11-10: "quiero el estándar de la industria"; lab
+  https://claude.ai/artifact/Pz4nbBHkVaEFSyg8X7hSMG): one per OUTPUT (node name), two doors — the gear box's
+  Equalizer row under the output (`quick.rs`: its page = the switch, three TONE CONTROLS — bass, mids, treble = the
+  1st, 3rd, 5th bands, `Item::Level { middle: true }` filling from 0 dB —, presets ticked, More… → `show_control`)
+  and Controls → Equalizer (`eq_page.rs`: output words, on/off, THE CURVE — `Group::eq: Curve`, drawn by
+  `Panel::flow_eq`: 20 Hz–20 kHz log × ±12 dB, the model's factory tuning dotted, numbered points; a press takes a
+  point (`eq_press`/`eq_drag_to`/`eq_release` → `EqEnd`, the sound follows the drag through `eq::live`), the wheel
+  over a point sets its width (`eq_wheel`), a click between points folds nothing —, the band's shape, presets,
+  what was lowered). WHERE IT RUNS: inside the output's own node as `audioconvert.filter-graph.1` (over graph 0 =
+  Golem's model tuning, `system/Modular/desktop/speakers`), builtin `bq_*` + `linear` only; `pre` = minus the
+  curve's highest boost (a boost never pushes a peak past what came in). KEPT in WirePlumber's state file
+  `$XDG_STATE_HOME/wireplumber/golem-eq` (`[golem-eq]`, `node=json`), which Golem's `equalizer/eq.lua` reads to put
+  it back when the output appears. LIVE: `eq::live` = a thread keeping the newest wish, `pw-cli set-param <id>
+  Props` — the whole live graph (`live_graph`, every band named) once per node, then controls only (`controls`).
+  Factory curves from `/etc/golem/speaker-tunings.json` (`GOLEM_SPEAKER_TUNINGS` for a rig). Numbers are written
+  without the locale (es_* LC_NUMERIC breaks SPA-JSON and ffmpeg). Rig with sound: an isolated PipeWire +
+  WirePlumber (no ALSA monitor, a file-backed `api.alsa.pcm.sink` named `…HiFi__Speaker__sink` with the 9i's
+  `alsa.components`) and the rig dock started with `PIPEWIRE_RUNTIME_DIR` at it and `XDG_STATE_HOME` beside it:
+  every pick is then MEASURED on the file (a sink's monitor is tapped BEFORE the in-node graph — useless here).
 - `quick.rs` — THE QUICK SETTINGS on the gear box's first page: Sound and screen (the volume — its symbol
   mutes, `Item::Level` — with its output › its page, the brightness with Auto, the microphone) and the
   Modes (night light, dark mode — `palette::colors_dark_all`: every surface's look, the sun stops
