@@ -574,8 +574,9 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
             // (just the glyph, or a miniature if unfurl resolves one). Best-effort
             // and synchronous on this worker thread (the render loop is untouched);
             // the focused window is still the copy source at this instant.
+            // A PRIVATE browser window is never photographed (`snapshot_region`).
             if is_browser_source(class, title) {
-                entry.preview_image = capture_window_snapshot(entry.hash);
+                entry.preview_image = capture_window_snapshot(entry.hash, class, title);
             }
         }
     }
@@ -585,8 +586,21 @@ fn capture(last_hash: &mut Option<u64>) -> Option<ClipEntry> {
 /// Snapshot the focused window to a side file via `grim`, for a link clip's
 /// fallback hero image (used when no og:image is available). Best-effort: `None`
 /// if the geometry is unavailable or `grim` fails / isn't installed.
-fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
-    let (x, y, w, h) = crate::hypr::active_window_geom()?;
+///
+/// Never a private browsing window (Max, 2026-11-12: privacy with no friction):
+/// what is on screen is read in one go and judged by `snapshot_region` before
+/// the picture, and read and judged again after it. Anything that changed in
+/// between (the focus went elsewhere, a private window came over it) and the
+/// picture is thrown away: an unsure case leaves the clip with its glyph.
+fn capture_window_snapshot(hash: u64, class: &str, title: &str) -> Option<PathBuf> {
+    let judge = || {
+        crate::hypr::shown_windows()
+            .and_then(|(focused, shown)| snapshot_region(class, title, &focused, &shown))
+    };
+    let Some((x, y, w, h)) = judge() else {
+        debug!("clip preview: no snapshot (private, covered, or not the copy's window)");
+        return None;
+    };
     let path = crate::persist::data_path(&format!("clipboard-previews/{hash:016x}.png"));
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
@@ -601,8 +615,17 @@ fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
         .arg(&path)
         .status()
     {
-        Ok(s) if s.success() => Some(path),
+        Ok(s) if s.success() => {
+            if judge() == Some((x, y, w, h)) {
+                Some(path)
+            } else {
+                let _ = std::fs::remove_file(&path);
+                debug!("clip preview: the screen changed during the snapshot; dropped");
+                None
+            }
+        }
         Ok(s) => {
+            let _ = std::fs::remove_file(&path);
             warn!("clip preview: grim exited {s}");
             None
         }
@@ -612,6 +635,76 @@ fn capture_window_snapshot(hash: u64) -> Option<PathBuf> {
         }
     }
 }
+
+/// Where the clipboard may photograph the copy's window, judged on ONE read of
+/// what is on screen (`hypr::shown_windows`): the focused window must still be
+/// the one the copy came from (same class and title), a browser's, not private,
+/// with a size, and no private browser window on screen may overlap it (a
+/// floating one over a tiled window would be in the picture). `None` = no
+/// snapshot.
+fn snapshot_region(
+    class: &str,
+    title: &str,
+    focused: &str,
+    shown: &[crate::hypr::ShownWindow],
+) -> Option<(i32, i32, i32, i32)> {
+    let me = shown.iter().find(|s| s.address == focused)?;
+    if me.class != class || me.title != title || me.w <= 0 || me.h <= 0 {
+        return None;
+    }
+    if !is_browser_source(&me.class, &me.title) || is_private_window(&me.class, &me.title) {
+        return None;
+    }
+    let overlaps = |o: &crate::hypr::ShownWindow| {
+        o.x < me.x + me.w && me.x < o.x + o.w && o.y < me.y + me.h && me.y < o.y + o.h
+    };
+    let covered = shown.iter().any(|o| {
+        o.address != me.address
+            && overlaps(o)
+            && is_browser_source(&o.class, &o.title)
+            && is_private_window(&o.class, &o.title)
+    });
+    (!covered).then_some((me.x, me.y, me.w, me.h))
+}
+
+/// Whether a browser window is a PRIVATE one, from what the compositor knows of
+/// it: its title. Seam (Firefox) gives a private window no class or tag of its
+/// own on Wayland; it ends the title with its private browsing words instead,
+/// the brand in them (Seam 160, read from the real build in every language it
+/// ships: "Page — Seam Private Browsing", "… — Seam Navegación privada", "… —
+/// Navigation privée de Seam", "… — Seam Privater Modus", "… — Seam Navigazione
+/// anonima", "… — Seam — navegação privativa", "… — Navegação privada do Seam";
+/// "Mozilla Firefox …" in the first frames, before Seam's own words).
+///
+/// So the TAIL is read (after the title's last " — ", else " - ", else all of
+/// it): a normal window's tail is the browser's name, and any private word in
+/// it (`PRIVATE_WORDS`, stems that survive a rewording) marks the window. What
+/// cannot be told leans to private: a browser window with no title. A web app's
+/// window (`webapp-…`) is never private (Seam opens them only as normal
+/// windows), and its title is the site's own.
+fn is_private_window(class: &str, title: &str) -> bool {
+    if class.to_lowercase().starts_with("webapp-") {
+        return false;
+    }
+    let t = title.trim().to_lowercase();
+    if t.is_empty() {
+        return true;
+    }
+    let tail = t
+        .rsplit_once(" \u{2014} ")
+        .or_else(|| t.rsplit_once(" - "))
+        .map_or(t.as_str(), |(_, tail)| tail);
+    PRIVATE_WORDS.iter().any(|w| tail.contains(w))
+        || OTHER_BROWSERS_PRIVATE.iter().any(|w| t.contains(w))
+}
+
+/// Stems of the private browsing words in the languages Seam ships (en, es,
+/// fr, de, it, pt): private/privater/privativa, privada, privée, anonima;
+/// incognito for the Chromium family. Lowercase.
+const PRIVATE_WORDS: &[&str] = &["privat", "privad", "priv\u{e9}", "anonim", "incognit"];
+
+/// Words other browsers put anywhere in a private window's title. Lowercase.
+const OTHER_BROWSERS_PRIVATE: &[&str] = &["incognito", "inprivate"];
 
 /// Whether a link was copied from a browser window — the only source whose live
 /// snapshot depicts the page (so it makes a useful fallback hero). Matches the
@@ -5395,6 +5488,114 @@ mod tests {
             clean_link_title("Fixes - a retrospective"),
             "Fixes - a retrospective"
         );
+    }
+
+    /// The titles the REAL Seam 160 gives its windows in every language it
+    /// ships, read from the build headless (2026-11-12): a page in a normal
+    /// window, a blank normal window, a page in a private window, a blank
+    /// private window.
+    const SEAM_TITLES: &[(&str, &str, &str, &str, &str)] = &[
+        ("en-US", "Golem test page — Seam", "Seam", "Golem test page — Seam Private Browsing", "Seam Private Browsing"),
+        ("es-MX", "Golem test page — Seam", "Seam", "Golem test page — Seam Navegación privada", "Seam Navegación privada"),
+        ("es-ES", "Golem test page — Seam", "Seam", "Golem test page — Seam Navegación privada", "Seam Navegación privada"),
+        ("fr", "Golem test page — Seam", "Seam", "Golem test page — Navigation privée de Seam", "Navigation privée de Seam"),
+        ("de", "Golem test page — Seam", "Seam", "Golem test page — Seam Privater Modus", "Seam Privater Modus"),
+        ("it", "Golem test page — Seam", "Seam", "Golem test page — Seam Navigazione anonima", "Seam Navigazione anonima"),
+        ("pt-BR", "Golem test page — Seam", "Seam", "Golem test page — Seam — navegação privativa", "Seam — navegação privativa"),
+        ("pt-PT", "Golem test page — Seam", "Seam", "Golem test page — Navegação privada do Seam", "Navegação privada do Seam"),
+    ];
+
+    #[test]
+    fn private_seam_windows_are_told_in_every_language() {
+        for (lang, page, blank, private_page, private_blank) in SEAM_TITLES {
+            assert!(!is_private_window("seam", page), "{lang}: normal page read as private");
+            assert!(!is_private_window("seam", blank), "{lang}: blank normal window read as private");
+            assert!(is_private_window("seam", private_page), "{lang}: private page missed");
+            assert!(is_private_window("seam", private_blank), "{lang}: blank private window missed");
+            // Firefox's own words in the first frames, before Seam's rename.
+            let early = private_page.replace("Seam", "Mozilla Firefox");
+            assert!(is_private_window("seam", &early), "{lang}: {early}");
+            // A page whose own title says "private" in a NORMAL window is normal.
+            let own = format!("Private notes — {page}");
+            assert!(!is_private_window("seam", &own), "{lang}: {own}");
+        }
+    }
+
+    #[test]
+    fn private_rule_leans_closed_and_spares_webapps() {
+        // A browser window that cannot be told: no snapshot.
+        assert!(is_private_window("seam", ""));
+        assert!(is_private_window("seam", "   "));
+        // Other browsers' private windows.
+        assert!(is_private_window("chromium", "New Tab - Chromium (Incognito)"));
+        assert!(is_private_window("firefox", "Docs — Mozilla Firefox Private Browsing"));
+        assert!(is_private_window("microsoft-edge", "InPrivate - Bing - Microsoft Edge"));
+        // A Seam web app's title is the site's own, and the window is never private.
+        assert!(!is_private_window("webapp-whatsapp", "(3) WhatsApp"));
+        assert!(!is_private_window("webapp-slack", "Private chat"));
+        assert!(!is_private_window("webapp-gmail", "Inbox (2) - private@example.com - Gmail"));
+        // Words that only look alike stay normal.
+        assert!(!is_private_window("seam", "Privacy settings — Seam"));
+    }
+
+    fn shown(addr: &str, class: &str, title: &str, rect: (i32, i32, i32, i32)) -> crate::hypr::ShownWindow {
+        crate::hypr::ShownWindow {
+            address: addr.into(),
+            class: class.into(),
+            title: title.into(),
+            x: rect.0,
+            y: rect.1,
+            w: rect.2,
+            h: rect.3,
+        }
+    }
+
+    #[test]
+    fn snapshot_only_of_a_normal_window_nothing_private_over_it() {
+        let page = "Docs — Seam";
+        let left = (0, 0, 960, 1080);
+        let right = (960, 0, 960, 1080);
+        // A normal Seam window, alone: photographed.
+        let s = [shown("0xa", "seam", page, left)];
+        assert_eq!(snapshot_region("seam", page, "0xa", &s), Some(left));
+        // A web app window: photographed.
+        let s = [shown("0xa", "webapp-gmail", "Inbox (2) - Gmail", left)];
+        assert_eq!(snapshot_region("webapp-gmail", "Inbox (2) - Gmail", "0xa", &s), Some(left));
+        // A private Seam window in every language: never.
+        for (lang, _, _, private_page, _) in SEAM_TITLES {
+            let s = [shown("0xa", "seam", private_page, left)];
+            assert_eq!(snapshot_region("seam", private_page, "0xa", &s), None, "{lang}");
+        }
+        // A private window floating over the normal one: never.
+        let over = (300, 200, 600, 400);
+        let s = [
+            shown("0xa", "seam", page, left),
+            shown("0xb", "seam", "Bank — Seam Private Browsing", over),
+        ];
+        assert_eq!(snapshot_region("seam", page, "0xa", &s), None);
+        // A private window beside it, not over it: the normal one is photographed.
+        let s = [
+            shown("0xa", "seam", page, left),
+            shown("0xb", "seam", "Bank — Seam Private Browsing", right),
+        ];
+        assert_eq!(snapshot_region("seam", page, "0xa", &s), Some(left));
+        // A normal window of another app over it changes nothing.
+        let s = [shown("0xa", "seam", page, left), shown("0xc", "foot", "~", over)];
+        assert_eq!(snapshot_region("seam", page, "0xa", &s), Some(left));
+        // The focus moved since the copy (another window, or another title): no picture.
+        let s = [
+            shown("0xa", "seam", page, left),
+            shown("0xb", "seam", "Mail — Seam", right),
+        ];
+        assert_eq!(snapshot_region("seam", page, "0xb", &s), None);
+        let s = [shown("0xa", "seam", "Other — Seam", left)];
+        assert_eq!(snapshot_region("seam", page, "0xa", &s), None);
+        // Not a browser, not on screen, no size: no picture.
+        let s = [shown("0xa", "foot", "~", left)];
+        assert_eq!(snapshot_region("foot", "~", "0xa", &s), None);
+        assert_eq!(snapshot_region("seam", page, "0xa", &[]), None);
+        let s = [shown("0xa", "seam", page, (0, 0, 0, 0))];
+        assert_eq!(snapshot_region("seam", page, "0xa", &s), None);
     }
 
     #[test]

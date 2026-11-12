@@ -64,7 +64,13 @@ hero, plus Title/About rows in the metadata sheet. Hero precedence: **og:image m
   into `preview_image` as a fallback hero (useful for pages with no og:image, e.g.
   Facebook). *A URL copied from a terminal/editor is **not** snapshotted — that would
   just capture an unrelated window — so it shows the glyph until unfurl resolves.* No
-  network.
+  network. *A PRIVATE browser window is never photographed* (2026-11-12,
+  `snapshot_region` + `is_private_window`): Seam gives a private window no class of its
+  own, so its TITLE's tail is read (Seam 160's words in all eight shipped locales are in
+  the tests, read from the real build); a browser window with no title counts as private,
+  a `webapp-*` never does; a private window on screen over the copy's window blocks the
+  picture too; what is on screen is judged before and again after `grim`, and a change
+  in between throws the picture away.
 - **Phase 2 (opt-in, network):** `[options] link_unfurl` (**default false**) spawns
   the `unfurl.rs` worker — shells out to **`curl`**, oEmbed fast-path for YouTube then a
   small OpenGraph/`<title>` scrape, downloads `og:image`; `on_unfurl` folds the clean
@@ -73,7 +79,8 @@ hero, plus Title/About rows in the metadata sheet. Hero precedence: **og:image m
 
 Runtime deps (best-effort, absent → graceful fallback): **`grim`** (P1), **`curl`** (P2).
 Files: `unfurl.rs`, link arms in `clipboard.rs` (`detect_url`, `capture_window_snapshot`,
-`is_browser_source`, `on_unfurl`, `clip_tile`), `hypr::active_window_geom`, flag in `core::config`.
+`is_browser_source`, `is_private_window`, `snapshot_region`, `on_unfurl`, `clip_tile`),
+`hypr::shown_windows`, flag in `core::config`.
 
 ## Clipboard type-to-search
 The open history box **holds the keyboard** (`sync_clip_keyboard` → `set_interactive`,

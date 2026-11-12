@@ -827,6 +827,67 @@ pub fn active_window_geom() -> Option<(i32, i32, i32, i32)> {
     Some((x, y, w, h))
 }
 
+/// A window that can be seen right now, for the clipboard's window snapshot
+/// (`clipboard::snapshot_region`): how it names itself and where it is, in the
+/// logical compositor coordinates `grim -g` expects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShownWindow {
+    pub address: String,
+    pub class: String,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// The focused window's address and every window on screen now: mapped, not
+/// hidden, and on the workspace (or the special workspace) its monitor is
+/// showing, or pinned. One read of each: `j/activewindow`, `j/clients`,
+/// `j/monitors`. `None` when the compositor does not answer or nothing is
+/// focused.
+pub fn shown_windows() -> Option<(String, Vec<ShownWindow>)> {
+    let active = reply_json("j/activewindow")?;
+    let focused = active["address"].as_str()?.to_owned();
+    if focused.is_empty() || focused == "0x0" {
+        return None;
+    }
+    let clients = reply_json("j/clients")?;
+    let monitors = reply_json("j/monitors")?;
+    let showing = |mon: Option<i64>, ws: i64| {
+        monitors.as_array().is_some_and(|ms| {
+            ms.iter().any(|m| {
+                m["id"].as_i64() == mon
+                    && (m["activeWorkspace"]["id"].as_i64() == Some(ws)
+                        || (ws < 0 && m["specialWorkspace"]["id"].as_i64() == Some(ws)))
+            })
+        })
+    };
+    let num = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(0.0).round() as i32;
+    let shown = clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["mapped"].as_bool().unwrap_or(false) && !c["hidden"].as_bool().unwrap_or(false))
+        .filter(|c| {
+            c["pinned"].as_bool().unwrap_or(false)
+                || showing(c["monitor"].as_i64(), c["workspace"]["id"].as_i64().unwrap_or(0))
+        })
+        .filter_map(|c| {
+            Some(ShownWindow {
+                address: c["address"].as_str()?.to_owned(),
+                class: c["class"].as_str().unwrap_or("").to_owned(),
+                title: c["title"].as_str().unwrap_or("").to_owned(),
+                x: num(&c["at"], 0),
+                y: num(&c["at"], 1),
+                w: num(&c["size"], 0),
+                h: num(&c["size"], 1),
+            })
+        })
+        .collect();
+    Some((focused, shown))
+}
+
 /// Inject a modifier+key chord into the currently focused window via this fork's
 /// keystroke dispatcher `hl.dsp.send_shortcut{ mods, key, window }`. Used by the
 /// clipboard OPTION (paste / copy / cut / select-all) so a pill click acts where
