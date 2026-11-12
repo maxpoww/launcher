@@ -1827,6 +1827,12 @@ pub fn monitors_all_json() -> Option<serde_json::Value> {
     serde_json::from_str(&request("j/monitors all").ok()?).ok()
 }
 
+/// `j/<what>` asked now, never the turn's snapshot: for what has just been
+/// changed (the Monitors page's Mirror moves desks between screens).
+pub(crate) fn fresh_json(what: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(&request(&format!("j/{what}")).ok()?).ok()
+}
+
 /// The names of the mice the compositor sees, a touchpad's own mouse face
 /// left out (`…-mouse` beside `…-touchpad` is the same hardware).
 pub(crate) fn mouse_names() -> Vec<String> {

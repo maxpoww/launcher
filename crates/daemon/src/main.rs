@@ -1037,6 +1037,7 @@ fn main() -> anyhow::Result<()> {
         panel_reset_due: false,
         display_pending: None,
         monitors_turn: None,
+        monitors_mirror_desks: Vec::new(),
         display_pointer: None,
         veil: transition::Veil::bind(&globals, &qh, layer_shell),
         screen_kit,
@@ -2400,6 +2401,10 @@ pub struct App {
     display_pending: Option<display::Pending>,
     /// A screen's turn being tried (the Monitors page).
     monitors_turn: Option<monitors_page::TurnTrial>,
+    /// The desk each screen showed as it began to mirror another (its
+    /// connector, the workspace): shown again when it has its own picture
+    /// back (the Monitors page's Mirror).
+    monitors_mirror_desks: Vec<(String, i64)>,
     /// The pointer to put back once a change of scale has landed.
     display_pointer: Option<display::PointerFix>,
     /// What a change of scale is dissolved with, the dissolve in flight, and
@@ -9201,8 +9206,11 @@ impl OutputHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        // A screen that began to mirror another keeps what was on it, drawn
+        // on nothing: the dock and the shell's parts go to the main one.
+        self.off_mirrored_output(&output);
         self.sync_options_zone();
         self.refresh_scaled_geometry();
         // A screen left — the state has to fall back as readily as it rose, or

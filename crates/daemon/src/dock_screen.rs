@@ -635,6 +635,34 @@ impl App {
         self.sync_edges();
     }
 
+    /// Screen `output` went and the compositor CLOSED NOTHING on it: it
+    /// began to mirror another (the Monitors page's Mirror; a mirror is no
+    /// screen of its own, its output goes but what was on it stays, drawn
+    /// on nothing). The dock on it — or on its way there — is made again on
+    /// the main screen, the box it held open included; the shell's parts
+    /// too. Only while the compositor has a mirror: a screen unplugged gets
+    /// its own `closed` (`dock_closed`, `part_closed`).
+    pub(crate) fn off_mirrored_output(&mut self, output: &WlOutput) {
+        let mirroring = crate::hypr::monitors_all_json().is_some_and(|j| {
+            j.as_array().into_iter().flatten().any(|m| m["mirrorOf"].as_str().is_some_and(|of| of != "none"))
+        });
+        if !mirroring {
+            return;
+        }
+        let on_it = self.dock_screens.output.as_ref() == Some(output);
+        let going_there = self.dock_screens.moving.as_ref().is_some_and(|m| m.output.as_ref() == Some(output));
+        if on_it || going_there {
+            warn!("dock: its screen mirrors another now; made again on the main one");
+            if on_it {
+                self.dock_screens.output = None;
+            }
+            let home = self.main_output();
+            let old_gone = self.dock_screens.moving.as_ref().is_some_and(|m| m.old_gone);
+            self.move_dock_to(home, Vec::new(), old_gone);
+        }
+        self.parts_off_mirror(output);
+    }
+
     /// A surface of the dock's was closed by the compositor (its screen
     /// went). True when it was one of them.
     pub(crate) fn dock_closed(&mut self, surface: &WlSurface) -> bool {
@@ -1109,6 +1137,7 @@ mod tests {
             transform: 0,
             mm: (0, 0),
             twin: false,
+            mirror: false,
         }
     }
 

@@ -128,6 +128,9 @@ pub(crate) struct Monitor {
     /// serial: two of one TV, a serial like 0x00000001): it is known by its
     /// connector instead, or the two would share every choice.
     pub twin: bool,
+    /// It shows another screen's picture (the Monitors page's Mirror): no
+    /// screen of its own, nothing of the shell's stands on it.
+    pub mirror: bool,
 }
 
 impl Monitor {
@@ -199,6 +202,7 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
                     m["physicalHeight"].as_u64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
                 ),
                 twin: false,
+                mirror: m["mirrorOf"].as_str().is_some_and(|of| of != "none"),
             })
         })
         .collect();
@@ -273,6 +277,23 @@ pub(crate) fn part_twins(monitors: &[Monitor], mut rename: impl FnMut(&str, &[St
 /// The connected screens, or none when the compositor does not answer.
 pub(crate) fn monitors() -> Vec<Monitor> {
     hypr::monitors_json().map(|json| parse_monitors(&json)).unwrap_or_default()
+}
+
+/// Every screen that is on, those showing another's picture (Mirror) too:
+/// the Monitors page's screens. ([`monitors`] leaves a mirror out — the
+/// compositor does: nothing can be put on it.)
+pub(crate) fn monitors_shown() -> Vec<Monitor> {
+    let Some(json) = hypr::monitors_all_json() else {
+        return Vec::new();
+    };
+    let on: Vec<serde_json::Value> = json
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["disabled"].as_bool() != Some(true))
+        .cloned()
+        .collect();
+    parse_monitors(&serde_json::Value::Array(on))
 }
 
 /// The size, in pixels, of the picture that covers the biggest of these
@@ -600,8 +621,11 @@ impl GolemSettings {
             out.push_str(&line);
             out.push('\n');
         }
+        // MIRROR (the Monitors page): every other screen shows the main one.
+        let mirror_of = self.monitors.mirror_of();
         for (selector, choice) in &self.displays {
-            match monitor_rule(selector, choice) {
+            let mirror = mirror_of.filter(|of| of != selector);
+            match monitor_rule_mirroring(selector, choice, mirror) {
                 Some(rule) => {
                     out.push_str(&rule);
                     out.push('\n');
@@ -881,6 +905,39 @@ fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
     ))
 }
 
+/// [`monitor_rule`] saying which screen it shows (`Some("")`: its own —
+/// a rule given live keeps whatever it does not say, a mirror included).
+fn monitor_rule_mirroring(selector: &str, choice: &DisplayChoice, mirror: Option<&str>) -> Option<String> {
+    let rule = monitor_rule(selector, choice)?;
+    match mirror {
+        None => Some(rule),
+        Some(of) => Some(format!("{}, mirror = {} }})", rule.strip_suffix(" })")?, lua_quote(of))),
+    }
+}
+
+/// MIRROR, ON THE SCREENS: each of `choices` shows screen `of` (`""`: its
+/// own picture again), in one evaluation. Whether the compositor took it.
+pub(crate) fn apply_mirroring(choices: &[(String, DisplayChoice)], of: &str) -> bool {
+    let mut lua = String::new();
+    for (selector, choice) in choices {
+        match monitor_rule_mirroring(selector, choice, Some(of)) {
+            Some(rule) => {
+                lua.push_str(&rule);
+                lua.push(' ');
+            }
+            None => {
+                warn!("display: not a rule: {selector:?} {choice:?}");
+                return false;
+            }
+        }
+    }
+    let ok = !lua.is_empty() && hypr::eval_ok(&lua);
+    if !ok {
+        warn!("display: the compositor refused {lua}");
+    }
+    ok
+}
+
 /// Turn screen `m` off or on (the lid, `monitors_page`). On, it takes its
 /// own rule again (`saved`) — a rule without `disabled = false` leaves it
 /// off (probed in the rig, 2026-10-22).
@@ -1003,7 +1060,9 @@ impl App {
     /// — on the Monitors page, or the Scale and Resolution pages' screens —
     /// else the one in use.
     fn display_target_of(&self, sel: Option<&str>) -> Option<Monitor> {
-        let mut all = monitors();
+        // (A screen named — the Monitors page's — may be a mirror: its
+        // resolution is still its own.)
+        let mut all = if sel.is_some() { monitors_shown() } else { monitors() };
         let picked = GolemSettings::load().monitors.picked;
         let want = sel.map(str::to_owned).or(picked);
         if let Some(i) = want.and_then(|sel| all.iter().position(|m| m.selector() == sel)) {
@@ -1114,6 +1173,12 @@ impl App {
             warn!("display: no screen to scale");
             return;
         };
+        // (A mirror shows another screen's picture fitted to it: a scale
+        // of its own changes nothing on it.)
+        if m.mirror {
+            info!("display: {} mirrors another screen, no scale of its own", m.name);
+            return;
+        }
         let Some(scale) = nearest_clean(m.mode.w, m.mode.h, want) else {
             warn!("display: {}x{} has no clean scale near {want}", m.mode.w, m.mode.h);
             return;
@@ -1674,6 +1739,38 @@ mod tests {
         let lua = store.lua();
         assert!(lua.contains("active_border = { colors = { 'rgba(ffbe98ff)' }, angle = 90 }, inactive_border = 'rgba(2a2e35ff)'"), "{lua}");
         assert!(lua.contains("background_color = 0xff16171a"), "{lua}");
+    }
+
+    #[test]
+    fn mirrored_every_other_screen_shows_the_main_one_and_it_holds() {
+        let laptop = "desc:Lenovo Group Limited 0x8BA2";
+        let tv = "desc:SKYDATA S.P.A. TV MONITOR 0x00000001";
+        let mut store = GolemSettings::default();
+        store.displays.insert(laptop.to_owned(), DisplayChoice { mode: "3200x2000@60.00".into(), scale: 1.6, position: Some("0x0".into()), transform: None });
+        store.displays.insert(tv.to_owned(), DisplayChoice { mode: "1360x768@60.02".into(), scale: 1.0, position: Some("2000x0".into()), transform: None });
+        // Extend: no mirror said.
+        store.monitors.mirrored = Some(laptop.to_owned());
+        assert!(!store.lua().contains("mirror"), "{}", store.lua());
+        // Mirror: the TV's rule shows the laptop, the laptop's its own.
+        store.monitors.screens = Some("mirror".to_owned());
+        let lua = store.lua();
+        assert!(lua.contains(&format!(
+            r#"hl.monitor({{ output = "{tv}", mode = "1360x768@60.02", position = "2000x0", scale = 1, mirror = "{laptop}" }})"#
+        )), "{lua}");
+        assert!(lua.contains(&format!(r#"hl.monitor({{ output = "{laptop}", mode = "3200x2000@60.00", position = "0x0", scale = 1.6 }})"#)), "{lua}");
+        // Taken off live: said, as nothing (a rule given live keeps what it does not say).
+        let rule = monitor_rule_mirroring(tv, &store.displays[tv], Some("")).unwrap();
+        assert!(rule.ends_with(r#", mirror = "" })"#), "{rule}");
+    }
+
+    #[test]
+    fn a_mirror_is_read_as_one() {
+        let json = serde_json::json!([
+            {"name": "eDP-1", "description": "Lenovo Group Limited 0x8BA2", "width": 3200, "height": 2000, "scale": 1.6, "mirrorOf": "none"},
+            {"name": "HDMI-A-1", "description": "SKYDATA S.P.A. TV MONITOR 0x00000001", "width": 1360, "height": 768, "scale": 1.0, "mirrorOf": "0"},
+        ]);
+        let all = parse_monitors(&json);
+        assert_eq!(all.iter().map(|m| m.mirror).collect::<Vec<_>>(), [false, true]);
     }
 
     #[test]

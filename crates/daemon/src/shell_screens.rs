@@ -453,6 +453,23 @@ impl App {
         false
     }
 
+    /// Screen `output` went and the compositor CLOSED NOTHING on it: it
+    /// began to mirror another (the Monitors page's Mirror) — what was on it
+    /// is drawn on nothing now, and no `closed` comes as for one unplugged.
+    /// Every part of the shell on it is made again on the main screen.
+    pub(crate) fn parts_off_mirror(&mut self, output: &WlOutput) {
+        let gone: Vec<Part> = self.shell_screens.on.iter().filter(|(_, o)| *o == output).map(|(p, _)| *p).collect();
+        if gone.is_empty() {
+            return;
+        }
+        let home = self.main_output();
+        for part in gone {
+            info!("{}: its screen mirrors another now; made again on the main one", part.name());
+            self.shell_screens.on.remove(&part);
+            self.remake_part(part, home.clone(), None, false);
+        }
+    }
+
     /// A surface of the shell entered a screen (its first map, or the
     /// compositor moved it): remember where it is.
     pub(crate) fn part_entered(&mut self, surface: &WlSurface, output: &WlOutput) {

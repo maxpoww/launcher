@@ -19,7 +19,17 @@
 //! the arrange work, drag and spin the real monitors"): a drop or a turn
 //! puts every screen where the drawing has it, turned as it has it, in one
 //! go, and saves those places and turns as the screens' own rules
-//! (`DisplayChoice::position`, `transform`), so they come back so.
+//! (`DisplayChoice::position`, `transform`), so they come back so. And
+//! MIRROR (Max, 2026-11-12: "hace mirror funcionar"): every other screen
+//! shows the main one (`App::monitors_screens_apply`; the compositor's own
+//! mirror, kept in the screens' rules as `mirror = <the main one>`), Extend
+//! or Isolated gives each its picture, its place and its desks back
+//! (`monitors_desks_home`). A mirror is no output for the programs: the
+//! page reads the screens with mirrors (`display::monitors_shown`), the
+//! dock and the shell leave a screen that becomes one
+//! (`App::off_mirrored_output`), and a screen that was a mirror from its
+//! connection is turned off and on to be one again (Hyprland 0.55.4 makes
+//! no output of it otherwise).
 //!
 //! THE DRAWING IS IN MILLIMETRES (Max, 2026-10-21: "I'd like an
 //! approximation to the real sizes on the preview"): each screen at the
@@ -74,12 +84,29 @@ pub(crate) struct MonitorsChoice {
     /// A closed lid leaves the built-in ON (the switch off).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub lid_keeps_built_in: bool,
+    /// MIRROR: the screen the others show (its selector) — the main one
+    /// when Mirror was picked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrored: Option<String>,
 }
 
 impl MonitorsChoice {
     pub(crate) fn is_default(&self) -> bool {
         *self == Self::default()
     }
+
+    /// The screen every other one shows, while Mirror is picked.
+    pub(crate) fn mirror_of(&self) -> Option<&str> {
+        self.mirrored.as_deref().filter(|_| self.screens.as_deref() == Some("mirror"))
+    }
+}
+
+/// The main screen among `monitors` (`launcher_prefs::main_screen`), a
+/// mirror never: it stands where the screen it shows is.
+fn main_index(monitors: &[Monitor]) -> Option<usize> {
+    let own: Vec<Monitor> = monitors.iter().filter(|m| !m.mirror).cloned().collect();
+    let name = &own.get(crate::launcher_prefs::main_screen(&own)?)?.name;
+    monitors.iter().position(|m| &m.name == name)
 }
 
 /// A box (in mm in the drawing, in logical px on the screens).
@@ -449,6 +476,8 @@ pub(crate) struct PageScreen {
     pub stops: Vec<f64>,
     /// The one in use (the compositor's focus).
     pub focused: bool,
+    /// It shows another screen (Mirror).
+    pub mirror: bool,
 }
 
 impl PageScreen {
@@ -519,11 +548,12 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
                 sizes,
                 stops,
                 focused: m.focused,
+                mirror: m.mirror,
             }
         })
         .collect();
     if out.iter().any(|s| !choice.places.contains_key(&s.sel)) {
-        let main = crate::launcher_prefs::main_screen(screens).unwrap_or(0);
+        let main = main_index(screens).unwrap_or(0);
         mm_from_logical(&mut out, main);
     }
     out
@@ -626,6 +656,27 @@ fn lid_closed() -> Option<bool> {
     std::fs::read_dir("/proc/acpi/button/lid").ok()?.flatten().find_map(|e| read(&e.path().join("state")))
 }
 
+/// The desk each screen shows now (its connector, the workspace).
+fn shown_desks() -> Vec<(String, i64)> {
+    let Some(json) = crate::hypr::fresh_json("monitors") else {
+        return Vec::new();
+    };
+    json.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m["name"].as_str()?.to_owned(), m["activeWorkspace"]["id"].as_i64()?)))
+        .collect()
+}
+
+/// Whether a rule's screen (`desc:…` or a connector, the compositor's
+/// static selector) names screen `m`.
+fn names_screen(selector: &str, m: &Monitor) -> bool {
+    match selector.strip_prefix("desc:") {
+        Some(desc) => !m.desc.is_empty() && m.desc.starts_with(desc.trim()),
+        None => selector == m.name,
+    }
+}
+
 /// The words of a three-way row, and which value each sends.
 const SCREENS: [(&str, &str); 3] = [("Extend", "extend"), ("Mirror", "mirror"), ("Isolated", "isolated")];
 const WHERE: [(&str, &str); 3] = [("Main screen", "main"), ("Every screen", "every"), ("Follows you", "follows")];
@@ -642,9 +693,11 @@ fn choice(text: impl Into<String>, on: bool, value: impl Into<String>) -> Choice
 /// The page (`controls::read("Monitors")`, on the controls' worker).
 pub(crate) fn view(view: &mut ControlView) {
     let saved = GolemSettings::load().monitors;
-    let monitors = crate::display::monitors();
+    // (Every screen on, a mirror too: it is still there to pick, to set
+    // its resolution, and to be given its own picture back.)
+    let monitors = crate::display::monitors_shown();
     let screens = kept_together(&monitors, &saved);
-    let main_sel = crate::launcher_prefs::main_screen(&monitors).and_then(|i| screens.get(i)).map(|s| s.sel.clone());
+    let main_sel = main_index(&monitors).and_then(|i| screens.get(i)).map(|s| s.sel.clone());
     view.subtitle = tr("How your screens work together.").to_owned();
     let Some(p) = picked(&screens, &saved) else {
         view.subtitle = tr("No screen to set.").to_owned();
@@ -695,7 +748,11 @@ pub(crate) fn view(view: &mut ControlView) {
         .iter()
         .map(|&st| choice(format!("{}%", (st * 100.0).round() as u32), (st - p.scale).abs() < 1e-4, format!("{st}")))
         .collect();
-    view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Scale"), "monitors-scale", stops) });
+    // (A mirror shows the other screen's picture fitted to it: no scale of
+    // its own.)
+    if !p.mirror {
+        view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Scale"), "monitors-scale", stops) });
+    }
     if many {
         view.groups.push(words("Screens", "monitors-screens", &SCREENS, saved.screens.as_deref().unwrap_or("extend")));
         if !mirrored {
@@ -727,7 +784,7 @@ impl App {
         // (the display settings' way: tried and kept, or under a dissolve).
         if key == "monitors-mode" || key == "monitors-scale" {
             let saved = GolemSettings::load().monitors;
-            let screens = page_screens(&monitors, &saved);
+            let screens = page_screens(&crate::display::monitors_shown(), &saved);
             let Some(sel) = picked(&screens, &saved).map(|p| p.sel.clone()) else { return };
             info!("monitors: {key} = {value} on {sel}");
             if key == "monitors-mode" {
@@ -753,6 +810,14 @@ impl App {
         });
         if turning {
             // (One thing tried at a time: a resolution being tried goes back.)
+            if self.display_trial_screen().is_some() {
+                self.revert_display();
+            }
+        }
+        // (Screens changed: a turn or a resolution being tried goes back
+        // first — a turn put back puts the Screens from before it back too.)
+        if key == "monitors-screens" {
+            self.monitors_turn_back();
             if self.display_trial_screen().is_some() {
                 self.revert_display();
             }
@@ -796,6 +861,9 @@ impl App {
         info!("monitors: {key} = {value}");
         if key == "monitors-lid" {
             self.monitors_lid();
+        }
+        if key == "monitors-screens" {
+            self.monitors_screens_apply();
         }
         if arranged {
             self.monitors_arrange();
@@ -908,6 +976,197 @@ impl App {
         }
     }
 
+    /// THE SCREENS TOGETHER, ON THE SCREENS (Max, 2026-11-12: "hace mirror
+    /// funcionar"). MIRROR: every other screen shows the main one's picture
+    /// — the compositor's own mirror: fitted, black bars where the shapes
+    /// differ — and what was on it (its desks and their windows) goes to the
+    /// main one meanwhile, as when it is unplugged. EXTEND or ISOLATED: each
+    /// its own picture again, where the page has it, its desks back on it,
+    /// showing the one it showed. Kept as the screens' own rules
+    /// (`GolemSettings::lua`): it holds at the next start, and a screen
+    /// plugged in while Mirror is picked mirrors too. Does nothing when the
+    /// screens are already so.
+    pub(crate) fn monitors_screens_apply(&mut self) {
+        let shown = crate::display::monitors_shown();
+        let Some(main) = main_index(&shown) else {
+            return;
+        };
+        let saved = GolemSettings::load().monitors;
+        let mirror = saved.screens.as_deref() == Some("mirror");
+        let target = shown[main].selector();
+        // The screens to change: those not showing the main one yet
+        // (Mirror), the mirrors (Extend, Isolated).
+        let changing: Vec<&Monitor> = shown.iter().enumerate().filter(|&(i, m)| i != main && m.mirror != mirror).map(|(_, m)| m).collect();
+        if changing.is_empty() && (!mirror || saved.mirrored.as_deref() == Some(target.as_str())) {
+            return;
+        }
+        // (A screen with no rule of its own yet keeps what it has; one
+        // coming back from a mirror stands where the compositor puts it,
+        // then where the page has it.)
+        let own = |m: &Monitor, placed: bool| crate::display::DisplayChoice {
+            mode: m.mode.rule(),
+            scale: m.scale,
+            position: placed.then(|| format!("{}x{}", m.pos.0.round() as i64, m.pos.1.round() as i64)),
+            transform: (m.transform != 0).then_some(m.transform),
+        };
+        if mirror {
+            let desks = shown_desks();
+            for m in &changing {
+                if let Some(&(_, id)) = desks.iter().find(|(n, _)| *n == m.name) {
+                    self.monitors_mirror_desks.retain(|(n, _)| *n != m.name);
+                    self.monitors_mirror_desks.push((m.name.clone(), id));
+                }
+            }
+            let choices = GolemSettings::change(|g| {
+                let mut choices = Vec::new();
+                for m in &changing {
+                    let sel = m.selector();
+                    let choice = g.displays.get(&sel).cloned().unwrap_or_else(|| own(m, true));
+                    g.displays.insert(sel.clone(), choice.clone());
+                    choices.push((sel, choice));
+                }
+                g.monitors.mirrored = Some(target.clone());
+                g.store();
+                choices
+            });
+            if choices.is_empty() {
+                return;
+            }
+            info!("monitors: {} showing {}", changing.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "), shown[main].name);
+            if !crate::display::apply_mirroring(&choices, &target) {
+                tracing::warn!("monitors: the compositor did not take the mirror");
+            }
+            self.monitors_read_soon(std::time::Duration::from_millis(700));
+            return;
+        }
+        let choices = GolemSettings::change(|g| {
+            let choices: Vec<(String, crate::display::DisplayChoice)> = changing
+                .iter()
+                .map(|m| {
+                    let sel = m.selector();
+                    let choice = g.displays.get(&sel).cloned().unwrap_or_else(|| own(m, false));
+                    (sel, choice)
+                })
+                .collect();
+            if g.monitors.mirrored.take().is_some() {
+                g.store();
+            }
+            choices
+        });
+        if choices.is_empty() {
+            return;
+        }
+        let names: Vec<String> = changing.iter().map(|m| m.name.clone()).collect();
+        info!("monitors: {} on their own again", names.join(", "));
+        // (The keyboard stays where it is.)
+        let keys = crate::hypr::fresh_json("activewindow").and_then(|w| w["address"].as_str().map(str::to_owned)).filter(|a| !a.is_empty());
+        let here = crate::hypr::fresh_json("monitors")
+            .and_then(|j| j.as_array()?.iter().find(|m| m["focused"].as_bool() == Some(true))?["name"].as_str().map(str::to_owned));
+        if !crate::display::apply_mirroring(&choices, "") {
+            tracing::warn!("monitors: the compositor did not take the screens back");
+            return;
+        }
+        // Once the compositor has them back: where the page has them, their
+        // desks on them, the wallpaper on them (no "monitoradded" says so).
+        use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+        use std::time::Duration;
+        let armed = self.loop_handle.insert_source(Timer::from_duration(Duration::from_millis(500)), move |_, _, app: &mut App| {
+            // ⚠ HYPRLAND 0.55.4 (rig, 2026-11-12): a screen that was a
+            // mirror AS IT CONNECTED — its rule said so: every start, every
+            // plug while Mirror is picked — is never made an output for the
+            // programs, not even once it stops mirroring (its listener is
+            // skipped with its output): nothing could be put on it, the
+            // wallpaper, the bar and the dock included. Turned off and on
+            // again, it is one. (Only with another screen on: from no screen
+            // on, a screen turned on crashed this Hyprland.)
+            let blind: Vec<Monitor> = crate::display::monitors().into_iter().filter(|m| names.contains(&m.name) && app.output_named(&m.name).is_none()).collect();
+            let others_on = app.output_state.outputs().next().is_some();
+            if blind.is_empty() || !others_on {
+                app.monitors_arrange();
+                app.monitors_desks_home(&names, keys.as_deref(), here.as_deref());
+                crate::controls::reassert_wallpaper();
+                return TimeoutAction::Drop;
+            }
+            for m in &blind {
+                info!("monitors: {} is not an output for the programs; off and on again", m.name);
+                crate::display::set_screen_on(m, false, None);
+            }
+            let (names, keys, here) = (names.clone(), keys.clone(), here.clone());
+            let armed = app.loop_handle.insert_source(Timer::from_duration(Duration::from_millis(600)), move |_, _, app: &mut App| {
+                let displays = GolemSettings::load().displays;
+                for m in &blind {
+                    crate::display::set_screen_on(m, true, displays.get(&m.selector()));
+                }
+                // (It comes back as a screen plugged in: arranged and given
+                // the wallpaper by that; its desks come home after.)
+                let (names, keys, here) = (names.clone(), keys.clone(), here.clone());
+                let armed = app.loop_handle.insert_source(Timer::from_duration(Duration::from_millis(1200)), move |_, _, app: &mut App| {
+                    app.monitors_desks_home(&names, keys.as_deref(), here.as_deref());
+                    TimeoutAction::Drop
+                });
+                if let Err(e) = armed {
+                    tracing::warn!("monitors: cannot bring the desks home ({e})");
+                }
+                TimeoutAction::Drop
+            });
+            if let Err(e) = armed {
+                tracing::warn!("monitors: cannot turn the screens on again ({e})");
+            }
+            TimeoutAction::Drop
+        });
+        if let Err(e) = armed {
+            tracing::warn!("monitors: cannot put the screens back in place ({e})");
+        }
+    }
+
+    /// The compositor gives a screen that stops mirroring only its first
+    /// desk back: the others stayed on the main screen. Every desk bound to
+    /// screens `names` (the workspace rules: `hyprland.lua`'s SCREENS) goes
+    /// home, and each screen shows the desk it showed before it mirrored;
+    /// the keyboard back on window `keys` (else screen `here`), the pointer
+    /// left where it is.
+    fn monitors_desks_home(&mut self, names: &[String], keys: Option<&str>, here: Option<&str>) {
+        let screens = crate::display::monitors();
+        let rules = crate::hypr::fresh_json("workspacerules").unwrap_or_default();
+        let spaces = crate::hypr::fresh_json("workspaces").unwrap_or_default();
+        let rules = rules.as_array().map(Vec::as_slice).unwrap_or_default();
+        let spaces = spaces.as_array().map(Vec::as_slice).unwrap_or_default();
+        let mut lua = String::new();
+        for name in names {
+            let Some(m) = screens.iter().find(|m| &m.name == name) else {
+                continue;
+            };
+            let bound = |id: i64| {
+                let id = id.to_string();
+                rules.iter().any(|r| r["workspaceString"].as_str() == Some(id.as_str()) && names_screen(r["monitor"].as_str().unwrap_or(""), m))
+            };
+            for w in spaces {
+                let Some(id) = w["id"].as_i64().filter(|&id| id > 0) else {
+                    continue;
+                };
+                if bound(id) && w["monitor"].as_str() != Some(name.as_str()) {
+                    lua.push_str(&format!("hl.dispatch(hl.dsp.workspace.move({{ workspace = \"{id}\", monitor = \"{name}\" }})) "));
+                }
+            }
+            let shown = self.monitors_mirror_desks.iter().position(|(n, _)| n == name).map(|i| self.monitors_mirror_desks.remove(i).1);
+            if let Some(id) = shown.filter(|&id| bound(id)) {
+                lua.push_str(&format!("hl.dispatch(hl.dsp.focus({{ workspace = {id} }})) "));
+            }
+        }
+        if lua.is_empty() {
+            return;
+        }
+        match (keys, here) {
+            (Some(addr), _) => lua.push_str(&format!("hl.dispatch(hl.dsp.focus({{ window = \"address:{addr}\" }})) ")),
+            (None, Some(mon)) => lua.push_str(&format!("hl.dispatch(hl.dsp.focus({{ monitor = \"{mon}\" }})) ")),
+            (None, None) => {}
+        }
+        let lua = format!("hl.config({{ [\"cursor.no_warps\"] = true }}) {lua}hl.config({{ [\"cursor.no_warps\"] = false }})");
+        if !crate::hypr::eval_ok(&lua) {
+            tracing::warn!("monitors: the desks did not go home: {lua}");
+        }
+    }
+
     /// Seconds the turn being tried still has.
     pub(crate) fn monitors_turn_left(&self) -> Option<f32> {
         self.monitors_turn
@@ -1013,6 +1272,8 @@ impl App {
         let armed = self.loop_handle.insert_source(Timer::from_duration(std::time::Duration::from_millis(700)), |_, _, app: &mut App| {
             // (A screen plugged in with the lid shut: the built-in goes off.)
             app.monitors_lid();
+            // (…with Mirror picked, a screen new to its rules mirrors too.)
+            app.monitors_screens_apply();
             app.monitors_keep_arranged();
             TimeoutAction::Drop
         });
@@ -1230,6 +1491,7 @@ mod tests {
             sizes: Vec::new(),
             stops: Vec::new(),
             focused: false,
+            mirror: false,
         }
     }
 
@@ -1358,6 +1620,7 @@ mod tests {
             transform: 0,
             mm: (530, 300),
             twin: false,
+            mirror: false,
         };
         assert_eq!(real_mm(&m, (1920.0, 1080.0)), (530.0, 300.0), "a 24-inch says so");
         let guess = (1920.0 * 25.4 / 96.0, 1080.0 * 25.4 / 96.0);
@@ -1365,6 +1628,37 @@ mod tests {
         assert_eq!(real_mm(&m, (1920.0, 1080.0)), guess);
         m.mm = (16, 9);
         assert_eq!(real_mm(&m, (1920.0, 1080.0)), guess, "an aspect is not a size");
+    }
+
+    #[test]
+    fn a_mirror_is_never_the_main_screen_and_rules_name_screens_as_the_compositor_does() {
+        let screen = |name: &str, desc: &str, pos: (f64, f64), mirror: bool| crate::display::Monitor {
+            name: name.to_owned(),
+            desc: desc.to_owned(),
+            model: String::new(),
+            mode: crate::display::Mode { w: 1920, h: 1080, hz: 60.0 },
+            scale: 1.0,
+            modes: Vec::new(),
+            focused: false,
+            pos,
+            transform: 0,
+            mm: (0, 0),
+            twin: false,
+            mirror,
+        };
+        // Two monitors, no built-in: the mirror stands at the main one's corner.
+        let s = [screen("DP-2", "Dell U2720Q", (0.0, 0.0), true), screen("DP-1", "LG 27UL850", (0.0, 0.0), false)];
+        assert_eq!(main_index(&s), Some(1));
+        assert!(names_screen("desc:LG 27UL850", &s[1]));
+        assert!(names_screen("desc:LG 27UL", &s[1]), "a description's start, as Hyprland's");
+        assert!(names_screen("DP-1", &s[1]));
+        assert!(!names_screen("desc:Dell U2720Q", &s[1]));
+        let blank = screen("HEADLESS-1", "", (0.0, 0.0), false);
+        assert!(!names_screen("desc:", &blank));
+        let mut c = MonitorsChoice { mirrored: Some("desc:LG 27UL850".into()), ..Default::default() };
+        assert_eq!(c.mirror_of(), None, "kept, but Extend");
+        c.screens = Some("mirror".into());
+        assert_eq!(c.mirror_of(), Some("desc:LG 27UL850"));
     }
 
     #[test]
