@@ -167,10 +167,10 @@ fn rule_name(class: &str) -> String {
     format!("golem-place-{tidy}")
 }
 
-/// An app's place as its two rules, one for its Wayland windows and one for
-/// its X11 ones that are not menus or dialogs (`hypr::MATCH_X11_MAIN`: an X11
-/// app's File menu opened at its remembered place, at that size — Max,
-/// 2026-11-13, Android Studio). `place` is monitor-relative `(x, y, w, h)`;
+/// An app's place as its rules: its own windows, never its menus, popups and
+/// dialogs (`hypr::MATCH_OWN`: an X11 app's File menu opened at its remembered
+/// place, at that size — Max, 2026-11-13, Android Studio), plus the X11 twin
+/// `hypr::MATCH_OWN` explains. `place` is monitor-relative `(x, y, w, h)`;
 /// `None` switches both off. The twin's name ends in `:x11`, a character
 /// `rule_name` never makes, so no class's rule can be another's twin.
 fn place_rules(class: &str, place: Option<(f64, f64, f64, f64)>) -> String {
@@ -183,7 +183,7 @@ fn place_rules(class: &str, place: Option<(f64, f64, f64, f64)>) -> String {
     format!(
         "hl.window_rule({{ name = \"{name}\", match = {{ class = \"{regex}\", {} }}, {effect} }}) \
          hl.window_rule({{ name = \"{name}:x11\", match = {{ class = \"{regex}\", {} }}, {effect} }})",
-        hypr::MATCH_WAYLAND,
+        hypr::MATCH_OWN,
         hypr::MATCH_X11_MAIN,
     )
 }
@@ -464,12 +464,12 @@ mod tests {
     #[test]
     fn an_x11_apps_menus_and_dialogs_are_never_placed() {
         let on = place_rules("jetbrains-studio", Some((658.0, 28.0, 530.0, 568.0)));
-        // The Wayland rule, as before, for Wayland windows only…
+        // The app's own windows, X11 or Wayland, never its popups or dialogs…
         assert!(on.contains(
-            "name = \"golem-place-jetbrains-studio\", match = { class = \"^jetbrains-studio$\", xwayland = false }, \
+            "name = \"golem-place-jetbrains-studio\", match = { class = \"^jetbrains-studio$\", float = false }, \
              size = { 530, 568 }, move = \"658 28\", enabled = true"
         ));
-        // …and its twin for the X11 windows Hyprland does not float by itself.
+        // …and the X11 twin (`hypr::MATCH_OWN` says why it stays).
         assert!(on.contains(
             "name = \"golem-place-jetbrains-studio:x11\", match = { class = \"^jetbrains-studio$\", \
              xwayland = true, float = false }, size = { 530, 568 }, move = \"658 28\", enabled = true"

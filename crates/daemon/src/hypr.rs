@@ -3087,14 +3087,21 @@ const FLOAT_RULE_X11: &str = "golem-float-mode-x11";
 /// separate X window, to that place at that size, and its search popups with
 /// it. On Wayland a menu is a popup of its window and no rule reaches it.
 ///
-/// The menus, tooltips, dropdowns and dialogs of an X11 app are the windows
-/// Hyprland floats BY ITSELF (override-redirect, a menu's or a dialog's window
-/// type, transient for another, a fixed size — `shouldBeFloated`), before any
-/// rule is read: at match time they are `float = true`, an app's main window
-/// is not. X11 apps place those windows themselves, so they keep what the app
-/// gave them. Wayland windows match as before. (Rule matches cannot say "not
-/// both", hence two clauses and, for the floating mode, two rules.)
-pub(crate) const MATCH_WAYLAND: &str = "xwayland = false";
+/// The menus, tooltips, dropdowns and dialogs of an app are the windows
+/// Hyprland floats BY ITSELF before any rule is read (`shouldBeFloated`: on
+/// X11 override-redirect, a menu's or a dialog's window type, transient for
+/// another; on Wayland a window with a parent; a fixed size on both): at match
+/// time they are `float = true`, an app's own windows are not. They keep the
+/// size the app gave them. The same day on native Wayland: Android Studio's
+/// "Trust project" dialog and its Recent Files popup are windows with a
+/// parent, and both were stretched to the float size.
+///
+/// `MATCH_OWN` alone says it. The X11 twin is for a compositor that already
+/// holds these rules from the build before (launcher bcbde909, `xwayland =
+/// false` on the main rule): a re-declaration can change a match but never
+/// take one off, so there the main rule still leaves X11 out and the twin
+/// covers it. Everywhere else it doubles the main rule, with the same effects.
+pub(crate) const MATCH_OWN: &str = "float = false";
 pub(crate) const MATCH_X11_MAIN: &str = "xwayland = true, float = false";
 
 /// Turn Golem's floating mode on or off **at the compositor**: a catch-all
@@ -3142,9 +3149,9 @@ pub fn set_float_rule(on: bool) {
     // measured 2026-09-15. The heal on `openwindow` (`heal_floating_map`)
     // catches whatever still slips through.
     //
-    // Two rules, one dispatch: every Wayland window, and an X11 app's own
-    // windows but not its menus and dialogs (`MATCH_X11_MAIN`). The X11 one
-    // floats only what it sizes: what it leaves out is floating already.
+    // Two rules, one dispatch: every app's own windows, not its menus and
+    // dialogs (`MATCH_OWN`), and the X11 twin (`MATCH_X11_MAIN`). They float
+    // only what they size: what they leave out is floating already.
     dispatch_checked(&float_rules_lua(&size, on));
 }
 
@@ -3153,7 +3160,7 @@ fn float_rules_lua(size: &str, on: bool) -> String {
     format!(
         "(function() \
          hl.window_rule({{ name = \"{FLOAT_RULE}\", \
-         match = {{ class = \".*\", {MATCH_WAYLAND} }}, float = true, {size}enabled = {on} }}) \
+         match = {{ class = \".*\", {MATCH_OWN} }}, float = true, {size}enabled = {on} }}) \
          hl.window_rule({{ name = \"{FLOAT_RULE_X11}\", \
          match = {{ class = \".*\", {MATCH_X11_MAIN} }}, float = true, {size}enabled = {on} }}) \
          return hl.dsp.no_op() end)()"
@@ -3292,7 +3299,7 @@ mod tests {
     fn the_floating_mode_leaves_x11_menus_alone() {
         let lua = super::float_rules_lua("size = { 1100, 700 }, center = true, ", true);
         assert!(lua.contains(
-            "name = \"golem-float-mode\", match = { class = \".*\", xwayland = false }, float = true, \
+            "name = \"golem-float-mode\", match = { class = \".*\", float = false }, float = true, \
              size = { 1100, 700 }, center = true, enabled = true"
         ));
         assert!(lua.contains(
