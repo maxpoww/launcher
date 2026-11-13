@@ -2930,7 +2930,13 @@ impl Blocks {
         let mut b = reply_json("j/workspacerules").map(|r| Self::from_rules(&r)).unwrap_or_default();
         if let Some(mons) = reply_json("j/monitors") {
             if let Some(m) = mons.as_array().into_iter().flatten().find(|m| m["focused"].as_bool().unwrap_or(false)) {
-                b.here = b.base_of_screen(m["name"].as_str().unwrap_or(""), m["description"].as_str().unwrap_or(""));
+                // Shared desks (waveview 2.31): a screen can show another
+                // screen's desk, and "here" is the PAGE of the desk on show —
+                // what Super+N and the swipe walk — not the screen's own.
+                b.here = match m["activeWorkspace"]["id"].as_i64() {
+                    Some(ws) if ws >= 1 => b.block_of(ws),
+                    _ => b.base_of_screen(m["name"].as_str().unwrap_or(""), m["description"].as_str().unwrap_or("")),
+                };
             }
         }
         b
