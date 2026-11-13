@@ -129,6 +129,16 @@ while :; do
   CODE=$?
   case $CODE in 0|130|137|143) exit $CODE ;; esac
   [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-1}" ] || exit $CODE
+  # ...and gone is OUR compositor, not "no compositor": on 2026-11-13 Hyprland
+  # crashed and came back within a second under the same socket name, this
+  # loop started the dock again with the dead one's signature in its
+  # environment, and that dock won the race against the new session's own. It
+  # drew, but every question to the compositor went to a dead socket: no dock
+  # on the second screen, no task pill. The new session starts its own wrapper.
+  if [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then
+    OURS="$(head -1 "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr/$HYPRLAND_INSTANCE_SIGNATURE/hyprland.lock" 2>/dev/null)"
+    { [ -n "$OURS" ] && kill -0 "$OURS" 2>/dev/null; } || exit $CODE
+  fi
   cp -f "$LOG" "$LOG.crashed" 2>/dev/null
   echo "waverunner-dev: the daemon ended ($CODE); starting it again in 2 s" >&2
   sleep 2
