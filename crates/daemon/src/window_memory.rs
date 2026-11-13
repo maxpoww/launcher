@@ -81,6 +81,8 @@ struct Seen {
     /// workspace: a spot the next window should not open on.
     corner: Option<(f64, f64)>,
     workspace: i64,
+    /// An X11 client's window: its closing teaches nothing (`remember_window_closed`).
+    x11: bool,
 }
 
 /// Window memory: the places, saved, and what is open now.
@@ -165,6 +167,27 @@ fn rule_name(class: &str) -> String {
     format!("golem-place-{tidy}")
 }
 
+/// An app's place as its two rules, one for its Wayland windows and one for
+/// its X11 ones that are not menus or dialogs (`hypr::MATCH_X11_MAIN`: an X11
+/// app's File menu opened at its remembered place, at that size — Max,
+/// 2026-11-13, Android Studio). `place` is monitor-relative `(x, y, w, h)`;
+/// `None` switches both off. The twin's name ends in `:x11`, a character
+/// `rule_name` never makes, so no class's rule can be another's twin.
+fn place_rules(class: &str, place: Option<(f64, f64, f64, f64)>) -> String {
+    let name = rule_name(class);
+    let regex = class_regex(class);
+    let effect = match place {
+        Some((x, y, w, h)) => format!("size = {{ {w}, {h} }}, move = \"{x} {y}\", enabled = true"),
+        None => "enabled = false".to_owned(),
+    };
+    format!(
+        "hl.window_rule({{ name = \"{name}\", match = {{ class = \"{regex}\", {} }}, {effect} }}) \
+         hl.window_rule({{ name = \"{name}:x11\", match = {{ class = \"{regex}\", {} }}, {effect} }})",
+        hypr::MATCH_WAYLAND,
+        hypr::MATCH_X11_MAIN,
+    )
+}
+
 /// `class` as an anchored regex literal (Hyprland matches classes by regex).
 fn class_regex(class: &str) -> String {
     let mut out = String::from("^");
@@ -245,6 +268,7 @@ impl App {
                     place,
                     corner: on_desk.then_some((here.x, here.y)),
                     workspace: c.workspace,
+                    x11: c.xwayland,
                 },
             );
         }
@@ -310,8 +334,16 @@ impl App {
         // A window hanging on the side (`side.rs`) closed small and parked:
         // what is remembered is its size and place from before it was thrown
         // (Max, 2026-10-14: "it remembers the last size, not this one").
+        //
+        // An X11 app's window teaches its place only when it is PUT
+        // (`remember_window_placed`), never by closing: its menus, popups and
+        // dialogs are windows too, and Hyprland's list does not say which is
+        // which. Studio's place had become a popup's, 530 × 568, and every
+        // window of it was sent there (Max, 2026-11-13). A menu cannot be
+        // dragged.
         let place = match self.side.home_of(addr) {
             Some(home) => Some(home),
+            None if gone.x11 => None,
             None => gone.place,
         };
         if let Some(place) = place {
@@ -324,20 +356,11 @@ impl App {
     /// `taken`, fit to the monitor. No place, no monitor, or tiling: the rule
     /// is switched off.
     fn place_rule_lua(&self, class: &str, mon: Option<&hypr::MonitorInfo>, taken: &[(f64, f64)]) -> String {
-        let name = rule_name(class);
-        let regex = class_regex(class);
-        match (self.window_memory.places.get(class), mon, self.settings.floating) {
-            (Some(&place), Some(mon), true) => {
-                let (x, y, w, h) = fit(place, taken, mon);
-                format!(
-                    "hl.window_rule({{ name = \"{name}\", match = {{ class = \"{regex}\" }}, \
-                     size = {{ {w}, {h} }}, move = \"{x} {y}\", enabled = true }})"
-                )
-            }
-            _ => format!(
-                "hl.window_rule({{ name = \"{name}\", match = {{ class = \"{regex}\" }}, enabled = false }})"
-            ),
-        }
+        let place = match (self.window_memory.places.get(class), mon, self.settings.floating) {
+            (Some(&place), Some(mon), true) => Some(fit(place, taken, mon)),
+            _ => None,
+        };
+        place_rules(class, place)
     }
 
     /// Every app's rule, recomputed against the windows open now, and sent to
@@ -436,5 +459,25 @@ mod tests {
         assert_eq!(class_regex("webapp-youtube"), "^webapp-youtube$");
         assert_eq!(class_regex("org.gnome.Nautilus"), "^org\\\\.gnome\\\\.Nautilus$");
         assert_eq!(rule_name("org.gnome.Nautilus"), "golem-place-org-gnome-Nautilus");
+    }
+
+    #[test]
+    fn an_x11_apps_menus_and_dialogs_are_never_placed() {
+        let on = place_rules("jetbrains-studio", Some((658.0, 28.0, 530.0, 568.0)));
+        // The Wayland rule, as before, for Wayland windows only…
+        assert!(on.contains(
+            "name = \"golem-place-jetbrains-studio\", match = { class = \"^jetbrains-studio$\", xwayland = false }, \
+             size = { 530, 568 }, move = \"658 28\", enabled = true"
+        ));
+        // …and its twin for the X11 windows Hyprland does not float by itself.
+        assert!(on.contains(
+            "name = \"golem-place-jetbrains-studio:x11\", match = { class = \"^jetbrains-studio$\", \
+             xwayland = true, float = false }, size = { 530, 568 }, move = \"658 28\", enabled = true"
+        ));
+        assert_eq!(on.matches("hl.window_rule(").count(), 2);
+        // Off: both off.
+        let off = place_rules("jetbrains-studio", None);
+        assert_eq!(off.matches("enabled = false").count(), 2);
+        assert!(!off.contains("move"));
     }
 }

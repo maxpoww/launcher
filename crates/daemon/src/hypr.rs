@@ -913,6 +913,8 @@ pub struct ClientGeometry {
     pub focus_rank: i64,
     /// The top-left corner of the screen it is on (global logical px).
     pub screen: (f64, f64),
+    /// An X11 client's window, through XWayland.
+    pub xwayland: bool,
 }
 
 /// Every mapped window's geometry (one `j/clients` read).
@@ -962,6 +964,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                 workspace,
                 focus_rank: c["focusHistoryID"].as_i64().unwrap_or(i64::MAX),
                 screen: screen_of(c["monitor"].as_i64()),
+                xwayland: c["xwayland"].as_bool().unwrap_or(false),
                 staged: c["tags"]
                     .as_array()
                     .is_some_and(|t| t.iter().any(|t| t.as_str().is_some_and(|t| t.starts_with("golem-stage")))),
@@ -3071,6 +3074,28 @@ fn zone_state_from(
 /// named rule, re-declared to flip it, because this fork addresses rules by
 /// name and has no "remove".
 const FLOAT_RULE: &str = "golem-float-mode";
+/// Its twin for XWayland windows (`set_float_rule`).
+const FLOAT_RULE_X11: &str = "golem-float-mode-x11";
+
+/// What a rule that SIZES or PLACES windows matches, so it never reaches an
+/// X11 window that places itself (Max, 2026-11-13: "i click on file and it
+/// opens file menu but somewhere else in the screen… and it's not complete",
+/// Android Studio). Hyprland applies `size`, `move` and `center` to EVERY
+/// window as it maps, an X11 menu included (0.55.4's
+/// `CDefaultFloatingAlgorithm::newTarget`, upstream the same): the floating
+/// mode's `center` and an app's remembered place moved Studio's File menu, a
+/// separate X window, to that place at that size, and its search popups with
+/// it. On Wayland a menu is a popup of its window and no rule reaches it.
+///
+/// The menus, tooltips, dropdowns and dialogs of an X11 app are the windows
+/// Hyprland floats BY ITSELF (override-redirect, a menu's or a dialog's window
+/// type, transient for another, a fixed size — `shouldBeFloated`), before any
+/// rule is read: at match time they are `float = true`, an app's main window
+/// is not. X11 apps place those windows themselves, so they keep what the app
+/// gave them. Wayland windows match as before. (Rule matches cannot say "not
+/// both", hence two clauses and, for the floating mode, two rules.)
+pub(crate) const MATCH_WAYLAND: &str = "xwayland = false";
+pub(crate) const MATCH_X11_MAIN: &str = "xwayland = true, float = false";
 
 /// Turn Golem's floating mode on or off **at the compositor**: a catch-all
 /// window rule that floats every window AS IT MAPS.
@@ -3116,11 +3141,23 @@ pub fn set_float_rule(on: bool) {
     // error) every window from then on maps tiled and nothing says why —
     // measured 2026-09-15. The heal on `openwindow` (`heal_floating_map`)
     // catches whatever still slips through.
-    dispatch_checked(&format!(
-        "(function() hl.window_rule({{ name = \"{FLOAT_RULE}\", \
-         match = {{ class = \".*\" }}, float = true, {size}enabled = {on} }}) \
+    //
+    // Two rules, one dispatch: every Wayland window, and an X11 app's own
+    // windows but not its menus and dialogs (`MATCH_X11_MAIN`). The X11 one
+    // floats only what it sizes: what it leaves out is floating already.
+    dispatch_checked(&float_rules_lua(&size, on));
+}
+
+/// The floating mode's two rules as one Lua call (`set_float_rule`).
+fn float_rules_lua(size: &str, on: bool) -> String {
+    format!(
+        "(function() \
+         hl.window_rule({{ name = \"{FLOAT_RULE}\", \
+         match = {{ class = \".*\", {MATCH_WAYLAND} }}, float = true, {size}enabled = {on} }}) \
+         hl.window_rule({{ name = \"{FLOAT_RULE_X11}\", \
+         match = {{ class = \".*\", {MATCH_X11_MAIN} }}, float = true, {size}enabled = {on} }}) \
          return hl.dsp.no_op() end)()"
-    ));
+    )
 }
 
 /// Bring every window that is currently in the wrong state into the mode: all
@@ -3251,6 +3288,21 @@ fn cascade_at(m: &MonitorInfo, size: (i64, i64), i: usize) -> (i64, i64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_floating_mode_leaves_x11_menus_alone() {
+        let lua = super::float_rules_lua("size = { 1100, 700 }, center = true, ", true);
+        assert!(lua.contains(
+            "name = \"golem-float-mode\", match = { class = \".*\", xwayland = false }, float = true, \
+             size = { 1100, 700 }, center = true, enabled = true"
+        ));
+        assert!(lua.contains(
+            "name = \"golem-float-mode-x11\", match = { class = \".*\", xwayland = true, float = false }, \
+             float = true, size = { 1100, 700 }, center = true, enabled = true"
+        ));
+        assert!(lua.ends_with("return hl.dsp.no_op() end)()"));
+        assert_eq!(super::float_rules_lua("", false).matches("enabled = false").count(), 2);
+    }
+
     #[test]
     fn blocks_follow_the_default_rules() {
         let rules = serde_json::json!([
