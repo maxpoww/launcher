@@ -1231,7 +1231,7 @@
  "Lid closed": "Tampa fechada",
  "On battery": "Na bateria",
  "Same": "Igual",
- "The screen follows what is drawn. Some screens flicker with it.": "A tela segue o que é desenhado. Algumas telas piscam com isso.",
+ "Dynamic: the screen follows what is drawn. If it flickers, pick a fixed rate.": "Dinâmica: a tela segue o que é desenhado. Se piscar, escolha uma taxa fixa.",
  "The built-in turns off and everything goes to the other screen.": "A tela integrada desliga e tudo vai para a outra tela.",
  "Move": "Mover",
  "Copy to {stick}": "Copiar para {stick}",

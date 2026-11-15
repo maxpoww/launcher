@@ -1231,7 +1231,7 @@
  "Lid closed": "Capot fermé",
  "On battery": "Sur batterie",
  "Same": "Identique",
- "The screen follows what is drawn. Some screens flicker with it.": "L’écran suit ce qui est dessiné. Certains écrans scintillent avec ce réglage.",
+ "Dynamic: the screen follows what is drawn. If it flickers, pick a fixed rate.": "Dynamique : l’écran suit ce qui est dessiné. S’il scintille, choisissez une fréquence fixe.",
  "The built-in turns off and everything goes to the other screen.": "L'écran intégré s'éteint et tout passe sur l'autre écran.",
  "Move": "Déplacer",
  "Copy to {stick}": "Copier sur {stick}",

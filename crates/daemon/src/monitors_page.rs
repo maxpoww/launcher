@@ -768,11 +768,13 @@ pub(crate) fn view(view: &mut ControlView) {
         let mut rates: Vec<Choice> =
             p.rates.iter().map(|&hz| choice(crate::refresh::hz_text(hz), !dynamic && (hz - plugged).abs() < 0.5, format!("{hz}"))).collect();
         if crate::refresh::can_dynamic(&p.name) {
-            let mut pill = choice(tr("Dynamic"), dynamic, "dynamic");
-            pill.hint = Some(tr("The screen follows what is drawn. Some screens flicker with it.").to_owned());
-            rates.push(pill);
+            rates.push(choice(tr("Dynamic"), dynamic, "dynamic"));
         }
         view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Refresh rate"), "monitors-rate", rates) });
+        // (Said while it is on: a pill's hint is only drawn on a tile.)
+        if dynamic {
+            view.groups.push(crate::controls::line_of(tr("Dynamic: the screen follows what is drawn. If it flickers, pick a fixed rate.").to_owned()));
+        }
         if crate::refresh::has_battery() {
             let lit = match chosen.battery {
                 Some(hz) if hz <= 0.0 => None,
