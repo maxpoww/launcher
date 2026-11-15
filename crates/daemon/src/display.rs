@@ -181,6 +181,13 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
             if !modes.iter().any(|x| x.same(&mode)) {
                 modes.push(mode);
             }
+            // (A rig's headless output lists one mode: rates made up for it.)
+            for hz in crate::refresh::rig_rates() {
+                let made = Mode { hz, ..mode };
+                if !modes.iter().any(|x| x.same(&made)) {
+                    modes.push(made);
+                }
+            }
             // The reply rounds the scale to two places (1.125 reads 1.13):
             // the real one is the clean scale it stands for.
             let reported = m["scale"].as_f64().unwrap_or(1.0);
@@ -625,7 +632,10 @@ impl GolemSettings {
         let mirror_of = self.monitors.mirror_of();
         for (selector, choice) in &self.displays {
             let mirror = mirror_of.filter(|of| of != selector);
-            match monitor_rule_mirroring(selector, choice, mirror) {
+            // (The file's own choices, not the ones on disk: it is being
+            // written from them.)
+            let vrr = crate::refresh::vrr_of(&self.monitors.refresh, selector);
+            match monitor_rule_vrr(selector, choice, vrr).and_then(|rule| with_mirror(rule, mirror)) {
                 Some(rule) => {
                     out.push_str(&rule);
                     out.push('\n');
@@ -882,6 +892,31 @@ fn valid_position(text: &str) -> bool {
 /// starts from the compositor's blank rule (1280×720 at 0,0), not from the
 /// one it overrides.
 fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
+    monitor_rule_vrr(selector, choice, live_vrr(selector))
+}
+
+/// The screen's adaptive sync as its Refresh rate row has it (`refresh.rs`),
+/// for a rule put on the screen now. A rule under a connector (the lid's)
+/// is the screen's all the same.
+fn live_vrr(selector: &str) -> Option<u8> {
+    // (Tests build rules; they do not read the owner's settings.)
+    if cfg!(test) {
+        return None;
+    }
+    let refresh = GolemSettings::load().monitors.refresh;
+    if refresh.is_empty() {
+        return None;
+    }
+    crate::refresh::vrr_of(&refresh, selector).or_else(|| {
+        let m = monitors().into_iter().find(|m| m.name == selector)?;
+        crate::refresh::vrr_of(&refresh, &m.selector())
+    })
+}
+
+/// [`monitor_rule`] with the screen's adaptive sync said (`vrr`: 1 on the
+/// desktop too — Dynamic —, 2 for a fullscreen window only) or left to the
+/// system's default.
+fn monitor_rule_vrr(selector: &str, choice: &DisplayChoice, vrr: Option<u8>) -> Option<String> {
     let mode = Mode::parse(&choice.mode)?;
     let scale = choice.scale;
     if selector.is_empty() || !(SCALE_RANGE.0..=SCALE_RANGE.1).contains(&scale) {
@@ -898,8 +933,13 @@ fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
         Some(_) => return None,
         None => String::new(),
     };
+    let vrr = match vrr {
+        Some(v @ 0..=3) => format!(", vrr = {v}"),
+        Some(_) => return None,
+        None => String::new(),
+    };
     Some(format!(
-        "hl.monitor({{ output = {}, mode = \"{}\", position = \"{position}\", scale = {scale}{transform} }})",
+        "hl.monitor({{ output = {}, mode = \"{}\", position = \"{position}\", scale = {scale}{transform}{vrr} }})",
         lua_quote(selector),
         mode.rule(),
     ))
@@ -908,7 +948,10 @@ fn monitor_rule(selector: &str, choice: &DisplayChoice) -> Option<String> {
 /// [`monitor_rule`] saying which screen it shows (`Some("")`: its own —
 /// a rule given live keeps whatever it does not say, a mirror included).
 fn monitor_rule_mirroring(selector: &str, choice: &DisplayChoice, mirror: Option<&str>) -> Option<String> {
-    let rule = monitor_rule(selector, choice)?;
+    with_mirror(monitor_rule(selector, choice)?, mirror)
+}
+
+fn with_mirror(rule: String, mirror: Option<&str>) -> Option<String> {
     match mirror {
         None => Some(rule),
         Some(of) => Some(format!("{}, mirror = {} }})", rule.strip_suffix(" })")?, lua_quote(of))),
@@ -1360,7 +1403,15 @@ impl App {
             return;
         };
         info!("display: keeping {}", p.wanted.mode);
+        // (Kept on the charger, its rate is the one to come back to after
+        // the battery's — `refresh.rs`.)
+        let plugged = (crate::refresh::source() != Some(false)).then(|| Mode::parse(&p.wanted.mode).map(|m| m.hz)).flatten().filter(|hz| *hz > 0.0);
         GolemSettings::change(|store| {
+            if let Some(hz) = plugged {
+                if let Some(r) = store.monitors.refresh.get_mut(&p.selector) {
+                    r.plugged = Some(hz);
+                }
+            }
             store.displays.insert(p.selector, p.wanted);
             store.save();
         });
@@ -1398,6 +1449,149 @@ impl App {
         // (Read back only: putting the screens side to side would save
         // Golem's defaults as the owner's choice again.)
         self.display_read_back();
+    }
+
+    /// A look at the power supply (often): only a change, or the first
+    /// look, puts the screens at the rate for it (`refresh.rs`).
+    pub(crate) fn refresh_follow(&mut self, on_charger: bool) {
+        // (A rig's source is the one it was told: `debug-desktop "power …"`.)
+        let on_charger = self.refresh_forced.unwrap_or(on_charger);
+        let first = crate::refresh::source().is_none();
+        if crate::refresh::note_source(on_charger) {
+            self.refresh_assert(!first && !on_charger);
+            self.monitors_read_soon(SETTLE);
+        }
+    }
+
+    /// Put every screen at the rate for the power source now. `unplugged`:
+    /// the cable was just pulled, so what is on the screens is the charger's
+    /// rate — kept, to come back to.
+    pub(crate) fn refresh_assert(&mut self, unplugged: bool) {
+        let Some(on_charger) = crate::refresh::source() else {
+            return;
+        };
+        let settings = GolemSettings::load();
+        for m in monitors() {
+            let sel = m.selector();
+            // (One being tried is the owner's hand on it: left alone.)
+            if self.display_pending.as_ref().is_some_and(|p| p.selector == sel) {
+                continue;
+            }
+            let mut rates: Vec<f64> = m.modes.iter().filter(|x| x.same_size(&m.mode)).map(|x| x.hz).collect();
+            rates.sort_by(f64::total_cmp);
+            rates.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+            if rates.len() < 2 {
+                continue;
+            }
+            let mut choice = settings.monitors.refresh.get(&sel).cloned().unwrap_or_default();
+            if !on_charger && (unplugged || choice.plugged.is_none()) {
+                // What to come back to: what is on now (the cable just
+                // pulled), else what was saved, else the panel's top rate.
+                let saved = settings.displays.get(&sel).and_then(|c| Mode::parse(&c.mode)).map(|x| x.hz).filter(|hz| *hz > 0.0);
+                let plugged = if unplugged { Some(m.mode.hz) } else { saved.or(rates.last().copied()) };
+                if plugged != choice.plugged {
+                    choice.plugged = plugged;
+                    let kept = choice.clone();
+                    let key = sel.clone();
+                    GolemSettings::change(|store| {
+                        store.monitors.refresh.insert(key, kept);
+                        store.save();
+                    });
+                }
+            }
+            let Some(hz) = crate::refresh::target(on_charger, &choice, &rates, m.mode.hz) else {
+                continue;
+            };
+            let saved = settings.displays.get(&sel);
+            let rule = DisplayChoice {
+                mode: Mode { hz, ..m.mode }.rule(),
+                scale: m.scale,
+                position: saved.and_then(|c| c.position.clone()).or_else(|| Some(format!("{}x{}", m.pos.0.round() as i64, m.pos.1.round() as i64))),
+                transform: saved.and_then(|c| c.transform),
+            };
+            let source = if on_charger { "the charger" } else { "the battery" };
+            info!("refresh: {} {} -> {} on {source}", m.name, m.mode.rule(), rule.mode);
+            // (Put on, never saved: the saved rule is the charger's.)
+            apply(&sel, &rule);
+        }
+    }
+
+    /// A pick of the Monitors page's Refresh rate row on screen `sel`: a
+    /// rate (fixed), or `dynamic` (the top rate, adaptive sync on the
+    /// desktop too).
+    pub(crate) fn refresh_pick_rate(&mut self, sel: &str, value: &str) {
+        let Some(m) = self.display_target_of(Some(sel)) else {
+            return;
+        };
+        let sel = m.selector();
+        let mut rates: Vec<f64> = m.modes.iter().filter(|x| x.same_size(&m.mode)).map(|x| x.hz).collect();
+        rates.sort_by(f64::total_cmp);
+        let dynamic = value == "dynamic";
+        let want = if dynamic { rates.last().copied() } else { value.parse::<f64>().ok().and_then(|hz| crate::refresh::nearest(&rates, hz)) };
+        let Some(want) = want else {
+            warn!("refresh: {} has no rate {value:?}", m.name);
+            return;
+        };
+        let on_battery = crate::refresh::source() == Some(false);
+        // (One thing tried at a time.)
+        if self.display_pending.is_some() {
+            self.revert_display();
+        }
+        let now = DisplayChoice { mode: m.mode.rule(), scale: m.scale, position: None, transform: None };
+        GolemSettings::change(|store| {
+            let r = store.monitors.refresh.entry(sel.clone()).or_default();
+            r.dynamic = Some(dynamic);
+            // (On the battery the row sets what the charger's will be;
+            // Dynamic's rate is not a trial: it is kept as it is picked.)
+            if on_battery || dynamic {
+                r.plugged = Some(want);
+            }
+            // (The compositor's copy says adaptive sync in the screen's own
+            // rule: one must be there.)
+            let rule = store.displays.entry(sel.clone()).or_insert(now);
+            // (The saved rule is the charger's: on the battery its rate is
+            // the one picked, though the battery's stays on the screen.)
+            if dynamic || on_battery {
+                if let Some(mode) = Mode::parse(&rule.mode) {
+                    rule.mode = Mode { hz: want, ..mode }.rule();
+                }
+            }
+            store.save();
+        });
+        info!("refresh: {} {}", m.name, if dynamic { "dynamic".to_owned() } else { crate::refresh::hz_text(want) });
+        let saved = GolemSettings::load().displays.get(&sel).cloned();
+        let here = |hz: f64| DisplayChoice {
+            mode: Mode { hz, ..m.mode }.rule(),
+            scale: m.scale,
+            position: saved.as_ref().and_then(|c| c.position.clone()),
+            transform: saved.as_ref().and_then(|c| c.transform),
+        };
+        if on_battery || (want - m.mode.hz).abs() < 0.5 {
+            // The rate on the screen stays: only its adaptive sync is said.
+            apply(&sel, &here(m.mode.hz));
+        } else if dynamic {
+            apply(&sel, &here(want));
+        } else {
+            // A fixed rate is tried, as a resolution is.
+            self.set_display_mode_on(Some(&sel), m.mode.w, m.mode.h, Some(want));
+            return;
+        }
+        self.display_changed();
+    }
+
+    /// A pick of the On battery row on screen `sel`: a rate, or `same`.
+    pub(crate) fn refresh_pick_battery(&mut self, sel: &str, value: &str) {
+        let hz = if value == "same" { Some(0.0) } else { value.parse::<f64>().ok().filter(|hz| *hz > 0.0) };
+        let Some(hz) = hz else {
+            return;
+        };
+        info!("refresh: {sel} on the battery: {value}");
+        GolemSettings::change(|store| {
+            store.monitors.refresh.entry(sel.to_owned()).or_default().battery = Some(hz);
+            store.save();
+        });
+        self.refresh_assert(false);
+        self.display_changed();
     }
 
     /// `waverunner-ctl display …`: the settings without the panel (scripts,

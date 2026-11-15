@@ -88,6 +88,10 @@ pub(crate) struct MonitorsChoice {
     /// when Mirror was picked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirrored: Option<String>,
+    /// Each screen's refresh choices, by selector (`refresh.rs`): Dynamic,
+    /// the rate on the battery.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub refresh: crate::refresh::Refresh,
 }
 
 impl MonitorsChoice {
@@ -474,6 +478,10 @@ pub(crate) struct PageScreen {
     pub mm: (f64, f64),
     pub sizes: Vec<(u32, u32)>,
     pub stops: Vec<f64>,
+    /// Its connector, its rate, and the rates of the size in use, ascending.
+    pub name: String,
+    pub hz: f64,
+    pub rates: Vec<f64>,
     /// The one in use (the compositor's focus).
     pub focused: bool,
     /// It shows another screen (Mirror).
@@ -533,7 +541,13 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
                 stops.push(1.0);
             }
             stops.sort_by(f64::total_cmp);
+            let mut rates: Vec<f64> = m.modes.iter().filter(|x| (x.w, x.h) == mode).map(|x| x.hz).collect();
+            rates.sort_by(f64::total_cmp);
+            rates.dedup_by(|a, b| (*a - *b).abs() < 0.5);
             PageScreen {
+                name: m.name.clone(),
+                hz: m.mode.hz,
+                rates,
                 short: if builtin { tr("Built-in").to_owned() } else { m.title() },
                 title: m.title(),
                 sel,
@@ -743,6 +757,34 @@ pub(crate) fn view(view: &mut ControlView) {
         .map(|&(w, h)| choice(format!("{w} × {h}"), (w, h) == p.mode, format!("{w}x{h}")))
         .collect();
     view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Resolution"), "monitors-mode", sizes) });
+    // THE REFRESH RATE (`refresh.rs`): the panel's rates and Dynamic; under
+    // it the rate on the battery.
+    if p.rates.len() > 1 {
+        let chosen = saved.refresh.get(&p.sel).cloned().unwrap_or_default();
+        let on_battery = crate::refresh::source() == Some(false);
+        let dynamic = chosen.dynamic == Some(true);
+        // (On the battery the row shows what the charger's is.)
+        let plugged = if on_battery { chosen.plugged.unwrap_or(p.hz) } else { p.hz };
+        let mut rates: Vec<Choice> =
+            p.rates.iter().map(|&hz| choice(crate::refresh::hz_text(hz), !dynamic && (hz - plugged).abs() < 0.5, format!("{hz}"))).collect();
+        if crate::refresh::can_dynamic(&p.name) {
+            let mut pill = choice(tr("Dynamic"), dynamic, "dynamic");
+            pill.hint = Some(tr("The screen follows what is drawn. Some screens flicker with it.").to_owned());
+            rates.push(pill);
+        }
+        view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Refresh rate"), "monitors-rate", rates) });
+        if crate::refresh::has_battery() {
+            let lit = match chosen.battery {
+                Some(hz) if hz <= 0.0 => None,
+                Some(hz) => crate::refresh::nearest(&p.rates, hz),
+                None => crate::refresh::battery_default(&p.rates),
+            };
+            let mut battery: Vec<Choice> =
+                p.rates.iter().map(|&hz| choice(crate::refresh::hz_text(hz), lit.is_some_and(|l| (l - hz).abs() < 0.5), format!("{hz}"))).collect();
+            battery.push(choice(tr("Same"), lit.is_none(), "same"));
+            view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("On battery"), "monitors-battery", battery) });
+        }
+    }
     let stops = p
         .stops
         .iter()
@@ -782,11 +824,19 @@ impl App {
         let mut arranged = false;
         // RESOLUTION AND SCALE are the picked screen's own, applied live
         // (the display settings' way: tried and kept, or under a dissolve).
-        if key == "monitors-mode" || key == "monitors-scale" {
+        if matches!(key, "monitors-mode" | "monitors-scale" | "monitors-rate" | "monitors-battery") {
             let saved = GolemSettings::load().monitors;
             let screens = page_screens(&crate::display::monitors_shown(), &saved);
             let Some(sel) = picked(&screens, &saved).map(|p| p.sel.clone()) else { return };
             info!("monitors: {key} = {value} on {sel}");
+            if key == "monitors-rate" {
+                self.refresh_pick_rate(&sel, value);
+                return;
+            }
+            if key == "monitors-battery" {
+                self.refresh_pick_battery(&sel, value);
+                return;
+            }
             if key == "monitors-mode" {
                 let size = value.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)));
                 if let Some((w, h)) = size {
@@ -1490,6 +1540,9 @@ mod tests {
             mm,
             sizes: Vec::new(),
             stops: Vec::new(),
+            name: String::new(),
+            hz: 60.0,
+            rates: Vec::new(),
             focused: false,
             mirror: false,
         }

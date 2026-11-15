@@ -6582,6 +6582,11 @@ impl App {
         // real source back).
         if let Some(rest) = what.strip_prefix("power ") {
             crate::power_mode::follow(rest == "charger");
+            // (In a rig the screens' rates keep to the source said here.)
+            if crate::palette::rig() {
+                self.refresh_forced = Some(rest == "charger");
+            }
+            self.refresh_follow(rest == "charger");
             return format!("power mode: as on {rest}");
         }
         if let Some(rest) = what.strip_prefix("taskbox ") {

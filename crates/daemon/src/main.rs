@@ -182,6 +182,7 @@ mod trash;
 mod usage;
 mod usb_watch;
 mod power_mode;
+mod refresh;
 mod power_profiles;
 mod visible;
 mod wall_follow;
@@ -1042,6 +1043,7 @@ fn main() -> anyhow::Result<()> {
         page_mix: 0.0,
         panel_reset_due: false,
         display_pending: None,
+        refresh_forced: None,
         monitors_turn: None,
         monitors_mirror_desks: Vec::new(),
         display_pointer: None,
@@ -2405,6 +2407,8 @@ pub struct App {
     /// A resolution being tried from the control panel: on the screen, not
     /// saved, going back by itself unless kept (see `display.rs`).
     display_pending: Option<display::Pending>,
+    /// A rig's power source for the screens' rates (`refresh.rs`).
+    refresh_forced: Option<bool>,
     /// A screen's turn being tried (the Monitors page).
     monitors_turn: Option<monitors_page::TurnTrial>,
     /// The desk each screen showed as it began to mirror another (its
@@ -4831,9 +4835,10 @@ impl App {
         // (Memory read as nothing: the first sample is not in yet, and a laptop
         // on its battery must not be taken for a desktop for a moment.)
         if ctx.metrics.ram_usage_pct > 0.0 {
-            power_mode::follow(
-                ctx.metrics.on_ac || ctx.metrics.is_charging || ctx.metrics.battery_pct.is_none(),
-            );
+            let on_charger = ctx.metrics.on_ac || ctx.metrics.is_charging || ctx.metrics.battery_pct.is_none();
+            power_mode::follow(on_charger);
+            // (…and the screens go to the rate for it: `refresh.rs`.)
+            self.refresh_follow(on_charger);
         }
         // Compared by reference, not by cloning both sides: this runs on every
         // brain update, which is often.

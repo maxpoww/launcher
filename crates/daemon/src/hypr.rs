@@ -1543,6 +1543,12 @@ pub fn subscribe(handle: &LoopHandle<'static, App>) -> anyhow::Result<()> {
                         if name == "monitorremoved" || name == "configreloaded" {
                             app.monitors_lid();
                         }
+                        // (A config read again puts the saved rate back,
+                        // a screen plugged in comes at its own: on the
+                        // battery each goes to the battery's.)
+                        if name == "monitoradded" || name == "configreloaded" {
+                            app.refresh_assert(false);
+                        }
                         if RELEVANT.iter().any(|r| name.starts_with(r)) {
                             debug!("hypr event: {}", name.trim());
                             relevant = true;
