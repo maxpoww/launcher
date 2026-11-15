@@ -49,6 +49,78 @@ const RELEVANT: &[&str] = &[
     "pin",
 ];
 
+/// The signature of the compositor this process should be talking to, when
+/// the one in its environment is not it: the instance under `runtime/hypr`
+/// whose lock names a running compositor on OUR Wayland socket. `None`: the
+/// environment's is alive (nothing to do), or there is not exactly one such
+/// instance (nothing safe to pick).
+///
+/// Why: on 2026-11-13 Hyprland crashed and came back within a second under
+/// the same socket name. Whatever starts the dock again (the dev wrapper's
+/// loop then; a systemd unit's `Restart=`, whose environment is the user
+/// manager's until the new compositor has exported its own) hands it the DEAD
+/// compositor's signature. That dock draws, since the Wayland socket is the
+/// new one's, but every question to the compositor goes to a socket nobody
+/// answers: no dock on the second screen, no task pill, no window places.
+fn live_instance(
+    runtime: &std::path::Path,
+    sig: Option<&str>,
+    wayland: Option<&str>,
+    alive: &dyn Fn(u32) -> bool,
+) -> Option<String> {
+    // (`hyprland.lock`: the compositor's pid, then its Wayland socket's name)
+    let lock = |dir: &std::path::Path| -> Option<(u32, String)> {
+        let text = std::fs::read_to_string(dir.join("hyprland.lock")).ok()?;
+        let mut lines = text.lines();
+        let pid = lines.next()?.trim().parse().ok()?;
+        Some((pid, lines.next().unwrap_or("").trim().to_string()))
+    };
+    let hypr = runtime.join("hypr");
+    if let Some(sig) = sig {
+        if lock(&hypr.join(sig)).is_some_and(|(pid, _)| alive(pid)) {
+            return None;
+        }
+    }
+    let mut found: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&hypr).ok()?.flatten() {
+        let Some((pid, socket)) = lock(&entry.path()) else { continue };
+        // ($WAYLAND_DISPLAY may be a full path: the lock holds the name)
+        let ours = |w: &str| w.rsplit('/').next() == Some(socket.as_str());
+        if alive(pid) && wayland.is_none_or(ours) {
+            found.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    (found.len() == 1).then(|| found.remove(0))
+}
+
+/// Is `pid` a running Hyprland? (Its name, not only its being there: a pid is
+/// handed out again.)
+fn is_compositor(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.contains("yprland"))
+}
+
+/// Point this process (and everything it starts) at the compositor that is
+/// really there — see [`live_instance`]. Call before any thread exists: the
+/// environment is not safe to change later. Returns what to log once logging
+/// is up.
+pub fn adopt_live_instance() -> Option<String> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+    let was = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok();
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    let now = live_instance(
+        std::path::Path::new(&runtime),
+        was.as_deref(),
+        wayland.as_deref(),
+        &is_compositor,
+    )?;
+    // SAFETY: single-threaded — `main` calls this before spawning anything.
+    unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", &now) };
+    Some(format!(
+        "the compositor in the environment ({}) is not running; talking to the one that is ({now})",
+        was.as_deref().unwrap_or("none")
+    ))
+}
+
 fn instance_dir() -> anyhow::Result<PathBuf> {
     let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
         .ok_or_else(|| anyhow!("HYPRLAND_INSTANCE_SIGNATURE not set (not under Hyprland?)"))?;
@@ -3479,5 +3551,55 @@ mod tests {
         assert_eq!(compositor_name("AlpsPS/2 ALPS GlidePoint"), "alpsps/2-alps-glidepoint");
         assert!(udev_touchpad("E:ID_INPUT=1\nE:ID_INPUT_TOUCHPAD=1\n"));
         assert!(!udev_touchpad("E:ID_INPUT=1\nE:ID_INPUT_MOUSE=1\n"));
+    }
+}
+
+#[cfg(test)]
+mod live_instance_tests {
+    use super::live_instance;
+
+    fn instance(root: &std::path::Path, sig: &str, pid: u32, socket: &str) {
+        let dir = root.join("hypr").join(sig);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hyprland.lock"), format!("{pid}\n{socket}\n")).unwrap();
+    }
+    fn root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wr-live-instance-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_live_compositor_in_the_environment_is_kept() {
+        let r = root("kept");
+        instance(&r, "old", 10, "wayland-1");
+        instance(&r, "other", 20, "wayland-1");
+        assert_eq!(live_instance(&r, Some("old"), Some("wayland-1"), &|_| true), None);
+    }
+
+    #[test]
+    fn a_dead_one_gives_way_to_the_one_on_our_socket() {
+        let r = root("dead");
+        instance(&r, "old", 10, "wayland-1");
+        instance(&r, "new", 20, "wayland-1");
+        instance(&r, "nested", 30, "wayland-2");
+        let alive = |pid: u32| pid != 10;
+        assert_eq!(live_instance(&r, Some("old"), Some("wayland-1"), &alive), Some("new".into()));
+        // (no signature at all — started before the compositor exported it — heals the same way)
+        assert_eq!(live_instance(&r, None, Some("wayland-1"), &alive), Some("new".into()));
+        assert_eq!(live_instance(&r, Some("old"), Some("/run/user/1/wayland-1"), &alive), Some("new".into()));
+    }
+
+    #[test]
+    fn nothing_is_picked_when_it_is_not_one() {
+        let r = root("many");
+        instance(&r, "old", 10, "wayland-1");
+        instance(&r, "a", 20, "wayland-1");
+        instance(&r, "b", 30, "wayland-1");
+        let alive = |pid: u32| pid != 10;
+        assert_eq!(live_instance(&r, Some("old"), Some("wayland-1"), &alive), None);
+        assert_eq!(live_instance(&r, Some("old"), Some("wayland-9"), &alive), None);
+        assert_eq!(live_instance(&root("empty"), Some("old"), Some("wayland-1"), &alive), None);
     }
 }

@@ -294,6 +294,9 @@ fn main() -> anyhow::Result<()> {
     // into every app we launch (see `launch::WORKSPACE_TICKET`). Dropped
     // before any thread exists — the environment is not safe to change later.
     let had_workspace_ticket = launch::drop_workspace_ticket();
+    // The compositor named in the environment may be one that died (a crash,
+    // then a restart of ours with the old environment): talk to the live one.
+    let healed_instance = hypr::adopt_live_instance();
     // The Vulkan driver of the compositor's card, named before any thread
     // (the environment is not safe to change later) — see `renderer`.
     renderer::pin_vulkan_driver();
@@ -322,6 +325,9 @@ fn main() -> anyhow::Result<()> {
         default_panic(info);
     }));
 
+    if let Some(note) = &healed_instance {
+        tracing::warn!("{note}");
+    }
     if had_workspace_ticket {
         info!("dropped the compositor's initial-workspace ticket: launched apps open on the workspace that is showing");
     }
