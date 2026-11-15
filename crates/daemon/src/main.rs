@@ -881,6 +881,8 @@ fn main() -> anyhow::Result<()> {
         frecency: focus_cycle::Frecency::default(),
         focus_walk: None,
         walk_focus_pending: None,
+        screen_walk: None,
+        screen_recent: Vec::new(),
         options_active_addr: None,
         options_class: None,
         options_title_addr: None,
@@ -1995,6 +1997,11 @@ pub struct App {
     /// Address our own walk dispatch is focusing — that change is the
     /// walk's doing, not user signal, so the stats hook skips it.
     walk_focus_pending: Option<String>,
+    /// An in-flight walk round the screens (Super+`), until something is
+    /// touched on the screen it stands on.
+    screen_walk: Option<focus_cycle::ScreenWalk>,
+    /// Screens by connector name, the one last worked on first.
+    screen_recent: Vec<String>,
     options_active_addr: Option<String>,
     /// The focused window's app class. The witness the title grooming needs to
     /// recognise an app's signature on its own title (see [`crate::task_title`]):
@@ -3905,6 +3912,10 @@ impl App {
             }
             Command::FocusOther => {
                 self.cycle_focus(false);
+                return;
+            }
+            Command::FocusScreen => {
+                self.cycle_screen();
                 return;
             }
             // While the overview owns the screen, ignore reveals (its close

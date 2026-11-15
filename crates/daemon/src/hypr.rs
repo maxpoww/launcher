@@ -1635,6 +1635,49 @@ pub fn monitor_info(name: Option<&str>) -> anyhow::Result<MonitorInfo> {
         .ok_or_else(|| anyhow!("no focused monitor in Hyprland reply"))
 }
 
+/// The screens a focus walk can stand on, as they lie (left to right, then
+/// top to bottom), and the focused one. A screen that only repeats another
+/// (a mirror) is not a place of its own.
+pub fn screens_in_layout() -> Option<(Vec<String>, String)> {
+    let json = reply_json("j/monitors")?;
+    let mut all: Vec<(i64, i64, String)> = Vec::new();
+    let mut focused = None;
+    for m in json.as_array()? {
+        let Some(name) = m["name"].as_str() else {
+            continue;
+        };
+        if m["mirrorOf"].as_str().is_some_and(|o| o != "none") || m["disabled"].as_bool() == Some(true) {
+            continue;
+        }
+        if m["focused"].as_bool() == Some(true) {
+            focused = Some(name.to_owned());
+        }
+        all.push((m["x"].as_i64().unwrap_or(0), m["y"].as_i64().unwrap_or(0), name.to_owned()));
+    }
+    all.sort();
+    Some((all.into_iter().map(|(_, _, n)| n).collect(), focused?))
+}
+
+/// Focus a screen by connector name: the compositor hands the keyboard to
+/// the window last used there and brings the pointer along.
+///
+/// The compositor leaves the pointer behind when the screen has no window to
+/// warp into, and the first nudge of the mouse would then pull the focus back
+/// to the screen just left: so the pointer is put on the screen's middle
+/// whenever it did not arrive by itself.
+pub fn focus_screen(name: &str) -> bool {
+    if !dispatch_checked(&format!("hl.dsp.focus({{ monitor = \"{name}\" }})")) {
+        return false;
+    }
+    if let (Ok(m), Some((x, y))) = (monitor_info(Some(name)), cursor_pos()) {
+        let inside = x >= m.x && x < m.x + m.w && y >= m.y && y < m.y + m.h;
+        if m.name == name && !inside {
+            move_cursor(m.x + m.w / 2.0, m.y + m.h / 2.0);
+        }
+    }
+    true
+}
+
 /// Every monitor (empty when Hyprland is unreachable).
 pub fn all_monitors() -> Vec<MonitorInfo> {
     reply_json("j/monitors")

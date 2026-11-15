@@ -90,6 +90,38 @@ pub(crate) struct FocusWalk {
     same_ws: bool,
 }
 
+/// An in-flight walk round the screens (Super+`): the same rule as the
+/// window walk, one level up. The first press goes to the screen last worked
+/// on; pressing again without having touched anything goes on round the
+/// rest and wraps home; touching the screen it stands on commits it.
+pub(crate) struct ScreenWalk {
+    /// Connector names, the starting screen last so the wrap returns home.
+    order: Vec<String>,
+    /// Index of the screen the walk has focused.
+    idx: usize,
+}
+
+/// The order of a fresh screen walk from `home`: the other screens by how
+/// lately they were worked on (`recent`, freshest first), then the ones
+/// never worked on as they lie rightward of home (round to the left end),
+/// and home last. Pure, for testability.
+fn screen_order(layout: &[String], home: &str, recent: &[String]) -> Vec<String> {
+    let at = layout.iter().position(|s| s == home).unwrap_or(0);
+    let n = layout.len();
+    let mut others: Vec<&String> = (1..n).map(|k| &layout[(at + k) % n]).filter(|s| *s != home).collect();
+    // Stable: the never-worked-on keep their rightward order.
+    others.sort_by_key(|s| recent.iter().position(|r| r == *s).unwrap_or(usize::MAX));
+    let mut order: Vec<String> = others.into_iter().cloned().collect();
+    order.push(home.to_owned());
+    order
+}
+
+/// Put `name` at the front of the worked-on list.
+fn touch_screen(recent: &mut Vec<String>, name: &str) {
+    recent.retain(|r| r != name);
+    recent.insert(0, name.to_owned());
+}
+
 /// One window's ranking inputs.
 struct Candidate {
     addr: String,
@@ -296,6 +328,60 @@ impl App {
         self.walk_focus_pending = None;
         debug!("focus cycle: interaction in {addr}");
         self.frecency.note(&addr);
+        self.note_screen_interaction();
+    }
+
+    /// Something was touched on the focused screen: that commits a screen
+    /// walk, and the screen becomes the one last worked on. The screen the
+    /// walk set out from was where the user stood just before, so it ranks
+    /// right behind, worked on or not.
+    fn note_screen_interaction(&mut self) {
+        let Some((_, here)) = hypr::screens_in_layout() else {
+            return;
+        };
+        if let Some(home) = self.screen_walk.take().and_then(|w| w.order.last().cloned()) {
+            touch_screen(&mut self.screen_recent, &home);
+        }
+        touch_screen(&mut self.screen_recent, &here);
+    }
+
+    /// Super+`: focus the next screen. A walk nothing has committed goes on
+    /// to its next screen; otherwise a fresh one starts from the screen last
+    /// worked on. Leaving the walk's screen by hand (the pointer crossing to
+    /// another one) drops it: the next press starts fresh from there.
+    pub(crate) fn cycle_screen(&mut self) {
+        // The overview has its own way round the screens (its pages).
+        if self.overview_active {
+            return;
+        }
+        let Some((layout, here)) = hypr::screens_in_layout() else {
+            return;
+        };
+        if layout.len() < 2 {
+            debug!("screen cycle: one screen, nowhere to go");
+            self.screen_walk = None;
+            return;
+        }
+        let standing = |w: &ScreenWalk| w.order[w.idx % w.order.len()] == here && w.order.iter().all(|s| layout.contains(s)) && w.order.len() == layout.len();
+        let target = match self.screen_walk.as_mut().filter(|w| standing(w)) {
+            Some(walk) => {
+                walk.idx += 1;
+                walk.order[walk.idx % walk.order.len()].clone()
+            }
+            None => {
+                let order = screen_order(&layout, &here, &self.screen_recent);
+                let target = order[0].clone();
+                self.screen_walk = Some(ScreenWalk { order, idx: 0 });
+                target
+            }
+        };
+        debug!("screen cycle: {here} -> {target}");
+        // The window walk is of the screen being left.
+        self.focus_walk = None;
+        self.walk_focus_pending = None;
+        if !hypr::focus_screen(&target) {
+            self.screen_walk = None;
+        }
     }
 
     /// A focus change the cycle did not cause (a window click, a
@@ -394,6 +480,32 @@ mod tests {
             last,
             history,
         }
+    }
+
+    fn names(s: &[&str]) -> Vec<String> {
+        s.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    #[test]
+    fn screen_walk_goes_to_the_last_worked_on_then_round_and_home() {
+        let layout = names(&["A", "B", "C"]);
+        // Nothing worked on yet: rightward, round, home last.
+        assert_eq!(screen_order(&layout, "B", &[]), names(&["C", "A", "B"]));
+        // C was worked on before B: it comes first, whatever the layout.
+        assert_eq!(screen_order(&layout, "A", &names(&["A", "C"])), names(&["C", "B", "A"]));
+        // Freshest first among the worked-on.
+        assert_eq!(screen_order(&layout, "C", &names(&["C", "A", "B"])), names(&["A", "B", "C"]));
+        // A screen that is gone is simply not in the round.
+        assert_eq!(screen_order(&names(&["A", "B"]), "A", &names(&["Z", "B"])), names(&["B", "A"]));
+    }
+
+    #[test]
+    fn touching_a_screen_puts_it_first_once() {
+        let mut recent = names(&["A", "B"]);
+        touch_screen(&mut recent, "B");
+        assert_eq!(recent, names(&["B", "A"]));
+        touch_screen(&mut recent, "C");
+        assert_eq!(recent, names(&["C", "B", "A"]));
     }
 
     #[test]

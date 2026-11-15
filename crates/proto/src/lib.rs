@@ -167,6 +167,9 @@ pub enum Command {
     /// Cycle focus into the other workspaces' windows, most-used first
     /// (the pill's right click).
     FocusOther,
+    /// Focus the next screen: the one last worked on first, then round the
+    /// others while nothing is touched (bindable as Super+`).
+    FocusScreen,
     /// Toggle Golem pseudo (tag + proportional size + framed) on the
     /// focused window — the topbar's square pill, bindable as Super+P.
     PseudoToggle,
@@ -310,6 +313,7 @@ impl fmt::Display for Command {
             Command::Interacted => f.write_str("interacted"),
             Command::FocusNext => f.write_str("focus-next"),
             Command::FocusOther => f.write_str("focus-other"),
+            Command::FocusScreen => f.write_str("focus-screen"),
             Command::PseudoToggle => f.write_str("pseudo-toggle"),
             Command::OverviewHover(t) => write!(f, "overview-hover {t}"),
             Command::OverviewResize(s) => write!(f, "overview-resize {s}"),
@@ -432,6 +436,7 @@ impl FromStr for Command {
             "pseudo-toggle" => Ok(Command::PseudoToggle),
             "focus-next" => Ok(Command::FocusNext),
             "focus-other" => Ok(Command::FocusOther),
+            "focus-screen" => Ok(Command::FocusScreen),
             "stage-toggle" => Ok(Command::StageToggle),
             "stage-resume" => Ok(Command::StageResume),
             "stage-dim" => Ok(Command::StageDim),
@@ -484,6 +489,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "interacted",
     "focus-next",
     "focus-other",
+    "focus-screen",
     "pseudo-toggle",
     "overview-hover [title]",
     "overview-resize [WxH]",
@@ -606,6 +612,7 @@ mod tests {
                 | Command::Interacted
                 | Command::FocusNext
                 | Command::FocusOther
+                | Command::FocusScreen
                 | Command::PseudoToggle
                 | Command::OverviewHover(_)
                 | Command::OverviewResize(_)
@@ -671,6 +678,7 @@ mod tests {
             Command::Interacted,
             Command::FocusNext,
             Command::FocusOther,
+            Command::FocusScreen,
             Command::PseudoToggle,
             Command::OverviewHover("A Window Title".into()),
             Command::OverviewResize("1240x1000".into()),

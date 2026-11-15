@@ -218,6 +218,7 @@ impl UiState {
             | Command::PseudoToggle
             | Command::FocusNext
             | Command::FocusOther
+            | Command::FocusScreen
             | Command::OverviewHover(_)
             | Command::OverviewResize(_)
             // STAGE mode drives compositor state, not the launcher's rest
