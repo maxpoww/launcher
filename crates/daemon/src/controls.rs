@@ -1295,6 +1295,9 @@ fn version_before(profiles: &std::path::Path, booted: &std::path::Path) -> Optio
 /// many older ones there are. A rebuild that changed nothing is not a
 /// version of its own: of several numbers on one system the newest counts.
 const VERSIONS_SHOWN: usize = 4;
+/// How many lines the versions get under their heading (a version is one,
+/// two with what it changed).
+const VERSION_LINES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Which {
@@ -1346,7 +1349,37 @@ struct MadeOf {
     programs: Option<String>,
     /// Apps by desktop id → the name they show.
     apps: std::collections::BTreeMap<String, String>,
+    /// What Golem's makers wrote about its changes, newest first, as (id,
+    /// the words in the shell's language). `None`: a system from before
+    /// these were written.
+    notes: Option<Vec<(String, String)>>,
 }
+
+/// WRITTEN BY HAND (Max, 2026-11-16: "qué cambió lo escribimos a mano"): each
+/// Golem system carries `etc/golem/whats-new.json`, every change worth
+/// telling as one short sentence a language, newest first:
+/// `[{ "id": "2026-11-16-capture", "en": "…", "es": "…", … }]`. A version's
+/// own changes are the entries the version before it does not have, so
+/// nothing has to know which update made which system. The words are taken
+/// in the shell's language, its parent's (`es_ES` → `es`), else English.
+fn notes_of(text: &str, lang: Option<&str>) -> Option<Vec<(String, String)>> {
+    let entries: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_str(text).ok()?;
+    let base = lang.and_then(|l| l.split('_').next());
+    Some(
+        entries
+            .iter()
+            .filter_map(|e| {
+                let words = lang.and_then(|l| e.get(l)).or_else(|| base.and_then(|b| e.get(b))).or_else(|| e.get("en"))?;
+                let words = words.trim();
+                (!words.is_empty()).then(|| (e.get("id").cloned().unwrap_or_else(|| words.to_owned()), words.to_owned()))
+            })
+            .collect(),
+    )
+}
+
+/// At most this many written changes are told for one version (a version
+/// is two lines on a page that does not scroll).
+const NOTES_TOLD: usize = 2;
 
 /// Read what the system at `system` (a version's folder) is made of.
 fn made_of(system: &std::path::Path) -> MadeOf {
@@ -1380,7 +1413,8 @@ fn made_of(system: &std::path::Path) -> MadeOf {
             }
         }
     }
-    MadeOf { kernel, programs, apps }
+    let notes = std::fs::read_to_string(system.join("etc/golem/whats-new.json")).ok().and_then(|t| notes_of(&t, crate::i18n::lang().as_deref()));
+    MadeOf { kernel, programs, apps, notes }
 }
 
 /// At most this many apps are named in a line; the rest are counted.
@@ -1399,10 +1433,19 @@ fn names(mut apps: Vec<&str>) -> String {
     }
 }
 
-/// What a version changed from the one before it, in one line: apps that
-/// came and went first (what the owner did), then what the system did.
+/// What a version changed from the one before it, in one line: what its
+/// makers wrote about it first; then the apps that came and went (what the
+/// owner did); and only where nothing was written, what the system did.
 fn what_changed(before: &MadeOf, after: &MadeOf) -> String {
     let mut parts = Vec::new();
+    // (Before anything was written every entry would read as new: the
+    // newest one alone then.)
+    let told = if before.notes.is_some() { NOTES_TOLD } else { 1 };
+    let known = before.notes.as_deref().unwrap_or_default();
+    let written: Vec<String> =
+        after.notes.iter().flatten().filter(|(id, _)| !known.iter().any(|(k, _)| k == id)).take(told).map(|(_, words)| words.clone()).collect();
+    let by_hand = !written.is_empty();
+    parts.extend(written);
     let added: Vec<&str> = after.apps.iter().filter(|(id, _)| !before.apps.contains_key(*id)).map(|(_, n)| n.as_str()).collect();
     let removed: Vec<&str> = before.apps.iter().filter(|(id, _)| !after.apps.contains_key(*id)).map(|(_, n)| n.as_str()).collect();
     if !added.is_empty() {
@@ -1411,12 +1454,12 @@ fn what_changed(before: &MadeOf, after: &MadeOf) -> String {
     if !removed.is_empty() {
         parts.push(fill(tr("Removed {apps}"), &[("apps", &names(removed))]));
     }
-    if let (Some(a), Some(b)) = (&before.programs, &after.programs) {
+    if let (Some(a), Some(b), false) = (&before.programs, &after.programs, by_hand) {
         if a != b {
             parts.push(tr("System programs updated").to_owned());
         }
     }
-    if let (Some(a), Some(b)) = (&before.kernel, &after.kernel) {
+    if let (Some(a), Some(b), false) = (&before.kernel, &after.kernel, by_hand) {
         if a != b {
             parts.push(fill(tr("Linux {version}"), &[("version", b)]));
         }
@@ -2794,10 +2837,17 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 view.groups.push(line(fill(tr("Versions kept: {n}"), &[("n", &all)])));
                 let now = crate::usage::now_secs() as u64;
                 let changes = versions_changes_here();
-                // (Two lines a version then: three of them are what the page
-                // holds without running under the box's foot; it does not scroll.)
-                let shown = if changes.is_empty() { VERSIONS_SHOWN } else { VERSIONS_SHOWN - 1 };
-                for (n, made, which) in versions.into_iter().take(shown) {
+                // (The page does not scroll: `VERSION_LINES` lines are what it
+                // holds over the box's foot on a small screen. Seen on the
+                // MacBook Air, 2026-11-16: a sixth line stood on the foot's
+                // hint. A version is shown whole, with its line, or not.)
+                let mut room = VERSION_LINES;
+                for (n, made, which) in versions.into_iter().take(VERSIONS_SHOWN) {
+                    let lines = 1 + usize::from(changes.contains_key(&n));
+                    if lines > room {
+                        break;
+                    }
+                    room -= lines;
                     let when = crate::card::model::when_text(made, now);
                     let words = match which {
                         Which::Running => tr("Version {n} · {when} · running now"),
@@ -3550,6 +3600,23 @@ mod tests {
         assert_eq!(what_changed(&MadeOf::default(), &many), "Added A, B, C and 2 more");
         // A folder that is not a system says nothing wrong.
         assert_eq!(made_of(&dir.join("nothing-here")), MadeOf::default());
+        // WRITTEN BY HAND: what the makers wrote stands first and in place
+        // of what the system did; the apps are still told.
+        let notes = |entries: &str| {
+            std::fs::create_dir_all(sys("e").join("etc/golem")).unwrap();
+            std::fs::write(sys("e").join("etc/golem/whats-new.json"), entries).unwrap();
+        };
+        fake_system(&sys("e"), "6.18.70", "26.05.200.ccc", &[("files", "Name=Files"), ("seam", "Name=Seam")]);
+        notes(r#"[{"id":"n3","en":"Third thing"},{"id":"n2","en":"Screenshots have a tool","es":"Las capturas tienen su herramienta"},{"id":"n1","en":"First thing"}]"#);
+        let (old, new) = (made_of(&sys("d")), made_of(&sys("e")));
+        assert_eq!(what_changed(&old, &new), "Third thing · Removed Krita", "the first written system tells its newest entry only");
+        let earlier = MadeOf { notes: Some(vec![("n1".to_owned(), "First thing".to_owned())]), ..old.clone() };
+        assert_eq!(what_changed(&earlier, &new), "Third thing · Screenshots have a tool · Removed Krita");
+        assert_eq!(what_changed(&new, &new), "Changes to Golem itself", "nothing new written, nothing else differs");
+        // The words come in the shell's language, its parent's, else English.
+        let es = notes_of(r#"[{"id":"a","en":"Tool","es":"Herramienta"},{"id":"b","en":"Only English"}]"#, Some("es_ES")).unwrap();
+        assert_eq!(es, [("a".to_owned(), "Herramienta".to_owned()), ("b".to_owned(), "Only English".to_owned())]);
+        assert_eq!(notes_of("not json", None), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
