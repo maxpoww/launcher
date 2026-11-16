@@ -1290,6 +1290,59 @@ fn version_before(profiles: &std::path::Path, booted: &std::path::Path) -> Optio
         .map(|(_, _, made)| *made)
 }
 
+/// THE VERSIONS KEPT (2026-11-16, the list half of "Versions"): the newest
+/// `VERSIONS_SHOWN`, newest first, as (number, when made, which), and how
+/// many older ones there are. A rebuild that changed nothing is not a
+/// version of its own: of several numbers on one system the newest counts.
+const VERSIONS_SHOWN: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Which {
+    /// The one running.
+    Running,
+    /// Newer than the one running: what the next restart starts.
+    Next,
+    /// Older: what "go back" and the start menu's Previous Versions reach.
+    Kept,
+}
+
+fn versions_kept(profiles: &std::path::Path, booted: &std::path::Path) -> (Vec<(u64, u64, Which)>, usize) {
+    let booted = std::fs::canonicalize(booted).ok();
+    let mut versions = system_versions(profiles);
+    versions.sort_by_key(|(n, _, _)| std::cmp::Reverse(*n));
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
+    versions.retain(|(_, at, _)| {
+        let new = !seen.contains(at);
+        if new {
+            seen.push(at.clone());
+        }
+        new
+    });
+    let running = versions.iter().find(|(_, at, _)| Some(at) == booted.as_ref()).map(|(n, _, _)| *n);
+    let all: Vec<_> = versions
+        .into_iter()
+        .map(|(n, _, made)| {
+            let which = match running {
+                Some(r) if n == r => Which::Running,
+                Some(r) if n > r => Which::Next,
+                _ => Which::Kept,
+            };
+            (n, made, which)
+        })
+        .collect();
+    let older = all.len().saturating_sub(VERSIONS_SHOWN);
+    (all.into_iter().take(VERSIONS_SHOWN).collect(), older)
+}
+
+/// The same, where this system keeps them (a rig: its made-up folder).
+fn versions_here() -> (Vec<(u64, u64, Which)>, usize) {
+    if let (Some(_), Some(dir)) = (std::env::var_os("GOLEM_RIG"), std::env::var_os("WAVERUNNER_VERSIONS_RIG")) {
+        let dir = std::path::PathBuf::from(dir);
+        return versions_kept(&dir.join("profiles"), &dir.join("booted"));
+    }
+    versions_kept(std::path::Path::new("/nix/var/nix/profiles"), std::path::Path::new("/run/booted-system"))
+}
+
 fn os_name() -> String {
     std::fs::read_to_string("/etc/os-release")
         .ok()
@@ -2610,6 +2663,24 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                     view.groups.push(Group { buttons: true, ..group(None, "go-back", 0.0, vec![choice(tr("Go back to it"), false, "ask")]) });
                 }
             }
+            // THE VERSIONS KEPT: a line each, newest first. Not while the
+            // question stands (it has the page), not with one version only.
+            let (versions, older) = versions_here();
+            if versions.len() > 1 && !go_back_asked() {
+                // (The heading counts them all: the older ones have no line.)
+                let all = versions.len() + older;
+                view.groups.push(line(fill(tr("Versions kept: {n}"), &[("n", &all)])));
+                let now = crate::usage::now_secs() as u64;
+                for (n, made, which) in versions {
+                    let when = crate::card::model::when_text(made, now);
+                    let words = match which {
+                        Which::Running => tr("Version {n} · {when} · running now"),
+                        Which::Next => tr("Version {n} · {when} · starts at the next restart"),
+                        Which::Kept => tr("Version {n} · {when}"),
+                    };
+                    view.groups.push(line(fill(words, &[("n", &n), ("when", &when)])));
+                }
+            }
         }
         // How the windows sit and stick. Empty for now: the window controls
         // come here as they are made (Max, 2026-10-14).
@@ -3292,6 +3363,15 @@ mod tests {
         assert_eq!(version_before(&profiles, &store.join("z")), Some(made(15)));
         // No booted system to read: no offer.
         assert_eq!(version_before(&profiles, &store.join("gone")), None);
+        // The list: newest first, one line a system (13, not 12), the staged
+        // one named, the running one named, the rest kept.
+        let (list, older) = versions_kept(&profiles, &store.join("c"));
+        assert_eq!(list.iter().map(|(n, _, w)| (*n, *w)).collect::<Vec<_>>(), vec![(15, Which::Next), (13, Which::Running), (9, Which::Kept), (7, Which::Kept)]);
+        assert_eq!(older, 0);
+        link(3, "z");
+        assert_eq!(versions_kept(&profiles, &store.join("c")).1, 1);
+        // Nothing running that the list knows: every one is just kept.
+        assert!(versions_kept(&profiles, &store.join("gone")).0.iter().all(|(_, _, w)| *w == Which::Kept));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
