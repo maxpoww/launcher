@@ -44,6 +44,8 @@ pub(crate) enum Report {
     /// What it is doing now, if that changes along the way (a print: its
     /// printer out of paper).
     Label { id: u64, label: String },
+    /// What the number's place says now (a recording: how long it has run).
+    Number { id: u64, number: String },
     /// It is over.
     End { id: u64 },
 }
@@ -62,6 +64,9 @@ pub(crate) struct Task {
     /// not the ones out of the printer). Empty: nothing there; the fill
     /// still comes whole at the end.
     pub number: Option<String>,
+    /// Ending it from the bar KEEPS what it made (a screen recording): its
+    /// chip says Stop, not Cancel.
+    pub kept: bool,
     /// When it ended; it lingers for `LINGER` after.
     pub ended: Option<Instant>,
 }
@@ -113,10 +118,17 @@ impl Tasks {
     /// of a percentage ([`Task::number`]).
     pub fn begin_with(&mut self, label: &str, number: Option<String>) -> (u64, Arc<AtomicBool>) {
         self.next += 1;
-        self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, number, ended: None });
+        self.list.push(Task { id: self.next, label: label.to_owned(), done: 0, total: 0, number, kept: false, ended: None });
         let stop = Arc::new(AtomicBool::new(false));
         self.stops.insert(self.next, stop.clone());
         (self.next, stop)
+    }
+
+    /// This task's chip says Stop: ending it keeps what it made.
+    pub fn keeps(&mut self, id: u64) {
+        if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
+            t.kept = true;
+        }
     }
 
     /// Cancel a running task: its worker is told, and it leaves the list at
@@ -145,6 +157,11 @@ impl Tasks {
             Report::Label { id, label } => {
                 if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
                     t.label = label;
+                }
+            }
+            Report::Number { id, number } => {
+                if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
+                    t.number = Some(number);
                 }
             }
             Report::End { id } => {
@@ -243,6 +260,11 @@ impl TaskHandle {
     /// What it is doing now.
     pub fn label(&self, label: &str) {
         let _ = self.tx.send(Report::Label { id: self.id, label: label.to_owned() });
+    }
+
+    /// What the number's place says now.
+    pub fn number(&self, number: &str) {
+        let _ = self.tx.send(Report::Number { id: self.id, number: number.to_owned() });
     }
 }
 

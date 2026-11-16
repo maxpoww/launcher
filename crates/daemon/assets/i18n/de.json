@@ -2397,5 +2397,9 @@
  "Treble": "Höhen",
  "audio sound equalizer eq bass treble mids tone presets voice music films speakers headphones curve frequency": "audio klang ton equalizer eq bass höhen mitten klangfarbe voreinstellungen stimme musik filme lautsprecher kopfhörer kurve frequenz",
  "Presets": "Voreinstellungen",
- "The whole curve, band by band": "Die ganze Kurve, Band für Band"
+ "The whole curve, band by band": "Die ganze Kurve, Band für Band",
+ "Recording the screen": "Bildschirm wird aufgenommen",
+ "Screen recording": "Bildschirmaufnahme",
+ "Saved as {name}": "Gespeichert als {name}",
+ "The screen could not be recorded": "Der Bildschirm konnte nicht aufgenommen werden"
 }

@@ -263,6 +263,10 @@ pub enum Command {
     /// banner's gear — hibernate, and sleep and restart behind it — come, or go.
     /// `open`, `shut`, `away`, `state` show them without a pointer.
     Power(String),
+    /// Record the screen the keyboard is on (Golem binds Ctrl+Print to this):
+    /// the first starts, the next stops and keeps the film in Videos →
+    /// Screencasts. `start`, `stop`, `state` without a toggle.
+    Record(String),
     /// The box opened as its TERMINAL (`./`), with what follows typed after
     /// it (`terminal 2 htop` → `./2 htop`, not run): a key binding's way in.
     Terminal(String),
@@ -333,6 +337,8 @@ impl fmt::Display for Command {
             Command::FastControls => f.write_str("fast-controls"),
             Command::Power(w) if w.is_empty() => f.write_str("power"),
             Command::Power(w) => write!(f, "power {w}"),
+            Command::Record(w) if w.is_empty() => f.write_str("record"),
+            Command::Record(w) => write!(f, "record {w}"),
             Command::Terminal(w) if w.is_empty() => f.write_str("terminal"),
             Command::Terminal(w) => write!(f, "terminal {w}"),
         }
@@ -389,6 +395,7 @@ impl FromStr for Command {
             ("min-del", Command::MinDel as fn(String) -> Command),
             ("window-placed", Command::WindowPlaced as fn(String) -> Command),
             ("power", Command::Power as fn(String) -> Command),
+            ("record", Command::Record as fn(String) -> Command),
             ("terminal", Command::Terminal as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
@@ -480,6 +487,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "options-trigger <id>",
     "control-panel",
     "power [open|shut|away|state]",
+    "record [toggle|start|stop|state]",
     "terminal [words]",
     "modules [name]",
     "overview-on",
@@ -631,6 +639,7 @@ mod tests {
                 | Command::FastLaunch
                 | Command::FastControls
                 | Command::Power(_)
+                | Command::Record(_)
                 | Command::Terminal(_) => (),
             }
         }
@@ -697,6 +706,8 @@ mod tests {
             Command::WindowPlaced("0x5c351e2e7660".into()),
             Command::FastLaunch,
             Command::Power(String::new()),
+            Command::Record(String::new()),
+            Command::Record("stop".into()),
             Command::Power("open".into()),
         ]
     }

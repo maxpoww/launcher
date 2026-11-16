@@ -47,6 +47,7 @@ mod startup_page;
 mod account_page;
 mod vpn_page;
 mod printing;
+mod record;
 mod mounts;
 mod logging;
 mod lighting;
@@ -838,6 +839,7 @@ fn main() -> anyhow::Result<()> {
         task_tx: None,
         task_pill: task_pill::TaskPill::default(),
         print_tasks: printing::PrintTasks::default(),
+        recording: None,
         bar_zoom_keys: false,
         zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
@@ -1920,6 +1922,8 @@ pub struct App {
     task_pill: task_pill::TaskPill,
     /// The prints on the bar, each a task (`printing.rs`).
     print_tasks: printing::PrintTasks,
+    /// The screen being recorded (`record.rs`), a task on the bar.
+    recording: Option<record::Recording>,
     /// The pointer is on the bar: Ctrl +/−/0 are its zoom's, unless a dock
     /// stack is open.
     bar_zoom_keys: bool,
@@ -4037,6 +4041,11 @@ impl App {
             Command::Power(what) => {
                 let done = self.power_command(&what);
                 info!("power: {done}");
+                return;
+            }
+            Command::Record(what) => {
+                let done = self.record_command(&what);
+                info!("record: {done}");
                 return;
             }
             // The box as its terminal (`term.rs`): opened, `./` typed. (As
