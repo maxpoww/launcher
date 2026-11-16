@@ -2412,5 +2412,11 @@
  "Recording the screen": "Grabando la pantalla",
  "Screen recording": "Grabación de pantalla",
  "Saved as {name}": "Guardada como {name}",
- "The screen could not be recorded": "No se pudo grabar la pantalla"
+ "The screen could not be recorded": "No se pudo grabar la pantalla",
+ "Added {apps}": "Se agregó {apps}",
+ "Removed {apps}": "Se quitó {apps}",
+ "System programs updated": "Programas del sistema actualizados",
+ "Changes to Golem itself": "Cambios en Golem mismo",
+ "{apps} and {n} more": "{apps} y {n} más",
+ "Linux {version}": "Linux {version}"
 }

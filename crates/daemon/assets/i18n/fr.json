@@ -2412,5 +2412,10 @@
  "Recording the screen": "Enregistrement de l’écran",
  "Screen recording": "Enregistrement de l’écran",
  "Saved as {name}": "Enregistré sous {name}",
- "The screen could not be recorded": "L’écran n’a pas pu être enregistré"
+ "The screen could not be recorded": "L’écran n’a pas pu être enregistré",
+ "Added {apps}": "Ajout de {apps}",
+ "Removed {apps}": "Retrait de {apps}",
+ "System programs updated": "Programmes du système mis à jour",
+ "Changes to Golem itself": "Changements dans Golem lui-même",
+ "{apps} and {n} more": "{apps} et {n} de plus"
 }

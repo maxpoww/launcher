@@ -1334,6 +1334,128 @@ fn versions_kept(profiles: &std::path::Path, booted: &std::path::Path) -> (Vec<(
     (all.into_iter().take(VERSIONS_SHOWN).collect(), older)
 }
 
+/// WHAT CHANGED IN A VERSION (2026-11-16, the other half of "Versions"):
+/// what a kept system is made of that its owner would know by name, read
+/// from its own folder: the kernel, the system's programs as a whole (the
+/// stamp of the collection they come from), and the apps it has.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct MadeOf {
+    /// `6.18.63`.
+    kernel: Option<String>,
+    /// The collection of programs the system was built from, as it names it.
+    programs: Option<String>,
+    /// Apps by desktop id → the name they show.
+    apps: std::collections::BTreeMap<String, String>,
+}
+
+/// Read what the system at `system` (a version's folder) is made of.
+fn made_of(system: &std::path::Path) -> MadeOf {
+    let kernel = std::fs::read_link(system.join("kernel")).ok().and_then(|k| {
+        k.components().find_map(|c| {
+            let name = c.as_os_str().to_str()?;
+            let at = name.find("-linux-")?;
+            let v = &name[at + "-linux-".len()..];
+            v.starts_with(|ch: char| ch.is_ascii_digit()).then(|| v.to_owned())
+        })
+    });
+    let programs = std::fs::read_to_string(system.join("nixos-version")).ok().map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    let mut apps = std::collections::BTreeMap::new();
+    let mut dirs = vec![system.join("sw/share/applications")];
+    if let Ok(users) = std::fs::read_dir(system.join("etc/profiles/per-user")) {
+        dirs.extend(users.flatten().map(|u| u.path().join("share/applications")));
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let file = e.file_name();
+            let Some(id) = file.to_str().and_then(|n| n.strip_suffix(".desktop")) else { continue };
+            let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+            let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)).map(str::trim);
+            // (What the owner never sees as an app is not a change to tell.)
+            if field("NoDisplay=") == Some("true") || field("Hidden=") == Some("true") || field("Type=").is_some_and(|t| t != "Application") {
+                continue;
+            }
+            if let Some(name) = field("Name=").filter(|n| !n.is_empty()) {
+                apps.entry(id.to_owned()).or_insert_with(|| name.to_owned());
+            }
+        }
+    }
+    MadeOf { kernel, programs, apps }
+}
+
+/// At most this many apps are named in a line; the rest are counted.
+const APPS_NAMED: usize = 3;
+
+/// `Brave, Krita, Steam and 2 more`.
+fn names(mut apps: Vec<&str>) -> String {
+    apps.sort_by_key(|a| a.to_lowercase());
+    apps.dedup();
+    let more = apps.len().saturating_sub(APPS_NAMED);
+    let shown = apps.iter().take(APPS_NAMED).copied().collect::<Vec<_>>().join(", ");
+    if more > 0 {
+        fill(tr("{apps} and {n} more"), &[("apps", &shown), ("n", &more)])
+    } else {
+        shown
+    }
+}
+
+/// What a version changed from the one before it, in one line: apps that
+/// came and went first (what the owner did), then what the system did.
+fn what_changed(before: &MadeOf, after: &MadeOf) -> String {
+    let mut parts = Vec::new();
+    let added: Vec<&str> = after.apps.iter().filter(|(id, _)| !before.apps.contains_key(*id)).map(|(_, n)| n.as_str()).collect();
+    let removed: Vec<&str> = before.apps.iter().filter(|(id, _)| !after.apps.contains_key(*id)).map(|(_, n)| n.as_str()).collect();
+    if !added.is_empty() {
+        parts.push(fill(tr("Added {apps}"), &[("apps", &names(added))]));
+    }
+    if !removed.is_empty() {
+        parts.push(fill(tr("Removed {apps}"), &[("apps", &names(removed))]));
+    }
+    if let (Some(a), Some(b)) = (&before.programs, &after.programs) {
+        if a != b {
+            parts.push(tr("System programs updated").to_owned());
+        }
+    }
+    if let (Some(a), Some(b)) = (&before.kernel, &after.kernel) {
+        if a != b {
+            parts.push(fill(tr("Linux {version}"), &[("version", b)]));
+        }
+    }
+    if parts.is_empty() {
+        // (Another system, and nothing above differs: its settings did.)
+        return tr("Changes to Golem itself").to_owned();
+    }
+    parts.join(" · ")
+}
+
+/// What each kept version changed from the one before it, by number. The
+/// oldest one kept has nothing before it and no line. A rebuild that
+/// changed nothing is not a version (as in [`versions_kept`]).
+fn versions_changes(profiles: &std::path::Path) -> std::collections::HashMap<u64, String> {
+    let mut versions = system_versions(profiles);
+    versions.sort_by_key(|(n, _, _)| std::cmp::Reverse(*n));
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
+    versions.retain(|(_, at, _)| {
+        let new = !seen.contains(at);
+        if new {
+            seen.push(at.clone());
+        }
+        new
+    });
+    // Only what the page shows is read, and the one before the last shown.
+    versions.truncate(VERSIONS_SHOWN + 1);
+    let made: Vec<(u64, MadeOf)> = versions.iter().map(|(n, at, _)| (*n, made_of(at))).collect();
+    made.windows(2).map(|w| (w[0].0, what_changed(&w[1].1, &w[0].1))).collect()
+}
+
+/// The same, where this system keeps them (a rig: its made-up folder).
+fn versions_changes_here() -> std::collections::HashMap<u64, String> {
+    if let (Some(_), Some(dir)) = (std::env::var_os("GOLEM_RIG"), std::env::var_os("WAVERUNNER_VERSIONS_RIG")) {
+        return versions_changes(&std::path::PathBuf::from(dir).join("profiles"));
+    }
+    versions_changes(std::path::Path::new("/nix/var/nix/profiles"))
+}
+
 /// The same, where this system keeps them (a rig: its made-up folder).
 fn versions_here() -> (Vec<(u64, u64, Which)>, usize) {
     if let (Some(_), Some(dir)) = (std::env::var_os("GOLEM_RIG"), std::env::var_os("WAVERUNNER_VERSIONS_RIG")) {
@@ -2671,7 +2793,11 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 let all = versions.len() + older;
                 view.groups.push(line(fill(tr("Versions kept: {n}"), &[("n", &all)])));
                 let now = crate::usage::now_secs() as u64;
-                for (n, made, which) in versions {
+                let changes = versions_changes_here();
+                // (Two lines a version then: three of them are what the page
+                // holds without running under the box's foot; it does not scroll.)
+                let shown = if changes.is_empty() { VERSIONS_SHOWN } else { VERSIONS_SHOWN - 1 };
+                for (n, made, which) in versions.into_iter().take(shown) {
                     let when = crate::card::model::when_text(made, now);
                     let words = match which {
                         Which::Running => tr("Version {n} · {when} · running now"),
@@ -2679,6 +2805,10 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                         Which::Kept => tr("Version {n} · {when}"),
                     };
                     view.groups.push(line(fill(words, &[("n", &n), ("when", &when)])));
+                    // What it changed from the one before, under it.
+                    if let Some(what) = changes.get(&n) {
+                        view.groups.push(line(what.clone()));
+                    }
                 }
             }
         }
@@ -3372,6 +3502,54 @@ mod tests {
         assert_eq!(versions_kept(&profiles, &store.join("c")).1, 1);
         // Nothing running that the list knows: every one is just kept.
         assert!(versions_kept(&profiles, &store.join("gone")).0.iter().all(|(_, _, w)| *w == Which::Kept));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A made-up version's folder: a kernel, a programs stamp, apps.
+    fn fake_system(root: &std::path::Path, kernel: &str, programs: &str, apps: &[(&str, &str)]) {
+        let apps_dir = root.join("sw/share/applications");
+        std::fs::create_dir_all(&apps_dir).unwrap();
+        let _ = std::fs::remove_file(root.join("kernel"));
+        std::os::unix::fs::symlink(format!("/nix/store/abc-linux-{kernel}/bzImage"), root.join("kernel")).unwrap();
+        std::fs::write(root.join("nixos-version"), format!("{programs}\n")).unwrap();
+        for (id, body) in apps {
+            std::fs::write(apps_dir.join(format!("{id}.desktop")), format!("[Desktop Entry]\nType=Application\n{body}\n")).unwrap();
+        }
+    }
+
+    #[test]
+    fn what_a_version_changed_is_said_in_the_owners_words() {
+        let dir = std::env::temp_dir().join(format!("wr-changes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (profiles, store) = (dir.join("profiles"), dir.join("store"));
+        std::fs::create_dir_all(&profiles).unwrap();
+        let sys = |name: &str| store.join(name);
+        // 3: the oldest. 5: Brave added. 6: the same system as 5 (a rebuild).
+        // 8: programs and kernel moved, Krita came, an app nobody sees came,
+        // Brave went. 9: nothing the owner would name.
+        fake_system(&sys("a"), "6.18.60", "26.05.100.aaa", &[("files", "Name=Files"), ("seam", "Name=Seam")]);
+        fake_system(&sys("b"), "6.18.60", "26.05.100.aaa", &[("files", "Name=Files"), ("seam", "Name=Seam"), ("brave", "Name=Brave")]);
+        fake_system(&sys("c"), "6.18.63", "26.05.140.bbb", &[("files", "Name=Files"), ("seam", "Name=Seam"), ("krita", "Name=Krita"), ("helper", "Name=Helper\nNoDisplay=true")]);
+        fake_system(&sys("d"), "6.18.63", "26.05.140.bbb", &[("files", "Name=Files"), ("seam", "Name=Seam"), ("krita", "Name=Krita")]);
+        std::fs::write(sys("d").join("settings"), "x").unwrap();
+        for (n, s) in [(3, "a"), (5, "b"), (6, "b"), (8, "c"), (9, "d")] {
+            std::os::unix::fs::symlink(sys(s), profiles.join(format!("system-{n}-link"))).unwrap();
+        }
+        let made = made_of(&sys("c"));
+        assert_eq!(made.kernel.as_deref(), Some("6.18.63"));
+        assert_eq!(made.programs.as_deref(), Some("26.05.140.bbb"));
+        assert_eq!(made.apps.keys().collect::<Vec<_>>(), ["files", "krita", "seam"], "what is not shown as an app is not one");
+        let changes = versions_changes(&profiles);
+        assert_eq!(changes.get(&9).map(String::as_str), Some("Changes to Golem itself"));
+        assert_eq!(changes.get(&8).map(String::as_str), Some("Added Krita · Removed Brave · System programs updated · Linux 6.18.63"));
+        assert_eq!(changes.get(&6).map(String::as_str), Some("Added Brave"), "the rebuild that changed nothing counts under its newest number");
+        assert_eq!(changes.get(&5), None);
+        assert_eq!(changes.get(&3), None, "the oldest kept has nothing before it");
+        // Many apps at once: three named, the rest counted.
+        let many = MadeOf { apps: ["a", "b", "c", "d", "e"].iter().map(|k| ((*k).to_owned(), k.to_uppercase())).collect(), ..MadeOf::default() };
+        assert_eq!(what_changed(&MadeOf::default(), &many), "Added A, B, C and 2 more");
+        // A folder that is not a system says nothing wrong.
+        assert_eq!(made_of(&dir.join("nothing-here")), MadeOf::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

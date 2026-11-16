@@ -50,5 +50,7 @@
   "{connected} connected · this computer is “{0}”": "{connected} conectados · este computador es “{0}”",
   "Drag a point to move its band. The wheel over it makes it wider or narrower.": "Arrastra un punto para mover su banda. La rueda sobre él la hace más ancha o más estrecha.",
   "The computer restarts. Your files stay as they are.": "El computador se reinicia. Tus archivos quedan como están.",
-  "The screen could not be recorded": "No se ha podido grabar la pantalla"
+  "The screen could not be recorded": "No se ha podido grabar la pantalla",
+  "Added {apps}": "Se añadió {apps}",
+  "Changes to Golem itself": "Cambios en el propio Golem"
 }
