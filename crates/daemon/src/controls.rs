@@ -1231,11 +1231,14 @@ fn update_marks_text() -> Option<String> {
     }
 }
 
-/// GOING BACK A VERSION. The unit is Golem's own (the one a desktop crash
-/// loop runs): it holds the running revision so the daily update does not
-/// bring it straight back, makes the newest earlier version the one that
-/// starts, and restarts. The owner may start it; nobody else.
-const GO_BACK_UNIT: &str = "golem-rollback.service";
+/// GOING BACK A VERSION. The unit is Golem's own (what a desktop crash loop
+/// runs, asked for: `golem-go-back`, Golem's `desktop/crash-recovery.nix`):
+/// it holds the running revision so the daily update does not bring it
+/// straight back, makes the newest earlier version the one that starts, and
+/// restarts; the notice after says it was asked for, not that anything
+/// crashed. The owner may start it; nobody else. A system without the unit
+/// shows no button.
+const GO_BACK_UNIT: &str = "golem-go-back.service";
 /// When "Go back to it" was clicked: the question stands this long.
 static GOING_BACK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 const GO_BACK_ASKED_FOR: std::time::Duration = std::time::Duration::from_secs(60);
