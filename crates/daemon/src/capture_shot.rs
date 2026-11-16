@@ -33,8 +33,9 @@
 //! shows the card's last thing on hover) comes out of the card's pill by
 //! itself, as the bell's does for a new notification, with a small picture of
 //! the shot (the clipboard's own thumbnails, in the bar's icon array), the
-//! word `Screenshot` and a × at its end. It stays `PREVIEW_FOR` and for as
-//! long as the pointer is on it, then folds back into the card's pill. A
+//! word `Screenshot` and a × at its end. It stays `PREVIEW_FOR`, then folds
+//! back into the card's pill; under the pointer its time STANDS STILL and
+//! goes on from where it stood when the pointer leaves (`preview_left`). A
 //! CLICK on it opens THE EDITOR; its × throws the shot away (the file is
 //! deleted). A second Print meanwhile settles the first as it is and takes
 //! its place.
@@ -91,7 +92,7 @@ pub(crate) const HOLD: Duration = Duration::from_millis(1500);
 pub(crate) const SIGN_FROM: Duration = Duration::from_millis(300);
 /// How long the preview stays out by itself.
 pub(crate) const PREVIEW_FOR: Duration = Duration::from_secs(4);
-/// …and how long after the pointer left it.
+/// …and the least it stays after the pointer left it.
 const PREVIEW_AFTER_HAND: Duration = Duration::from_millis(1200);
 /// How often a preview that is out looks at whether to fold (ms).
 const PREVIEW_LOOK: u64 = 250;
@@ -269,8 +270,22 @@ struct Pending {
 /// A preview that is out on the card's long pill.
 struct Preview {
     kept: Arc<Kept>,
-    until: Instant,
+    /// How much of its time is left, as of `looked` (`preview_left`).
+    left: Duration,
+    looked: Instant,
     n: u64,
+}
+
+/// What is left of a preview's time, `passed` after `left` was. Under the
+/// hand its clock STANDS STILL — and it is owed `PREVIEW_AFTER_HAND` at the
+/// least, so it never folds from under the hand nor the moment the hand
+/// leaves; with no hand on it its time runs, on from where it stood.
+pub(crate) fn preview_left(left: Duration, passed: Duration, hand: bool) -> Duration {
+    if hand {
+        left.max(PREVIEW_AFTER_HAND)
+    } else {
+        left.saturating_sub(passed)
+    }
 }
 
 /// The key's and the screenshot's state (in `capture::Capture`).
@@ -560,15 +575,16 @@ impl App {
         }
         self.capture_tool.shots.preview = Some(Preview {
             kept,
-            until: Instant::now() + PREVIEW_FOR,
+            left: PREVIEW_FOR,
+            looked: Instant::now(),
             n,
         });
         self.clip_long_show(true, false);
         self.capture_preview_look(n);
     }
 
-    /// A preview that is out looks whether to fold: after its time, never
-    /// under the pointer.
+    /// A preview that is out looks whether to fold: when its time is spent,
+    /// and its time does not run under the pointer.
     fn capture_preview_look(&mut self, n: u64) {
         self.after_ms(PREVIEW_LOOK, move |app| {
             let hand = app.capture_preview_hand();
@@ -577,10 +593,9 @@ impl App {
                 return;
             };
             let now = Instant::now();
-            if hand {
-                p.until = p.until.max(now + PREVIEW_AFTER_HAND);
-            }
-            if now >= p.until {
+            p.left = preview_left(p.left, now.duration_since(p.looked), hand);
+            p.looked = now;
+            if p.left.is_zero() {
                 app.capture_tool.shots.preview = None;
                 app.capture_hang_sync();
                 app.clip_long_show(false, false);
@@ -1052,6 +1067,36 @@ mod tests {
         // A screen turned on its side keeps its shape.
         let (w, h) = hang_size((1080, 1920), 1080.0, 1.0);
         assert_eq!((w, h), (360.0, 640.0));
+    }
+
+    #[test]
+    fn a_previews_time_stands_still_under_the_hand_and_goes_on_when_it_leaves() {
+        let look = ms(250);
+        // Alone: its four seconds, then gone.
+        let (mut left, mut looks) = (PREVIEW_FOR, 0);
+        while !left.is_zero() {
+            left = preview_left(left, look, false);
+            looks += 1;
+        }
+        assert_eq!(looks, 16);
+        // The hand comes after one second and stays ten: nothing is spent
+        // meanwhile, and what was left is left when it goes.
+        let mut left = PREVIEW_FOR;
+        for _ in 0..4 {
+            left = preview_left(left, look, false);
+        }
+        assert_eq!(left, ms(3000));
+        for _ in 0..40 {
+            left = preview_left(left, look, true);
+        }
+        assert_eq!(left, ms(3000), "its own time goes on from where it stood");
+        left = preview_left(left, look, false);
+        assert_eq!(left, ms(2750));
+        // The hand comes at the very end: it is not folded from under the
+        // hand, nor the moment the hand leaves.
+        let left = preview_left(ms(100), look, true);
+        assert_eq!(left, PREVIEW_AFTER_HAND);
+        assert!(!preview_left(left, look, false).is_zero());
     }
 
     #[test]

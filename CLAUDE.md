@@ -690,8 +690,9 @@ The big daemon files are cohesive but long — go straight to the function:
   the screen" with the task pill's fill growing (`Press::sign`, `capture_sign_frame`; timers only while the key is
   down). `capture shot` = both in one. THE PREVIEW: the card's long pill (`clipboard.rs::push_clip_pill` asks
   `push_capture_long` first; `clip_long_show`, `clip_thumb_ask`/`clip_thumb_of` = the clipboard's thumbnailer into
-  the bar's icon array) with the shot small, `Screenshot` and a ×; `PREVIEW_FOR` (4 s) and for as long as the pointer
-  is on it (`capture_preview_look`), then it folds; the card's own hover leaves the pill alone meanwhile
+  the bar's icon array) with the shot small, `Screenshot` and a ×; `PREVIEW_FOR` (4 s), then it folds — under the
+  pointer its time STANDS STILL and goes on from there when the pointer leaves (`preview_left`, 1.2 s at the least;
+  `capture_preview_look`); the card's own hover leaves the pill alone meanwhile
   (`capture_long_out` in `update_clip_reveal`). A click = THE EDITOR (`capture_preview_clicked` → `capture_edit`),
   its × deletes the file (`capture_preview_close`); a second Print settles the first and takes its place. THE
   EDITOR = the capture tool with `Tool::still` (`Kept`): the shot is the top surface's one big picture
