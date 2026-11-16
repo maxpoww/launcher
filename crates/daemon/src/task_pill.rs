@@ -66,6 +66,13 @@ const SMALL_GAP: f32 = 5.0;
 /// What the number's slot is measured from.
 const WIDEST: &str = "100%";
 const CANCEL: &str = "Cancel";
+/// The chip of a task whose end from the bar keeps what it made.
+const STOP: &str = "Stop";
+
+/// What a task's chip says.
+fn chip_word(task: Option<&Task>) -> &'static str {
+    crate::i18n::tr(if task.is_some_and(|t| t.kept) { STOP } else { CANCEL })
+}
 
 /// The pill's state.
 #[derive(Debug, Default)]
@@ -160,7 +167,8 @@ impl App {
         if key != self.task_pill.measured || self.task_pill.cancel_w <= 0.0 {
             self.task_pill.label_w = r.measure_text(&label, font_px, TEXT_FONT);
             self.task_pill.pct_w = if slot.is_empty() { 0.0 } else { r.measure_text(&slot, font_px, TEXT_FONT) };
-            self.task_pill.cancel_w = r.measure_text(crate::i18n::tr(CANCEL), font_px, TEXT_FONT);
+            // (One width for both words: a chip does not change size between tasks.)
+            self.task_pill.cancel_w = r.measure_text(crate::i18n::tr(CANCEL), font_px, TEXT_FONT).max(r.measure_text(crate::i18n::tr(STOP), font_px, TEXT_FONT));
             self.task_pill.measured = key;
         }
         if number != self.task_pill.num_measured {
@@ -370,6 +378,7 @@ impl App {
                 self.tasks_changed();
             }
             self.printing_task_cancelled(id);
+            self.record_task_cancelled(id);
             return;
         }
         // Only the band collapses it: a click between two rows is nothing.
@@ -404,6 +413,7 @@ impl App {
                     self.tasks.cancel(id);
                     self.tasks_changed();
                     self.printing_task_cancelled(id);
+                    self.record_task_cancelled(id);
                 }
             }
             _ => return "taskbox open|close|collapse|peek|unpeek|cancel".to_owned(),
@@ -564,7 +574,7 @@ impl App {
             self.push_task_chip(scene, *chip, text, ink, (1.0 - e) * a, false);
         }
         if let Some(cancel) = parts.cancel {
-            self.push_task_chip(scene, cancel, crate::i18n::tr(CANCEL), ink, a * whole, ptr.is_some_and(|p| cancel.contains(p)));
+            self.push_task_chip(scene, cancel, chip_word(self.task_pill.shown.as_ref()), ink, a * whole, ptr.is_some_and(|p| cancel.contains(p)));
         }
         let ty = band.y + (band.h - line_px) / 2.0;
         let color = Some([ink[0], ink[1], ink[2], ink[3] * a]);
@@ -633,7 +643,7 @@ impl App {
                 });
             }
             let cancel = self.task_row_cancel(rr);
-            self.push_task_chip(scene, cancel, crate::i18n::tr(CANCEL), ink, solid, ptr.is_some_and(|p| cancel.contains(p)));
+            self.push_task_chip(scene, cancel, chip_word(Some(*task)), ink, solid, ptr.is_some_and(|p| cancel.contains(p)));
             let ty = rr.y + (rr.h - line_px) / 2.0;
             let slot_x = cancel.x - CHIP_GAP - slot;
             let words_w = (slot_x - GAP - (rr.x + PILL_PAD_X)).max(1.0);

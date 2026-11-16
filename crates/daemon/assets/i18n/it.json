@@ -2408,5 +2408,9 @@
  "Treble": "Alti",
  "audio sound equalizer eq bass treble mids tone presets voice music films speakers headphones curve frequency": "audio suono equalizzatore eq bassi alti medi tono preset voce musica film altoparlanti cuffie curva frequenza",
  "Presets": "Preset",
- "The whole curve, band by band": "Tutta la curva, banda per banda"
+ "The whole curve, band by band": "Tutta la curva, banda per banda",
+ "Recording the screen": "Registrazione dello schermo",
+ "Screen recording": "Registrazione dello schermo",
+ "Saved as {name}": "Salvata come {name}",
+ "The screen could not be recorded": "Non è stato possibile registrare lo schermo"
 }
