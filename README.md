@@ -1,115 +1,98 @@
 # waverunner
 
-A macOS-style auto-hiding dock and app launcher for Wayland/Hyprland,
-written in Rust. One persistent daemon, one fixed layer-shell surface,
-GPU-rendered (wgpu), fully idle at rest. See `CLAUDE.md` for design
-decisions and `IMPLEMENTATION_PLAN.md` for the phased roadmap.
+The shell of **Golem**: one persistent daemon that draws the dock, the top
+bar and everything that opens from them. Rust, Wayland layer-shell surfaces on
+Hyprland, GPU-rendered (wgpu), idle at rest.
 
-## What it does
+It started as a dock and launcher (the name of the repo, `launcher`, is from
+then). Read `GOLEM.md` for what Golem is and how the work is done, and
+`CLAUDE.md` for the code: every part of the shell has its section there.
+`IMPLEMENTATION_PLAN.md` is the plan of the first weeks (August 2026) and is
+kept as history; it does not describe what is here now.
 
-The whole UI is one rounded "card" that slides up from the bottom edge:
+## What is in it
 
-- **Edge reveal** — touch the bottom edge of the screen with the pointer
-  and the dock (the card's top sliver, a row of app icons) rises.
-- **Intellihide** — the dock parks visible while no window overlaps its
-  zone and dodges out of the way when one does (via Hyprland IPC;
-  degrades to plain auto-hide elsewhere).
-- **Magnification** — icons swell under the cursor with cosine falloff,
-  in the dock row and in the grid.
-- **Scroll to open** — scrolling on the dock raises the full card: a
-  launchpad-style app grid with names, plus a search box.
-- **Type to search** — the open card takes the keyboard; typing filters
-  the grid live (nucleo fuzzy matching), the best match is
-  auto-selected, Enter or a click launches it (with a launch bounce),
-  Escape clears then collapses.
-- **Self-updating** — the app index rescans whenever the dock is
-  summoned, so installs/uninstalls show up without a restart. Icons
-  come from your freedesktop icon theme (SVG and PNG).
-- **Install section** — searching also matches all ~110k nixpkgs
-  packages (index cached locally, refreshed daily). Drag a package onto
-  the Apps section to `nix profile install` it — the app appears in the
-  grid when done; drag a profile-installed app onto Install to remove
-  it. Apps that didn't come from `nix profile` are left alone.
-- Launched apps are fully detached (`setsid`, double-fork): they
-  survive daemon restarts.
+- **The dock** at the bottom edge: pinned and running apps, groups that open
+  in a line, the bin, minimized windows; it hides when a window needs the
+  space.
+- **The box** that rises from the dock: every app in a grid, search as you
+  type, the Install section (nixpkgs packages, webapps and whole modules,
+  installed by dragging), files, and Controls (the settings pages).
+- **The top bar**: the current window's own controls, the clock, the gear's
+  quick settings (Wi-Fi, Bluetooth, sound, power, battery, storage),
+  notifications, the clipboard with its history, and what the machine offers
+  by itself (OPTIONS).
+- **Golem Files**, Quick Look, the desktop's icons, the card (notes, emoji,
+  dictation), the box terminal.
+- **The look**: palettes, lighting that follows the day, every app themed to
+  match.
+- **Seven languages** besides English: es, es_ES, pt, pt_PT, fr, de, it
+  (`crates/daemon/assets/i18n/`, compiled into the binary).
 
-## Build & run (NixOS)
+## Layout
+
+| Crate | What it is |
+|---|---|
+| `crates/daemon` | the `waverunner` binary: the Wayland loop, the renderer, every surface |
+| `crates/client` | `waverunner-ctl`, the command line that talks to the daemon |
+| `crates/core` | config, the `.desktop` index, fuzzy search |
+| `crates/proto` | the socket's message types |
+| `crates/options-engine` | the headless engine: collectors (what the machine is doing) and the Mind (what to offer) |
+| `crates/options-notify` | the notification server (`org.freedesktop.Notifications`) behind the bell |
+
+`nixos/` holds the privileged helper for installs (`nixos/README.md`),
+`tools/` the translation scripts (`tools/i18n/README.md`), the performance
+guards and other checks.
+
+## Build and test
 
 ```sh
-nix develop                     # always enter the dev shell first
-cargo build
-cargo run -p waverunner-daemon  # needs a live Hyprland session
-cargo run -p waverunner-client -- toggle
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+nix develop -c cargo build
+nix develop -c cargo clippy --workspace -- -D warnings   # kept clean
+nix develop -c cargo test --workspace
 ```
 
-## Hyprland integration
+The tests cover the logic (layout, search, stores, translations: a string
+without its translation fails). What a surface looks like is checked by
+running it, in a nested Hyprland so the live desktop is not touched.
 
-The daemon never grabs global hotkeys; bind the CLI client instead:
+## Running it
 
-```conf
-exec-once = waverunner
-bind = SUPER, SPACE, exec, waverunner-ctl toggle
-```
+- **On an installed Golem** the shell comes from this flake:
+  `homeManagerModules.default` (`programs.waverunner`) installs the daemon,
+  `waverunner-ctl` and the package index and starts the daemon with the
+  session; `nixosModules.notification-service` runs the notification server.
+  Golem's home layer (`~/Golem/system/home/home.nix`) wires both.
+- **On the development machine** Hyprland starts `./waverunner-dev`, which
+  runs `target/release/waverunner` with the libraries the flake names, and
+  the key binds call `target/debug/waverunner-ctl`. So `cargo build` gives a
+  new `waverunner-ctl` at once; a new daemon needs a release build and a
+  restart of the dock.
 
-`waverunner-ctl` speaks `toggle | show | hide | expand | collapse` over
-a Unix socket in `$XDG_RUNTIME_DIR`. Pass `--time` to print the
-command round-trip (the daemon draws the first frame before it
-responds, so this is command-to-first-frame; ~5–8 ms typical).
+The daemon takes no global keys. Hyprland binds `waverunner-ctl <command>`;
+`waverunner-ctl --help` lists the commands (`toggle`, `expand`,
+`control-panel`, `focus-next`, … and the `debug-*` ones the test rigs use).
+`--time` prints the round trip of a command.
+
+## Installing apps
+
+Installs are declarative. The dock edits one file the owner can write,
+`~/.config/waverunner/packages.list` (one nixpkgs attribute a line); a root
+`systemd.path` unit sees the change and rebuilds the system with that list.
+Nothing is installed imperatively, and an install that fails leaves the system
+as it was. `nixos/README.md` has the whole path.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/waverunner/config.toml` — all keys optional:
+`$XDG_CONFIG_HOME/waverunner/config.toml`, every key optional. Most of what a
+person changes is not here but in Controls, which writes
+`~/.config/golem/settings.json`; the file is for the few things with no
+control yet (`CLAUDE.md` names each key where its feature is described).
 
 ```toml
-[window]
-width = 720
-height = 560            # full card height
-input_bar_height = 48   # dock sliver height
-bottom_margin = 12      # gap under the fully risen card
-
-[animation.open]
-kind = "spring"         # spring | ease-out-quart | ease-out-cubic | ease-in-cubic
-spring_stiffness = 550.0
-spring_damping = 42.0
-spring_mass = 1.0
-
-[animation.close]
-kind = "ease-in-cubic"
-duration_ms = 140
-
 [theme]
-background = "#1e1e2ecc"   # #rrggbb or #rrggbbaa
-corner_radius = 24.0
-text = "#e6e6efff"
-highlight = "#ffffff26"
-icon_theme = "hicolor"     # e.g. "Papirus-Dark"
+icon_theme = "Papirus-Dark"
 
-[input]
-natural_scroll = true      # dock gesture follows natural scroll direction
-edge_reveal = true
-edge_reveal_px = 5         # pointer-sensitive strip while hidden
-autohide = true
-autohide_delay_ms = 300
-intellihide = true         # park while no window overlaps the dock zone
+[options]
+link_unfurl = false   # fetch a copied link's title and picture (off: no network)
 ```
-
-With home-manager, manage it declaratively:
-
-```nix
-xdg.configFile."waverunner/config.toml".text = ''
-  [theme]
-  icon_theme = "Papirus-Dark"
-'';
-```
-
-## Status
-
-Core launcher (P1–P4) works and is verified live on Hyprland: dock,
-grid, search, launch, animations, intellihide, persistent icon cache
-(cold start ~26 ms warm), terminal apps, drag-and-drop dock pinning,
-the three-section popup (Apps / Install / Files), and nixpkgs package
-search with drag-to-(un)install. Open work: real GPU + scale-2 +
-144 Hz visual checks, fractional scaling, theming polish, and prefix
-modes (see the plan).
