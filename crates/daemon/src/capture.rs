@@ -4,53 +4,64 @@
 //!
 //! One verb, `waverunner-ctl capture` (Golem binds Print to it; the card's
 //! Captures page opens it from its camera): the screen the pointer is on
-//! stays live, dimmed lightly outside what is chosen, and a slim toolbar
-//! stands at the bottom centre, made of the ONE MENU's material
-//! (`capture_view.rs` draws it):
+//! stays live, dimmed lightly outside what is chosen (`capture_view.rs`
+//! draws it), and its controls come to the BANNER as pills — a round parent
+//! and its children (`capture_pill.rs`; Max, the same day, on seeing a
+//! toolbar at the bottom of the screen: "a parent pill and a few children"):
 //!
 //! - WHAT: Region · Window · Screen (one lit; Tab walks them). A region is
 //!   dragged, then resized by its eight handles, moved by a drag inside and
 //!   nudged by the arrows (Shift: ten at a time), its size written by it; the
 //!   last one is there again at the next opening. A window is outlined under
 //!   the pointer and taken by a click; so is the screen.
-//! - KIND: Picture · Video (V).
-//! - chips that cycle on a click: Timer (off · 3 s · 10 s), Pointer (in the
-//!   picture or not), and for a video Sound.
+//! - Video (V): lit, a film; not lit, a picture. With it, Sound.
+//! - Timer: off · 3 s · 10 s, a click the next.
 //! - THE PLUS, Copy text: the words in the selection are READ (`tesseract`)
 //!   and put on the clipboard. Not shown at all without `tesseract`.
-//! - the main action, Capture or Record (Enter, or a double click inside a
-//!   region), and × (Escape).
+//! - the round pill closes the tool (Escape).
+//! - by the selection itself, one small button: Capture, or Record (Enter,
+//!   or a double click inside a region).
 //!
-//! It is drawn on the desktop's TOP surface (`desktop_top.rs`: Overlay, the
-//! whole output, above every window), made again on the pointer's screen
-//! when it is on another (`capture_follow`). That surface takes the keyboard
-//! (exclusive) and the whole pointer while something is being chosen; during
-//! a countdown it lets the pointer through everywhere but its toolbar, so a
-//! menu can be opened for the picture. At rest that surface stops short of
-//! the bar's strip (its exclusive zone); while the tool is up it is asked to
-//! cover the screen whole (`capture_cover`), so the bar can be in a region.
+//! A picture is taken without the pointer and a film with it (`capture
+//! pointer on` puts it in a picture: a verb, no control).
 //!
-//! TAKING IT. The tool's own drawing must not be in the picture: the surface
-//! is drawn EMPTY and its input region cleared, and only when the compositor
-//! says that frame was shown (its frame callback; `HIDE_WITHIN` later at the
-//! latest) does a thread run `grim`. A picture then does what Golem's
-//! `golem-screenshot` does: the clipboard first (`wl-copy`), a PNG in
-//! Pictures → Screenshots, a notification that carries the picture and
-//! opens it on a click. A video starts the screen recording (`record.rs`)
-//! on the same rectangle, with its task pill and Stop as they are. Nothing
-//! slow is on the loop, and closed it costs nothing: no timer, no surface of
-//! its own, no state but what was chosen last (`Prefs`).
+//! THE SCREEN SIDE is drawn on the desktop's TOP surface (`desktop_top.rs`:
+//! Overlay, above every window), made again on the pointer's screen when it
+//! is on another (`capture_follow`). At rest that surface stops short of the
+//! bar's strip (its exclusive zone); while the tool is up it is asked to
+//! cover the screen whole (`capture_cover`), so the banner can be in a
+//! region — but it takes no pointer on that strip, where the pills are, and
+//! does not dim it. The keyboard is FETCHED with an exclusive grab and kept
+//! on demand once it is here (`capture_keys_arrived`, the desktop's and the
+//! card's way): an exclusive layer has the pointer pinned to it too, and the
+//! pills must take their clicks. During a countdown the surface takes no
+//! pointer at all, so a menu can be opened for the picture.
+//!
+//! TAKING IT. Nothing of the tool may be in the picture: its surface is
+//! drawn EMPTY and its input region cleared, the banner's pills go in the
+//! same step, at once (`capture_pills_off_now`; a banner called over a
+//! fullscreen window goes whole), and only when the compositor says BOTH
+//! frames were shown (their frame callbacks: `capture_frame_shown`,
+//! `capture_bar_shown`; `HIDE_WITHIN` later at the latest) does a thread run
+//! `grim`. A picture then does what Golem's `golem-screenshot` does: the
+//! clipboard first (`wl-copy`), a PNG in Pictures → Screenshots, a
+//! notification that carries the picture and opens it on a click. A video
+//! starts the screen recording (`record.rs`) on the same rectangle, with its
+//! task pill and Stop as they are. Nothing slow is on the loop, and closed
+//! it costs nothing: no timer, no surface of its own, no state but what was
+//! chosen last (`Prefs`).
 //!
 //! Programs: `grim`, `wl-copy`, `wf-recorder`, `tesseract`, `busctl`; each
 //! can be named by `WAVERUNNER_GRIM`, `WAVERUNNER_WL_COPY`,
 //! `WAVERUNNER_WF_RECORDER`, `WAVERUNNER_TESSERACT`, `WAVERUNNER_BUSCTL` (a
 //! rig's stand-ins).
 //!
-//! Pointer-free: `capture [toggle|open|close|state]`, `capture what
+//! Pointer-free: `capture [toggle|open|close|state|pills]`, `capture what
 //! region|window|screen`, `capture kind picture|video`, `capture timer
 //! <0|3|10>`, `capture pointer on|off`, `capture sound on|off`, `capture rect
 //! <x> <y> <w> <h>`, `capture take`, `capture text`. `state` says everything
-//! in one line (the log's `capture: …`).
+//! in one line and `pills` where the banner's pills stand (the log's
+//! `capture: …`).
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -78,6 +89,11 @@ const DRAG_FROM: i32 = 3;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// The surface's new size is waited for at most this long (ms).
 const COVER_WITHIN: u64 = 120;
+/// The keyboard is given this long to arrive before its grab is let go (ms).
+const GRAB_WITHIN: u64 = 350;
+/// After a picture the keyboard goes back to its window this much later
+/// (ms): once `grim` has what it came for.
+const KEYS_BACK_AFTER: u64 = 400;
 /// The empty frame is waited for at most this long.
 const HIDE_WITHIN: u64 = 150;
 /// `grim` gets this long (a screen that is not being drawn never answers).
@@ -381,17 +397,17 @@ pub(crate) enum Phase {
     Hiding { job: Job, aim: Aim },
 }
 
-/// A control of the toolbar.
+/// A control of the tool: the banner's pills (`capture_pill.rs`), and the
+/// one button by the selection (`Main`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ctl {
     What(What),
-    Kind(Kind),
+    /// Video: lit = a film, not lit = a picture.
+    Video,
     Timer,
-    Pointer,
     Sound,
     Text,
     Main,
-    Close,
 }
 
 /// A region being dragged.
@@ -421,14 +437,19 @@ pub(crate) struct Tool {
     pub phase: Phase,
     /// Whether text can be read here (`tesseract` is there).
     pub ocr: bool,
-    /// The toolbar as it was last laid out (`capture_view.rs`).
-    pub bar: Vec<(Ctl, Rect)>,
+    /// The one button by the selection, Capture or Record, as it was last
+    /// laid out (`capture_view.rs`); nothing wide while there is none.
     pub bar_rect: Rect,
-    /// Where its rules stand, and how much it was made smaller to fit.
-    pub rules: Vec<f32>,
-    pub k: f32,
-    /// The empty frame was drawn (and is on its way to the screen).
+    /// The banner's strip at the top of this screen (0: it is on another, or
+    /// the surface begins under it): its pills take the pointer there, and
+    /// it is not dimmed.
+    pub strip: i32,
+    /// The empty frame was drawn, and then shown; and the banner's frame
+    /// without the pills likewise. The picture waits for both.
     pub cleared: bool,
+    top_shown: bool,
+    bar_drawn: bool,
+    bar_shown: bool,
 }
 
 /// The capture tool's place in [`App`].
@@ -440,6 +461,8 @@ pub(crate) struct Capture {
     epoch: u64,
     /// How the surface holds the keyboard and the pointer for it now.
     held: Held,
+    /// The keyboard is being fetched (exclusive) and has not arrived yet.
+    grab: bool,
     /// The surface was asked to cover the whole screen, the bar's strip too.
     whole: bool,
     /// The screen the tool opens on once the surface has its new size.
@@ -452,11 +475,12 @@ enum Held {
     /// Nothing: the tool is closed, or drawn empty.
     #[default]
     Nothing,
-    /// The keyboard (exclusive) and the whole pointer.
-    All,
-    /// The keyboard while no window is clicked, and the pointer on the
-    /// toolbar only (a countdown).
-    Bar(i32, i32, i32, i32),
+    /// The keyboard, and the pointer everywhere under the banner's strip
+    /// (this many pixels at the top are the banner's pills').
+    All(i32),
+    /// The keyboard while no window is clicked, and no pointer at all (a
+    /// countdown: a menu can be opened for the picture).
+    Keys,
 }
 
 impl Tool {
@@ -491,10 +515,7 @@ impl Tool {
 
     /// The control at `p`.
     fn ctl_at(&self, p: (f32, f32)) -> Option<Ctl> {
-        self.bar
-            .iter()
-            .find(|(_, r)| r.contains(p))
-            .map(|(c, _)| *c)
+        (self.bar_rect.w > 0.0 && self.bar_rect.contains(p)).then_some(Ctl::Main)
     }
 }
 
@@ -859,12 +880,10 @@ impl App {
             .is_some_and(|t| !matches!(t.phase, Phase::Hiding { .. }))
     }
 
-    /// Whether it takes the pointer over the whole screen now.
-    pub(crate) fn capture_takes_pointer(&self) -> bool {
-        self.capture_tool
-            .tool
-            .as_ref()
-            .is_some_and(|t| t.phase == Phase::Choosing)
+    /// Whether the banner's pills stand (`capture_pill.rs`): while the tool
+    /// shows, a countdown included; never while it waits to be off the screen.
+    pub(crate) fn capture_pills_on(&self) -> bool {
+        self.capture_shows()
     }
 
     /// A frame of the top surface was drawn: the EMPTY one, when the tool
@@ -914,6 +933,7 @@ impl App {
             }
             ("close", _) => self.capture_close(),
             ("state", _) => {}
+            ("pills", _) => return self.capture_pill_state(),
             ("what", "region") => self.capture_set_what(What::Region),
             ("what", "window") => self.capture_set_what(What::Window),
             ("what", "screen") => self.capture_set_what(What::Screen),
@@ -960,7 +980,7 @@ impl App {
                     return format!("nothing to read ({})", self.capture_state());
                 }
             }
-            _ => return "capture [toggle|open|close|state|what region|window|screen|kind picture|video|timer 0|3|10|pointer on|off|sound on|off|rect <x> <y> <w> <h>|take|text]".to_owned(),
+            _ => return "capture [toggle|open|close|state|what region|window|screen|kind picture|video|timer 0|3|10|pointer on|off|sound on|off|rect <x> <y> <w> <h>|take|text|pills]".to_owned(),
         }
         self.capture_state()
     }
@@ -1154,11 +1174,20 @@ impl App {
             last_press: None,
             phase: Phase::Choosing,
             ocr: can_read_text(),
-            bar: Vec::new(),
             bar_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
-            rules: Vec::new(),
-            k: 1.0,
+            strip: 0,
             cleared: false,
+            top_shown: false,
+            bar_drawn: false,
+            bar_shown: false,
+        };
+        // (The banner's strip, where this surface covers it: the bar's own
+        // height where it stands on this screen, else what is kept at the top.)
+        let bar_here = self.bar_screen_name().is_none_or(|n| n == tool.screen.name);
+        tool.strip = if covers && bar_here {
+            self.options_bar_h().ceil() as i32
+        } else {
+            0
         };
         // (The window under the pointer as it opens, else the topmost.)
         tool.win = ptr
@@ -1205,6 +1234,7 @@ impl App {
         self.capture_layout();
         self.capture_hold();
         self.capture_cursor();
+        self.capture_pill_sync();
         self.request_desktop_top_draw();
     }
 
@@ -1214,51 +1244,87 @@ impl App {
         let want = match self.capture_tool.tool.as_ref() {
             Some(Tool {
                 phase: Phase::Choosing,
+                strip,
                 ..
-            }) => Held::All,
+            }) => Held::All(*strip),
             Some(Tool {
                 phase: Phase::Counting { .. },
-                bar_rect: r,
                 ..
-            }) => Held::Bar(
-                r.x.floor() as i32,
-                r.y.floor() as i32,
-                r.w.ceil() as i32 + 1,
-                r.h.ceil() as i32 + 1,
-            ),
+            }) => Held::Keys,
             _ => Held::Nothing,
         };
         let had = std::mem::replace(&mut self.capture_tool.held, want);
         if had == want {
             return;
         }
+        let (w, h) = self.desktop_top.size;
         let Some(layer) = self.desktop_top.layer.as_ref() else {
             return;
         };
-        match want {
-            Held::All => {
+        let rects: Vec<(i32, i32, i32, i32)> = match want {
+            Held::All(strip) => vec![(0, strip, w as i32, h as i32 - strip)],
+            _ => Vec::new(),
+        };
+        crate::surface::set_input_rects(&self.compositor, layer, &rects);
+        self.desktop_top.input_on = false;
+        match (want, had) {
+            // The keyboard is fetched with an exclusive grab and kept on
+            // demand once it is here (`capture_keys_arrived`): an exclusive
+            // layer has the pointer pinned to it too, and the banner's pills
+            // must take their clicks.
+            (Held::All(_), Held::Nothing) => {
                 crate::surface::set_interactive(layer, true);
+                self.capture_tool.grab = true;
                 self.cancel_keyboard_handback(crate::KbSurface::Capture);
+                self.after_ms(GRAB_WITHIN, |app| app.capture_keys_arrived());
             }
-            Held::Bar(..) => crate::surface::set_on_demand(layer),
-            Held::Nothing => {
+            (Held::Nothing, _) => {
                 crate::surface::set_interactive(layer, false);
-                // (The keyboard goes back to the window it was taken from.)
-                self.begin_keyboard_handback(crate::KbSurface::Capture, None);
+                self.capture_tool.grab = false;
+                // The keyboard goes back to the window it was taken from —
+                // but only AFTER a picture: giving it back is a focus call,
+                // and where that moves the focus (no plugin: a bounce through
+                // a neighbour) a fullscreen window would leave fullscreen
+                // under the picture being taken. Nothing has the keyboard
+                // meanwhile, which changes nothing on the screen.
+                let picture = self.capture_tool.tool.as_ref().is_some_and(|t| {
+                    matches!(
+                        t.phase,
+                        Phase::Hiding {
+                            job: Job::Picture | Job::Text,
+                            ..
+                        }
+                    )
+                });
+                if picture {
+                    self.after_ms(KEYS_BACK_AFTER, |app| {
+                        if app.capture_tool.held == Held::Nothing {
+                            app.kb_worker.hand_back(None);
+                        }
+                    });
+                } else {
+                    self.begin_keyboard_handback(crate::KbSurface::Capture, None);
+                }
             }
-        }
-        // (The whole pointer is `sync_desktop_top_input`'s, with the menus';
-        // the toolbar alone, or nothing after it, is set here.)
-        if let (Some(layer), true) = (self.desktop_top.layer.as_ref(), want != Held::All) {
-            let rects: Vec<(i32, i32, i32, i32)> = match want {
-                Held::Bar(x, y, w, h) => vec![(x, y, w, h)],
-                _ => Vec::new(),
-            };
-            crate::surface::set_input_rects(&self.compositor, layer, &rects);
-            self.desktop_top.input_on = false;
+            // (Between choosing and counting the keyboard stays as it is.)
+            _ => {}
         }
         let _ = self.conn.flush();
         debug!("capture: holds {want:?}");
+    }
+
+    /// The keyboard has arrived on the tool's surface (or was given long
+    /// enough to): the exclusive grab that fetched it is let go, and it is
+    /// kept on demand — until a window is clicked.
+    pub(crate) fn capture_keys_arrived(&mut self) {
+        if !std::mem::take(&mut self.capture_tool.grab) || self.capture_tool.held == Held::Nothing {
+            return;
+        }
+        if let Some(layer) = self.desktop_top.layer.as_ref() {
+            crate::surface::set_on_demand(layer);
+        }
+        let _ = self.conn.flush();
+        debug!("capture: has the keyboard; the grab is let go");
     }
 
     /// The main action (`job`: a picture or a film), or Copy text: after
@@ -1323,8 +1389,14 @@ impl App {
             return;
         };
         tool.phase = Phase::Hiding { job, aim };
+        (tool.cleared, tool.top_shown, tool.bar_drawn, tool.bar_shown) =
+            (false, false, false, false);
         self.capture_tool.epoch += 1;
         let epoch = self.capture_tool.epoch;
+        // The banner's pills go in the same step, at once (no easing: a
+        // region or a screen can have the banner in it), and a banner that
+        // was called over a fullscreen window goes whole.
+        self.capture_pills_off_now();
         // (No frame callback comes for a surface nobody sees: then anyway.)
         self.after_ms(HIDE_WITHIN, move |app| {
             if app.capture_tool.epoch == epoch {
@@ -1333,16 +1405,62 @@ impl App {
         });
     }
 
-    /// The top surface's frame was shown: the empty one, when the tool is
-    /// waiting for it.
-    pub(crate) fn capture_frame_shown(&mut self) {
+    /// The banner drew a frame (`presented`: it went to the screen, and its
+    /// callback will say when it was shown; else nothing of it had changed).
+    pub(crate) fn capture_bar_drawn(&mut self, presented: bool) {
+        let Some(tool) = self
+            .capture_tool
+            .tool
+            .as_mut()
+            .filter(|t| matches!(t.phase, Phase::Hiding { .. }))
+        else {
+            return;
+        };
+        tool.bar_drawn = true;
+        if !presented {
+            tool.bar_shown = true;
+            self.capture_fire_when_gone();
+        }
+    }
+
+    /// The banner's frame was shown: the one without the pills, when the tool
+    /// is waiting for it.
+    pub(crate) fn capture_bar_shown(&mut self) {
+        if let Some(tool) = self
+            .capture_tool
+            .tool
+            .as_mut()
+            .filter(|t| t.bar_drawn && matches!(t.phase, Phase::Hiding { .. }))
+        {
+            tool.bar_shown = true;
+            self.capture_fire_when_gone();
+        }
+    }
+
+    /// Take it once BOTH the tool's surface and the banner were shown without
+    /// anything of the tool.
+    fn capture_fire_when_gone(&mut self) {
         if self
             .capture_tool
             .tool
             .as_ref()
-            .is_some_and(|t| t.cleared && matches!(t.phase, Phase::Hiding { .. }))
+            .is_some_and(|t| t.top_shown && t.bar_shown)
         {
             self.capture_fire();
+        }
+    }
+
+    /// The top surface's frame was shown: the empty one, when the tool is
+    /// waiting for it.
+    pub(crate) fn capture_frame_shown(&mut self) {
+        if let Some(tool) = self
+            .capture_tool
+            .tool
+            .as_mut()
+            .filter(|t| t.cleared && matches!(t.phase, Phase::Hiding { .. }))
+        {
+            tool.top_shown = true;
+            self.capture_fire_when_gone();
         }
     }
 
@@ -1350,6 +1468,7 @@ impl App {
     /// tool held of it went with it.
     pub(crate) fn capture_surface_gone(&mut self, close: bool) {
         self.capture_tool.held = Held::Nothing;
+        self.capture_tool.grab = false;
         // (A surface made again is inside the bar's strip, as made.)
         self.capture_tool.whole = false;
         if close && self.capture_tool.tool.take().is_some() {
@@ -1389,25 +1508,33 @@ impl App {
         self.capture_changed();
     }
 
-    /// A control of the toolbar, clicked.
-    fn capture_press_ctl(&mut self, ctl: Ctl) {
-        let counting = self
+    /// A control of the tool, clicked: a pill of the banner, or the button by
+    /// the selection.
+    pub(crate) fn capture_press_ctl(&mut self, ctl: Ctl) {
+        // (During a countdown nothing but the round pill answers.)
+        if self
             .capture_tool
             .tool
             .as_ref()
-            .is_some_and(|t| matches!(t.phase, Phase::Counting { .. }));
-        if counting && ctl != Ctl::Close {
+            .is_some_and(|t| matches!(t.phase, Phase::Counting { .. }))
+        {
             return;
         }
         let prefs = &mut self.capture_tool.prefs;
         match ctl {
             Ctl::What(what) => return self.capture_set_what(what),
-            Ctl::Kind(kind) => return self.capture_set_kind(kind),
+            Ctl::Video => {
+                let kind = if prefs.kind == Kind::Video {
+                    Kind::Picture
+                } else {
+                    Kind::Video
+                };
+                return self.capture_set_kind(kind);
+            }
             Ctl::Timer => {
                 let i = TIMERS.iter().position(|t| *t == prefs.timer).unwrap_or(0);
                 prefs.timer = TIMERS[(i + 1) % TIMERS.len()];
             }
-            Ctl::Pointer => prefs.pointer = !prefs.pointer,
             Ctl::Sound => prefs.sound = !prefs.sound,
             Ctl::Text => {
                 self.capture_go(Job::Text);
@@ -1422,7 +1549,6 @@ impl App {
                 self.capture_go(job);
                 return;
             }
-            Ctl::Close => return self.capture_close(),
         }
         self.capture_changed();
     }
@@ -1692,11 +1818,12 @@ mod tests {
             last_press: None,
             phase: Phase::Choosing,
             ocr: false,
-            bar: Vec::new(),
             bar_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
-            rules: Vec::new(),
-            k: 1.0,
+            strip: 0,
             cleared: false,
+            top_shown: false,
+            bar_drawn: false,
+            bar_shown: false,
         }
     }
 

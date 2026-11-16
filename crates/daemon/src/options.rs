@@ -593,6 +593,8 @@ pub(crate) fn group_of(id: PillId) -> PillGroup {
         PillId::Settings | PillId::SettingsStats => PillGroup::Settings,
         // The power pills stand by the gear, which never re-flows.
         PillId::Power | PillId::PowerSleep | PillId::PowerRestart => PillGroup::Settings,
+        // (So do the capture tool's.)
+        PillId::Capture | PillId::CaptureCtl(_) => PillGroup::Settings,
         PillId::Clipboard | PillId::ClipboardBox | PillId::ClipCopyLink => PillGroup::Clipboard,
         // (The terminal's pill stands with the card's.)
         PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_) => PillGroup::Clipboard,
@@ -912,6 +914,9 @@ fn draw_z(id: PillId) -> u8 {
         PillId::Power => 11,
         PillId::PowerSleep => 10,
         PillId::PowerRestart => 9,
+        // The capture tool's round pill over its children.
+        PillId::Capture => 11,
+        PillId::CaptureCtl(_) => 10,
         // The terminal's round pill over its tabs coming out from behind it.
         PillId::TermPill => 11,
         PillId::TermTab(_) => 10,
@@ -999,6 +1004,11 @@ pub(crate) enum PillId {
     /// …and, out from behind it on hover, sleep and restart.
     PowerSleep,
     PowerRestart,
+    /// The capture tool's round pill, right of the gear while the tool is up
+    /// (`capture_pill.rs`)…
+    Capture,
+    /// …and its children, out to its right (by their place).
+    CaptureCtl(u8),
     /// The box's terminal's pill (`term_pill.rs`), right of the card's pill
     /// while a tab runs something…
     TermPill,
@@ -1575,6 +1585,12 @@ fn presence(id: PillId) -> Presence {
             overview: true,
             stage: true,
         },
+        // The capture tool is opened wherever one is.
+        PillId::Capture | PillId::CaptureCtl(_) => Presence {
+            desktop: true,
+            overview: true,
+            stage: true,
+        },
         // What runs in the terminal is worth seeing wherever one is.
         PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_) => Presence {
             desktop: true,
@@ -2015,6 +2031,11 @@ impl App {
         // The power key's pills (`power_pill.rs`) stand right of the gear, and
         // what stands there begins after them (`options_left_start`).
         for (id, rect) in self.power_pill_rects(y, ph) {
+            pills.push(Pill { id, rect, text: String::new(), family: None, glyph_color: None });
+        }
+        // The capture tool's pills (`capture_pill.rs`) after them, while it is
+        // up: OVER what stands there (`options_pills` takes that off the bar).
+        for (id, rect) in self.capture_pill_rects(y, ph) {
             pills.push(Pill { id, rect, text: String::new(), family: None, glyph_color: None });
         }
         // The sleep timer's countdown and X (`timer_pill.rs`) after them.
@@ -2646,6 +2667,19 @@ impl App {
         if let Some(i) = self.drive_pill_out() {
             if let Some(rect) = pills.iter().find(|p| p.id == PillId::Drive(i)).map(|p| p.rect) {
                 clear_under(&mut pills, rect, move |id| id == PillId::Drive(i));
+            }
+        }
+        // THE CAPTURE TOOL's pills (`capture_pill.rs`) come out over what
+        // stands right of the gear — a long row, on a small screen as far as
+        // the window's pill: the same rule, and the window's pills leave
+        // TOGETHER (its × or a control left alone by its name would be a
+        // button for nothing).
+        if let Some(span) = self.capture_pill_span() {
+            let under = |r: &Rect| r.x < span.x + span.w && r.x + r.w > span.x;
+            let window = pills.iter().any(|p| group_of(p.id) == PillGroup::Window && under(&p.rect));
+            clear_under(&mut pills, span, |id| matches!(id, PillId::Capture | PillId::CaptureCtl(_)));
+            if window {
+                pills.retain(|p| group_of(p.id) != PillGroup::Window);
             }
         }
         pills
@@ -4093,6 +4127,10 @@ impl App {
                 self.push_power_pill(scene, pill.rect, pill.id);
                 continue;
             }
+            if matches!(pill.id, PillId::Capture | PillId::CaptureCtl(_)) {
+                self.push_capture_pill(scene, pill.rect, pill.id);
+                continue;
+            }
             if matches!(pill.id, PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_)) {
                 self.push_term_pill(scene, pill.rect, pill.id);
                 continue;
@@ -5189,6 +5227,15 @@ impl App {
         self.schedule_options_show_frame();
     }
 
+    /// The bar concealed NOW, in one frame (the capture tool called it over a
+    /// fullscreen window and the picture must not have it: `capture_pill.rs`).
+    pub(crate) fn options_hide_now(&mut self) {
+        self.options_hidden = true;
+        self.options_show.t = 0.0;
+        self.options_hover = None;
+        self.snap_lead();
+    }
+
     fn schedule_options_show_frame(&mut self) {
         self.schedule_tick(|a| (&mut a.options_show.frame_pending, &mut a.options_show.last), App::tick_options_show);
     }
@@ -5967,6 +6014,10 @@ impl App {
         // Sleep and restart rest behind the round power pill until they are out.
         if matches!(id, PillId::Power | PillId::PowerSleep | PillId::PowerRestart) {
             return self.power_pill_reachable(id);
+        }
+        // The capture tool's children rest behind its round pill until they are out.
+        if matches!(id, PillId::Capture | PillId::CaptureCtl(_)) {
+            return self.capture_pill_reachable(id);
         }
         // The terminal's tabs rest behind its round pill until they are out.
         if matches!(id, PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_)) {
@@ -7076,6 +7127,7 @@ impl App {
             Some(PillId::Phone) => self.phone_pill_click(),
             Some(PillId::Drive(i)) => self.drive_pill_click(i),
             Some(id @ (PillId::Power | PillId::PowerSleep | PillId::PowerRestart)) => self.power_pill_click(id),
+            Some(id @ (PillId::Capture | PillId::CaptureCtl(_))) => self.capture_pill_click(id),
             Some(id @ (PillId::TermPill | PillId::TermTab(_) | PillId::TermTabClose(_))) => self.term_pill_click(id),
             Some(PillId::Timer) => self.timer_pill_click(),
             // Clicking the clipboard element pastes the current clip into the

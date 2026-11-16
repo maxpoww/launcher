@@ -132,9 +132,9 @@ impl App {
     /// The surface takes the pointer everywhere while a menu or a box is
     /// up, and nowhere otherwise.
     fn sync_desktop_top_input(&mut self) {
-        // (The capture tool takes the whole pointer while something is chosen;
-        // its countdown's toolbar alone is its own doing: `capture_hold`.)
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up() || self.capture_takes_pointer();
+        // (The capture tool's hold on the pointer is its own doing, under the
+        // banner's strip: `capture_hold`.)
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up();
         // (The keyboard taken only for a menu goes back with it.)
         if !up && std::mem::take(&mut self.desktop.keys_for_menu) {
             self.desktop_drop_keys();

@@ -29,6 +29,7 @@ mod damage;
 mod deck;
 mod deck_thumbs;
 mod capture;
+mod capture_pill;
 mod capture_view;
 mod card;
 mod desktop;
@@ -843,6 +844,7 @@ fn main() -> anyhow::Result<()> {
         print_tasks: printing::PrintTasks::default(),
         recording: None,
         capture_tool: capture::Capture::default(),
+        capture_pills: capture_pill::CapturePills::default(),
         bar_zoom_keys: false,
         zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
@@ -1929,6 +1931,8 @@ pub struct App {
     recording: Option<record::Recording>,
     /// THE CAPTURE TOOL (`capture.rs`): up or not, and what was chosen last.
     capture_tool: capture::Capture,
+    /// Its pills on the banner (`capture_pill.rs`).
+    capture_pills: capture_pill::CapturePills,
     /// The pointer is on the bar: Ctrl +/−/0 are its zoom's, unless a dock
     /// stack is open.
     bar_zoom_keys: bool,
@@ -7950,6 +7954,8 @@ impl CompositorHandler for App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             self.options_frame_pending = false;
+            // (The capture tool's: the banner without its pills was shown.)
+            self.capture_bar_shown();
             if self.options_dirty {
                 self.draw_options();
             }
@@ -8412,6 +8418,9 @@ impl KeyboardHandler for App {
         }
         if self.card_layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
             self.card_keys_arrived();
+        }
+        if self.desktop_top.layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
+            self.capture_keys_arrived();
         }
     }
 

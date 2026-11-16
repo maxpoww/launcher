@@ -496,7 +496,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "control-panel",
     "power [open|shut|away|state]",
     "record [toggle|start|stop|state]",
-    "capture [toggle|open|close|state|what region|window|screen|kind picture|video|timer 0|3|10|pointer on|off|sound on|off|rect <x> <y> <w> <h>|take|text]",
+    "capture [toggle|open|close|state|pills|what region|window|screen|kind picture|video|timer 0|3|10|pointer on|off|sound on|off|rect <x> <y> <w> <h>|take|text]",
     "terminal [words]",
     "modules [name]",
     "overview-on",

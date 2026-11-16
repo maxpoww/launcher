@@ -643,25 +643,40 @@ The big daemon files are cohesive but long — go straight to the function:
   show printers`, `display pick <g> <i>`, `display type <text>|enter`; the engine alone:
   `cargo run -p options-engine --example printing [cancel|restart|resume|pause|default|options|set|print …]`;
   CUPS answers as a driverless printer at ipp://localhost:631/printers/<queue> (an add to test with).
-- `capture.rs` + `capture_view.rs` — THE CAPTURE TOOL (Max, 2026-11-16: "Print Screen should be… a TOOL, with
-  everything a user needs and some plus"): `waverunner-ctl capture` (Golem binds Print; the card's Captures camera
-  opens it). Drawn on the desktop's TOP surface (`desktop_top.rs`), made again on the pointer's screen
-  (`capture_follow`) and asked to cover the screen whole while it is up (`capture_cover`: exclusive zone -1, so
-  the bar can be in a region; 0 again after). Light dim outside what is chosen, a toolbar bottom centre in the
-  ONE MENU's paint (`capture_view::slots`/`lay`/`fit`, words only): Region · Window · Screen | Picture · Video |
-  Timer · Pointer · Sound (a film's) | Copy text (only with `tesseract`) · Capture/Record · ×. `Tool` = while up,
-  `Prefs` = what was chosen last (in memory, the last region with its screen); `Phase`: Choosing (keyboard
-  exclusive + whole pointer) → Counting (pointer only on the bar, Escape gives the countdown up) → Hiding (drawn
-  EMPTY, input cleared; `capture_frame_shown` from the surface's frame callback, `HIDE_WITHIN` at the latest)
-  → `capture_fire`: a thread runs `grim` (`shoot`: clipboard, Pictures → Screenshots, a notification carrying
-  the picture — `notify_args`, its click opens the FILE, `notif_open`), or `read_text` (grim → `tesseract …
-  stdout -l` → `wl-copy`; `pick_langs`), or the recording starts (`record::record_start_at`, `record::Aim`; a
-  film's sides made even). Region = `grip_at`/`dragged`/`handles` (pure, tested), windows topmost first by
-  `stack` (fullscreen, floating, then focus history: the compositor does not tell the true order). Keys: Escape,
-  Tab, V, Enter, arrows (Shift ×10). Programs by env for a rig: `WAVERUNNER_GRIM`, `_WL_COPY`, `_TESSERACT`,
-  `_WF_RECORDER`, `_BUSCTL` (⚠ the rig's bus is the LIVE one: stub busctl). Rig: `capture open|close|state|what
-  …|kind …|timer 0|3|10|pointer on|off|sound on|off|rect x y w h|take|text` (`state` in the log); real keys with
-  the nested `hl.dsp.send_shortcut`. Not built: symbols on the bar, annotation, settings.json for the choices.
+- `capture.rs` + `capture_pill.rs` + `capture_view.rs` — THE CAPTURE TOOL (Max, 2026-11-16: "Print Screen should
+  be… a TOOL, with everything a user needs and some plus"; then, on seeing a bottom toolbar: the controls as PILLS
+  ON THE BANNER, "a parent pill and a few children"): `waverunner-ctl capture` (Golem binds Print; the card's
+  Captures camera opens it). THE PILLS (`capture_pill.rs`, the power pills' and the terminal pill's idiom): a round
+  parent right of the gear (after the power pills; camera, a film camera with Video lit; a click closes the tool) and
+  its children out at once as words — Region · Window · Screen (one lit: full ink on the hover ground), Video (lit =
+  a film), `Timer: off|3 s|10 s`, Copy text (only with `tesseract`), Sound last (only with Video, so nothing else
+  moves). `PillId::Capture` / `CaptureCtl(k)` → `children`/`words`/`lit`/`places` (pure, tested). They come out OVER
+  what stands there, which leaves the bar meanwhile (`capture_pill_span` in `options_pills`, `clear_under`; the
+  window's pills leave together — pushing the left band ran into the window's pill at 1440 px). Over a fullscreen
+  the banner is called and goes back (`called_bar`, as the power key). THE SCREEN SIDE (`capture_view.rs`) is the
+  desktop's TOP surface (`desktop_top.rs`), made again on the pointer's screen (`capture_follow`) and asked to cover
+  the screen whole while up (`capture_cover`: exclusive zone -1; 0 again after): light dim outside what is chosen
+  (never on the banner's `Tool::strip`, where it takes no pointer either), outline, a region's eight handles, its
+  size, the countdown, and ONE button by the selection, Capture/Record (`button_place`: under the bottom right
+  corner, inside with no room below; the menu's paint + THE KIT's main tint). `Tool` = while up, `Prefs` = what was
+  chosen last (in memory); `Phase`: Choosing → Counting (no pointer at all; Escape gives the countdown up, the
+  round pill closes) → Hiding → `capture_fire`. THE KEYBOARD is fetched exclusive and kept ON DEMAND once it arrives
+  (`capture_keys_arrived`: an exclusive layer has the pointer pinned to it and the pills would take no click);
+  after a PICTURE it goes back `KEYS_BACK_AFTER` later (the hand-back is a focus call: without the waveview plugin
+  it bounces through a neighbour and a fullscreen window left fullscreen under the picture). HIDING: the surface
+  drawn EMPTY, the pills off in the same step with no easing (`capture_pills_off_now`; a called banner hidden whole,
+  `options_hide_now`), and the picture waits for BOTH frames (`capture_frame_shown`, `capture_bar_drawn`/
+  `capture_bar_shown`; `HIDE_WITHIN` at the latest). Then a thread runs `grim` (`shoot`: clipboard, Pictures →
+  Screenshots, a notification carrying the picture — `notify_args`, its click opens the FILE, `notif_open`), or
+  `read_text` (grim → `tesseract … stdout -l` → `wl-copy`; `pick_langs`), or the recording starts
+  (`record::record_start_at`, `record::Aim`; a film's sides made even). Pictures without the pointer, films with
+  it (`capture pointer on` is a verb only). Region = `grip_at`/`dragged`/`handles` (pure, tested), windows topmost
+  first by `stack` (fullscreen, floating, then focus history: the compositor does not tell the true order). Keys:
+  Escape, Tab, V, Enter, arrows (Shift ×10). Programs by env for a rig: `WAVERUNNER_GRIM`, `_WL_COPY`,
+  `_TESSERACT`, `_WF_RECORDER`, `_BUSCTL` (⚠ the rig's bus is the LIVE one: stub busctl). Rig: `capture open|close|
+  state|pills|what …|kind …|timer 0|3|10|pointer on|off|sound on|off|rect x y w h|take|text` (`state` and `pills`
+  — the pills' rects — in the log); real keys with the nested `hl.dsp.send_shortcut`, real clicks with the
+  scratchpad's `vptr.py`. Not built: annotation, settings.json for the choices, a bar narrower than the row.
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

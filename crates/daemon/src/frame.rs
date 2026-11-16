@@ -2554,6 +2554,10 @@ impl App {
     /// colour sampler once a second for nothing: 17 full-screen captures in
     /// 15 s on the Acer, round 3.)
     fn options_frame_drawn(&mut self, frame: Option<crate::renderer::Frame>) {
+        // (The capture tool waits for the banner without its pills.)
+        if let Some(frame) = &frame {
+            self.capture_bar_drawn(matches!(frame, crate::renderer::Frame::Presented));
+        }
         match frame {
             Some(crate::renderer::Frame::Presented) => {}
             Some(crate::renderer::Frame::Unchanged) => self.options_frame_pending = false,
