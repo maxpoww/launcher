@@ -11,6 +11,9 @@
 //! on a window too, closes the menu and is nothing more — what a menu does
 //! everywhere. Its pointer events go to the desktop's own handler
 //! (`App::desktop_pointer`); only the drawing lives here.
+//!
+//! Quick Look (`quicklook.rs`) and the capture tool (`capture.rs`) are
+//! drawn here too: both must stand over every window.
 
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -122,12 +125,16 @@ impl App {
         }
         self.desktop_top.drawn = true; // draw once, whatever is (not) up
         self.request_desktop_top_draw();
+        // (The capture tool asked for the whole screen, the bar's strip too.)
+        self.capture_surface_sized();
     }
 
     /// The surface takes the pointer everywhere while a menu or a box is
     /// up, and nowhere otherwise.
     fn sync_desktop_top_input(&mut self) {
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up();
+        // (The capture tool takes the whole pointer while something is chosen;
+        // its countdown's toolbar alone is its own doing: `capture_hold`.)
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up() || self.capture_takes_pointer();
         // (The keyboard taken only for a menu goes back with it.)
         if !up && std::mem::take(&mut self.desktop.keys_for_menu) {
             self.desktop_drop_keys();
@@ -153,7 +160,7 @@ impl App {
             return;
         }
         self.sync_desktop_top_input();
-        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up();
+        let up = self.desktop.menu.is_some() || self.desktop.props.is_some() || self.desktop_config_up() || self.peek.is_up() || self.capture_shows();
         if !up && !self.desktop_top.drawn {
             return;
         }
@@ -332,7 +339,7 @@ impl App {
         // (The menus are the Shell's: its Transparency. Quick Look shows what
         // was asked for whole.)
         let mut scene = Scene {
-            alpha: if self.peek.is_up() { 1.0 } else { crate::options::shell_content() },
+            alpha: if self.peek.is_up() || self.capture_shows() { 1.0 } else { crate::options::shell_content() },
             ..Default::default()
         };
         // (Quick Look and a menu are never up together: each has the first
@@ -346,6 +353,10 @@ impl App {
         // (Quick Look over the menus: they are not up together.)
         self.peek_upload();
         self.peek_push(&mut scene);
+        // THE CAPTURE TOOL (`capture.rs`) over everything of ours.
+        self.capture_layout();
+        self.capture_push(&mut scene);
+        self.capture_drawn_away();
         self.desktop_top.drawn = !scene.grids.is_empty();
         // (Quick Look's layers are pictures: no squircle on them.)
         let thumb_base = if self.peek.is_up() { 0 } else { u32::MAX };

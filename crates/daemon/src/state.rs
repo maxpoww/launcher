@@ -237,7 +237,7 @@ impl UiState {
             | Command::MinAdd(_)
             | Command::MinDel(_)
             | Command::WindowPlaced(_)
-            | Command::FastLaunch | Command::FastControls | Command::Power(_) | Command::Record(_) | Command::Terminal(_) => false,
+            | Command::FastLaunch | Command::FastControls | Command::Power(_) | Command::Record(_) | Command::Capture(_) | Command::Terminal(_) => false,
         }
     }
 

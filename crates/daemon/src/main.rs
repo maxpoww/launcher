@@ -28,6 +28,8 @@ mod controls;
 mod damage;
 mod deck;
 mod deck_thumbs;
+mod capture;
+mod capture_view;
 mod card;
 mod desktop;
 mod desktop_config;
@@ -840,6 +842,7 @@ fn main() -> anyhow::Result<()> {
         task_pill: task_pill::TaskPill::default(),
         print_tasks: printing::PrintTasks::default(),
         recording: None,
+        capture_tool: capture::Capture::default(),
         bar_zoom_keys: false,
         zoom_keys_for: None,
         phone_pill: phone_pill::PhonePill::default(),
@@ -1924,6 +1927,8 @@ pub struct App {
     print_tasks: printing::PrintTasks,
     /// The screen being recorded (`record.rs`), a task on the bar.
     recording: Option<record::Recording>,
+    /// THE CAPTURE TOOL (`capture.rs`): up or not, and what was chosen last.
+    capture_tool: capture::Capture,
     /// The pointer is on the bar: Ctrl +/−/0 are its zoom's, unless a dock
     /// stack is open.
     bar_zoom_keys: bool,
@@ -3136,7 +3141,9 @@ pub(crate) const NOTIFY_OPEN: &str = "golem-open:";
 /// `icon` is a themed icon's name (`phone`: the one a phone has on the desktop).
 /// `show` is the whole key of the action a click runs (`NOTIFY_OPEN…`).
 pub(crate) fn desktop_send_notify_open(title: &str, icon: &str, body: &str, show: Option<&str>) {
-    let mut cmd = std::process::Command::new("busctl");
+    // (`WAVERUNNER_BUSCTL`: a rig's stand-in, as for the capture tool's.)
+    let busctl = std::env::var_os("WAVERUNNER_BUSCTL").filter(|v| !v.is_empty()).unwrap_or_else(|| "busctl".into());
+    let mut cmd = std::process::Command::new(busctl);
     cmd.args([
         "--user",
         "call",
@@ -4046,6 +4053,11 @@ impl App {
             Command::Record(what) => {
                 let done = self.record_command(&what);
                 info!("record: {done}");
+                return;
+            }
+            Command::Capture(what) => {
+                let done = self.capture_command(&what);
+                info!("capture: {done}");
                 return;
             }
             // The box as its terminal (`term.rs`): opened, `./` typed. (As
@@ -7483,6 +7495,11 @@ impl App {
     }
 
     fn handle_key_event(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        // THE CAPTURE TOOL holds the keyboard while something is chosen.
+        if self.capture_takes_key(keysym) {
+            self.capture_key(keysym);
+            return;
+        }
         // A file window with the keyboard is a window like any other: its
         // keys are its own.
         if let Some(id) = self.filer.keys {
@@ -7958,6 +7975,8 @@ impl CompositorHandler for App {
             .is_some_and(|l| l.wl_surface() == surface)
         {
             self.desktop_top.frame_pending = false;
+            // (The capture tool's empty frame was shown: now the picture.)
+            self.capture_frame_shown();
             if self.desktop_top.dirty {
                 self.draw_desktop_top();
             }
@@ -8352,6 +8371,8 @@ pub(crate) enum KbSurface {
     Desktop,
     /// The card, while its input box, search or name is typed in (`card/`).
     Card,
+    /// The capture tool on the menus' surface (`capture.rs`).
+    Capture,
 }
 
 /// A keyboard hand-back in flight (see [`App::begin_keyboard_handback`]).
@@ -8418,6 +8439,11 @@ impl KeyboardHandler for App {
         }
         if self.card_layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
             self.card_keys_left();
+            return;
+        }
+        // (The capture tool's release, confirmed.)
+        if self.desktop_top.layer.as_ref().is_some_and(|l| l.wl_surface() == surface) {
+            self.complete_keyboard_handback(KbSurface::Capture);
             return;
         }
         if self

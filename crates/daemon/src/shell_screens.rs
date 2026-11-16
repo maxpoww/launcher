@@ -379,6 +379,7 @@ impl App {
                         swap(&conn, part, &mut top.layer, &mut top.renderer, &mut top.fscale, &mut top.visible, new);
                         top.frame_pending = false;
                         top.input_on = false;
+                        self.capture_surface_gone(false);
                     }
                     Part::Card => {
                         swap(&conn, part, &mut self.card_layer, &mut self.card_renderer, &mut self.card_fscale, &mut self.card_visible, new);
@@ -441,7 +442,10 @@ impl App {
         self.shell_screens.lost.insert(part);
         // What was up on it went with it.
         match part {
-            Part::DesktopTop => self.peek.up = None,
+            Part::DesktopTop => {
+                self.peek.up = None;
+                self.capture_surface_gone(true);
+            }
             Part::Desktop => self.desktop.rename = None,
             _ => {}
         }
@@ -497,7 +501,7 @@ impl App {
         for part in Part::ALL {
             let at_home = match part {
                 Part::Options | Part::Deck | Part::Desktop | Part::Veil => true,
-                Part::DesktopTop => !self.peek.is_up() && self.desktop.menu.is_none() && self.desktop.props.is_none(),
+                Part::DesktopTop => !self.peek.is_up() && self.desktop.menu.is_none() && self.desktop.props.is_none() && !self.capture_up(),
                 // (The card goes where its window is: `card_follow_screen`.)
                 Part::Card => false,
             };
@@ -574,6 +578,24 @@ impl App {
             Some(Box::new(move |app: &mut App| app.peek_show(win, thing))),
             false,
         )
+    }
+
+    /// THE CAPTURE TOOL opens on the screen the pointer is on (`capture.rs`):
+    /// when the menus' surface is on another, it is made again there and the
+    /// tool opens once it is (true: the caller leaves it).
+    pub(crate) fn capture_follow(&mut self, screen: &str) -> bool {
+        if self.output_state.outputs().nth(1).is_none() {
+            return false;
+        }
+        let Some(target) = self.output_named(screen) else {
+            return false;
+        };
+        if self.part_output(Part::DesktopTop) == Some(&target) {
+            self.stay_put(Part::DesktopTop);
+            return false;
+        }
+        let screen = screen.to_owned();
+        self.remake_part(Part::DesktopTop, Some(target), Some(Box::new(move |app: &mut App| app.capture_open_on(&screen))), false)
     }
 
     /// THE CARD rides its window onto that window's screen: when its surface

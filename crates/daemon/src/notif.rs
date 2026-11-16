@@ -2706,6 +2706,15 @@ impl App {
             .map(std::path::PathBuf::from);
         if let Some(folder) = folder {
             tracing::info!("notif: opening {}", folder.display());
+            // (A file — a screenshot just taken — opens with its app.)
+            if folder.is_file() {
+                let exec = format!("xdg-open {}", crate::launch::shell_quote(&folder.to_string_lossy()));
+                if let Err(e) = crate::launch::launch(&exec, false, &self.config.launch.terminal) {
+                    tracing::warn!("notif: opening {} failed: {e:#}", folder.display());
+                }
+                self.notif_dismiss(idx);
+                return;
+            }
             self.filer_open(folder);
             self.notif_dismiss(idx);
             return;

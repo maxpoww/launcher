@@ -9,7 +9,9 @@
 //! recording). No pill of its own: the task pill is where long things show.
 //!
 //! The recorder is `wf-recorder` (Golem's home layer brings it;
-//! `WAVERUNNER_WF_RECORDER` names another), one whole screen, no sound. It is
+//! `WAVERUNNER_WF_RECORDER` names another). The key records one whole
+//! screen, no sound; the capture tool (`capture.rs`) hands it a part of one
+//! (a region, a window's rectangle: [`Aim::Area`]) and sound when asked. It is
 //! ended with SIGINT, which is how it closes its file properly, and it ends
 //! with the dock (PDEATHSIG, as the card's voice recorder does): a recorder
 //! left alone would fill the disk with a film nobody asked for.
@@ -62,6 +64,15 @@ pub(crate) struct Recording {
     file: PathBuf,
     since: Instant,
     task: TaskHandle,
+}
+
+/// What is recorded (and what a picture is taken of: `capture.rs`): one
+/// whole screen by its connector name, or a rectangle of the layout as
+/// `grim` and `wf-recorder` take it, `"x,y wxh"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Aim {
+    Screen(String),
+    Area(String),
 }
 
 /// The recorder's program.
@@ -136,7 +147,7 @@ fn kept_at_all(file: &Path) -> bool {
 }
 
 /// `<what> 2026-11-16 14-03-21.<ext>` in local time.
-fn stamped(what: &str, ext: &str, at: SystemTime) -> String {
+pub(crate) fn stamped(what: &str, ext: &str, at: SystemTime) -> String {
     let secs = at.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
     // SAFETY: `localtime_r` fills a caller-owned `tm` from a valid `time_t`.
     let tm = unsafe {
@@ -165,11 +176,20 @@ pub(crate) fn clock(secs: u64) -> String {
     }
 }
 
-/// The recorder's command for `screen` into `file`.
-fn command(screen: &str, file: &Path) -> Command {
+/// The recorder's command for `aim` into `file`, with the sound that is
+/// playing when `sound`.
+fn command(aim: &Aim, sound: bool, file: &Path) -> Command {
     let mut cmd = Command::new(recorder());
     // -y: never ask on its input; yuv420p: a film every player opens.
-    cmd.arg("-y").arg("-o").arg(screen).arg("-x").arg("yuv420p").arg("-f").arg(file);
+    cmd.arg("-y");
+    match aim {
+        Aim::Screen(screen) => cmd.arg("-o").arg(screen),
+        Aim::Area(area) => cmd.arg("-g").arg(area),
+    };
+    if sound {
+        cmd.arg("--audio");
+    }
+    cmd.arg("-x").arg("yuv420p").arg("-f").arg(file);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // SAFETY: `prctl` is async-signal-safe and touches nothing of ours.
     unsafe {
@@ -231,6 +251,7 @@ impl App {
         }
     }
 
+    /// The key's recording: the whole screen the keyboard is on, no sound.
     fn record_start(&mut self) {
         let screen = match crate::hypr::focused_monitor() {
             Ok(m) => m.name,
@@ -240,6 +261,15 @@ impl App {
                 return;
             }
         };
+        self.record_start_at(Aim::Screen(screen), false);
+    }
+
+    /// Record `aim` (the capture tool's: a region, a window's rectangle, a
+    /// screen), with the sound when `sound`. One recording at a time.
+    pub(crate) fn record_start_at(&mut self, aim: Aim, sound: bool) {
+        if self.recording.is_some() {
+            return;
+        }
         let dir = folder();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             warn!("record: cannot make {dir:?}: {e}");
@@ -247,7 +277,7 @@ impl App {
             return;
         }
         let file = dir.join(file_name(SystemTime::now()));
-        let child = match command(&screen, &file).spawn() {
+        let child = match command(&aim, sound, &file).spawn() {
             Ok(child) => child,
             Err(e) => {
                 warn!("record: the recorder did not start ({:?}): {e}", recorder());
@@ -255,7 +285,7 @@ impl App {
                 return;
             }
         };
-        info!("record: recording {screen} into {file:?}");
+        info!("record: recording {aim:?} (sound: {sound}) into {file:?}");
         let task = self.task_begin_with(tr("Recording the screen"), Some(clock(0)));
         self.tasks.keeps(task.id());
         self.tasks_changed();
@@ -380,8 +410,17 @@ mod tests {
 
     #[test]
     fn the_recorder_is_asked_for_one_screen_and_never_asks_back() {
-        let cmd = command("HDMI-A-1", Path::new("/tmp/x.mp4"));
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(args, ["-y", "-o", "HDMI-A-1", "-x", "yuv420p", "-f", "/tmp/x.mp4"]);
+        let args = |cmd: Command| cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<String>>();
+        let cmd = command(&Aim::Screen("HDMI-A-1".into()), false, Path::new("/tmp/x.mp4"));
+        assert_eq!(args(cmd), ["-y", "-o", "HDMI-A-1", "-x", "yuv420p", "-f", "/tmp/x.mp4"]);
+    }
+
+    #[test]
+    fn a_part_of_the_screen_is_asked_by_its_rectangle_and_sound_only_when_wanted() {
+        let args = |cmd: Command| cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<String>>();
+        let cmd = command(&Aim::Area("10,20 640x480".into()), true, Path::new("/tmp/x.mp4"));
+        assert_eq!(args(cmd), ["-y", "-g", "10,20 640x480", "--audio", "-x", "yuv420p", "-f", "/tmp/x.mp4"]);
+        let cmd = command(&Aim::Area("0,0 2x2".into()), false, Path::new("/tmp/x.mp4"));
+        assert!(!args(cmd).contains(&"--audio".to_owned()));
     }
 }

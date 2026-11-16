@@ -2422,5 +2422,10 @@
  "Screenshot": "Captura",
  "Stop · {time}": "Parar · {time}",
  "Moved to the bin": "Movido para o lixo",
- "Click to paste · drag it out": "Clique para colar · arraste para fora"
+ "Click to paste · drag it out": "Clique para colar · arraste para fora",
+ "Drag to choose a region": "Arraste para escolher uma região",
+ "There is no window on this screen": "Não há nenhuma janela neste ecrã",
+ "Screenshot saved": "Captura guardada",
+ "It could not be saved in {0}.": "Não foi possível guardar em {0}.",
+ "The screenshot could not be taken": "Não foi possível fazer a captura"
 }

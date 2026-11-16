@@ -267,6 +267,11 @@ pub enum Command {
     /// the first starts, the next stops and keeps the film in Videos →
     /// Screencasts. `start`, `stop`, `state` without a toggle.
     Record(String),
+    /// THE CAPTURE TOOL (Golem binds Print to this): the screen dimmed, a
+    /// toolbar to choose a region, a window or the screen, as a picture or a
+    /// film, and to copy the text in it. Alone it opens or closes; the rest
+    /// drives it without a pointer.
+    Capture(String),
     /// The box opened as its TERMINAL (`./`), with what follows typed after
     /// it (`terminal 2 htop` → `./2 htop`, not run): a key binding's way in.
     Terminal(String),
@@ -339,6 +344,8 @@ impl fmt::Display for Command {
             Command::Power(w) => write!(f, "power {w}"),
             Command::Record(w) if w.is_empty() => f.write_str("record"),
             Command::Record(w) => write!(f, "record {w}"),
+            Command::Capture(w) if w.is_empty() => f.write_str("capture"),
+            Command::Capture(w) => write!(f, "capture {w}"),
             Command::Terminal(w) if w.is_empty() => f.write_str("terminal"),
             Command::Terminal(w) => write!(f, "terminal {w}"),
         }
@@ -396,6 +403,7 @@ impl FromStr for Command {
             ("window-placed", Command::WindowPlaced as fn(String) -> Command),
             ("power", Command::Power as fn(String) -> Command),
             ("record", Command::Record as fn(String) -> Command),
+            ("capture", Command::Capture as fn(String) -> Command),
             ("terminal", Command::Terminal as fn(String) -> Command),
         ] {
             if let Some(rest) = line.strip_prefix(verb) {
@@ -488,6 +496,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "control-panel",
     "power [open|shut|away|state]",
     "record [toggle|start|stop|state]",
+    "capture [toggle|open|close|state|what region|window|screen|kind picture|video|timer 0|3|10|pointer on|off|sound on|off|rect <x> <y> <w> <h>|take|text]",
     "terminal [words]",
     "modules [name]",
     "overview-on",
@@ -640,6 +649,7 @@ mod tests {
                 | Command::FastControls
                 | Command::Power(_)
                 | Command::Record(_)
+                | Command::Capture(_)
                 | Command::Terminal(_) => (),
             }
         }
@@ -708,6 +718,8 @@ mod tests {
             Command::Power(String::new()),
             Command::Record(String::new()),
             Command::Record("stop".into()),
+            Command::Capture(String::new()),
+            Command::Capture("rect 10 20 640 480".into()),
             Command::Power("open".into()),
         ]
     }

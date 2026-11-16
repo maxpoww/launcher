@@ -5254,6 +5254,12 @@ impl App {
         {
             self.desktop_end_rename(true);
         }
+        // THE CAPTURE TOOL is up (on the top surface, over Quick Look too):
+        // the pointer there is its.
+        if self.capture_up() && self.pointer_surface == crate::options::PointerSurface::DesktopTop {
+            self.capture_pointer(&event);
+            return;
+        }
         // QUICK LOOK is up (on the top surface): the pointer there is its.
         // (Not the desktop's: Quick Look can be up on ANOTHER screen, and a
         // click on this one's wallpaper went to it at this screen's points —

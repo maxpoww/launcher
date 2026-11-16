@@ -2693,9 +2693,17 @@ impl App {
         });
     }
 
-    /// The Captures page's camera: a region of the screen, dragged, as a
-    /// picture. Off the loop (the owner is choosing); the page's tick lists it.
+    /// The Captures page's camera: THE CAPTURE TOOL (`capture.rs`), as Print
+    /// opens it; the page's tick lists what it takes. Where the tool cannot
+    /// be drawn (no top surface), the old way: a region dragged with
+    /// `slurp`, off the loop.
     fn card_screenshot(&mut self) {
+        if self.desktop_top_ready() {
+            if !self.capture_up() {
+                self.capture_open();
+            }
+            return;
+        }
         let spawned = std::thread::Builder::new().name("card-screenshot".into()).spawn(|| {
             crate::record::screenshot_region();
         });
