@@ -35,6 +35,27 @@ const EMPTY: u64 = 2048;
 /// How long the recorder gets to close its file before it is killed.
 const CLOSE_WITHIN: Duration = Duration::from_secs(8);
 
+/// When the running recording began (none: not recording). The card's
+/// Captures page reads it as it draws; only the loop writes it.
+static SINCE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn since_set(at: Option<Instant>) {
+    if let Ok(mut s) = SINCE.lock() {
+        *s = at;
+    }
+}
+
+/// How long the screen has been recorded, as the pill says it; `None` when
+/// it is not being recorded.
+pub(crate) fn running_clock() -> Option<String> {
+    SINCE.lock().ok().and_then(|s| *s).map(|at| clock(at.elapsed().as_secs()))
+}
+
+/// Videos → Screencasts: where the films are kept.
+pub(crate) fn films_folder() -> PathBuf {
+    folder()
+}
+
 /// A recording that is running.
 pub(crate) struct Recording {
     child: Child,
@@ -59,6 +80,63 @@ fn folder() -> PathBuf {
 
 /// `Screencast 2026-11-16 14-03-21.mp4`: the screenshots' way of naming.
 fn file_name(at: SystemTime) -> String {
+    stamped("Screencast", "mp4", at)
+}
+
+/// Pictures → Screenshots: where the screenshots are kept (Golem's
+/// `golem-screenshot` puts them there).
+pub(crate) fn shots_folder() -> PathBuf {
+    let home = crate::filer::home();
+    let conf = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from);
+    let text = std::fs::read_to_string(conf.join("user-dirs.dirs")).unwrap_or_default();
+    let pictures = crate::filer::user_dir(&text, &home, "PICTURES").filter(|d| *d != home).unwrap_or_else(|| home.join("Pictures"));
+    pictures.join("Screenshots")
+}
+
+/// A REGION OF THE SCREEN as a picture, asked from the card: the owner drags
+/// it. Golem's own command where there is one (`golem-screenshot region`: the
+/// file, the clipboard, its notification); elsewhere the same by hand — the
+/// region picked with `slurp`, taken with `grim` into Pictures → Screenshots
+/// and put on the clipboard. Blocks until it is taken or given up: never on
+/// the loop. Whether a picture was taken.
+pub(crate) fn screenshot_region() -> bool {
+    let on_path = |name: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()));
+    if on_path("golem-screenshot") {
+        return Command::new("golem-screenshot").arg("region").stdin(Stdio::null()).status().is_ok_and(|s| s.success());
+    }
+    let Ok(picked) = Command::new("slurp").stdin(Stdio::null()).stderr(Stdio::null()).output() else {
+        warn!("record: no slurp to pick a region with");
+        return false;
+    };
+    let region = String::from_utf8_lossy(&picked.stdout).trim().to_owned();
+    if !picked.status.success() || region.is_empty() {
+        return false; // given up (Escape)
+    }
+    let dir = shots_folder();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("record: cannot make {dir:?}: {e}");
+        return false;
+    }
+    let file = dir.join(stamped("Screenshot", "png", SystemTime::now()));
+    let taken = Command::new("grim").arg("-g").arg(&region).arg(&file).stdin(Stdio::null()).status().is_ok_and(|s| s.success());
+    if !taken || !kept_at_all(&file) {
+        return false;
+    }
+    // (On the clipboard too, as the key's screenshot is.)
+    if let Ok(picture) = std::fs::File::open(&file) {
+        let _ = Command::new("wl-copy").args(["--type", "image/png"]).stdin(picture).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    info!("record: a screenshot of {region} in {file:?}");
+    true
+}
+
+/// A file that is there and not empty.
+fn kept_at_all(file: &Path) -> bool {
+    std::fs::metadata(file).is_ok_and(|m| m.len() > 0)
+}
+
+/// `<what> 2026-11-16 14-03-21.<ext>` in local time.
+fn stamped(what: &str, ext: &str, at: SystemTime) -> String {
     let secs = at.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
     // SAFETY: `localtime_r` fills a caller-owned `tm` from a valid `time_t`.
     let tm = unsafe {
@@ -67,7 +145,7 @@ fn file_name(at: SystemTime) -> String {
         tm
     };
     format!(
-        "Screencast {:04}-{:02}-{:02} {:02}-{:02}-{:02}.mp4",
+        "{what} {:04}-{:02}-{:02} {:02}-{:02}-{:02}.{ext}",
         tm.tm_year + 1900,
         tm.tm_mon + 1,
         tm.tm_mday,
@@ -181,7 +259,9 @@ impl App {
         let task = self.task_begin_with(tr("Recording the screen"), Some(clock(0)));
         self.tasks.keeps(task.id());
         self.tasks_changed();
-        self.recording = Some(Recording { child, file, since: Instant::now(), task });
+        let since = Instant::now();
+        since_set(Some(since));
+        self.recording = Some(Recording { child, file, since, task });
         self.record_tick_arm();
     }
 
@@ -200,6 +280,7 @@ impl App {
                 }
                 ended => {
                     warn!("record: the recorder ended by itself ({ended:?})");
+                    since_set(None);
                     if let Some(rec) = app.recording.take() {
                         // (What it made before it ended is the owner's.)
                         if kept(&rec.file) {
@@ -223,6 +304,7 @@ impl App {
         let Some(Recording { mut child, file, since, task }) = self.recording.take() else {
             return;
         };
+        since_set(None);
         info!("record: stopped after {} s", since.elapsed().as_secs());
         // (The task is over now: the pill fills and leaves.)
         drop(task);

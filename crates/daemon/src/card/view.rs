@@ -107,6 +107,13 @@ pub(crate) enum Page {
     /// is said is written into the window, and the last thing said stays
     /// under the microphone until the next one, to be kept or pasted again.
     Talk,
+    /// CAPTURES (Max, 2026-11-16: the button to start recording *"should go
+    /// in the card with a screenshot button, and right there one should see
+    /// the screen recordings and the screenshots"*): two buttons at the top —
+    /// take a screenshot, record the screen — and under them every
+    /// screenshot and recording there is, newest first, as files: a click
+    /// pastes one, a drag carries it out, its × sends it to the bin.
+    Captures,
 }
 
 impl Page {
@@ -124,6 +131,7 @@ impl Page {
             Page::Translate => Some(tr("Translator")),
             Page::Emoji => Some(tr("Emoji")),
             Page::Talk => Some(tr("Voice to text")),
+            Page::Captures => Some(tr("Captures")),
         }
     }
 }
@@ -145,10 +153,30 @@ pub(crate) enum Foot {
     Emoji,
     Talk,
     Translate,
+    Captures,
 }
 
 /// How many buttons the head has.
-pub(crate) const FEET: usize = 7;
+pub(crate) const FEET: usize = 8;
+
+/// The camera (fa-camera), the dot of "record" (fa-circle) and the square
+/// of "stop" (fa-stop).
+const GLYPH_CAMERA: &str = "\u{f030}";
+const GLYPH_REC: &str = "\u{f111}";
+const GLYPH_STOP: &str = "\u{f04d}";
+/// The room the two buttons take at the top of the Captures page, and how
+/// big they are.
+const CAPTURE_SPACE: f32 = 118.0;
+const CAPTURE_BTN: f32 = 56.0;
+
+/// Where the Captures page's two buttons are, in its list: the screenshot's,
+/// then the recording's.
+pub(crate) fn capture_buttons(list: Rect) -> (Rect, Rect) {
+    let gap = 44.0;
+    let x = (list.x + (list.w - 2.0 * CAPTURE_BTN - gap) / 2.0).round();
+    let y = list.y + 20.0;
+    (Rect::new(x, y, CAPTURE_BTN, CAPTURE_BTN), Rect::new(x + CAPTURE_BTN + gap, y, CAPTURE_BTN, CAPTURE_BTN))
+}
 /// The microphone (fa-microphone).
 const GLYPH_MIC: &str = "\u{f130}";
 /// The room the big microphone takes at the top of voice-to-text's page,
@@ -178,6 +206,7 @@ impl Foot {
         Foot::Clipboard,
         Foot::Translate,
         Foot::Dictionary,
+        Foot::Captures,
         Foot::Memory,
     ];
 
@@ -193,6 +222,7 @@ impl Foot {
             Foot::Translate => "\u{f05ca}", // md-translate: 文 and A
             Foot::Emoji => "\u{f118}",      // fa-smile-o
             Foot::Talk => GLYPH_MIC,
+            Foot::Captures => GLYPH_CAMERA,
         }
     }
 
@@ -219,6 +249,8 @@ impl Foot {
             Foot::Clipboard => (0.600, 0.670, 1.0, (0.0, 0.0)),
             Foot::Translate => (0.600, 0.545, 1.0125, (0.0, 0.0)),
             Foot::Dictionary => (0.600, 0.6875, 1.0, (0.0, 0.0)),
+            // (Not searched on the rig as the others were: by eye.)
+            Foot::Captures => (0.600, 0.525, 0.95, (0.0, 0.0)),
         };
         Some(Icon {
             glyph: self.word(),
@@ -239,6 +271,7 @@ impl Foot {
             Foot::Translate => Page::Translate,
             Foot::Emoji => Page::Emoji,
             Foot::Talk => Page::Talk,
+            Foot::Captures => Page::Captures,
         }
     }
 }
@@ -259,6 +292,9 @@ pub(crate) enum Hover {
     More(u64),
     /// The big microphone of voice-to-text's page.
     Mic,
+    /// The Captures page's two buttons: take a screenshot, record the screen.
+    Shot,
+    Rec,
     /// A voice note's line: a click on it plays from there.
     Line(u64),
     /// The line of languages over a translation: a click opens their menu.
@@ -1533,6 +1569,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
     // (Voice to text: the microphone has the top of the list.)
     let over = match page {
         Page::Talk => TALK_SPACE,
+        Page::Captures => CAPTURE_SPACE,
         _ if named => NAME_SPACE,
         _ => 0.0,
     };
@@ -2178,6 +2215,72 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 hot,
                 acc,
             );
+        }
+    }
+    // CAPTURES: the two buttons at the top, each with its word under it;
+    // the screenshots and recordings are the list, under those.
+    if page == Page::Captures {
+        let (shot, rec) = capture_buttons(body);
+        let recording = crate::record::running_clock();
+        for (btn, which, glyph, word, live) in [
+            (shot, Hover::Shot, GLYPH_CAMERA, tr("Screenshot").to_owned(), false),
+            (
+                rec,
+                Hover::Rec,
+                if recording.is_some() { GLYPH_STOP } else { GLYPH_REC },
+                match &recording {
+                    Some(clock) => crate::i18n::fill(tr("Stop · {time}"), &[("time", clock)]),
+                    None => tr("Record").to_owned(),
+                },
+                recording.is_some(),
+            ),
+        ] {
+            let hot = view.hover == Some(which);
+            // (As the microphone: a ring of the accent; filled red while
+            // it records, or with the wash under the pointer.)
+            let fill = if live {
+                Some([danger()[0], danger()[1], danger()[2], 0.9])
+            } else if hot {
+                Some(paint.wash())
+            } else {
+                None
+            };
+            if let Some(color) = fill {
+                list.rects.push(RectInst { rect: btn, radius: btn.w / 2.0, color, glass: 0.0, border: 0.0 });
+            }
+            list.rects.push(RectInst {
+                rect: btn,
+                radius: btn.w / 2.0,
+                color: [acc[0], acc[1], acc[2], 0.45],
+                glass: 0.0,
+                border: 1.0,
+            });
+            // (The record dot is the red it will be; the rest the accent.)
+            let ink = if live {
+                [1.0, 1.0, 1.0, 1.0]
+            } else if which == Hover::Rec {
+                [danger()[0], danger()[1], danger()[2], 1.0]
+            } else {
+                [acc[0], acc[1], acc[2], 1.0]
+            };
+            for (text, y, px, family, color) in [
+                (glyph.to_owned(), btn.y + 17.0, 20.0, Some(crate::options::NERD), ink),
+                (word, btn.y + btn.h + 10.0, 11.5, None, paint.ink_at(0.9)),
+            ] {
+                list.labels.push(Label {
+                    text,
+                    pos: (btn.x + btn.w / 2.0, y),
+                    max_w: btn.w + 40.0,
+                    font_px: px,
+                    line_px: (px * 1.3).round(),
+                    centered: true,
+                    dim: false,
+                    cache: true,
+                    clip: Some(clip),
+                    family,
+                    color: Some(color),
+                });
+            }
         }
     }
     // VOICE TO TEXT: the big microphone at the top, what it is doing under
@@ -3198,6 +3301,7 @@ mod tests {
                 Foot::Clipboard,
                 Foot::Translate,
                 Foot::Dictionary,
+                Foot::Captures,
                 Foot::Memory
             ]
         );

@@ -52,5 +52,6 @@
   "The computer restarts. Your files stay as they are.": "El computador se reinicia. Tus archivos quedan como están.",
   "The screen could not be recorded": "No se ha podido grabar la pantalla",
   "Added {apps}": "Se añadió {apps}",
-  "Changes to Golem itself": "Cambios en el propio Golem"
+  "Changes to Golem itself": "Cambios en el propio Golem",
+  "Click to paste · drag it out": "Clic para pegar · arrástralo fuera"
 }

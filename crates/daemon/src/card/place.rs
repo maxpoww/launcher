@@ -18,7 +18,7 @@ pub(crate) const WIDTH: f32 = 420.0;
 /// takes that edge, between these limits (the first mockup's were 240–520).
 /// The width is the WINDOW's, like the place the card was slid to: each
 /// window has its own, kept until that window closes.
-pub(super) const WIDTH_MIN: f32 = 240.0;
+pub(super) const WIDTH_MIN: f32 = 340.0;
 
 pub(super) const WIDTH_MAX: f32 = 640.0;
 

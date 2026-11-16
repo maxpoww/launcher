@@ -2417,5 +2417,10 @@
  "Removed {apps}": "Retrait de {apps}",
  "System programs updated": "Programmes du système mis à jour",
  "Changes to Golem itself": "Changements dans Golem lui-même",
- "{apps} and {n} more": "{apps} et {n} de plus"
+ "{apps} and {n} more": "{apps} et {n} de plus",
+ "Captures": "Captures",
+ "Screenshot": "Capture",
+ "Stop · {time}": "Arrêter · {time}",
+ "Moved to the bin": "Mis à la corbeille",
+ "Click to paste · drag it out": "Clic pour coller · faites-le glisser dehors"
 }

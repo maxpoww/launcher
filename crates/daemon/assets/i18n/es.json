@@ -2418,5 +2418,10 @@
  "System programs updated": "Programas del sistema actualizados",
  "Changes to Golem itself": "Cambios en Golem mismo",
  "{apps} and {n} more": "{apps} y {n} más",
- "Linux {version}": "Linux {version}"
+ "Linux {version}": "Linux {version}",
+ "Captures": "Capturas",
+ "Screenshot": "Captura",
+ "Stop · {time}": "Detener · {time}",
+ "Moved to the bin": "Movido a la papelera",
+ "Click to paste · drag it out": "Clic para pegar · arrástralo afuera"
 }

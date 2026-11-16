@@ -147,6 +147,73 @@ const ZOOM_KEYS: [(&str, &str); 8] = [
 /// The ids of the clipboard page's rows start here (a clip's own id is
 /// added): far from the card's own.
 const CLIP_IDS: u64 = 1 << 62;
+/// The ids of the Captures page's rows start here (what a file's path
+/// hashes to is added).
+const CAPTURE_IDS: u64 = 1 << 61;
+/// How many captures the page lists (the newest).
+const CAPTURES_SHOWN: usize = 40;
+
+/// The screenshots and the screen recordings there are, newest first, as
+/// (file, when it was made).
+fn capture_files() -> Vec<(std::path::PathBuf, u64)> {
+    let mut found: Vec<(std::path::PathBuf, u64)> = [crate::record::shots_folder(), crate::record::films_folder()]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(|dir| dir.flatten())
+        .filter_map(|e| {
+            let path = e.path();
+            let ext = path.extension()?.to_str()?.to_lowercase();
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "mp4" | "mkv" | "webm") {
+                return None;
+            }
+            let meta = e.metadata().ok().filter(|m| m.is_file() && m.len() > 0)?;
+            let made = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some((path, made))
+        })
+        .collect();
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    found.truncate(CAPTURES_SHOWN);
+    found
+}
+
+/// What tells that the captures changed: how many, the newest's time, their
+/// sizes together.
+fn capture_sig(files: &[(std::path::PathBuf, u64)]) -> (usize, u64, u64) {
+    let sizes = files.iter().filter_map(|(p, _)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    (files.len(), files.first().map_or(0, |f| f.1), sizes)
+}
+
+/// A capture's id on its page: the same for the same file, whatever else
+/// comes and goes.
+fn capture_id(path: &std::path::Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    CAPTURE_IDS + (h.finish() & ((1 << 48) - 1))
+}
+
+/// The Captures page's rows: each capture as its file (a screenshot shows
+/// its picture, a recording its name and size).
+fn capture_rows(files: &[(std::path::PathBuf, u64)]) -> Vec<Item> {
+    files
+        .iter()
+        .map(|(path, made)| {
+            let kind = kind_of(path);
+            Item {
+                id: capture_id(path),
+                kind,
+                body: file_body(path),
+                path: Some(path.to_string_lossy().into_owned()),
+                aspect: if kind == Kind::Image { aspect_of(path) } else { 0.0 },
+                owned: false,
+                at: *made,
+                from: None,
+                parts: Vec::new(),
+                said: None,
+            }
+        })
+        .collect()
+}
 
 /// How many emoji the picker remembers as used lately (two rows).
 const RECENT_EMOJI: usize = 16;
@@ -542,6 +609,10 @@ pub(crate) struct Card {
     /// one of the window the card is on. `None`: that window has none yet
     /// (Memory's page is up for one to be picked).
     open: Option<u64>,
+    /// The Captures page's list as last read: how many, the newest's time
+    /// and all their sizes together (a film being recorded grows) — a change
+    /// of any reads it again.
+    capture_sig: (usize, u64, u64),
     pinned: Vec<Item>,
     /// Memory's page, SEARCHED: what is listed instead of its rows — each
     /// session that has something of what is typed (its row, then those
@@ -1209,6 +1280,17 @@ impl Card {
         if self.page == Page::Talk && talk_mic(list).contains(pos) {
             return Some(Hover::Mic);
         }
+        if self.page == Page::Captures {
+            let (shot, rec) = capture_buttons(list);
+            // (They scroll with the list: only where they are drawn.)
+            let at = (pos.0, pos.1 + self.scroll);
+            if shot.contains(at) {
+                return Some(Hover::Shot);
+            }
+            if rec.contains(at) {
+                return Some(Hover::Rec);
+            }
+        }
         if self.page == Page::Session {
             let name = match self.field {
                 Some(Field::Name) => Some(format!("{}|", self.naming)),
@@ -1549,7 +1631,7 @@ impl Card {
             Page::Dictionary => self.looked = shown,
             Page::Translate => self.translated = shown,
             Page::Talk => self.said_last = shown.into_iter().next(),
-            Page::Memory | Page::Clipboard | Page::Emoji => {}
+            Page::Memory | Page::Clipboard | Page::Emoji | Page::Captures => {}
         }
     }
 
@@ -1570,7 +1652,8 @@ impl Card {
             Page::Talk => self.said_last.take().into_iter().collect(),
             Page::Dictionary => std::mem::take(&mut self.looked),
             Page::Translate => std::mem::take(&mut self.translated),
-            Page::Clipboard | Page::Emoji => Vec::new(),
+            // (The captures are the dock's to list too: `card_show`.)
+            Page::Clipboard | Page::Emoji | Page::Captures => Vec::new(),
         };
         // (A session's row is wrapped afresh: it may have changed.)
         for past in &self.memory {
@@ -2049,6 +2132,9 @@ impl App {
                 self.card_flash(tr("Copied"));
                 return;
             }
+            // (The captures' page lists what the screen gave: nothing is
+            // kept there by a drop.)
+            Page::Captures => return,
             Page::Memory => {
                 if let Some(session) = self.card.drop_session {
                     let item = self.card_part(kind, body, path, owned, aspect);
@@ -2291,6 +2377,10 @@ impl App {
             }
             if page == Page::Clipboard {
                 self.card.items = self.card_clip_rows();
+            }
+            if page == Page::Captures {
+                self.card_captures_list();
+                self.card_captures_tick();
             }
             for path in self.card_pictures() {
                 self.card_ask_picture(&path);
@@ -2571,6 +2661,53 @@ impl App {
             self.card.lines.remove(&id);
         }
         self.card_save();
+        self.request_card_draw();
+    }
+
+    /// THE CAPTURES PAGE's list, read from the two folders.
+    fn card_captures_list(&mut self) {
+        let files = capture_files();
+        self.card.capture_sig = capture_sig(&files);
+        self.card.items = capture_rows(&files);
+        for path in self.card_pictures() {
+            self.card_ask_picture(&path);
+        }
+    }
+
+    /// While the Captures page is up: once a second, a capture that came or
+    /// went is listed (the key's screenshot, a recording just closed), and
+    /// the recording's time moves.
+    fn card_captures_tick(&mut self) {
+        self.after_ms(1000, |app| {
+            if app.card.page != Page::Captures || app.card.host.is_none() {
+                return;
+            }
+            let files = capture_files();
+            if capture_sig(&files) != app.card.capture_sig {
+                app.card_captures_list();
+                app.request_card_draw();
+            } else if crate::record::running_clock().is_some() {
+                app.request_card_draw();
+            }
+            app.card_captures_tick();
+        });
+    }
+
+    /// The Captures page's camera: a region of the screen, dragged, as a
+    /// picture. Off the loop (the owner is choosing); the page's tick lists it.
+    fn card_screenshot(&mut self) {
+        let spawned = std::thread::Builder::new().name("card-screenshot".into()).spawn(|| {
+            crate::record::screenshot_region();
+        });
+        if let Err(e) = spawned {
+            warn!("card: cannot take a screenshot ({e})");
+        }
+    }
+
+    /// The Captures page's record button: starts, or stops and keeps.
+    fn card_record(&mut self) {
+        let done = self.record_command("toggle");
+        info!("card: record → {done}");
         self.request_card_draw();
     }
 
@@ -3459,6 +3596,8 @@ impl App {
             Hover::Undo => self.card_undo(),
             // The big microphone: talk; again, and it is written.
             Hover::Mic => self.card_voice_button(true),
+            Hover::Shot => self.card_screenshot(),
+            Hover::Rec => self.card_record(),
             // "Show all" / "Show less": the text is wrapped again, whole or cut.
             // (On a voice note it is "Transcribe" / "Hide text": what is
             // said in it is written out the first time, and kept.)
@@ -3912,6 +4051,20 @@ impl App {
         }
         // (A row of the clipboard's page: the clip itself goes, from the
         // clipboard's own history — there is no taking that back.)
+        // (A row of the captures' page: the file itself goes to the bin,
+        // where it can be taken back from.)
+        if self.card.page == Page::Captures {
+            let Some(path) = self.card.items.iter().find(|it| it.id == id).and_then(|it| it.path.clone()) else {
+                return;
+            };
+            match crate::trash::Trash::home().trash(std::path::Path::new(&path)) {
+                Ok(_) => self.card_flash(tr("Moved to the bin")),
+                Err(e) => warn!("card: {path} not moved to the bin: {e}"),
+            }
+            self.card.lines.remove(&id);
+            self.card_captures_list();
+            return;
+        }
         if self.card.page == Page::Clipboard {
             let clip = id.wrapping_sub(CLIP_IDS);
             if let Some(idx) = self.clip.history.iter().position(|c| c.id == clip) {
@@ -5140,6 +5293,7 @@ impl App {
             (_, _, Page::Dictionary) => tr("Type to search · press Enter to look a word up"),
             (_, _, Page::Translate) => tr("Type to search · press Enter to translate"),
             (_, _, Page::Talk) => tr("Press the microphone, or hold Space to talk"),
+            (_, _, Page::Captures) => tr("Click to paste · drag it out"),
             _ => "",
         };
         let view = View {
@@ -6115,7 +6269,8 @@ impl App {
                     "emoji" | "emojis" => Page::Emoji,
                     "memory" => Page::Memory,
                     "voice" => Page::Talk,
-                    _ => return "card at clipboard|emoji|memory|voice".to_owned(),
+                    "captures" => Page::Captures,
+                    _ => return "card at clipboard|emoji|memory|voice|captures".to_owned(),
                 };
                 // (THE CARD THAT IS UP HERE is the one the key is for: it
                 // turns to that page where it is — on its window or under
@@ -6318,6 +6473,22 @@ impl App {
             "clipboard" => {
                 self.card_show(Page::Clipboard);
                 format!("{} rows", self.card.items.len())
+            }
+            // `captures [shot|rec|bin <n>]`: the captures' page · its camera ·
+            // its record button · a capture's ×.
+            "captures" => {
+                self.card_show(Page::Captures);
+                match rest.trim() {
+                    "shot" => self.card_screenshot(),
+                    "rec" => self.card_record(),
+                    // `bin <n>`: the × of the n-th capture.
+                    other => {
+                        if let Some(id) = other.strip_prefix("bin ").and_then(|n| n.trim().parse::<usize>().ok()).and_then(|n| self.card.items.get(n)).map(|it| it.id) {
+                            self.card_remove(id);
+                        }
+                    }
+                }
+                format!("{} captures, {}", self.card.items.len(), crate::record::running_clock().map_or_else(|| "not recording".to_owned(), |c| format!("recording {c}")))
             }
             // `dictionary [word]` · `emojis`: their pages.
             "dictionary" => {
