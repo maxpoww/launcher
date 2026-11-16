@@ -673,10 +673,36 @@ The big daemon files are cohesive but long — go straight to the function:
   it (`capture pointer on` is a verb only). Region = `grip_at`/`dragged`/`handles` (pure, tested), windows topmost
   first by `stack` (fullscreen, floating, then focus history: the compositor does not tell the true order). Keys:
   Escape, Tab, V, Enter, arrows (Shift ×10). Programs by env for a rig: `WAVERUNNER_GRIM`, `_WL_COPY`,
-  `_TESSERACT`, `_WF_RECORDER`, `_BUSCTL` (⚠ the rig's bus is the LIVE one: stub busctl). Rig: `capture open|close|
+  `_TESSERACT`, `_WF_RECORDER`, `_BUSCTL` (⚠ the rig's bus is the LIVE one: stub busctl). PRINT itself is `capture_shot.rs` (next entry); `capture`/
+  `capture open` are this live tool. Rig: `capture open|close|
   state|pills|what …|kind …|timer 0|3|10|pointer on|off|sound on|off|rect x y w h|take|text` (`state` and `pills`
   — the pills' rects — in the log); real keys with the nested `hl.dsp.send_shortcut`, real clicks with the
   scratchpad's `vptr.py`. Not built: annotation, settings.json for the choices, a bar narrower than the row.
+- `capture_shot.rs` — PRINT TAKES THE WHOLE SCREEN AT ONCE (Max, 2026-11-16, the third round: "the print key takes
+  a full screen and shows on the card pill… the user can click to edit the screenshot… or let it save as is… also
+  start recording by holding the print key for 1.5 s"). THE KEY = `Press` (pure, the time handed in; tested): `capture
+  press` → a running recording is STOPPED and nothing else, else the pointer's screen is taken NOW (`capture_shoot` →
+  `grab_screen`, `grim -o` through `desktop_off_loop`, with the windows as they stand — `Frame`; the tool, its pills
+  or an earlier preview are taken off first and given `HIDE_FIRST`); `capture release` before `HOLD` (1.5 s) makes the
+  shot the screenshot (`Pending::keep`, settled once the picture is in too: `settle` — clipboard, Pictures →
+  Screenshots, its pixels kept for the editor; NO notification); held `HOLD` the shot is dropped and `record start`
+  runs (`capture_held`), and from `SIGN_FROM` (300 ms) the card's long pill is out saying "Keep holding to record
+  the screen" with the task pill's fill growing (`Press::sign`, `capture_sign_frame`; timers only while the key is
+  down). `capture shot` = both in one. THE PREVIEW: the card's long pill (`clipboard.rs::push_clip_pill` asks
+  `push_capture_long` first; `clip_long_show`, `clip_thumb_ask`/`clip_thumb_of` = the clipboard's thumbnailer into
+  the bar's icon array) with the shot small, `Screenshot` and a ×; `PREVIEW_FOR` (4 s) and for as long as the pointer
+  is on it (`capture_preview_look`), then it folds; the card's own hover leaves the pill alone meanwhile
+  (`capture_long_out` in `update_clip_reveal`). A click = THE EDITOR (`capture_preview_clicked` → `capture_edit`),
+  its × deletes the file (`capture_preview_close`); a second Print settles the first and takes its place. THE
+  EDITOR = the capture tool with `Tool::still` (`Kept`): the shot is the top surface's one big picture
+  (`Renderer::set_video_frame` + `Scene::video`, drawn under the dim in `capture_view.rs`, clipped off the banner's
+  strip: the live pills stand there), the pills are Region · Window · Screen · Copy text (`capture_pill::children(…,
+  still)`), the windows are the shot's own, the button says Save: `capture_still_save` cuts the kept PNG in
+  process (`crop_px`: each edge rounded on its own at any scale; `cut`), writes it OVER the same file
+  (`part_beside` + rename) and puts it on the clipboard; Screen + Save / Escape / the round pill leave the shot
+  whole; `capture_still_text` reads the cut with tesseract. Not kept across a dock restart (the file and the
+  clipboard are; the preview and the editor's still are memory). Rig: `capture press|release|shot`, `capture preview
+  click|close|state`, `capture edit`; the state line says `mode live|still`, `key down|up`, `preview out <file>|none`.
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

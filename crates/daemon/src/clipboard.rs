@@ -2013,6 +2013,11 @@ impl App {
         // LIGHTER (Max, 2026-08-31) — one clear direction, no row tinting.
         let hover_ink = crate::options::hover_ink_for(ink);
         let dim_ink = self.dim_ink(ink);
+        // (A SCREENSHOT'S PREVIEW, or the held Print key's sign: the long
+        // pill is theirs while they are out — `capture_shot.rs`.)
+        if e < 0.001 && self.push_capture_long(scene, rect, ink, ((peek - 0.35) / 0.5).clamp(0.0, 1.0)) {
+            return;
+        }
 
         // Collapsed preview of the newest clip, fading out as the box solidifies
         // (complementary to the list fading in, so they cross-fade cleanly).
@@ -4369,6 +4374,39 @@ impl App {
         self.clip.icon_slot.get(&key).copied()
     }
 
+    /// A small picture of the file at `path` asked of the clipboard's
+    /// thumbnailer for the long pill (the screenshot's preview,
+    /// `capture_shot.rs`): it lands in the bar's icon array as a clip's does
+    /// (`on_clip_thumb`).
+    pub(crate) fn clip_thumb_ask(&mut self, path: &str) {
+        let key = hash_bytes(path.as_bytes());
+        if self.clip.icon_slot.contains_key(&key) || !self.clip.icon_pending.insert(key) {
+            return;
+        }
+        if let Some(t) = &self.clip.thumbs {
+            t.request(path);
+        }
+    }
+
+    /// …and its layer once it is in.
+    pub(crate) fn clip_thumb_of(&self, path: &str) -> Option<u32> {
+        self.clip_thumb_layer(hash_bytes(path.as_bytes()))
+    }
+
+    /// The long pill out of the card's pill, or back into it, with no hand
+    /// on it (the screenshot's preview and the held Print key's sign);
+    /// `now`: back at once, no easing (a picture is about to be taken).
+    pub(crate) fn clip_long_show(&mut self, out: bool, now: bool) {
+        self.clip.hold_deadline = None;
+        self.clip.peek_reveal = out || matches!(self.options_hover, Some(PillId::Clipboard | PillId::ClipboardBox));
+        if now && !out {
+            self.clip.peek_reveal = false;
+            self.clip.peek_t = 0.0;
+        }
+        self.clip.last = None;
+        self.schedule_clip_frame();
+    }
+
     /// A thumbnail arrived from the worker: put it in the bar's icon array
     /// (one layer written, nothing else re-sent).
     pub(crate) fn on_clip_thumb(&mut self, ev: crate::thumbs::Event) {
@@ -4663,6 +4701,9 @@ impl App {
             }
         } else if self.clip.peek_reveal
             && self.clip.hold_deadline.is_none()
+            // (A screenshot's preview, the held Print key's sign: theirs to
+            // fold, `capture_shot.rs`.)
+            && !self.capture_long_out()
             // (The card hangs from the long pill: it stays out with it.)
             && !self.card_banner_open()
             && !self.clip.dict_open
@@ -4787,6 +4828,7 @@ impl App {
                     if !app.clip.dict_open
                         && !app.clip.search_open
                         && !app.card_banner_open()
+                        && !app.capture_long_out()
                         && !matches!(
                             app.options_hover,
                             Some(PillId::Clipboard | PillId::ClipboardBox)

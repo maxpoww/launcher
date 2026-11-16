@@ -57,7 +57,19 @@ const OFF_INK: f32 = 0.38;
 
 /// The children, in order. Sound is a film's and comes last, so that
 /// lighting Video moves no other pill; Copy text only where text can be read.
-pub(crate) fn children(kind: Kind, ocr: bool) -> Vec<Ctl> {
+pub(crate) fn children(kind: Kind, ocr: bool, still: bool) -> Vec<Ctl> {
+    // THE EDITOR (a still): what to cut, and Copy text; nothing of a film.
+    if still {
+        let mut all = vec![
+            Ctl::What(What::Region),
+            Ctl::What(What::Window),
+            Ctl::What(What::Screen),
+        ];
+        if ocr {
+            all.push(Ctl::Text);
+        }
+        return all;
+    }
     let mut all = vec![
         Ctl::What(What::Region),
         Ctl::What(What::Window),
@@ -75,8 +87,10 @@ pub(crate) fn children(kind: Kind, ocr: bool) -> Vec<Ctl> {
 }
 
 /// A control's words (the button by the selection too: `Ctl::Main`).
-pub(crate) fn words(ctl: Ctl, prefs: &Prefs) -> String {
+pub(crate) fn words(ctl: Ctl, prefs: &Prefs, still: bool) -> String {
     match ctl {
+        // (Over a still the button by the selection SAVES the cut.)
+        Ctl::Main if still => tr("Save").to_owned(),
         Ctl::What(What::Region) => tr("Region").to_owned(),
         Ctl::What(What::Window) => tr("Window").to_owned(),
         Ctl::What(What::Screen) => tr("Screen").to_owned(),
@@ -146,9 +160,9 @@ impl App {
         let on = self.capture_pills_on();
         if let Some(tool) = self.capture_tool.tool.as_ref() {
             let prefs = &self.capture_tool.prefs;
-            let kids: Vec<(Ctl, String)> = children(prefs.kind, tool.ocr)
+            let kids: Vec<(Ctl, String)> = children(prefs.kind, tool.ocr, tool.still.is_some())
                 .into_iter()
-                .map(|c| (c, words(c, prefs)))
+                .map(|c| (c, words(c, prefs, tool.still.is_some())))
                 .collect();
             if kids != self.capture_pills.kids {
                 let font_px = FONT_PX * self.options_scale();
@@ -408,6 +422,12 @@ impl App {
         };
         let s = self.options_scale();
         let ink = self.options_text_color();
+        // (Over a still it is a picture's camera, whatever the live tool was left on.)
+        let live = self
+            .capture_tool
+            .tool
+            .as_ref()
+            .is_none_or(|t| t.still.is_none());
         let (text, family, k) = match kid {
             Some((_, word)) => (
                 word.clone(),
@@ -421,7 +441,7 @@ impl App {
                 },
             ),
             None => (
-                (if prefs.kind == Kind::Video {
+                (if prefs.kind == Kind::Video && live {
                     GLYPH_FILM
                 } else {
                     GLYPH_PICTURE
@@ -454,7 +474,7 @@ mod tests {
     #[test]
     fn sound_is_a_films_and_last_and_copy_text_only_where_text_can_be_read() {
         assert_eq!(
-            children(Kind::Picture, false),
+            children(Kind::Picture, false, false),
             [
                 Ctl::What(What::Region),
                 Ctl::What(What::Window),
@@ -463,9 +483,15 @@ mod tests {
                 Ctl::Timer
             ]
         );
-        assert_eq!(children(Kind::Picture, true).last(), Some(&Ctl::Text));
+        assert_eq!(
+            children(Kind::Picture, true, false).last(),
+            Some(&Ctl::Text)
+        );
         // Lighting Video adds Sound AFTER everything: no other pill moves.
-        let (picture, film) = (children(Kind::Picture, true), children(Kind::Video, true));
+        let (picture, film) = (
+            children(Kind::Picture, true, false),
+            children(Kind::Video, true, false),
+        );
         assert_eq!(film[..picture.len()], picture[..]);
         assert_eq!(film.last(), Some(&Ctl::Sound));
         // (No pointer control: pictures without it, films with it.)
@@ -473,10 +499,29 @@ mod tests {
     }
 
     #[test]
+    fn over_a_still_there_is_what_to_cut_and_copy_text_and_nothing_of_a_film() {
+        let what = [
+            Ctl::What(What::Region),
+            Ctl::What(What::Window),
+            Ctl::What(What::Screen),
+        ];
+        assert_eq!(children(Kind::Picture, false, true), what);
+        // (Whatever the live tool was left on.)
+        assert_eq!(children(Kind::Video, false, true), what);
+        assert_eq!(children(Kind::Video, true, true)[3..], [Ctl::Text]);
+        let film = Prefs {
+            kind: Kind::Video,
+            ..Prefs::default()
+        };
+        assert_eq!(words(Ctl::Main, &film, true), "Save");
+        assert_eq!(words(Ctl::Main, &Prefs::default(), true), "Save");
+    }
+
+    #[test]
     fn a_child_says_what_it_is_set_to_and_is_lit_when_in_use() {
         let mut prefs = Prefs::default();
-        assert_eq!(words(Ctl::Timer, &prefs), "Timer: off");
-        assert_eq!(words(Ctl::Main, &prefs), "Capture");
+        assert_eq!(words(Ctl::Timer, &prefs, false), "Timer: off");
+        assert_eq!(words(Ctl::Main, &prefs, false), "Capture");
         assert!(lit(Ctl::What(What::Region), &prefs) && !lit(Ctl::What(What::Screen), &prefs));
         assert!(
             !lit(Ctl::Video, &prefs)
@@ -488,8 +533,8 @@ mod tests {
         prefs.kind = Kind::Video;
         prefs.sound = true;
         prefs.what = What::Window;
-        assert_eq!(words(Ctl::Timer, &prefs), "Timer: 10 s");
-        assert_eq!(words(Ctl::Main, &prefs), "Record");
+        assert_eq!(words(Ctl::Timer, &prefs, false), "Timer: 10 s");
+        assert_eq!(words(Ctl::Main, &prefs, false), "Record");
         assert!(lit(Ctl::Video, &prefs) && lit(Ctl::Timer, &prefs) && lit(Ctl::Sound, &prefs));
         assert!(lit(Ctl::What(What::Window), &prefs) && !lit(Ctl::What(What::Region), &prefs));
     }

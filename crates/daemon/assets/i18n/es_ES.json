@@ -53,5 +53,6 @@
   "The screen could not be recorded": "No se ha podido grabar la pantalla",
   "Added {apps}": "Se añadió {apps}",
   "Changes to Golem itself": "Cambios en el propio Golem",
-  "Click to paste · drag it out": "Clic para pegar · arrástralo fuera"
+  "Click to paste · drag it out": "Clic para pegar · arrástralo fuera",
+ "Keep holding to record the screen": "Sigue pulsando para grabar la pantalla"
 }

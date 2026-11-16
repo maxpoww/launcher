@@ -14,7 +14,7 @@
 
 use crate::capture::{handles, Area, Ctl, Phase, What};
 use crate::capture_pill::words;
-use crate::content::{GridContent, Label, Rect, RectInst, Scene, FONT_MEDIUM, UNLIT};
+use crate::content::{GridContent, IconInst, Label, Rect, RectInst, Scene, FONT_MEDIUM, UNLIT};
 use crate::i18n::tr;
 use crate::App;
 
@@ -149,7 +149,11 @@ impl App {
         let place = match (tool.selection(prefs.what), &tool.phase) {
             (Some(a), Phase::Choosing) => {
                 let w = self
-                    .capture_measure(&words(Ctl::Main, prefs), FONT_PX, Some(FONT_MEDIUM))
+                    .capture_measure(
+                        &words(Ctl::Main, prefs, tool.still.is_some()),
+                        FONT_PX,
+                        Some(FONT_MEDIUM),
+                    )
                     .ceil()
                     + 2.0 * BUTTON_PAD;
                 // (A whole screen has no size plate.)
@@ -190,6 +194,36 @@ impl App {
         let chosen = tool.selection(prefs.what);
         let white = |a: f32| [1.0, 1.0, 1.0, a];
         let black = |a: f32| [0.0, 0.0, 0.0, a];
+        // THE EDITOR'S STILL (`capture_shot.rs`): the shot whole, under
+        // everything of the tool — the surface's one big picture, its own
+        // pixels on the screen's own (no tiles, no mips, nothing smoothed) —
+        // but not over the banner's strip, where the live pills stand.
+        if let Some(kept) = tool.still.as_ref() {
+            let strip = tool.strip as f32;
+            let under = Rect::new(0.0, strip, sw, (sh - strip).max(0.0));
+            let at = Rect::new(
+                (kept.screen.x - tool.screen.x) as f32,
+                (kept.screen.y - tool.screen.y) as f32,
+                kept.screen.w as f32,
+                kept.screen.h as f32,
+            );
+            scene.video = Some((
+                scene.grids.len(),
+                IconInst {
+                    rect: at,
+                    layer: 0,
+                    tint: [under.x, under.y, under.x + under.w, under.y + under.h],
+                    ring: -1.6,
+                    plate: [0.0, 1.0, 0.0, 0.0],
+                },
+            ));
+            let mut ground = GridContent {
+                clip: under,
+                ..Default::default()
+            };
+            ground.rects.push(solid(under, 0.0, black(1.0)));
+            scene.grids.push(ground);
+        }
         let mut over = GridContent {
             clip: full,
             ..Default::default()
@@ -347,7 +381,7 @@ impl App {
         g.labels.push(Label {
             line_px: LINE_PX,
             ..centred(
-                &words(Ctl::Main, prefs),
+                &words(Ctl::Main, prefs, tool.still.is_some()),
                 b.x + b.w / 2.0,
                 b.y + (b.h - LINE_PX) / 2.0,
                 FONT_PX,

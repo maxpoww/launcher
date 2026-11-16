@@ -7137,6 +7137,9 @@ impl App {
             // (THE CARD'S PILL since 2026-10-12: a click turns the card on or
             // off for the focused window. It pasted the newest clip.)
             // (While it shows a dictation a click cancels that.)
+            // (A SCREENSHOT'S PREVIEW on the long pill: a click opens the
+            // editor, its × throws the shot away — `capture_shot.rs`.)
+            Some(PillId::ClipboardBox) if self.capture_preview_out() => self.capture_preview_clicked(),
             Some(PillId::Clipboard | PillId::ClipboardBox) => {
                 if !self.dictate_cancel() {
                     self.card_pill_click();

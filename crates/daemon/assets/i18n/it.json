@@ -2439,5 +2439,7 @@
  "The text could not be read": "Non è stato possibile leggere il testo",
  "No text was found there": "Lì non è stato trovato nessun testo",
  "Text copied": "Testo copiato",
- "The text could not be copied": "Non è stato possibile copiare il testo"
+ "The text could not be copied": "Non è stato possibile copiare il testo",
+ "Keep holding to record the screen": "Continua a tenere premuto per registrare lo schermo",
+ "The screenshot could not be saved": "Non è stato possibile salvare la schermata"
 }

@@ -30,6 +30,7 @@ mod deck;
 mod deck_thumbs;
 mod capture;
 mod capture_pill;
+mod capture_shot;
 mod capture_view;
 mod card;
 mod desktop;

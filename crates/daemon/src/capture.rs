@@ -51,6 +51,14 @@
 //! it costs nothing: no timer, no surface of its own, no state but what was
 //! chosen last (`Prefs`).
 //!
+//! THE PRINT KEY itself no longer opens this tool (the third round, the same
+//! night: `capture_shot.rs`): it takes the whole screen at once and shows it
+//! on the card's pill; a click there opens this tool over the FROZEN shot,
+//! as its editor (`Tool::still`: no film, no timer, nothing to hide before
+//! taking, the button says Save). `capture` / `capture open` — the card's
+//! camera, a film of a region or a window — stay the live tool described
+//! here.
+//!
 //! Programs: `grim`, `wl-copy`, `wf-recorder`, `tesseract`, `busctl`; each
 //! can be named by `WAVERUNNER_GRIM`, `WAVERUNNER_WL_COPY`,
 //! `WAVERUNNER_WF_RECORDER`, `WAVERUNNER_TESSERACT`, `WAVERUNNER_BUSCTL` (a
@@ -165,7 +173,7 @@ impl Area {
     }
 
     /// The part of it on a screen `bounds` big (`None`: none of it is).
-    fn clipped(self, (bw, bh): (i32, i32)) -> Option<Self> {
+    pub(crate) fn clipped(self, (bw, bh): (i32, i32)) -> Option<Self> {
         let (x0, y0) = (self.x.max(0), self.y.max(0));
         let (x1, y1) = ((self.x + self.w).min(bw), (self.y + self.h).min(bh));
         (x1 > x0 && y1 > y0).then(|| Self::new(x0, y0, x1 - x0, y1 - y0))
@@ -450,6 +458,9 @@ pub(crate) struct Tool {
     top_shown: bool,
     bar_drawn: bool,
     bar_shown: bool,
+    /// THE EDITOR (`capture_shot.rs`): the screenshot this tool is open
+    /// over, frozen (`None`: the live screen).
+    pub still: Option<std::sync::Arc<crate::capture_shot::Kept>>,
 }
 
 /// The capture tool's place in [`App`].
@@ -467,6 +478,10 @@ pub(crate) struct Capture {
     whole: bool,
     /// The screen the tool opens on once the surface has its new size.
     opening: Option<String>,
+    /// The Print key, its shot and its preview (`capture_shot.rs`).
+    pub(crate) shots: crate::capture_shot::Shots,
+    /// A still is in the surface's big picture (and goes with the tool).
+    still_up: bool,
 }
 
 /// The top surface's hold for the tool.
@@ -666,7 +681,7 @@ pub(crate) fn notify_args(title: &str, body: &str, picture: Option<&Path>) -> Ve
     args
 }
 
-fn notify(title: &str, body: &str, picture: Option<&Path>) {
+pub(crate) fn notify(title: &str, body: &str, picture: Option<&Path>) {
     let sent = Command::new(program("WAVERUNNER_BUSCTL", "busctl"))
         .args(notify_args(title, body, picture))
         .stdin(Stdio::null())
@@ -703,7 +718,7 @@ fn run_within(mut cmd: Command, limit: Duration) -> bool {
 }
 
 /// A place for a picture on its way (the session's own folder, in memory).
-fn scratch_png() -> PathBuf {
+pub(crate) fn scratch_png() -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
@@ -711,14 +726,14 @@ fn scratch_png() -> PathBuf {
 }
 
 /// `aim` as a PNG in `file`. Whether there is one.
-fn grab(aim: &Aim, pointer: bool, file: &Path) -> bool {
+pub(crate) fn grab(aim: &Aim, pointer: bool, file: &Path) -> bool {
     let mut cmd = Command::new(grim());
     cmd.args(grim_args(aim, pointer, file));
     run_within(cmd, GRIM_WITHIN) && std::fs::metadata(file).is_ok_and(|m| m.len() > 0)
 }
 
 /// `bytes` onto the clipboard as `kind`. Whether it went.
-fn copy(kind: &str, bytes: &[u8]) -> bool {
+pub(crate) fn copy(kind: &str, bytes: &[u8]) -> bool {
     let spawned = Command::new(wl_copy())
         .args(["--type", kind])
         .stdin(Stdio::piped())
@@ -826,6 +841,13 @@ fn read_text(aim: &Aim) {
         notify(tr("The text could not be read"), "", None);
         return;
     }
+    read_picture(&tmp, &format!("{aim:?}"));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// The words in the picture `tmp` (a PNG; `of` names it in the log), read
+/// and put on the clipboard: the live tool's and the editor's Copy text.
+pub(crate) fn read_picture(tmp: &Path, of: &str) {
     let listed = Command::new(tesseract())
         .arg("--list-langs")
         .stdin(Stdio::null())
@@ -836,11 +858,10 @@ fn read_text(aim: &Aim) {
         .unwrap_or_default();
     let langs = pick_langs(crate::i18n::lang().as_deref(), &listed);
     let read = Command::new(tesseract())
-        .args(tesseract_args(&tmp, &langs))
+        .args(tesseract_args(tmp, &langs))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
-    let _ = std::fs::remove_file(&tmp);
     let text = match read {
         Ok(out) if out.status.success() => tidy(&String::from_utf8_lossy(&out.stdout)),
         other => {
@@ -853,7 +874,7 @@ fn read_text(aim: &Aim) {
         }
     };
     info!(
-        "capture: {} characters read in {aim:?} ({})",
+        "capture: {} characters read in {of} ({})",
         text.chars().count(),
         langs.join("+")
     );
@@ -933,6 +954,24 @@ impl App {
             }
             ("close", _) => self.capture_close(),
             ("state", _) => {}
+            // THE KEY and its screenshot (`capture_shot.rs`).
+            ("press", _) => self.capture_key_press(),
+            ("release", _) => self.capture_key_release(),
+            ("shot", _) => {
+                self.capture_key_press();
+                self.capture_key_release();
+            }
+            ("preview", "click") | ("edit", _) => {
+                if !self.capture_edit() {
+                    return format!("no preview is out ({})", self.capture_state());
+                }
+            }
+            ("preview", "close") => {
+                if !self.capture_preview_close() {
+                    return format!("no preview is out ({})", self.capture_state());
+                }
+            }
+            ("preview", _) => {}
             ("pills", _) => return self.capture_pill_state(),
             ("what", "region") => self.capture_set_what(What::Region),
             ("what", "window") => self.capture_set_what(What::Window),
@@ -1001,9 +1040,18 @@ impl App {
             on(p.pointer),
             on(p.sound)
         );
+        let rest = format!("{rest} {}", self.capture_shot_state());
         let Some(tool) = self.capture_tool.tool.as_ref() else {
             return format!("closed {rest}");
         };
+        let rest = format!(
+            "mode {} {rest}",
+            if tool.still.is_some() {
+                "still"
+            } else {
+                "live"
+            }
+        );
         let phase = match &tool.phase {
             Phase::Choosing => "open".to_owned(),
             Phase::Counting { left, .. } => format!("counting {left}"),
@@ -1130,26 +1178,48 @@ impl App {
             h: sh as i32,
         };
         let bounds = (screen.w, screen.h);
-        let wins = stack(
-            crate::hypr::client_geometries()
-                .into_iter()
-                .filter(|c| !c.special && c.workspace == monitor.active_ws)
-                .filter_map(|c| {
-                    let area = Area::new(
-                        (c.x - ox).round() as i32,
-                        (c.y - oy).round() as i32,
-                        c.w.round() as i32,
-                        c.h.round() as i32,
-                    );
-                    Some(Stacked {
-                        area: area.clipped(bounds)?,
-                        floating: c.floating,
-                        fullscreen: c.fullscreen,
-                        rank: c.focus_rank,
+        // THE EDITOR: the windows are the ones that were on the screen when
+        // the shot was taken, where they stood then (on this surface).
+        let still = self.capture_tool.shots.opening.take();
+        let wins = if let Some(kept) = still.as_ref() {
+            let (dx, dy) = (kept.screen.x - screen.x, kept.screen.y - screen.y);
+            kept.wins
+                .iter()
+                .filter_map(|a| Area::new(a.x + dx, a.y + dy, a.w, a.h).clipped(bounds))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let live = still.is_none();
+        let wins = if !live {
+            wins
+        } else {
+            stack(
+                crate::hypr::client_geometries()
+                    .into_iter()
+                    .filter(|c| !c.special && c.workspace == monitor.active_ws)
+                    .filter_map(|c| {
+                        let area = Area::new(
+                            (c.x - ox).round() as i32,
+                            (c.y - oy).round() as i32,
+                            c.w.round() as i32,
+                            c.h.round() as i32,
+                        );
+                        Some(Stacked {
+                            area: area.clipped(bounds)?,
+                            floating: c.floating,
+                            fullscreen: c.fullscreen,
+                            rank: c.focus_rank,
+                        })
                     })
-                })
-                .collect(),
-        );
+                    .collect(),
+            )
+        };
+        // (Its pixels into the surface's one big picture, once.)
+        if let (Some(kept), Some(renderer)) = (still.as_ref(), self.desktop_top.renderer.as_mut()) {
+            renderer.set_video_frame(kept.px.0, kept.px.1, &kept.rgba);
+            self.capture_tool.still_up = true;
+        }
         let region = self
             .capture_tool
             .prefs
@@ -1180,6 +1250,7 @@ impl App {
             top_shown: false,
             bar_drawn: false,
             bar_shown: false,
+            still,
         };
         // (The banner's strip, where this surface covers it: the bar's own
         // height where it stands on this screen, else what is kept at the top.)
@@ -1194,7 +1265,12 @@ impl App {
             .and_then(|p| tool.window_at(p))
             .or((!tool.wins.is_empty()).then_some(0));
         info!(
-            "capture: open on {} ({} windows, text: {})",
+            "capture: open {} on {} ({} windows, text: {})",
+            if tool.still.is_some() {
+                "over the shot"
+            } else {
+                "live"
+            },
             tool.screen.name,
             tool.wins.len(),
             tool.ocr
@@ -1221,15 +1297,30 @@ impl App {
     }
 
     fn capture_set_kind(&mut self, kind: Kind) {
+        // (A still is a picture: nothing of a film in the editor.)
+        if self
+            .capture_tool
+            .tool
+            .as_ref()
+            .is_some_and(|t| t.still.is_some())
+        {
+            return;
+        }
         self.capture_tool.prefs.kind = kind;
         self.capture_changed();
     }
 
     /// Something of the tool changed: its hold on the keyboard and the
     /// pointer follows, and it is drawn.
-    fn capture_changed(&mut self) {
+    pub(crate) fn capture_changed(&mut self) {
         if self.capture_tool.tool.is_none() && self.capture_tool.opening.is_none() {
             self.capture_cover(false);
+        }
+        // (The editor's still goes with it.)
+        if self.capture_tool.tool.is_none() && std::mem::take(&mut self.capture_tool.still_up) {
+            if let Some(renderer) = self.desktop_top.renderer.as_mut() {
+                renderer.drop_video();
+            }
         }
         self.capture_layout();
         self.capture_hold();
@@ -1339,6 +1430,26 @@ impl App {
         else {
             return false;
         };
+        // THE EDITOR: nothing to wait for and nothing to hide — the picture
+        // is in hand. Save cuts it (the whole screen: it stays as it is);
+        // Copy text reads the selection of the still.
+        if let Some(kept) = tool.still.clone() {
+            let Some(area) = tool.selection(what) else {
+                return false;
+            };
+            let (dx, dy) = (tool.screen.x - kept.screen.x, tool.screen.y - kept.screen.y);
+            let area = Area::new(area.x + dx, area.y + dy, area.w, area.h);
+            let whole = what == What::Screen;
+            self.capture_tool.tool = None;
+            self.capture_tool.epoch += 1;
+            match job {
+                Job::Text => self.capture_still_text(kept, area),
+                _ if whole => info!("capture: the shot stays as it was taken"),
+                _ => self.capture_still_save(kept, area),
+            }
+            self.capture_changed();
+            return true;
+        }
         let Some(aim) = tool.aim(what, job) else {
             return false;
         };
@@ -1824,6 +1935,7 @@ mod tests {
             top_shown: false,
             bar_drawn: false,
             bar_shown: false,
+            still: None,
         }
     }
 
