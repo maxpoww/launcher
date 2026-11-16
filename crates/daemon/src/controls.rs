@@ -1295,9 +1295,6 @@ fn version_before(profiles: &std::path::Path, booted: &std::path::Path) -> Optio
 /// many older ones there are. A rebuild that changed nothing is not a
 /// version of its own: of several numbers on one system the newest counts.
 const VERSIONS_SHOWN: usize = 4;
-/// How many lines the versions get under their heading (a version is one,
-/// two with what it changed).
-const VERSION_LINES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Which {
@@ -2837,17 +2834,10 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 view.groups.push(line(fill(tr("Versions kept: {n}"), &[("n", &all)])));
                 let now = crate::usage::now_secs() as u64;
                 let changes = versions_changes_here();
-                // (The page does not scroll: `VERSION_LINES` lines are what it
-                // holds over the box's foot on a small screen. Seen on the
-                // MacBook Air, 2026-11-16: a sixth line stood on the foot's
-                // hint. A version is shown whole, with its line, or not.)
-                let mut room = VERSION_LINES;
-                for (n, made, which) in versions.into_iter().take(VERSIONS_SHOWN) {
-                    let lines = 1 + usize::from(changes.contains_key(&n));
-                    if lines > room {
-                        break;
-                    }
-                    room -= lines;
+                // (Two lines a version then: three of them are what the page
+                // holds without running under the box's foot; it does not scroll.)
+                let shown = if changes.is_empty() { VERSIONS_SHOWN } else { VERSIONS_SHOWN - 1 };
+                for (n, made, which) in versions.into_iter().take(shown) {
                     let when = crate::card::model::when_text(made, now);
                     let words = match which {
                         Which::Running => tr("Version {n} · {when} · running now"),
