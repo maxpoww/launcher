@@ -39,6 +39,23 @@
 //! deleted). A second Print meanwhile settles the first as it is and takes
 //! its place.
 //!
+//! THE SHOT, BIGGER, ON HOVER (the fourth round, the same night: the pill's
+//! thumbnail is too small to judge a shot by). With the pointer on the
+//! preview the long pill GROWS DOWN into a box holding the shot at about
+//! `HANG_W` (never wider than a third of the screen, the shot's own shape) —
+//! the way the clipboard's box grows down out of this very pill, the
+//! lightest idiom there is that can hold a picture: the same pill, rect
+//! (`clip_geom`), motion, corner and fill (`push_clip_pill` takes
+//! `capture_hang_t` beside its own `expand_t`), no surface and no layer of
+//! its own. The picture is a copy of the shot made at that size off the loop
+//! as the shot lands (`Kept::small`), shown through the bar renderer's one
+//! big picture (`set_video_frame`), not the thumbnail blown up. The pointer
+//! away and it folds, and the preview's own time goes on from there; a
+//! click on the picture is a click on the pill (the editor); the × stays on
+//! the pill's row. A Print, or the live tool opening, takes pill AND picture
+//! off in one step, at once (`capture_preview_off_now`), before anything is
+//! taken. One clock while it moves (`schedule_tick`), none at rest.
+//!
 //! THE EDITOR is the capture tool (`capture.rs`) over the FROZEN shot
 //! (`Tool::still`): the shot is drawn whole on the tool's surface, pixel for
 //! pixel (the renderer's one big picture, `Renderer::set_video_frame`: no
@@ -51,7 +68,8 @@
 //! then a rename) and put on the clipboard in the whole one's place. `Screen`
 //! + Save, Escape or the round pill leave the shot as it was taken.
 //!
-//! Rig: `capture press|release|shot`, `capture preview click|close|state`,
+//! Rig: `capture press|release|shot`, `capture preview click|close|state|
+//! hover|unhover` (the pointer on the preview, and off it),
 //! `capture edit` (the editor on the shot whose preview is out).
 
 use std::path::{Path, PathBuf};
@@ -79,6 +97,12 @@ const PREVIEW_AFTER_HAND: Duration = Duration::from_millis(1200);
 const PREVIEW_LOOK: u64 = 250;
 /// What of ours was on the screen is given this long to be off it (ms).
 const HIDE_FIRST: u64 = 150;
+/// The hanging picture: how wide at the bar's scale (and never wider than
+/// this share of the screen), the air round it in its box, its own corner.
+const HANG_W: f32 = 360.0;
+const HANG_SHARE: f32 = 1.0 / 3.0;
+const HANG_PAD: f32 = 6.0;
+const HANG_CORNER: f32 = 6.0;
 /// The sign's frames while the key is held (ms).
 const SIGN_FRAME: u64 = 33;
 /// fa-camera, where a preview's picture is not there yet; fa-video-camera,
@@ -228,6 +252,9 @@ pub(crate) struct Kept {
     pub px: (u32, u32),
     pub screen: Screen,
     pub wins: Vec<Area>,
+    /// The shot made small for the picture that hangs under its preview:
+    /// its size and its pixels (RGBA).
+    small: (u32, u32, Vec<u8>),
 }
 
 /// A shot whose key has not said yet what it is.
@@ -256,6 +283,25 @@ pub(crate) struct Shots {
     pub(crate) opening: Option<Arc<Kept>>,
     /// Counts previews (a fold timer armed for one leaves the next alone).
     previews: u64,
+    /// THE PICTURE under the preview: wanted (the pointer is on it), how far
+    /// down it is (0 → 1), its clock, and whether its pixels are in the bar.
+    hang: bool,
+    hang_t: f32,
+    hang_last: Option<Instant>,
+    hang_pending: bool,
+    hang_in: bool,
+    /// A rig's pointer on the preview (`capture preview hover`).
+    hover_forced: bool,
+    /// The long pill is held shut: a picture is being taken.
+    shut: bool,
+}
+
+/// How big the hanging picture is, for a shot `px` big on a bar `bar_w`
+/// wide at scale `s`: `HANG_W` wide at the bar's scale, never more than
+/// `HANG_SHARE` of the screen, as tall as the shot's own shape makes it.
+pub(crate) fn hang_size(px: (u32, u32), bar_w: f32, s: f32) -> (f32, f32) {
+    let w = (HANG_W * s).min(bar_w * HANG_SHARE).max(1.0).round();
+    (w, (w * px.1 as f32 / px.0.max(1) as f32).round().max(1.0))
 }
 
 /// The screen `name` as a PNG, off the loop.
@@ -273,7 +319,7 @@ fn grab_screen(name: &str) -> Option<Vec<u8>> {
 
 /// A frame made a screenshot, off the loop: the clipboard first, then its
 /// file, then its pixels for the editor. `None`: there is no file.
-fn settle(frame: Frame) -> Option<Kept> {
+fn settle(frame: Frame, small_w: u32) -> Option<Kept> {
     let copied = crate::capture::copy("image/png", &frame.png);
     let dir = crate::record::shots_folder();
     let file = crate::capture::keep(&frame.png, &dir, SystemTime::now());
@@ -286,7 +332,13 @@ fn settle(frame: Frame) -> Option<Kept> {
         .ok()?
         .to_rgba8();
     let px = (pixels.width(), pixels.height());
+    // (The picture that hangs under the preview: made once, here, at the
+    // size it is shown at.)
+    let sw = small_w.clamp(1, px.0.max(1));
+    let sh = ((u64::from(sw) * u64::from(px.1)) / u64::from(px.0.max(1))).max(1) as u32;
+    let small = image::imageops::resize(&pixels, sw, sh, image::imageops::FilterType::CatmullRom);
     Some(Kept {
+        small: (sw, sh, small.into_raw()),
         file,
         png: frame.png,
         rgba: pixels.into_raw(),
@@ -364,11 +416,16 @@ impl App {
             self.capture_changed();
             ours = true;
         }
-        // (A preview that is out is settled as it is: its file stays.)
-        if self.capture_tool.shots.preview.take().is_some() {
-            self.clip_long_show(false, true);
-            self.draw_options();
+        // (A preview that is out is settled as it is: its file stays. Its
+        // pill and the picture hanging from it go in this same step.
+        // The long pill stays shut until the picture is in: the pointer
+        // resting where the preview was would bring the card's own hover
+        // pill out in its place, into the picture.)
+        self.capture_tool.shots.shut = true;
+        if self.capture_preview_off_now() {
             ours = true;
+        } else {
+            self.capture_tool.shots.shut = false;
         }
         if ours {
             self.after_ms(HIDE_FIRST, move |app| app.capture_grab(n));
@@ -435,6 +492,10 @@ impl App {
 
     /// `grim` answered for press `n`.
     fn capture_grabbed(&mut self, n: u64, frame: Option<Frame>) {
+        // (The picture is in: the long pill is the pointer's again.)
+        if std::mem::take(&mut self.capture_tool.shots.shut) {
+            self.update_clip_reveal();
+        }
         match self
             .capture_tool
             .shots
@@ -471,8 +532,14 @@ impl App {
             return;
         };
         let mut frame = Some(frame);
+        // (The hanging picture's width in the bar's own pixels.)
+        let (bar_w, s) = (self.options_size.0 as f32, self.options_scale());
+        let small_w = (hang_size((16, 9), bar_w, s).0
+            * self.surface_scale(crate::fractional::SurfaceKind::Options))
+        .round()
+        .max(1.0) as u32;
         self.desktop_off_loop(
-            move || frame.take().and_then(settle),
+            move || frame.take().and_then(|f| settle(f, small_w)),
             |app, kept| match kept {
                 Some(kept) => app.capture_preview_show(Arc::new(kept)),
                 None => crate::capture::notify(tr("The screenshot could not be taken"), "", None),
@@ -486,6 +553,11 @@ impl App {
         shots.previews += 1;
         let n = shots.previews;
         self.clip_thumb_ask(&kept.file.to_string_lossy());
+        // (Its bigger picture into the bar's one big picture, for the hover.)
+        if let Some(renderer) = self.options_renderer.as_mut() {
+            renderer.set_video_frame(kept.small.0, kept.small.1, &kept.small.2);
+            self.capture_tool.shots.hang_in = true;
+        }
         self.capture_tool.shots.preview = Some(Preview {
             kept,
             until: Instant::now() + PREVIEW_FOR,
@@ -499,10 +571,8 @@ impl App {
     /// under the pointer.
     fn capture_preview_look(&mut self, n: u64) {
         self.after_ms(PREVIEW_LOOK, move |app| {
-            let hand = matches!(
-                app.options_hover,
-                Some(PillId::Clipboard | PillId::ClipboardBox)
-            );
+            let hand = app.capture_preview_hand();
+            app.capture_hang_sync();
             let Some(p) = app.capture_tool.shots.preview.as_mut().filter(|p| p.n == n) else {
                 return;
             };
@@ -512,11 +582,17 @@ impl App {
             }
             if now >= p.until {
                 app.capture_tool.shots.preview = None;
+                app.capture_hang_sync();
                 app.clip_long_show(false, false);
             } else {
                 app.capture_preview_look(n);
             }
         });
+    }
+
+    /// Whether the card's long pill is held shut (a picture is being taken).
+    pub(crate) fn capture_long_shut(&self) -> bool {
+        self.capture_tool.shots.shut
     }
 
     /// Whether a preview is out.
@@ -540,6 +616,7 @@ impl App {
             "capture: the screenshot {:?} thrown away ({gone})",
             p.kept.file
         );
+        self.capture_hang_sync();
         self.clip_long_show(false, false);
         self.draw_options();
         true
@@ -550,6 +627,7 @@ impl App {
         let Some(p) = self.capture_tool.shots.preview.take() else {
             return false;
         };
+        self.capture_hang_sync();
         self.clip_long_show(false, false);
         if self.capture_up() {
             self.capture_close();
@@ -565,10 +643,12 @@ impl App {
     /// A click on the card's long pill while a preview is on it: its × (the
     /// pill's last stretch) throws the shot away, the rest opens the editor.
     pub(crate) fn capture_preview_clicked(&mut self) {
-        let r = self.clip_rect();
+        // (The × is on the pill's row only: the picture hanging under it is
+        // the pill's, all of it.)
+        let (r, ph) = (self.clip_rect(), self.options_pill_h());
         let on_close = self
             .options_ptr
-            .is_some_and(|(x, _)| x >= r.x + r.w - r.h * 1.2);
+            .is_some_and(|(x, y)| x >= r.x + r.w - ph * 1.2 && y <= r.y + ph);
         if on_close {
             self.capture_preview_close();
         } else {
@@ -595,6 +675,131 @@ impl App {
         self.draw_options();
     }
 
+    /// Whether the hand is on the preview: the pointer on the card's pill,
+    /// its long pill or the picture hanging from it (one rect), or a rig's.
+    fn capture_preview_hand(&self) -> bool {
+        self.capture_tool.shots.hover_forced
+            || matches!(
+                self.options_hover,
+                Some(PillId::Clipboard | PillId::ClipboardBox)
+            )
+    }
+
+    /// `capture preview hover|unhover`: a rig's pointer on the preview.
+    pub(crate) fn capture_preview_hover(&mut self, on: bool) {
+        self.capture_tool.shots.hover_forced = on && self.capture_preview_out();
+        self.capture_hang_sync();
+    }
+
+    /// The picture hangs while the hand is on a preview that is out, and
+    /// folds when either ends (eased; its clock runs only while it moves).
+    pub(crate) fn capture_hang_sync(&mut self) {
+        if !self.capture_preview_out() {
+            self.capture_tool.shots.hover_forced = false;
+        }
+        let want = self.capture_preview_out() && self.capture_preview_hand();
+        let shots = &mut self.capture_tool.shots;
+        if shots.hang != want || (shots.hang_t > 0.0 && !want) {
+            shots.hang = want;
+            self.schedule_tick(
+                |a| {
+                    (
+                        &mut a.capture_tool.shots.hang_pending,
+                        &mut a.capture_tool.shots.hang_last,
+                    )
+                },
+                App::tick_capture_hang,
+            );
+        }
+    }
+
+    fn tick_capture_hang(&mut self) {
+        let now = Instant::now();
+        let shots = &mut self.capture_tool.shots;
+        let dt = shots
+            .hang_last
+            .map_or(0.0, |l| now.duration_since(l).as_secs_f32().min(0.05));
+        shots.hang_last = Some(now);
+        let (t, moving) = crate::animation::ease_toward(
+            shots.hang_t,
+            f32::from(u8::from(shots.hang)),
+            dt,
+            crate::animation::MORPH_RATE,
+            crate::animation::settle_t(HANG_W * 0.6),
+        );
+        shots.hang_t = t;
+        self.sync_options_input();
+        self.draw_options();
+        if moving {
+            self.schedule_tick(
+                |a| {
+                    (
+                        &mut a.capture_tool.shots.hang_pending,
+                        &mut a.capture_tool.shots.hang_last,
+                    )
+                },
+                App::tick_capture_hang,
+            );
+        } else {
+            self.capture_tool.shots.hang_last = None;
+            self.capture_hang_let_go();
+        }
+    }
+
+    /// The bar's big picture is given back once nothing shows it.
+    fn capture_hang_let_go(&mut self) {
+        let shots = &mut self.capture_tool.shots;
+        if shots.preview.is_none() && shots.hang_t <= 0.0 && std::mem::take(&mut shots.hang_in) {
+            if let Some(renderer) = self.options_renderer.as_mut() {
+                renderer.drop_video();
+            }
+        }
+    }
+
+    /// The preview AND the picture hanging from it off the banner NOW, in
+    /// one step and with no easing (a picture is about to be taken, or the
+    /// live tool opens); the shot stays as it was saved. Whether anything of
+    /// them was out.
+    pub(crate) fn capture_preview_off_now(&mut self) -> bool {
+        let shots = &mut self.capture_tool.shots;
+        let was = shots.preview.take().is_some() || shots.hang_t > 0.0;
+        if !was {
+            return false;
+        }
+        (shots.hang, shots.hang_t, shots.hover_forced) = (false, 0.0, false);
+        self.capture_hang_let_go();
+        self.clip_long_show(false, true);
+        self.sync_options_input();
+        self.draw_options();
+        true
+    }
+
+    /// How far down the picture hangs (0: not at all).
+    pub(crate) fn capture_hang_t(&self) -> f32 {
+        self.capture_tool.shots.hang_t
+    }
+
+    /// The hanging picture's size on the bar (`None`: no preview is out).
+    fn capture_hang_size(&self) -> Option<(f32, f32)> {
+        let p = self.capture_tool.shots.preview.as_ref()?;
+        Some(hang_size(
+            p.kept.px,
+            self.options_size.0 as f32,
+            self.options_scale(),
+        ))
+    }
+
+    /// How much taller than its pill the long pill is for the picture, when
+    /// it hangs whole (`capture_hang_extra`: now).
+    pub(crate) fn capture_hang_full(&self) -> f32 {
+        self.capture_hang_size()
+            .map_or(0.0, |(_, h)| h + 2.0 * HANG_PAD * self.options_scale())
+    }
+
+    pub(crate) fn capture_hang_extra(&self) -> f32 {
+        self.capture_hang_t().clamp(0.0, 1.0) * self.capture_hang_full()
+    }
+
     /// The key's and the preview's state, for the state line.
     pub(crate) fn capture_shot_state(&self) -> String {
         let s = &self.capture_tool.shots;
@@ -609,8 +814,15 @@ impl App {
                 )
             },
         );
+        let picture = if s.hang {
+            "hangs"
+        } else if s.hang_t > 0.0 {
+            "folding"
+        } else {
+            "folded"
+        };
         format!(
-            "key {} preview {preview}",
+            "key {} preview {preview} picture {picture}",
             if s.press.is_down() { "down" } else { "up" }
         )
     }
@@ -681,7 +893,38 @@ impl App {
             return true;
         }
         let s = self.options_scale();
-        let ph = rect.h;
+        // (The pill's own row: under it, the picture that hangs on hover.)
+        let ph = self.options_pill_h().min(rect.h);
+        let hang = shots.hang_t.clamp(0.0, 1.0);
+        if let (Some((pw, pic_h)), true) = (self.capture_hang_size(), hang > 0.01 && shots.hang_in)
+        {
+            let at = Rect::new(
+                (rect.x + (rect.w - pw) / 2.0).round(),
+                (rect.y + ph + HANG_PAD * s).round(),
+                pw,
+                pic_h,
+            );
+            // (Cut by the box as it grows: the picture is uncovered, not moved.)
+            scene.video = Some((
+                scene.grids.len(),
+                IconInst {
+                    rect: at,
+                    layer: 0,
+                    tint: [at.x, at.y, at.x + at.w, at.y + at.h],
+                    ring: -1.6,
+                    plate: [
+                        HANG_CORNER * s,
+                        a * ((hang - 0.2) / 0.6).clamp(0.0, 1.0),
+                        0.0,
+                        0.0,
+                    ],
+                },
+            ));
+            scene.grids.push(crate::content::GridContent {
+                clip: rect,
+                ..Default::default()
+            });
+        }
         let ty = rect.y + (ph - LINE_PX * s) / 2.0;
         let word = |text: &str,
                     x: f32,
@@ -777,7 +1020,7 @@ impl App {
         let over_close = self.options_hover == Some(PillId::ClipboardBox)
             && self
                 .options_ptr
-                .is_some_and(|(x, _)| x >= rect.x + rect.w - ph * 1.2);
+                .is_some_and(|(x, y)| x >= rect.x + rect.w - ph * 1.2 && y <= rect.y + ph);
         scene.labels.push(word(
             "×",
             close.x + close.w / 2.0,
@@ -796,6 +1039,19 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn the_hanging_picture_is_360_wide_at_the_bars_scale_a_third_of_the_screen_at_most_and_the_shots_shape(
+    ) {
+        assert_eq!(hang_size((1440, 900), 1440.0, 1.0), (360.0, 225.0));
+        // A bigger bar: bigger with it.
+        assert_eq!(hang_size((2880, 1800), 1920.0, 1.5), (540.0, 338.0));
+        // A narrow screen: a third of it, no more.
+        assert_eq!(hang_size((1024, 768), 900.0, 1.0), (300.0, 225.0));
+        // A screen turned on its side keeps its shape.
+        let (w, h) = hang_size((1080, 1920), 1080.0, 1.0);
+        assert_eq!((w, h), (360.0, 640.0));
     }
 
     #[test]

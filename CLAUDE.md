@@ -700,7 +700,16 @@ The big daemon files are cohesive but long — go straight to the function:
   still)`), the windows are the shot's own, the button says Save: `capture_still_save` cuts the kept PNG in
   process (`crop_px`: each edge rounded on its own at any scale; `cut`), writes it OVER the same file
   (`part_beside` + rename) and puts it on the clipboard; Screen + Save / Escape / the round pill leave the shot
-  whole; `capture_still_text` reads the cut with tesseract. Not kept across a dock restart (the file and the
+  whole; `capture_still_text` reads the cut with tesseract. THE SHOT BIGGER ON HOVER (the fourth round): with the
+  pointer on the preview the long pill GROWS DOWN into a box with the shot ~360 px wide (`hang_size`: a third of the
+  screen at most, the shot's shape) — the clipboard box's own growth out of this pill (`clip_geom` + `capture_hang_extra`,
+  `push_clip_pill`'s corner and fill follow `capture_hang_t` as they do `expand_t`), the picture a copy made at that
+  size off the loop in `settle` (`Kept::small`) and shown through the BAR renderer's big picture (`Scene::video`);
+  the bar's input region reaches down over it (`sync_options_input`), a click on it is the pill's (the × only on the
+  pill's row), `capture_hang_sync`/`tick_capture_hang` ease it (no clock at rest). A Print, or the live tool
+  opening, takes pill and picture off AT ONCE (`capture_preview_off_now`) and the long pill is held SHUT until the
+  picture is in (`Shots::shut`: the pointer resting there brought the card's own hover pill out into the shot).
+  Rig: `capture preview hover|unhover`; the state line says `picture hangs|folding|folded`. Not kept across a dock restart (the file and the
   clipboard are; the preview and the editor's still are memory). Rig: `capture press|release|shot`, `capture preview
   click|close|state`, `capture edit`; the state line says `mode live|still`, `key down|up`, `preview out <file>|none`.
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar

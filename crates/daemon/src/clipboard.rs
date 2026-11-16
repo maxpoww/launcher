@@ -1674,7 +1674,9 @@ impl App {
         } else {
             self.clip_full_h()
         };
-        let h = lerp(ph, full, self.clip.expand_t);
+        // (…or, a screenshot's preview under the pointer, into the box that
+        // holds the shot bigger: `capture_shot.rs`.)
+        let h = lerp(ph, full, self.clip.expand_t) + self.capture_hang_extra();
         Rect::new(left, y, w, h)
     }
 
@@ -1711,7 +1713,7 @@ impl App {
     /// where the colour-match samples the toolbar, so the sampler must
     /// exclude it too.
     pub(crate) fn clip_occludes_below_bar(&self) -> bool {
-        self.clip.expand_t > 0.01
+        self.clip.expand_t > 0.01 || self.capture_hang_t() > 0.01
     }
 
     /// The element's current rect (used by hit-testing / scroll / input region),
@@ -1974,7 +1976,11 @@ impl App {
         if peek < 0.001 && e < 0.001 {
             return;
         }
-        let radius = lerp(ph / 2.0, self.box_radius(), e);
+        // (A SCREENSHOT'S PREVIEW grown down for its bigger picture is the
+        // same box: its corner and its fill come with `hang` as with `e`.)
+        let hang = self.capture_hang_t().clamp(0.0, 1.0);
+        let solid = solid.max(1.0 - (1.0 - hang).powi(3));
+        let radius = lerp(ph / 2.0, self.box_radius(), e.max(hang));
         // (THE LONG PILL HAS BECOME THE CARD: the card stands in its place,
         // in the bar's row, and nothing of the pill is drawn — Max,
         // 2026-10-12.)
@@ -4398,7 +4404,10 @@ impl App {
     /// `now`: back at once, no easing (a picture is about to be taken).
     pub(crate) fn clip_long_show(&mut self, out: bool, now: bool) {
         self.clip.hold_deadline = None;
-        self.clip.peek_reveal = out || matches!(self.options_hover, Some(PillId::Clipboard | PillId::ClipboardBox));
+        // (Folding leaves it out under a hand that is on it — the card's own
+        // hover —, but never while a screenshot is being taken.)
+        let hand = !now && !self.capture_long_shut() && matches!(self.options_hover, Some(PillId::Clipboard | PillId::ClipboardBox));
+        self.clip.peek_reveal = out || hand;
         if now && !out {
             self.clip.peek_reveal = false;
             self.clip.peek_t = 0.0;
@@ -4686,10 +4695,18 @@ impl App {
     /// after the pointer leaves (mirrors the bell's peek). Hovering either the
     /// small pill or the box it reveals holds it open.
     pub(crate) fn update_clip_reveal(&mut self) {
+        // (A screenshot's preview under the pointer hangs its picture.)
+        if self.capture_preview_out() {
+            self.capture_hang_sync();
+        }
         let on = matches!(
             self.options_hover,
             Some(PillId::Clipboard | PillId::ClipboardBox)
         );
+        // (Held shut while a screenshot is being taken: `capture_shot.rs`.)
+        if on && self.capture_long_shut() {
+            return;
+        }
         if on {
             self.clip.hold_deadline = None;
             // (The long pill says the card's last thing, or what the pill

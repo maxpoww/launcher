@@ -5460,6 +5460,7 @@ impl App {
             || self.task_box_open()
             || self.phone_box_open()
             || self.stats.open
+            || self.capture_hang_t() > 0.0
         {
             // Extend the pointer-sensitive region down over whichever box is
             // open so scroll/hover/clicks there reach us instead of passing
@@ -5471,6 +5472,11 @@ impl App {
             }
             if self.clip.expanded {
                 bottom = bottom.max(self.clip_input_bottom());
+            }
+            // (A screenshot's bigger picture under its preview: all of it,
+            // so the hand can travel onto it.)
+            if self.capture_hang_t() > 0.0 {
+                bottom = bottom.max(self.options_bar_h() + self.capture_hang_full());
             }
             if self.play_box_open {
                 bottom = bottom.max(self.play_box_input_bottom());

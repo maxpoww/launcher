@@ -966,6 +966,8 @@ impl App {
                     return format!("no preview is out ({})", self.capture_state());
                 }
             }
+            ("preview", "hover") => self.capture_preview_hover(true),
+            ("preview", "unhover") => self.capture_preview_hover(false),
             ("preview", "close") => {
                 if !self.capture_preview_close() {
                     return format!("no preview is out ({})", self.capture_state());
@@ -1227,6 +1229,9 @@ impl App {
             .as_ref()
             .filter(|(on, _)| *on == screen.name)
             .and_then(|(_, a)| a.clipped(bounds));
+        // (A screenshot's preview and the picture hanging from it go at
+        // once: nothing of ours may be in what the tool takes.)
+        self.capture_preview_off_now();
         // (A menu up would be under it, and its keys: it goes.)
         self.desktop.menu = None;
         self.desktop.props = None;
