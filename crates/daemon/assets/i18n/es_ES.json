@@ -48,5 +48,6 @@
   "turn on USB debugging in the phone's developer options, and allow this computer when the phone asks.": "activa la depuración USB en las opciones de desarrollador del teléfono, y permite este computador cuando el teléfono pregunte.",
   "your phone and computer, linked": "tu teléfono y computador, conectados",
   "{connected} connected · this computer is “{0}”": "{connected} conectados · este computador es “{0}”",
-  "Drag a point to move its band. The wheel over it makes it wider or narrower.": "Arrastra un punto para mover su banda. La rueda sobre él la hace más ancha o más estrecha."
+  "Drag a point to move its band. The wheel over it makes it wider or narrower.": "Arrastra un punto para mover su banda. La rueda sobre él la hace más ancha o más estrecha.",
+  "The computer restarts. Your files stay as they are.": "El computador se reinicia. Tus archivos quedan como están."
 }

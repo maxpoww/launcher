@@ -1231,6 +1231,62 @@ fn update_marks_text() -> Option<String> {
     }
 }
 
+/// GOING BACK A VERSION. The unit is Golem's own (the one a desktop crash
+/// loop runs): it holds the running revision so the daily update does not
+/// bring it straight back, makes the newest earlier version the one that
+/// starts, and restarts. The owner may start it; nobody else.
+const GO_BACK_UNIT: &str = "golem-rollback.service";
+/// When "Go back to it" was clicked: the question stands this long.
+static GOING_BACK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const GO_BACK_ASKED_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn go_back_asked() -> bool {
+    GOING_BACK.lock().ok().and_then(|g| *g).is_some_and(|at| at.elapsed() < GO_BACK_ASKED_FOR)
+}
+
+/// When the version one would go back to was made (unix seconds): only on
+/// a system that has the unit, and only with an earlier version kept.
+fn go_back_offer() -> Option<u64> {
+    // A test rig shows the offer from a made-up folder (`profiles/` and a
+    // `booted` link in it); its "Go back and restart" only writes a log line.
+    if let (Some(_), Some(dir)) = (std::env::var_os("GOLEM_RIG"), std::env::var_os("WAVERUNNER_VERSIONS_RIG")) {
+        let dir = std::path::PathBuf::from(dir);
+        return version_before(&dir.join("profiles"), &dir.join("booted"));
+    }
+    let made = version_before(std::path::Path::new("/nix/var/nix/profiles"), std::path::Path::new("/run/booted-system"))?;
+    let has_unit = out("systemctl", &["list-unit-files", GO_BACK_UNIT, "--no-legend"]).is_some_and(|s| s.contains(GO_BACK_UNIT));
+    has_unit.then_some(made)
+}
+
+/// The system versions kept in `profiles` (`system-<n>-link`), as (number,
+/// what it points at, when it was made), in no order.
+fn system_versions(profiles: &std::path::Path) -> Vec<(u64, std::path::PathBuf, u64)> {
+    let Ok(dir) = std::fs::read_dir(profiles) else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let n: u64 = name.to_str()?.strip_prefix("system-")?.strip_suffix("-link")?.parse().ok()?;
+            let made = std::fs::symlink_metadata(e.path()).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some((n, std::fs::canonicalize(e.path()).ok()?, made))
+        })
+        .collect()
+}
+
+/// When the version BEFORE the running one was made: the newest kept
+/// version older than the one that was started (`booted`) and not the same
+/// system. The choice the unit itself makes, but for the revisions it holds
+/// back, which only root can read.
+fn version_before(profiles: &std::path::Path, booted: &std::path::Path) -> Option<u64> {
+    let booted = std::fs::canonicalize(booted).ok()?;
+    let versions = system_versions(profiles);
+    let running = versions.iter().filter(|(_, at, _)| *at == booted).map(|(n, _, _)| *n).max();
+    versions
+        .iter()
+        .filter(|(n, at, _)| *at != booted && running.is_none_or(|r| *n < r))
+        .max_by_key(|(n, _, _)| *n)
+        .map(|(_, _, made)| *made)
+}
+
 fn os_name() -> String {
     std::fs::read_to_string("/etc/os-release")
         .ok()
@@ -2533,6 +2589,24 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
             let running = out("systemctl", &["is-active", "golem-autoupdate.service"]).is_some_and(|s| matches!(s.trim(), "active" | "activating"));
             let word = if running { tr("Updating…") } else { tr("Update now") };
             view.groups.push(Group { buttons: true, ..group(None, "update", 0.0, vec![choice(word, false, "now")]) });
+            // GO BACK (2026-11-16): the version before the one running, and
+            // a way to it that is asked once. Only where the system can do
+            // it and there is one to go back to.
+            if let Some(made) = go_back_offer() {
+                let when = crate::card::model::when_text(made, crate::usage::now_secs() as u64);
+                if go_back_asked() {
+                    view.groups.push(Group { centred: true, ..line(fill(tr("Go back to the version made {when}?"), &[("when", &when)])) });
+                    view.groups.push(Group { centred: true, ..line(tr("The computer restarts. Your files stay as they are.").to_owned()) });
+                    view.groups.push(Group { centred: true, ..line(tr("Golem skips this update and waits for a newer one.").to_owned()) });
+                    view.groups.push(Group {
+                        buttons: true,
+                        ..group(None, "go-back", 0.0, vec![choice(tr("Stay on this version"), false, "stay"), choice(tr("Go back and restart"), false, "yes")])
+                    });
+                } else {
+                    view.groups.push(line(fill(tr("The version before this one was made {when}."), &[("when", &when)])));
+                    view.groups.push(Group { buttons: true, ..group(None, "go-back", 0.0, vec![choice(tr("Go back to it"), false, "ask")]) });
+                }
+            }
         }
         // How the windows sit and stick. Empty for now: the window controls
         // come here as they are made (Max, 2026-10-14).
@@ -2864,6 +2938,28 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             let unit = if now { "golem-update-now.service" } else { "golem-autoupdate.service" };
             run("systemctl", &["start", "--no-block", unit]);
         }
+        // Asked once: the first click only asks, the second (within
+        // `GO_BACK_ASKED_FOR`) starts the system's own way back, which
+        // restarts the computer (Golem's `desktop/crash-recovery.nix`).
+        "go-back" => {
+            let asked = GOING_BACK.lock().ok().and_then(|mut g| g.take());
+            match value {
+                "ask" => {
+                    if let Ok(mut g) = GOING_BACK.lock() {
+                        *g = Some(std::time::Instant::now());
+                    }
+                }
+                "yes" if asked.is_some_and(|at| at.elapsed() < GO_BACK_ASKED_FOR) => {
+                    if std::env::var_os("GOLEM_RIG").is_some() {
+                        info!("controls: a rig — would go back to the previous version");
+                    } else {
+                        info!("controls: going back to the previous version");
+                        run("systemctl", &["start", "--no-block", GO_BACK_UNIT]);
+                    }
+                }
+                _ => {}
+            }
+        }
         "charge-limit" => {
             set_charge_limit(on);
         }
@@ -3161,6 +3257,40 @@ mod tests {
     }
 
     use super::*;
+
+    /// The version one goes back to is the newest kept one older than the
+    /// one running; a kept link to the running system itself is not "before".
+    #[test]
+    fn the_version_before_is_the_newest_older_one() {
+        let dir = std::env::temp_dir().join(format!("wr-versions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (profiles, store) = (dir.join("profiles"), dir.join("store"));
+        std::fs::create_dir_all(&profiles).unwrap();
+        for sys in ["a", "b", "c", "d"] {
+            std::fs::create_dir_all(store.join(sys)).unwrap();
+        }
+        let link = |n: u32, sys: &str| std::os::unix::fs::symlink(store.join(sys), profiles.join(format!("system-{n}-link"))).unwrap();
+        let made = |n: u32| std::fs::symlink_metadata(profiles.join(format!("system-{n}-link"))).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // Nothing kept: nothing to go back to.
+        assert_eq!(version_before(&profiles, &store.join("c")), None);
+        link(7, "a");
+        link(9, "b");
+        link(12, "c");
+        link(13, "c"); // a rebuild that changed nothing
+        link(15, "d"); // staged for the next restart, not running
+        std::fs::write(profiles.join("system-x-link"), "").unwrap();
+        std::os::unix::fs::symlink(profiles.join("system-15-link"), profiles.join("system")).unwrap();
+        // Running c (12 and 13): before it is 9, never 12, never the staged 15.
+        assert_eq!(version_before(&profiles, &store.join("c")), Some(made(9)));
+        // Running the oldest: nothing before it.
+        assert_eq!(version_before(&profiles, &store.join("a")), None);
+        // Running something the profile does not know (a test boot): the newest kept.
+        std::fs::create_dir_all(store.join("z")).unwrap();
+        assert_eq!(version_before(&profiles, &store.join("z")), Some(made(15)));
+        // No booted system to read: no offer.
+        assert_eq!(version_before(&profiles, &store.join("gone")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sound_devices_and_the_default_come_out_of_a_dump() {
