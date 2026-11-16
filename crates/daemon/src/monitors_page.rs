@@ -92,6 +92,14 @@ pub(crate) struct MonitorsChoice {
     /// the rate on the battery.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub refresh: crate::refresh::Refresh,
+    /// THE ARRANGEMENT OF EACH SET OF SCREENS (the plan's F11.4): the places
+    /// as they were last kept with exactly these screens connected, by the
+    /// set ([`set_key`]) then by selector. `places` is one drawing for every
+    /// screen ever seen, and a screen pushed against the others while one of
+    /// a row was away had its place there overwritten: the three came back
+    /// in another order. When a set comes back, its own arrangement does.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub layouts: BTreeMap<String, BTreeMap<String, Placed>>,
 }
 
 impl MonitorsChoice {
@@ -606,6 +614,65 @@ fn keep_places(c: &mut MonitorsChoice, screens: &[PageScreen], main: usize) {
     for s in screens {
         c.places.insert(s.sel.clone(), Placed { x: s.at.0 + shift.0, y: s.at.1 + shift.1, rot: s.rot });
     }
+    keep_layout(c, screens);
+}
+
+/// How many sets of screens have their arrangement remembered: a laptop
+/// carried between desks meets a handful; past this the oldest go.
+const LAYOUTS_KEPT: usize = 24;
+
+/// What a set of screens is known by: its selectors, sorted (the order the
+/// compositor lists them in is the order they were plugged in).
+fn set_key<'a>(sels: impl IntoIterator<Item = &'a str>) -> String {
+    let mut sels: Vec<&str> = sels.into_iter().collect();
+    sels.sort_unstable();
+    sels.dedup();
+    sels.join(" | ")
+}
+
+/// The arrangement just kept in `places` is this set's own from now on. One
+/// screen alone has no arrangement.
+fn keep_layout(c: &mut MonitorsChoice, screens: &[PageScreen]) {
+    if screens.len() < 2 {
+        return;
+    }
+    let key = set_key(screens.iter().map(|s| s.sel.as_str()));
+    let layout: BTreeMap<String, Placed> = screens.iter().filter_map(|s| Some((s.sel.clone(), *c.places.get(&s.sel)?))).collect();
+    if layout.len() != screens.len() {
+        return;
+    }
+    c.layouts.insert(key.clone(), layout);
+    while c.layouts.len() > LAYOUTS_KEPT {
+        let Some(old) = c.layouts.keys().find(|k| **k != key).cloned() else { break };
+        c.layouts.remove(&old);
+    }
+}
+
+/// The set of screens now connected has an arrangement of its own from
+/// before: it is put back into `places`, in the frame `places` is in (the
+/// screen `anchor` — the main one — stays where the drawing has it now, the
+/// others stand from it as they did). True when a place changed.
+fn recall_layout(c: &mut MonitorsChoice, sels: &[&str], anchor: Option<&str>) -> bool {
+    if sels.len() < 2 {
+        return false;
+    }
+    let Some(layout) = c.layouts.get(&set_key(sels.iter().copied())) else {
+        return false;
+    };
+    let shift = anchor
+        .into_iter()
+        .chain(sels.iter().copied())
+        .find_map(|k| Some((c.places.get(k)?, layout.get(k)?)))
+        .map_or((0.0, 0.0), |(now, then)| (now.x - then.x, now.y - then.y));
+    let mut changed = false;
+    for (sel, then) in layout.clone() {
+        let put = Placed { x: then.x + shift.0, y: then.y + shift.1, rot: then.rot };
+        if c.places.get(&sel) != Some(&put) {
+            c.places.insert(sel, put);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// The screens as the page draws them: where they were put, and any no
@@ -1345,6 +1412,15 @@ impl App {
             if g.monitors.screens.as_deref() == Some("mirror") {
                 return None;
             }
+            // A set of screens that was arranged before comes back as it was
+            // (a plug, an unplug, the dock's start: every way in is here).
+            let sels: Vec<String> = monitors.iter().map(crate::display::Monitor::selector).collect();
+            let sels: Vec<&str> = sels.iter().map(String::as_str).collect();
+            let main_sel = crate::launcher_prefs::main_screen(&monitors).and_then(|i| sels.get(i).copied());
+            if recall_layout(&mut g.monitors, &sels, main_sel) {
+                info!("monitors: this set of screens was arranged before, its places are back");
+                g.store();
+            }
             if only_moved && (monitors.len() < 2 || g.monitors.places.is_empty()) {
                 return None;
             }
@@ -1646,6 +1722,78 @@ mod tests {
         keep_places(&mut c, &tv, 0);
         assert_eq!(at(&c, "tv"), (14.0, -650.0));
         assert_eq!(at(&c, "laptop"), (419.0, 0.0));
+    }
+
+    /// F11.4: three in a row, the middle one unplugged (the outer two are
+    /// pushed together and kept so), then plugged back: the row is as it
+    /// was arranged, not the pushed-together places with one squeezed in.
+    #[test]
+    fn a_set_of_screens_comes_back_as_it_was_arranged() {
+        let laptop = || page("laptop", (1920, 1080), 1.0, (340.0, 190.0), (0.0, 0.0));
+        let monitor = || page("monitor", (1920, 1080), 1.0, (530.0, 300.0), (1920.0, 0.0));
+        let tv = || page("tv", (1920, 1080), 1.0, (1150.0, 650.0), (3840.0, 0.0));
+        let mut c = MonitorsChoice::default();
+        // The three as arranged: laptop, monitor, TV, left to right.
+        let mut three = vec![laptop(), monitor(), tv()];
+        three[0].at = (0.0, 0.0);
+        three[1].at = (340.0, 0.0);
+        three[2].at = (870.0, 0.0);
+        keep_places(&mut c, &three, 0);
+        let at = |c: &MonitorsChoice, k: &str| (c.places[k].x, c.places[k].y);
+        assert_eq!(at(&c, "tv"), (870.0, 0.0));
+        // The monitor away: the TV rests against the laptop, and is then
+        // moved to its LEFT by hand.
+        let mut two = vec![laptop(), tv()];
+        two[0].at = (0.0, 0.0);
+        two[1].at = (-1150.0, 0.0);
+        keep_places(&mut c, &two, 0);
+        assert_eq!(at(&c, "tv"), (-1150.0, 0.0), "the pair's own arrangement");
+        assert_eq!(c.layouts.len(), 2);
+        // The monitor back: the three stand as the three were arranged.
+        assert!(recall_layout(&mut c, &["monitor", "laptop", "tv"], Some("laptop")));
+        assert_eq!(at(&c, "laptop"), (0.0, 0.0));
+        assert_eq!(at(&c, "monitor"), (340.0, 0.0));
+        assert_eq!(at(&c, "tv"), (870.0, 0.0));
+        // Asked again: nothing to change.
+        assert!(!recall_layout(&mut c, &["laptop", "monitor", "tv"], Some("laptop")));
+        // And the pair again: the TV on the left, as the pair was left.
+        assert!(recall_layout(&mut c, &["tv", "laptop"], Some("laptop")));
+        assert_eq!(at(&c, "tv"), (-1150.0, 0.0));
+        // A set never arranged, or one screen alone: places are left alone.
+        let before = c.places.clone();
+        assert!(!recall_layout(&mut c, &["laptop", "projector"], Some("laptop")));
+        assert!(!recall_layout(&mut c, &["tv"], Some("tv")));
+        assert_eq!(c.places, before);
+    }
+
+    /// A remembered arrangement comes back in the frame the drawing is in
+    /// now: the main screen stays put, the others stand from it as they did.
+    #[test]
+    fn an_arrangement_comes_back_about_the_main_screen() {
+        let mut c = MonitorsChoice::default();
+        let mut layout = BTreeMap::new();
+        layout.insert("laptop".to_owned(), Placed { x: 0.0, y: 0.0, rot: 0 });
+        layout.insert("tv".to_owned(), Placed { x: 340.0, y: -100.0, rot: 90 });
+        c.layouts.insert(set_key(["tv", "laptop"]), layout);
+        // The drawing has since been moved as a whole (another desk's frame).
+        c.places.insert("laptop".into(), Placed { x: 419.0, y: 10.0, rot: 0 });
+        c.places.insert("tv".into(), Placed { x: 0.0, y: 0.0, rot: 0 });
+        assert!(recall_layout(&mut c, &["laptop", "tv"], Some("laptop")));
+        assert_eq!(c.places["laptop"], Placed { x: 419.0, y: 10.0, rot: 0 });
+        assert_eq!(c.places["tv"], Placed { x: 759.0, y: -90.0, rot: 90 }, "from the laptop as before, its turn too");
+    }
+
+    #[test]
+    fn only_so_many_sets_are_remembered_and_never_the_one_in_use_is_dropped() {
+        let mut c = MonitorsChoice::default();
+        for i in 0..(LAYOUTS_KEPT + 5) {
+            let other = format!("screen{i:02}");
+            let mut s = vec![page("laptop", (1920, 1080), 1.0, (340.0, 190.0), (0.0, 0.0)), page(&other, (1920, 1080), 1.0, (530.0, 300.0), (1920.0, 0.0))];
+            s[1].at = (340.0, 0.0);
+            keep_places(&mut c, &s, 0);
+            assert!(c.layouts.contains_key(&set_key(["laptop", other.as_str()])));
+        }
+        assert_eq!(c.layouts.len(), LAYOUTS_KEPT);
     }
 
     #[test]
