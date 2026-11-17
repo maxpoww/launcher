@@ -321,6 +321,9 @@ impl App {
     /// only windows actually WORKED IN rank, never ones passed through.
     pub(crate) fn note_interaction(&mut self) {
         let Some((addr, _, _)) = hypr::active_window_info() else {
+            // A screen with no window (the plugin tells that too, 2026-11-17):
+            // no window earns a point, but the screen walk commits there.
+            self.note_screen_interaction();
             return;
         };
         // Reaching the walk's current landing by using it = committed.
