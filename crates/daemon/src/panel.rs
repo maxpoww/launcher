@@ -56,7 +56,7 @@ type Item = (&'static str, u8, &'static str);
 /// The settings in the order they stand on the grid — kin beside kin: how
 /// Golem looks, the screen and the sound, the connections, power, the
 /// owner's security, the keys and the system. Fixed: use moves nothing.
-const SETTINGS: [Item; 39] = [
+const SETTINGS: [Item; 40] = [
     // (name, kin, search keywords: what else people call it or look for
     // it by).
     // How Golem looks.
@@ -75,6 +75,8 @@ const SETTINGS: [Item; 39] = [
     ("Monitors", 1, "monitors screens displays external tv projector arrange mirror extend isolated rotate turn resolution scale lid"),
     ("Brightness", 1, "display screen backlight dim auto sensor light"),
     ("Night light", 1, "display screen warm blue light sunset eyes night automatic schedule"),
+    // What Print takes and what becomes of a shot (Max, 2026-11-16).
+    ("Screenshots", 1, "screenshot screenshots screen shot capture print prtsc snip snipping record recording video film screencast clipboard preview pointer cursor banner dock sound"),
     ("Sound output", 1, "audio speakers speaker headphones output"),
     ("Volume", 1, "audio sound loud quiet mute apps mixer per app"),
     // THE EQUALIZER (2026-11-11, `eq.rs`): each output's curve, the studio way.
@@ -444,6 +446,7 @@ fn symbol_of(label: &str) -> &'static str {
         "Your account" => "person",
         "Mouse and touchpad" => "ctl-mouse",
         "Shortcuts" => "ctl-shortcuts",
+        "Screenshots" => "camera",
         "Accessibility" => "ctl-access",
         "Startup apps" => "play",
         "Lock screen" => "ctl-lock",

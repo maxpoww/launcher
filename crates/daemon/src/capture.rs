@@ -22,8 +22,14 @@
 //! - by the selection itself, one small button: Capture, or Record (Enter,
 //!   or a double click inside a region).
 //!
-//! A picture is taken without the pointer and a film with it (`capture
-//! pointer on` puts it in a picture: a verb, no control).
+//! WHAT IS IN A PICTURE is Controls → Screenshots' (`shots_page.rs`): the
+//! pointer only when chosen there (`capture pointer on|off` sets that
+//! choice); a film always has it. A picture of the whole SCREEN leaves the
+//! banner's strip out when Banner is off (`capture_banner_cut`, cut from the
+//! picture's top rows: `capture_shot::strip_px`) and is taken with the dock
+//! drawn EMPTY when Dock is off (`dock_blank`; the shot waits `HIDE_WITHIN`
+//! more for it). It goes onto the clipboard unless that is off there. A
+//! film's Sound starts from that page at each opening.
 //!
 //! THE SCREEN SIDE is drawn on the desktop's TOP surface (`desktop_top.rs`:
 //! Overlay, above every window), made again on the pointer's screen when it
@@ -365,9 +371,7 @@ pub(crate) struct Prefs {
     pub kind: Kind,
     /// Seconds before it is taken (one of [`TIMERS`]).
     pub timer: u32,
-    /// The pointer in the picture.
-    pub pointer: bool,
-    /// The sound in a film.
+    /// The sound in a film (each opening starts from Controls → Screenshots).
     pub sound: bool,
     /// The last region, and the screen it was on.
     pub region: Option<(String, Area)>,
@@ -379,7 +383,6 @@ impl Default for Prefs {
             what: What::Region,
             kind: Kind::Picture,
             timer: 0,
-            pointer: false,
             sound: false,
             region: None,
         }
@@ -482,6 +485,10 @@ pub(crate) struct Capture {
     pub(crate) shots: crate::capture_shot::Shots,
     /// A still is in the surface's big picture (and goes with the tool).
     still_up: bool,
+    /// THE DOCK DRAWN EMPTY for a picture of the screen (Controls →
+    /// Screenshots → Dock off), and the tool's picture waiting for that.
+    pub(crate) dock_blank: bool,
+    dock_wait: bool,
 }
 
 /// The top surface's hold for the tool.
@@ -782,7 +789,7 @@ pub(crate) fn keep(picture: &[u8], dir: &Path, at: SystemTime) -> Option<PathBuf
 }
 
 /// A folder as it is read: `~/Pictures/Screenshots`.
-fn shown(dir: &Path) -> String {
+pub(crate) fn shown(dir: &Path) -> String {
     match dir.strip_prefix(crate::filer::home()) {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => dir.display().to_string(),
@@ -790,9 +797,11 @@ fn shown(dir: &Path) -> String {
 }
 
 /// A PICTURE of `aim` (on a thread): the clipboard first — it is what a
-/// hand reaches for next, and it never waits for the file —, then the file,
-/// then the notification that carries it.
-fn shoot(aim: &Aim, pointer: bool) {
+/// hand reaches for next, and it never waits for the file — unless the
+/// owner keeps it out of there, then the file, then the notification that
+/// carries it. `(strip, logical_h)`: the banner's strip to leave out of the
+/// top of a screen `logical_h` tall (0: nothing).
+fn shoot(aim: &Aim, pointer: bool, clipboard: bool, (strip, logical_h): (i32, i32)) {
     let tmp = scratch_png();
     let grabbed = grab(aim, pointer, &tmp);
     let picture = if grabbed {
@@ -806,7 +815,8 @@ fn shoot(aim: &Aim, pointer: bool) {
         notify(tr("The screenshot could not be taken"), "", None);
         return;
     };
-    let copied = copy("image/png", &picture);
+    let picture = crate::capture_shot::without_strip(picture, strip, logical_h);
+    let copied = clipboard && copy("image/png", &picture);
     let dir = crate::record::shots_folder();
     let file = keep(&picture, &dir, SystemTime::now());
     let place = shown(&dir);
@@ -888,6 +898,38 @@ pub(crate) fn read_picture(tmp: &Path, of: &str) {
 }
 
 impl App {
+    /// The banner's strip to leave out of a picture of the whole screen
+    /// `screen` (Controls → Screenshots → Banner off), in logical pixels:
+    /// the bar's height where it stands on that screen and is showing;
+    /// else nothing (over a fullscreen window its place is the window's).
+    pub(crate) fn capture_banner_cut(&self, screen: &str) -> i32 {
+        if crate::shots_page::ShotChoice::now().banner || self.options_hidden {
+            return 0;
+        }
+        if self.bar_screen_name().is_some_and(|n| n != screen) {
+            return 0;
+        }
+        self.options_bar_h().ceil() as i32
+    }
+
+    /// Dock off (Controls → Screenshots): the dock drawn EMPTY for a
+    /// picture of the screen, when it is in sight. Whether it was.
+    pub(crate) fn capture_dock_away(&mut self) -> bool {
+        if crate::shots_page::ShotChoice::now().dock || self.ui.reveal() <= 0.0 {
+            return false;
+        }
+        self.capture_tool.dock_blank = true;
+        self.schedule_frame();
+        true
+    }
+
+    /// The picture is taken: the dock as it was.
+    pub(crate) fn capture_dock_back(&mut self) {
+        if std::mem::take(&mut self.capture_tool.dock_blank) {
+            self.schedule_frame();
+        }
+    }
+
     /// Whether the tool is up at all (a countdown and the empty frame too).
     pub(crate) fn capture_up(&self) -> bool {
         self.capture_tool.tool.is_some()
@@ -985,7 +1027,8 @@ impl App {
                 self.capture_changed();
             }
             ("pointer", arg) if on_off(arg).is_some() => {
-                self.capture_tool.prefs.pointer = arg == "on";
+                // (Controls → Screenshots' choice: the verb sets it.)
+                crate::shots_page::ShotChoice::change(|c| c.pointer = arg == "on");
                 self.capture_changed();
             }
             ("sound", arg) if on_off(arg).is_some() => {
@@ -1039,7 +1082,7 @@ impl App {
             "what {} kind {kind} timer {} pointer {} sound {}",
             p.what.name(),
             p.timer,
-            on(p.pointer),
+            on(crate::shots_page::ShotChoice::now().pointer),
             on(p.sound)
         );
         let rest = format!("{rest} {}", self.capture_shot_state());
@@ -1193,6 +1236,9 @@ impl App {
             Vec::new()
         };
         let live = still.is_none();
+        if live {
+            self.capture_tool.prefs.sound = crate::shots_page::ShotChoice::now().sound;
+        }
         let wins = if !live {
             wins
         } else {
@@ -1513,9 +1559,30 @@ impl App {
         // region or a screen can have the banner in it), and a banner that
         // was called over a fullscreen window goes whole.
         self.capture_pills_off_now();
+        // (Dock off: a picture of the screen is taken with the dock drawn
+        // empty, given its own wait.)
+        let screen_picture = matches!(
+            &self.capture_tool.tool,
+            Some(Tool {
+                phase: Phase::Hiding {
+                    job: Job::Picture,
+                    aim: Aim::Screen(_)
+                },
+                ..
+            })
+        );
+        if screen_picture && self.capture_dock_away() {
+            self.capture_tool.dock_wait = true;
+            self.after_ms(HIDE_WITHIN, move |app| {
+                if app.capture_tool.epoch == epoch {
+                    app.capture_tool.dock_wait = false;
+                    app.capture_fire_when_gone();
+                }
+            });
+        }
         // (No frame callback comes for a surface nobody sees: then anyway.)
         self.after_ms(HIDE_WITHIN, move |app| {
-            if app.capture_tool.epoch == epoch {
+            if app.capture_tool.epoch == epoch && !app.capture_tool.dock_wait {
                 app.capture_fire();
             }
         });
@@ -1561,6 +1628,7 @@ impl App {
             .tool
             .as_ref()
             .is_some_and(|t| t.top_shown && t.bar_shown)
+            && !self.capture_tool.dock_wait
         {
             self.capture_fire();
         }
@@ -1602,23 +1670,38 @@ impl App {
             return;
         };
         self.capture_tool.epoch += 1;
-        let (pointer, sound) = (
-            self.capture_tool.prefs.pointer,
-            self.capture_tool.prefs.sound,
-        );
+        self.capture_tool.dock_wait = false;
+        let choice = crate::shots_page::ShotChoice::now();
+        let sound = self.capture_tool.prefs.sound;
         info!("capture: taking {aim:?} as {job:?}");
         match job {
             Job::Video => self.record_start_at(aim, sound),
-            Job::Picture | Job::Text => {
+            Job::Text => {
                 let spawned = std::thread::Builder::new()
                     .name("capture".into())
-                    .spawn(move || match job {
-                        Job::Text => read_text(&aim),
-                        _ => shoot(&aim, pointer),
-                    });
+                    .spawn(move || read_text(&aim));
                 if let Err(e) = spawned {
                     warn!("capture: cannot take it ({e})");
                 }
+            }
+            Job::Picture => {
+                // (A picture of the whole screen leaves the banner's strip
+                // out when Banner is off; the dock comes back once it is
+                // taken.)
+                let cut = match &aim {
+                    Aim::Screen(name) => {
+                        let logical_h = crate::hypr::monitor_info(Some(name))
+                            .ok()
+                            .filter(|m| &m.name == name)
+                            .map_or(0, |m| m.h.round() as i32);
+                        (self.capture_banner_cut(name), logical_h)
+                    }
+                    Aim::Area(_) => (0, 0),
+                };
+                self.desktop_off_loop(
+                    move || shoot(&aim, choice.pointer, choice.clipboard, cut),
+                    |app, ()| app.capture_dock_back(),
+                );
             }
         }
         self.capture_changed();

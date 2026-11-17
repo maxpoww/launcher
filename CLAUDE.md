@@ -676,15 +676,20 @@ The big daemon files are cohesive but long — go straight to the function:
   `capture_bar_shown`; `HIDE_WITHIN` at the latest). Then a thread runs `grim` (`shoot`: clipboard, Pictures →
   Screenshots, a notification carrying the picture — `notify_args`, its click opens the FILE, `notif_open`), or
   `read_text` (grim → `tesseract … stdout -l` → `wl-copy`; `pick_langs`), or the recording starts
-  (`record::record_start_at`, `record::Aim`; a film's sides made even). Pictures without the pointer, films with
-  it (`capture pointer on` is a verb only). Region = `grip_at`/`dragged`/`handles` (pure, tested), windows topmost
+  (`record::record_start_at`, `record::Aim`; a film's sides made even). What a picture holds is Controls →
+  Screenshots' (`shots_page.rs`, next entry but one): the pointer as chosen there (`capture pointer on|off` sets
+  it), films always with it; a picture of the whole SCREEN without the banner's strip (Banner off:
+  `capture_banner_cut`, the rows cut by `capture_shot::strip_px`/`without_strip`) and with the dock drawn EMPTY
+  (Dock off: `capture_dock_away` → `Capture::dock_blank`, `frame.rs` draws an empty scene, the shot waits
+  `HIDE_WITHIN` more — `dock_wait` — and `capture_dock_back` after); the clipboard as chosen; Sound starts from
+  the page at each opening. Region = `grip_at`/`dragged`/`handles` (pure, tested), windows topmost
   first by `stack` (fullscreen, floating, then focus history: the compositor does not tell the true order). Keys:
   Escape, Tab, V, Enter, arrows (Shift ×10). Programs by env for a rig: `WAVERUNNER_GRIM`, `_WL_COPY`,
   `_TESSERACT`, `_WF_RECORDER`, `_BUSCTL` (⚠ the rig's bus is the LIVE one: stub busctl). PRINT itself is `capture_shot.rs` (next entry); `capture`/
   `capture open` are this live tool. Rig: `capture open|close|
   state|pills|what …|kind …|timer 0|3|10|pointer on|off|sound on|off|rect x y w h|take|text` (`state` and `pills`
   — the pills' rects — in the log); real keys with the nested `hl.dsp.send_shortcut`, real clicks with the
-  scratchpad's `vptr.py`. Not built: annotation, settings.json for the choices, a bar narrower than the row.
+  scratchpad's `vptr.py`. Not built: annotation, a bar narrower than the row.
 - `capture_shot.rs` — PRINT TAKES THE WHOLE SCREEN AT ONCE (Max, 2026-11-16, the third round: "the print key takes
   a full screen and shows on the card pill… the user can click to edit the screenshot… or let it save as is… also
   start recording by holding the print key for 1.5 s"). THE KEY = `Press` (pure, the time handed in; tested): `capture
@@ -717,9 +722,27 @@ The big daemon files are cohesive but long — go straight to the function:
   pill's row), `capture_hang_sync`/`tick_capture_hang` ease it (no clock at rest). A Print, or the live tool
   opening, takes pill and picture off AT ONCE (`capture_preview_off_now`) and the long pill is held SHUT until the
   picture is in (`Shots::shut`: the pointer resting there brought the card's own hover pill out into the shot).
-  Rig: `capture preview hover|unhover`; the state line says `picture hangs|folding|folded`. Not kept across a dock restart (the file and the
+  Rig: `capture preview hover|unhover`; the state line says `picture hangs|folding|folded`. THE PAGE'S CHOICES here:
+  "Let me choose first" makes the press take nothing and its release open the live tool (`Pending::choose`; a
+  hold still records); the file and the clipboard without the banner's strip when Banner is off (`Frame::strip`,
+  `settle` — the editor's still stays WHOLE and its Save never reaches above `Kept::cut_top`); the dock drawn
+  empty first when Dock is off (`capture_shoot` → `capture_dock_away`, back in `capture_grabbed`); no clipboard
+  when that is off (`Kept::clipboard` for the editor's Save too); no preview → the ordinary notification that
+  carries the picture (a shot is never silent); the held key's film has sound when Screen recording says With
+  sound. Not kept across a dock restart (the file and the
   clipboard are; the preview and the editor's still are memory). Rig: `capture press|release|shot`, `capture preview
   click|close|state`, `capture edit`; the state line says `mode live|still`, `key down|up`, `preview out <file>|none`.
+- `shots_page.rs` — Controls → SCREENSHOTS (Max, 2026-11-16: "show the banner, hide the dock and idk what more…
+  the rest is good, build it"): Print takes (The whole screen · Let me choose first — a word row), In the picture
+  (Banner · Dock · Pointer), After a shot (Copy to the clipboard · Show the preview) — switches of THE KIT under
+  captions —, Screen recording (Silent · With sound: a word row, one line, so the page fits a 900-pixel screen
+  with the Dock's hint out); under Dock, only while it is off, "The shot is taken a moment
+  later." (Max: tell the person it costs a moment). `ShotChoice` is `screenshots` in `settings.json` (absent =
+  the defaults, which are not written; `ShotChoice::now()` where they are used, `change` + `store` on the
+  settings' worker for a pick, keys `shots-*`). In the grid among the screen's settings, after Night light
+  (symbol `camera`). Rig: `display show screenshots`, `display pick <g> <n>` (groups from 0: Print takes, the
+  caption, Banner, Dock, Pointer, caption, clipboard, preview, Screen recording; a switch's 0 is on, Screen
+  recording's 0 is Silent).
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

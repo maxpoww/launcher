@@ -549,6 +549,9 @@ pub(crate) struct GolemSettings {
     /// applied yet.
     #[serde(default, skip_serializing_if = "crate::monitors_page::MonitorsChoice::is_default")]
     pub monitors: crate::monitors_page::MonitorsChoice,
+    /// The Screenshots page's choices ([`crate::shots_page`]).
+    #[serde(default, skip_serializing_if = "crate::shots_page::ShotChoice::is_default")]
+    pub screenshots: crate::shots_page::ShotChoice,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
 }

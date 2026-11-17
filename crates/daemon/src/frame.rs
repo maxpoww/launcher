@@ -2190,6 +2190,10 @@ impl App {
                 dock_open_alpha,
             },
         );
+        // (Controls → Screenshots → Dock off: drawn EMPTY while a picture of
+        // the screen is taken — `capture_shot.rs`, `capture.rs` — and as it
+        // was the frame after.)
+        let scene = if self.capture_tool.dock_blank { content::Scene::default() } else { scene };
         let thumb_base = self.thumb_layer_base();
         let Some(renderer) = self.renderer.as_mut() else {
             return;
