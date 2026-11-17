@@ -143,10 +143,16 @@ pub(crate) fn edid_dynamic(edid: &[u8]) -> bool {
     })
 }
 
-/// Whether the screen on connector `name` can do Dynamic.
-pub(crate) fn can_dynamic(name: &str) -> bool {
+/// Whether the screen on connector `name` can do Dynamic: what the
+/// compositor `said` (Golem's Hyprland: `vrrCapable`, the kernel's own
+/// word — a range in the EDID is not adaptive sync: many 60 Hz screens
+/// list one), else the EDID.
+pub(crate) fn can_dynamic(name: &str, said: Option<bool>) -> bool {
     if std::env::var_os("WAVERUNNER_RIG_RATES").is_some() {
         return true;
+    }
+    if let Some(said) = said {
+        return said;
     }
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return false;
@@ -252,6 +258,21 @@ mod tests {
         edid[78] = 45;
         assert!(edid_dynamic(&edid));
         assert!(!edid_dynamic(&edid[..100]));
+    }
+
+    #[test]
+    fn the_compositors_word_on_adaptive_sync_wins_over_the_edid() {
+        // (A rig makes every screen able: nothing to tell there.)
+        if std::env::var_os("WAVERUNNER_RIG_RATES").is_some() {
+            return;
+        }
+        assert!(can_dynamic("DP-9", Some(true)), "said able, though no EDID is read");
+        assert!(!can_dynamic("eDP-1", Some(false)), "said unable, whatever its EDID's range");
+        let screen = serde_json::json!([{
+            "name": "DP-1", "width": 2560, "height": 1440, "refreshRate": 165.0, "vrrCapable": true,
+            "availableModes": ["2560x1440@165.00Hz", "2560x1440@60.00Hz"],
+        }]);
+        assert_eq!(crate::display::parse_monitors(&screen)[0].vrr_capable, Some(true));
     }
 
     #[test]

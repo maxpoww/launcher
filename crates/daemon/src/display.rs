@@ -131,6 +131,9 @@ pub(crate) struct Monitor {
     /// It shows another screen's picture (the Monitors page's Mirror): no
     /// screen of its own, nothing of the shell's stands on it.
     pub mirror: bool,
+    /// Whether it can do adaptive sync, as the compositor says (Golem's
+    /// Hyprland: `vrrCapable`, the kernel's word); `None`: it does not say.
+    pub vrr_capable: Option<bool>,
 }
 
 impl Monitor {
@@ -210,6 +213,7 @@ pub(crate) fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
                 ),
                 twin: false,
                 mirror: m["mirrorOf"].as_str().is_some_and(|of| of != "none"),
+                vrr_capable: m["vrrCapable"].as_bool(),
             })
         })
         .collect();
@@ -1895,6 +1899,8 @@ mod tests {
         }]);
         let m = &parse_monitors(&json)[0];
         assert_eq!(m.scale, 1.125);
+        // (A stock compositor does not say whether it can do adaptive sync.)
+        assert_eq!(m.vrr_capable, None);
         assert_eq!(m.selector(), "desc:Apple Computer Inc Color LCD");
         assert_eq!(m.title(), "Built-in screen");
         let view = DisplayView::of(m);
