@@ -28,6 +28,7 @@ use calloop::timer::{TimeoutAction, Timer};
 use crate::animation::{ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SETTLE_PX};
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::gear::PageKind;
+use crate::i18n::tr;
 use crate::options::{hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
 use crate::App;
 use options_engine::NetworkLink;
@@ -64,6 +65,128 @@ const READING_PAD: f32 = 10.0;
 /// sides; the box is as wide as that band.
 const OPEN_GAP: f32 = 10.0;
 const OPEN_PAD: f32 = 12.0;
+
+// --- THE SYMBOL AND ITS DOT (Max, 2026-11-17: "quiero que tengan colores
+// (semáforo + azul)… y que en las píldoras se vea solo símbolo, la información
+// solo en hover"; the mockup https://claude.ai/artifact/XvJdXRqyVk4t1Goe6DtuGg).
+// Shut, a reading is a ROUND pill with its symbol; how it stands is a DOT at the
+// round part's bottom right. Resting on the SYMBOL opens the pill to the right
+// (its words after the dot, the pills after it pushed along); leaving the
+// symbol, either way, closes it.
+
+/// The dot across, its centre this far right of and below the symbol's centre,
+/// ringed this wide in the pill's own ground (so it reads apart from the
+/// symbol it sits against).
+const DOT_D: f32 = 6.0;
+const DOT_OFF: f32 = 6.5;
+const DOT_RING: f32 = 1.5;
+/// How long the pointer rests on a symbol before its pill opens (Max's pick).
+const OPEN_AFTER: Duration = Duration::from_millis(300);
+/// Opening and closing tempos, 95 % of the way in 120 ms and in 80 ms (Max's
+/// picks, off the mockup's sliders). A deliberate exception to law 3's one
+/// tempo (`MORPH_RATE`, ~230 ms): a reading glanced at answers at once.
+const OPEN_RATE: f32 = 3.0 / 0.120;
+const CLOSE_RATE: f32 = 3.0 / 0.080;
+/// A colour goes back to a better one only once its value is this many points
+/// past the limit, so a reading that hovers round a limit does not blink.
+const SETTLE_POINTS: f32 = 3.0;
+
+/// How a reading stands, as its dot says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signal {
+    /// Connected or plugged in.
+    Blue,
+    /// On, and fine.
+    Green,
+    /// Worth a look: a weak signal, a middling use, a battery running down.
+    Yellow,
+    /// Off, or at the limit.
+    Red,
+}
+
+impl Signal {
+    /// The traffic light's own colours, fixed whatever the palette (Max's
+    /// "semáforo puro"): bright on a dark bar, deep on a light one. sRGB.
+    fn srgb(self, bright: bool) -> [f32; 4] {
+        let hex: u32 = match (self, bright) {
+            (Signal::Blue, false) => 0x4aa3ff,
+            (Signal::Green, false) => 0x35d06a,
+            (Signal::Yellow, false) => 0xffd23f,
+            (Signal::Red, false) => 0xff5b52,
+            (Signal::Blue, true) => 0x0a5fd0,
+            (Signal::Green, true) => 0x1b8a3c,
+            (Signal::Yellow, true) => 0x9a5b00,
+            (Signal::Red, true) => 0xd0021b,
+        };
+        let c = |shift: u32| ((hex >> shift) & 255) as f32 / 255.0;
+        [c(16), c(8), c(0), 1.0]
+    }
+}
+
+/// What a reading's dot is decided from.
+#[derive(Debug, Clone, Copy)]
+enum Measure {
+    /// A state with no number: its colour as it is.
+    Is(Signal),
+    /// Nothing to say (a graphics card that does not tell): no dot.
+    Unknown,
+    /// A number against its limits: `colors[n]` where `n` limits are passed —
+    /// reached going up when `worse_up` (a use), gone under going down when
+    /// not (a charge, a signal).
+    Scale {
+        value: f32,
+        limits: &'static [f32],
+        worse_up: bool,
+        colors: &'static [Signal],
+    },
+}
+
+const USE: [Signal; 3] = [Signal::Green, Signal::Yellow, Signal::Red];
+
+/// The dot for `m`, given the one shown `before`: worse at once, better only
+/// [`SETTLE_POINTS`] past the limit.
+fn decide(m: Measure, before: Option<Signal>) -> Option<Signal> {
+    match m {
+        Measure::Is(s) => Some(s),
+        Measure::Unknown => None,
+        Measure::Scale { value, limits, worse_up, colors } => {
+            let rank = |v: f32| limits.iter().filter(|&&l| if worse_up { v >= l } else { v < l }).count();
+            let now = rank(value);
+            let held = before.and_then(|b| colors.iter().position(|&c| c == b));
+            let r = match held {
+                Some(p) if now < p => {
+                    let toward_worse = if worse_up { value + SETTLE_POINTS } else { value - SETTLE_POINTS };
+                    rank(toward_worse).min(p)
+                }
+                _ => now,
+            };
+            colors.get(r.min(colors.len().saturating_sub(1))).copied()
+        }
+    }
+}
+
+/// Where a reading's words begin, from its symbol's centre: past the symbol's
+/// ink by the couple's bond, and never on the dot.
+fn val_off(ink: f32, s: f32) -> f32 {
+    (ink / 2.0 + PAIR_GAP * s).max((DOT_OFF + DOT_D / 2.0 + 1.0) * s)
+}
+
+/// The wash of a pill whose symbol is under the pointer: LIGHTER on any
+/// ground, a dark bar's or a light one's.
+fn stats_lit_wash(bright: bool) -> [f32; 4] {
+    crate::options::wash(true, if bright { 0.66 } else { 0.32 })
+}
+
+/// A couple in the open box's band, from its symbol's left ink to the end of
+/// its words (or of its dot, when it has none).
+fn band_w(ink: f32, value_w: f32, s: f32) -> f32 {
+    ink / 2.0
+        + if value_w > 0.0 {
+            val_off(ink, s) + value_w
+        } else {
+            (ink / 2.0).max((DOT_OFF + DOT_D / 2.0) * s)
+        }
+}
 
 // --- The box (Max, 2026-09-13: "scroll down or click the gear opens a box") --
 /// The open panel's height is [`crate::options::BOX_DRAWER_H`] — the ONE height
@@ -127,6 +250,12 @@ struct Reading {
     /// the pill and every couple right of it would shift a few pixels every few
     /// seconds while the pointer rests on it.
     reserve: &'static str,
+    /// What the pill says when it opens: the number, or a word where there is
+    /// no number ("Not connected", "Off", the headphones' name). Empty: it
+    /// does not open.
+    hover: String,
+    /// What its dot is decided from.
+    measure: Measure,
 }
 
 /// Every percentage is reserved at its widest; so is a transfer rate, which
@@ -302,18 +431,6 @@ const ICON_BT: Icon = icon("\u{f00af}", SCALE_BT, INK_BT);
 const ICON_BT_CONNECTED: Icon = icon("\u{f00b1}", SCALE_BT, INK_BT);
 const ICON_BT_OFF: Icon = icon("\u{f00b2}", SCALE_BT, INK_BT);
 
-/// One couple's width: its symbol, plus its number and the breath between them
-/// when it has one. A symbol-only reading (a wired link, Bluetooth with nothing
-/// connected) is exactly its symbol wide — no gap reserved for a number that
-/// isn't there.
-fn pair_w(icon_w: f32, value_w: f32, scale: f32) -> f32 {
-    if value_w <= 0.0 {
-        icon_w
-    } else {
-        icon_w + PAIR_GAP * scale + value_w
-    }
-}
-
 /// The wireless symbol for a signal quality — four arcs, so each covers 25%.
 fn wifi_glyph(pct: u8) -> Icon {
     let step = (pct as usize * ICON_WIFI.len()) / 101;
@@ -365,6 +482,63 @@ mod tests {
                 rate_text(Some(bps)).len() <= RESERVE_RATE.len(),
                 "{bps} rendered wider than the reserved column"
             );
+        }
+    }
+
+    /// The dot by the table Max approved: a use goes green → yellow → red at its
+    /// limits at once, and back only once it is SETTLE_POINTS under them.
+    #[test]
+    fn a_use_reddens_at_its_limit_and_greens_three_points_under() {
+        let cpu = |v: f32| Measure::Scale { value: v, limits: &[50.0, 80.0], worse_up: true, colors: &USE };
+        assert_eq!(decide(cpu(12.0), None), Some(Signal::Green));
+        assert_eq!(decide(cpu(50.0), Some(Signal::Green)), Some(Signal::Yellow), "worse at once");
+        assert_eq!(decide(cpu(80.0), Some(Signal::Yellow)), Some(Signal::Red));
+        assert_eq!(decide(cpu(78.0), Some(Signal::Red)), Some(Signal::Red), "two points under: held");
+        assert_eq!(decide(cpu(76.9), Some(Signal::Red)), Some(Signal::Yellow), "past three: back");
+        assert_eq!(decide(cpu(10.0), Some(Signal::Red)), Some(Signal::Green), "far under: all the way");
+        assert_eq!(decide(cpu(48.0), Some(Signal::Yellow)), Some(Signal::Yellow));
+        assert_eq!(decide(cpu(46.0), Some(Signal::Yellow)), Some(Signal::Green));
+    }
+
+    /// A charge and a signal go the other way: worse as they fall.
+    #[test]
+    fn a_battery_and_a_signal_worsen_as_they_fall() {
+        let bat = |v: f32| Measure::Scale { value: v, limits: &[40.0, 15.0], worse_up: false, colors: &USE };
+        assert_eq!(decide(bat(84.0), None), Some(Signal::Green));
+        assert_eq!(decide(bat(39.0), Some(Signal::Green)), Some(Signal::Yellow));
+        assert_eq!(decide(bat(14.0), Some(Signal::Yellow)), Some(Signal::Red));
+        assert_eq!(decide(bat(16.0), Some(Signal::Red)), Some(Signal::Red), "charging back: held");
+        assert_eq!(decide(bat(18.0), Some(Signal::Red)), Some(Signal::Yellow));
+        assert_eq!(decide(bat(43.0), Some(Signal::Yellow)), Some(Signal::Green));
+        let wifi = |v: f32| Measure::Scale { value: v, limits: &[40.0], worse_up: false, colors: &[Signal::Blue, Signal::Yellow] };
+        assert_eq!(decide(wifi(78.0), None), Some(Signal::Blue));
+        assert_eq!(decide(wifi(30.0), Some(Signal::Blue)), Some(Signal::Yellow));
+        assert_eq!(decide(wifi(41.0), Some(Signal::Yellow)), Some(Signal::Yellow));
+        assert_eq!(decide(Measure::Unknown, Some(Signal::Green)), None, "nothing to say: no dot");
+        assert_eq!(decide(Measure::Is(Signal::Red), Some(Signal::Blue)), Some(Signal::Red));
+    }
+
+    /// The words never start on the dot, and a couple in the band is at least
+    /// its symbol and its dot wide.
+    #[test]
+    fn the_words_start_after_the_dot() {
+        for s in [0.82, 1.0, 1.5] {
+            for ink in [8.0, 11.0, 16.0] {
+                let ink = ink * s;
+                let words = val_off(ink, s);
+                assert!(words >= (DOT_OFF + DOT_D / 2.0) * s, "on the dot at ink {ink}");
+                assert!(words >= ink / 2.0 + PAIR_GAP * s);
+                assert!(band_w(ink, 0.0, s) >= ink / 2.0 + (DOT_OFF + DOT_D / 2.0) * s - 0.01);
+            }
+        }
+        // Each colour reads apart from the others on both grounds.
+        for bright in [false, true] {
+            let all = [Signal::Blue, Signal::Green, Signal::Yellow, Signal::Red].map(|g| g.srgb(bright));
+            for (i, a) in all.iter().enumerate() {
+                for b in &all[i + 1..] {
+                    assert!(a != b);
+                }
+            }
         }
     }
 
@@ -424,6 +598,17 @@ pub(crate) struct StatsState {
     /// Numbered rather than named because the pages have no content yet; when
     /// they do, this becomes the page's identity and the number goes away.
     page: usize,
+    /// Each reading's open words, measured (`measure_stats`), as `widths`.
+    hover_w: Vec<f32>,
+    /// The reading whose SYMBOL the pointer is on, and since when.
+    sym: Option<(usize, Instant)>,
+    /// The reading rested on long enough: its pill is open (or opening).
+    opened: Option<usize>,
+    /// How far each pill is open, 0 (its round symbol) → 1 (its words out).
+    g: Vec<f32>,
+    /// The dot each reading shows, kept so a better one waits
+    /// [`SETTLE_POINTS`] (`measure_stats` decides them).
+    signals: Vec<(PageKind, Option<Signal>)>,
 }
 
 impl App {
@@ -449,7 +634,7 @@ impl App {
     /// not, or the colour every left box wears would jump when it opens.
     pub(crate) fn stats_span_full_right(&self) -> f32 {
         let ph = self.options_pill_h();
-        EDGE_PAD + (ph + BOND_GAP) + self.stats_full_w()
+        EDGE_PAD + (ph + BOND_GAP) + self.stats_full_w_max()
     }
 
     /// The panel's full height: the bar's one drawer height. Empty for now —
@@ -622,6 +807,8 @@ impl App {
         }
         self.stats.open = open;
         self.stats.scroll_accum = 0.0;
+        self.stats.sym = None;
+        self.stats.opened = None;
         // The row has to be out for the panel to grow from it — opening from a
         // click on the gear while the readout is still tucked away would have
         // the panel appear from nothing.
@@ -698,31 +885,52 @@ impl App {
         }
         // Every reading's own pill, and the bond between them: the SAME
         // arithmetic `stats_pills` lays them out with.
-        let pills: f32 = self
-            .stats
-            .widths
-            .iter()
-            .map(|(icon_w, value_w)| self.stats_pill_w(pair_w(*icon_w, *value_w, s)))
-            .sum();
-        pills + BOND_GAP * (self.stats.widths.len() - 1) as f32
+        let n = self.stats.widths.len();
+        let pills: f32 = (0..n).map(|i| self.stats_pill_w(i)).sum();
+        pills + BOND_GAP * (n - 1) as f32
     }
 
-    /// The open box's width: every couple, `OPEN_GAP` apart, `OPEN_PAD` in from
-    /// both sides — never wider than the row of pills it grew from.
+    /// The widest the row ever gets: every pill round but the widest one open.
+    fn stats_full_w_max(&self) -> f32 {
+        let n = self.stats.widths.len();
+        if n == 0 {
+            return STATS_W * self.options_scale();
+        }
+        let ph = self.options_pill_h();
+        let extra = (0..n).map(|i| self.stats_open_pill_w(i) - ph).fold(0.0, f32::max);
+        ph * n as f32 + BOND_GAP * (n - 1) as f32 + extra
+    }
+
+    /// The open box's width: every couple (symbol, dot and number), `OPEN_GAP`
+    /// apart, `OPEN_PAD` in from both sides.
     pub(crate) fn stats_open_w(&self) -> f32 {
         let s = self.options_scale();
         if self.stats.widths.is_empty() {
             return self.stats_full_w();
         }
         let n = self.stats.widths.len() as f32;
-        let couples: f32 = self.stats.widths.iter().map(|(i, v)| pair_w(*i, *v, s)).sum();
-        (couples + (n - 1.0) * OPEN_GAP * s + 2.0 * OPEN_PAD * s).min(self.stats_full_w())
+        let couples: f32 = self.stats.widths.iter().map(|(i, v)| band_w(*i, *v, s)).sum();
+        couples + (n - 1.0) * OPEN_GAP * s + 2.0 * OPEN_PAD * s
     }
 
-    /// A reading's own pill's width: its couple and `READING_PAD` at both
-    /// ends, never narrower than a round pill.
-    fn stats_pill_w(&self, couple: f32) -> f32 {
-        (couple + 2.0 * READING_PAD * self.options_scale()).max(self.options_pill_h())
+    /// A reading's pill now: round with its symbol shut, its words after the
+    /// dot as it opens (`g`).
+    fn stats_pill_w(&self, i: usize) -> f32 {
+        let ph = self.options_pill_h();
+        lerp(ph, self.stats_open_pill_w(i), self.stats.g.get(i).copied().unwrap_or(0.0))
+    }
+
+    /// A reading's pill wide open: its symbol's round half, the words after the
+    /// dot, `READING_PAD` after them.
+    fn stats_open_pill_w(&self, i: usize) -> f32 {
+        let s = self.options_scale();
+        let ph = self.options_pill_h();
+        let ink = self.stats.widths.get(i).map_or(0.0, |w| w.0);
+        let words = self.stats.hover_w.get(i).copied().unwrap_or(0.0);
+        if words <= 0.0 {
+            return ph;
+        }
+        (ph / 2.0 + val_off(ink, s) + words + READING_PAD * s).max(ph)
     }
 
     /// Whether the readout is out far enough to be worth drawing or touching.
@@ -749,19 +957,32 @@ impl App {
     /// scale can have changed: when the readout is raised, on every Brain
     /// snapshot while it is out, and from the bar's own measuring pass.
     pub(crate) fn measure_stats(&mut self) {
-        let templates: Vec<String> = self
-            .stats_readings()
+        let readings = self.stats_readings();
+        // The dots, decided here (every snapshot while the readout is out, and
+        // as it comes out): worse at once, better only past the limit.
+        let signals: Vec<(PageKind, Option<Signal>)> = readings
             .iter()
-            .map(|r| r.template().to_owned())
+            .map(|r| {
+                let before = self.stats.signals.iter().find(|(k, _)| *k == r.kind).and_then(|(_, s)| *s);
+                (r.kind, decide(r.measure, before))
+            })
             .collect();
-        let inks: Vec<f32> = self
-            .stats_readings()
+        self.stats.signals = signals;
+        self.stats.g.resize(readings.len(), 0.0);
+        if self.stats.opened.is_some_and(|i| i >= readings.len()) {
+            self.stats.opened = None;
+        }
+        let templates: Vec<String> = readings.iter().map(|r| r.template().to_owned()).collect();
+        // The open words: a number takes its reserved width (it must not
+        // breathe while it is read), a word its own.
+        let hovers: Vec<String> = readings
             .iter()
-            .map(|r| ICON_PX * r.icon.scale * r.icon.ink)
+            .map(|r| if r.hover == r.value { r.template().to_owned() } else { r.hover.clone() })
             .collect();
+        let inks: Vec<f32> = readings.iter().map(|r| ICON_PX * r.icon.scale * r.icon.ink).collect();
         let s = self.options_scale();
         let value_px = VALUE_PX * s;
-        let Some(r) = self.options_renderer.as_mut() else {
+        let Some(rd) = self.options_renderer.as_mut() else {
             return;
         };
         // Only the NUMBERS are measured; a symbol's width is its INK
@@ -771,7 +992,11 @@ impl App {
         self.stats.widths = templates
             .into_iter()
             .zip(inks)
-            .map(|(value, ink)| (ink * s, r.measure_text(&value, value_px, Some(NERD))))
+            .map(|(value, ink)| (ink * s, if value.is_empty() { 0.0 } else { rd.measure_text(&value, value_px, Some(NERD)) }))
+            .collect();
+        self.stats.hover_w = hovers
+            .iter()
+            .map(|h| if h.is_empty() { 0.0 } else { rd.measure_text(h, value_px, Some(NERD)) })
             .collect();
     }
 
@@ -796,6 +1021,49 @@ impl App {
             // other box on this bar — a visit ends when you go.
             self.schedule_stats_collapse(LEAVE_HOLD);
         }
+        self.update_stats_symbol();
+    }
+
+    /// The reading whose SYMBOL — its round part — is at `(x, y)`, while the
+    /// row is out and the box shut. Its number, the gaps and the rest are not
+    /// a symbol.
+    fn stats_symbol_at(&self, x: f32, y: f32) -> Option<usize> {
+        if self.stats.e > 0.01 || self.stats.t < 0.99 {
+            return None;
+        }
+        let ph = self.options_pill_h();
+        self.stats_pills(self.stats_geom())
+            .iter()
+            .position(|p| x >= p.x && x < p.x + ph && y >= p.y && y < p.y + ph)
+    }
+
+    /// Follow the pointer over the symbols (Max, 2026-11-17: "que la píldora se
+    /// cierre cuando el puntero abandone el símbolo, no la píldora"): the one it
+    /// is on lights at once; rested on [`OPEN_AFTER`], its pill opens; leaving
+    /// the symbol, whichever way, closes it — onto its own number too.
+    fn update_stats_symbol(&mut self) {
+        let on = if self.options_hover == Some(PillId::SettingsStats) {
+            self.options_ptr.and_then(|(x, y)| self.stats_symbol_at(x, y))
+        } else {
+            None
+        };
+        if on == self.stats.sym.map(|(i, _)| i) {
+            return;
+        }
+        let now = Instant::now();
+        self.stats.sym = on.map(|i| (i, now));
+        self.stats.opened = None;
+        if let Some(i) = on {
+            let _ = self.loop_handle.insert_source(Timer::from_duration(OPEN_AFTER), move |_, _, app: &mut App| {
+                // Only if the hand is still on that symbol, since then.
+                if app.stats.sym == Some((i, now)) && app.stats.e < 0.01 {
+                    app.stats.opened = Some(i);
+                    app.schedule_stats_frame();
+                }
+                TimeoutAction::Drop
+            });
+        }
+        self.schedule_stats_frame();
     }
 
     /// Slide the readout out (or back) without a pointer — `debug-stats`.
@@ -832,6 +1100,8 @@ impl App {
     /// The box and its row away now, as a hand that left would have them.
     pub(crate) fn stats_put_away(&mut self) {
         self.stats.hold_deadline = None;
+        self.stats.sym = None;
+        self.stats.opened = None;
         self.set_stats_box(false);
         self.stats.reveal = false;
         self.stats.last = None;
@@ -859,6 +1129,8 @@ impl App {
                     app.stats.reveal = false;
                     app.stats.open = false;
                     app.stats.scroll_accum = 0.0;
+                    app.stats.sym = None;
+                    app.stats.opened = None;
                     app.stats.last = None;
                     app.gear_sync();
                     app.schedule_stats_frame();
@@ -911,6 +1183,22 @@ impl App {
         );
         self.stats.e = e;
         moving |= box_moving;
+        // Each pill opening or closing, at its own tempo.
+        let ph = self.options_pill_h();
+        for i in 0..self.stats.g.len() {
+            let target = if self.stats.opened == Some(i) { 1.0 } else { 0.0 };
+            let rate = if target > self.stats.g[i] { OPEN_RATE } else { CLOSE_RATE };
+            let span = (self.stats_open_pill_w(i) - ph).max(1.0);
+            let (g, m) = ease_toward(self.stats.g[i], target, dt, rate, settle_t(span));
+            self.stats.g[i] = g;
+            moving |= m;
+        }
+        // The pills moved under a pointer that did not: the symbol it is on
+        // now is the one it rests on (the next one slid under it as the open
+        // one closed).
+        if moving {
+            self.update_stats_symbol();
+        }
         moving |= self.gear_tick(dt);
         self.draw_options();
         if moving {
@@ -946,23 +1234,35 @@ impl App {
         // aerial is for) and the figure is the negotiated bitrate.
         let net = &ctx.network;
         out.push(match net.link {
+            // Blue while the link is up; yellow on a weak wireless signal.
             NetworkLink::Wireless => Reading {
                 kind: PageKind::Net,
                 icon: net.signal_pct.map_or(ICON_WIFI_NONE, wifi_glyph),
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
+                hover: rate_text(net.throughput_bps),
+                measure: net.signal_pct.map_or(Measure::Is(Signal::Blue), |p| Measure::Scale {
+                    value: f32::from(p),
+                    limits: &[40.0],
+                    worse_up: false,
+                    colors: &[Signal::Blue, Signal::Yellow],
+                }),
             },
             NetworkLink::Wired => Reading {
                 kind: PageKind::Net,
                 icon: ICON_WIRED,
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
+                hover: rate_text(net.throughput_bps),
+                measure: Measure::Is(Signal::Blue),
             },
             NetworkLink::Down => Reading {
                 kind: PageKind::Net,
                 icon: ICON_NO_LINK,
                 value: String::new(),
                 reserve: "",
+                hover: tr("Not connected").to_owned(),
+                measure: Measure::Is(Signal::Red),
             },
         });
         // Bluetooth, but ONLY when the engine can actually see it: an absent
@@ -986,6 +1286,19 @@ impl App {
                 },
                 value: bt.connected.to_string(),
                 reserve: RESERVE_COUNT,
+                // Off, on, or what is connected, by its name.
+                hover: match (bt.powered, bt.connected) {
+                    (false, _) => tr("Off").to_owned(),
+                    (true, 0) => tr("On").to_owned(),
+                    (true, _) if bt.device.is_empty() => bt.connected.to_string(),
+                    (true, 1) => bt.device.clone(),
+                    (true, n) => format!("{} +{}", bt.device, n - 1),
+                },
+                measure: Measure::Is(match (bt.powered, bt.connected) {
+                    (false, _) => Signal::Red,
+                    (true, 0) => Signal::Green,
+                    (true, _) => Signal::Blue,
+                }),
             });
         }
         if let Some(disk) = m.disk_usage_pct {
@@ -994,6 +1307,8 @@ impl App {
                 icon: ICON_DISK,
                 value: format!("{disk:.0}%"),
                 reserve: RESERVE_PCT,
+                hover: format!("{disk:.0}%"),
+                measure: Measure::Scale { value: disk, limits: &[75.0, 90.0], worse_up: true, colors: &USE },
             });
         }
         out.push(Reading {
@@ -1001,12 +1316,16 @@ impl App {
             icon: ICON_CPU,
             value: format!("{:.0}%", m.cpu_usage_pct),
             reserve: RESERVE_PCT,
+            hover: format!("{:.0}%", m.cpu_usage_pct),
+            measure: Measure::Scale { value: m.cpu_usage_pct, limits: &[50.0, 80.0], worse_up: true, colors: &USE },
         });
         out.push(Reading {
             kind: PageKind::Ram,
             icon: ICON_RAM,
             value: format!("{:.0}%", m.ram_usage_pct),
             reserve: RESERVE_PCT,
+            hover: format!("{:.0}%", m.ram_usage_pct),
+            measure: Measure::Scale { value: m.ram_usage_pct, limits: &[60.0, 85.0], worse_up: true, colors: &USE },
         });
         // Shown only when the Brain can actually read it: no Intel GPU, or a
         // kernel that will not hand out perf counters, means we cannot tell, and
@@ -1021,8 +1340,17 @@ impl App {
                 icon: ICON_GPU,
                 value: format!("{gpu:.0}%"),
                 reserve: RESERVE_PCT,
+                hover: format!("{gpu:.0}%"),
+                measure: Measure::Scale { value: gpu, limits: &[50.0, 80.0], worse_up: true, colors: &USE },
             },
-            None => Reading { kind: PageKind::Gpu, icon: ICON_GPU, value: String::new(), reserve: "" },
+            None => Reading {
+                kind: PageKind::Gpu,
+                icon: ICON_GPU,
+                value: String::new(),
+                reserve: "",
+                hover: tr("No reading").to_owned(),
+                measure: Measure::Unknown,
+            },
         });
         if let Some(bat) = m.battery_pct {
             out.push(Reading {
@@ -1037,6 +1365,13 @@ impl App {
                 },
                 value: format!("{bat}%"),
                 reserve: RESERVE_PCT,
+                hover: format!("{bat}%"),
+                // Blue on the charger; else by the charge left.
+                measure: if m.is_charging {
+                    Measure::Is(Signal::Blue)
+                } else {
+                    Measure::Scale { value: f32::from(bat), limits: &[40.0, 15.0], worse_up: false, colors: &USE }
+                },
             });
         }
         out
@@ -1084,26 +1419,33 @@ impl App {
         let ty = rect.y + (band_h - line) / 2.0;
         // The symbol is its own label so it can be its own size — one label
         // carries one font, and each symbol needs its own optical correction.
-        // Every one is centred in a cell of the same width, so the distance from
-        // symbol to number is identical in every couple.
-        let gap = PAIR_GAP * s;
-        let columns = self.stats_columns(rect);
+        // Shut, it stands centred in its round pill and never moves as the
+        // pill opens; open, it eases to its place in the box's band.
+        let centres = self.stats_centres(rect);
+        let pills = self.stats_pills(rect);
         // With the box open, the reading whose page is showing stays at full
         // strength and the others step back, so the row says which page this is.
         let open_e = self.stats.e.clamp(0.0, 1.0);
         let page = self.stats_page();
+        let bright = self.options_bar_is_bright();
+        // The dot's ring: the ground it stands on — the pill's (lit under the
+        // pointer), the box's as it opens.
+        let (box_fill, box_ink) = self.box_surface_at(rect);
+        // Which of the dot's two sets reads on its ground: the bar's, or the
+        // box's once it is more than half open (a light box has dark ink).
+        let light_ground = if open_e < 0.5 { bright } else { box_ink[0] < 0.5 };
+        let ring_on = |lit: bool| -> Option<[f32; 4]> {
+            let pill = self.options_pill_ground(if lit { stats_lit_wash(bright) } else { self.options_rest_wash() })?;
+            Some(crate::animation::lerp4(pill, [box_fill[0], box_fill[1], box_fill[2], 1.0], open_e))
+        };
         for (i, r) in readings.iter().enumerate() {
-            let Some(col) = columns.get(i) else { break };
+            let (Some(&c), Some(pill)) = (centres.get(i), pills.get(i)) else { break };
             let a = if page == i + 2 { a } else { a * lerp(1.0, 0.6, open_e) };
-            let pair_x = col.x;
-            let (icon_w, value_w) = self.stats_pair_w(i, r, s);
+            let ink_w = self.stats_ink(i, r, s);
             let icon_px = ICON_PX * r.icon.scale * s;
             scene.labels.push(Label {
                 text: r.icon.glyph.to_owned(),
-                pos: (
-                    pair_x + icon_w / 2.0,
-                    rect.y + (band_h - icon_px * 1.2) / 2.0,
-                ),
+                pos: (c, rect.y + (band_h - icon_px * 1.2) / 2.0),
                 // Room for the glyph at its own size, whatever the cell is —
                 // the cell governs the LAYOUT, never the drawing, or an
                 // enlarged symbol would be clipped by its own column.
@@ -1117,19 +1459,57 @@ impl App {
                 color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
                 clip: Some(rect),
             });
-            if !r.value.is_empty() {
+            // THE DOT, ringed in what it stands on.
+            let signal = self.stats.signals.get(i).and_then(|(k, sig)| (*k == r.kind).then_some(*sig)).flatten();
+            if let Some(sig) = signal {
+                let (dx, dy) = (c + DOT_OFF * s, rect.y + band_h / 2.0 + DOT_OFF * s);
+                let lit = open_e < 0.01 && self.stats.sym.is_some_and(|(k, _)| k == i);
+                if let Some(ring) = ring_on(lit) {
+                    let rr = (DOT_D / 2.0 + DOT_RING) * s;
+                    scene.rects.push(RectInst {
+                        rect: Rect::new(dx - rr, dy - rr, 2.0 * rr, 2.0 * rr),
+                        radius: rr,
+                        color: [ring[0], ring[1], ring[2], a],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
+                let dot = crate::kit::linear(sig.srgb(light_ground));
+                let dr = DOT_D / 2.0 * s;
+                scene.rects.push(RectInst {
+                    rect: Rect::new(dx - dr, dy - dr, 2.0 * dr, 2.0 * dr),
+                    radius: dr,
+                    color: [dot[0], dot[1], dot[2], a],
+                    glass: 0.0,
+                    border: 0.0,
+                });
+            }
+            let words_x = c + val_off(ink_w, s);
+            // Open, in its pill: what it says, uncovered as the pill grows.
+            let g = self.stats.g.get(i).copied().unwrap_or(0.0);
+            if g > 0.001 && open_e < 0.99 && !r.hover.is_empty() {
                 scene.labels.push(Label {
-                    // LEFT-aligned in the width it reserves, not centred in it.
-                    // The reservation is the widest form the number can take, so
-                    // centring spends the leftover on both sides — and half of it
-                    // lands between the symbol and its own number, which is why
-                    // "6%" sat 18px from its chip while "84%" sat 10px from its
-                    // battery (measured, 2026-09-13). Left-aligned, the bond is
-                    // exactly `PAIR_GAP` in every couple and the slack falls into
-                    // the wide gap between couples, where nobody is comparing.
+                    text: r.hover.clone(),
+                    pos: (words_x, ty),
+                    max_w: self.stats.hover_w.get(i).copied().unwrap_or(0.0) + 1.0,
+                    font_px: font,
+                    line_px: line,
+                    centered: false,
+                    dim: false,
+                    cache: false,
+                    family: Some(NERD),
+                    color: Some([ink[0], ink[1], ink[2], ink[3] * a * g * (1.0 - open_e)]),
+                    clip: Some(*pill),
+                });
+            }
+            // In the open box's band: today's figure, as it always was —
+            // LEFT-aligned in the width it reserves, so the slack falls into
+            // the gap between couples where nobody is comparing.
+            if !r.value.is_empty() && open_e > 0.001 {
+                scene.labels.push(Label {
                     text: r.value.clone(),
-                    pos: (pair_x + icon_w + gap, ty),
-                    max_w: value_w + 1.0,
+                    pos: (words_x, ty),
+                    max_w: self.stats.widths.get(i).map_or(0.0, |w| w.1) + 1.0,
                     font_px: font,
                     line_px: line,
                     centered: false,
@@ -1139,7 +1519,7 @@ impl App {
                     // they are tabular and a column stops shifting sideways as
                     // its value changes under the pointer.
                     family: Some(NERD),
-                    color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+                    color: Some([ink[0], ink[1], ink[2], ink[3] * a * open_e]),
                     clip: Some(rect),
                 });
             }
@@ -1179,53 +1559,66 @@ impl App {
         self.gear_press()
     }
 
-    /// One reading's measured `(symbol, number)` widths, with the rough guess
-    /// that stands in until the first measuring pass lands — which only ever
-    /// shows on the frame a reading first appears.
-    fn stats_pair_w(&self, i: usize, r: &Reading, s: f32) -> (f32, f32) {
-        self.stats.widths.get(i).copied().unwrap_or((
-            ICON_PX * r.icon.scale * r.icon.ink * s,
-            VALUE_PX * s * r.value.len() as f32 * 0.6,
-        ))
+    /// One reading's symbol ink, with the rough guess that stands in until the
+    /// first measuring pass lands.
+    fn stats_ink(&self, i: usize, r: &Reading, s: f32) -> f32 {
+        self.stats.widths.get(i).map_or(ICON_PX * r.icon.scale * r.icon.ink * s, |w| w.0)
     }
 
-    /// Where each reading's couple sits inside the readout — the ONE source for
-    /// the draw and for the hit-test, the way `stats_geom` is for the element as
-    /// a whole. Two spellings of this arithmetic is how a button ends up
-    /// somewhere other than where its symbol is drawn.
-    fn stats_columns(&self, rect: Rect) -> Vec<Rect> {
+    /// Where each reading's SYMBOL is centred now: in its round pill shut, at
+    /// its place in the box's tight band as the box opens.
+    fn stats_centres(&self, rect: Rect) -> Vec<f32> {
         let s = self.options_scale();
         let e = self.stats.e.clamp(0.0, 1.0);
+        let ph = self.options_pill_h();
         let readings = self.stats_readings();
-        // Shut: centred in its own pill; opening, each eases to its place in
-        // the box's tight band (`OPEN_GAP`, `OPEN_PAD`).
         let mut open_x = rect.x + OPEN_PAD * s;
         self.stats_pills(rect)
             .into_iter()
             .zip(readings.iter().enumerate())
             .map(|(p, (i, r))| {
-                let (icon_w, value_w) = self.stats_pair_w(i, r, s);
-                let w = pair_w(icon_w, value_w, s);
-                let x = lerp(p.x + (p.w - w) / 2.0, open_x, e);
+                let ink = self.stats_ink(i, r, s);
+                let value_w = self.stats.widths.get(i).map_or(0.0, |w| w.1);
+                let open = open_x + ink / 2.0;
+                open_x += band_w(ink, value_w, s) + OPEN_GAP * s;
+                lerp(p.x + ph / 2.0, open, e)
+            })
+            .collect()
+    }
+
+    /// Where each reading stands for the pointer: its pill shut, its couple in
+    /// the band as the box opens — the ONE source the buttons are made from.
+    fn stats_columns(&self, rect: Rect) -> Vec<Rect> {
+        let s = self.options_scale();
+        let e = self.stats.e.clamp(0.0, 1.0);
+        let readings = self.stats_readings();
+        let mut open_x = rect.x + OPEN_PAD * s;
+        self.stats_pills(rect)
+            .into_iter()
+            .zip(readings.iter().enumerate())
+            .map(|(p, (i, r))| {
+                let ink = self.stats_ink(i, r, s);
+                let w = band_w(ink, self.stats.widths.get(i).map_or(0.0, |w| w.1), s);
+                let x = lerp(p.x, open_x, e);
+                let col_w = lerp(p.w, w, e);
                 open_x += w + OPEN_GAP * s;
-                Rect::new(x, p.y, w, p.h)
+                Rect::new(x, p.y, col_w, p.h)
             })
             .collect()
     }
 
     /// Where each reading's own pill stands now: fanned out from behind the
     /// first as the readout slides out (`t`), `BOND_GAP` apart once it is out
-    /// — the power pills' way of coming out from behind one another.
+    /// — the power pills' way of coming out from behind one another. Round
+    /// shut; the one open is as long as its words, pushing the rest along.
     pub(crate) fn stats_pills(&self, rect: Rect) -> Vec<Rect> {
-        let s = self.options_scale();
         let band_h = self.options_pill_h();
         let t = self.stats.t.clamp(0.0, 1.0);
-        let readings = self.stats_readings();
-        let mut out = Vec::with_capacity(readings.len());
+        let n = self.stats_readings().len();
+        let mut out = Vec::with_capacity(n);
         let mut offset = 0.0;
-        for (i, r) in readings.iter().enumerate() {
-            let (icon_w, value_w) = self.stats_pair_w(i, r, s);
-            let w = self.stats_pill_w(pair_w(icon_w, value_w, s));
+        for i in 0..n {
+            let w = if self.stats.widths.is_empty() { band_h } else { self.stats_pill_w(i) };
             out.push(Rect::new(rect.x + offset * t, rect.y, w, band_h));
             offset += w + BOND_GAP;
         }
@@ -1244,7 +1637,7 @@ impl App {
         bright: bool,
         a: f32,
         shadow_a: f32,
-        hover_wash: [f32; 4],
+        _hover_wash: [f32; 4],
         rest_wash: [f32; 4],
     ) {
         let e = self.stats_open_t().clamp(0.0, 1.0);
@@ -1252,15 +1645,18 @@ impl App {
         let own = (1.0 - e * 3.0).clamp(0.0, 1.0);
         if own > 0.001 {
             let pills = self.stats_pills(rect);
-            let ptr = self.options_ptr.filter(|_| self.options_hover == Some(PillId::SettingsStats));
+            // Lit is the pill whose SYMBOL the pointer is on, at once, lighter
+            // on any ground (Max, 2026-11-17: "un efecto hover en cada hover,
+            // la píldora más clara").
+            let lit = self.stats.sym.map(|(i, _)| i);
             // (The later ones first: each comes out from behind the one
             // before it.)
-            for p in pills.iter().rev() {
-                let over = e < 0.01 && ptr.is_some_and(|(x, _)| x >= p.x && x < p.x + p.w);
+            for (k, p) in pills.iter().enumerate().rev() {
+                let over = e < 0.01 && lit == Some(k);
                 let r = if over { hover_grow(*p) } else { *p };
                 let radius = r.h / 2.0;
                 push_neumorph(scene, r, radius, bright, shadow_a * own);
-                let wash = if over { hover_wash } else { rest_wash };
+                let wash = if over { stats_lit_wash(bright) } else { rest_wash };
                 scene.rects.push(RectInst {
                     rect: r,
                     radius,

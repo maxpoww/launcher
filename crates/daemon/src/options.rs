@@ -3105,6 +3105,12 @@ impl App {
         self.options_regime().get()
     }
 
+    /// A bar pill's ground as it is drawn: the backdrop with `wash` over it
+    /// (`None` before the first sample).
+    pub(crate) fn options_pill_ground(&self, wash: [f32; 4]) -> Option<[f32; 4]> {
+        self.options_backdrop().map(|b| box_fill(b, wash))
+    }
+
     /// Adaptive text colour for the BAR's pills: measured against whatever
     /// they float on, so the words stay legible over a matched window or a
     /// bare wallpaper alike. Only an unsampled bar falls back to the theme.
