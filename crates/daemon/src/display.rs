@@ -1480,8 +1480,9 @@ impl App {
         let settings = GolemSettings::load();
         for m in monitors() {
             let sel = m.selector();
-            // (One being tried is the owner's hand on it: left alone.)
-            if self.display_pending.as_ref().is_some_and(|p| p.selector == sel) {
+            // (One being tried is the owner's hand on it: left alone. A
+            // mirror too: a rule put on it would end the mirror.)
+            if m.mirror || self.display_pending.as_ref().is_some_and(|p| p.selector == sel) {
                 continue;
             }
             let mut rates: Vec<f64> = m.modes.iter().filter(|x| x.same_size(&m.mode)).map(|x| x.hz).collect();
@@ -1506,7 +1507,10 @@ impl App {
                     });
                 }
             }
-            let Some(hz) = crate::refresh::target(on_charger, &choice, &rates, m.mode.hz) else {
+            // (Its owner chose its rate: a rule saved for it, or a pick of
+            // the Refresh rate row. Nobody did: the top on the charger.)
+            let chosen = settings.displays.contains_key(&sel) || choice.dynamic.is_some();
+            let Some(hz) = crate::refresh::target(on_charger, &choice, chosen, &rates, m.mode.hz) else {
                 continue;
             };
             let saved = settings.displays.get(&sel);
