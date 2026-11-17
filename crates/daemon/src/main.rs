@@ -44,6 +44,7 @@ mod desktop_ink;
 mod scanners;
 mod printers_page;
 mod shortcuts_page;
+mod shots_page;
 mod input_page;
 mod access_page;
 mod idle_page;

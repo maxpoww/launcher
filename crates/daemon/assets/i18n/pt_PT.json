@@ -2429,5 +2429,8 @@
  "It could not be saved in {0}.": "Não foi possível guardar em {0}.",
  "The screenshot could not be taken": "Não foi possível fazer a captura",
  "Keep holding to record the screen": "Continue a premir para gravar o ecrã",
- "The screenshot could not be saved": "Não foi possível guardar a captura"
+ "The screenshot could not be saved": "Não foi possível guardar a captura",
+ "Screenshots": "Capturas de ecrã",
+ "The whole screen": "O ecrã inteiro",
+ "Show the preview": "Mostrar a pré-visualização"
 }

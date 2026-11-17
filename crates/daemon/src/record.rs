@@ -251,7 +251,8 @@ impl App {
         }
     }
 
-    /// The key's recording: the whole screen the keyboard is on, no sound.
+    /// The key's recording: the whole screen the keyboard is on, with the
+    /// sound when Controls → Screenshots → Screen recording says With sound.
     fn record_start(&mut self) {
         let screen = match crate::hypr::focused_monitor() {
             Ok(m) => m.name,
@@ -261,7 +262,7 @@ impl App {
                 return;
             }
         };
-        self.record_start_at(Aim::Screen(screen), false);
+        self.record_start_at(Aim::Screen(screen), crate::shots_page::ShotChoice::now().sound);
     }
 
     /// Record `aim` (the capture tool's: a region, a window's rectangle, a

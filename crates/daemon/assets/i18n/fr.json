@@ -2441,5 +2441,20 @@
  "Text copied": "Texte copié",
  "The text could not be copied": "Le texte n'a pas pu être copié",
  "Keep holding to record the screen": "Maintenez pour enregistrer l'écran",
- "The screenshot could not be saved": "La capture n'a pas pu être enregistrée"
+ "The screenshot could not be saved": "La capture n'a pas pu être enregistrée",
+ "Screenshots": "Captures d’écran",
+ "What the Print key takes and what happens next.": "Ce que prend la touche Impr écran, et ce qui suit.",
+ "Print takes": "Impr écran prend",
+ "The whole screen": "Tout l’écran",
+ "Let me choose first": "Choisir d’abord",
+ "In the picture": "Dans l’image",
+ "Banner": "Barre du haut",
+ "Pointer": "Pointeur",
+ "The shot is taken a moment later.": "La capture est prise un instant plus tard.",
+ "After a shot": "Après une capture",
+ "Copy to the clipboard": "Copier dans le presse-papiers",
+ "Show the preview": "Afficher l’aperçu",
+ "screenshot screenshots screen shot capture print prtsc snip snipping record recording video film screencast clipboard preview pointer cursor banner dock sound": "capture captures écran impression impr écran découpe enregistrer enregistrement vidéo film presse-papiers aperçu pointeur curseur barre dock son",
+ "Silent": "Sans son",
+ "With sound": "Avec le son"
 }

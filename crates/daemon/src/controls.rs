@@ -772,6 +772,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Monitors"
             | "Printers"
             | "Shortcuts"
+            | "Screenshots"
             | "Your account"
             | "Mouse and touchpad"
             | "Accessibility"
@@ -2918,6 +2919,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Monitors" => crate::monitors_page::view(&mut view),
         "Printers" => crate::printers_page::view(&mut view),
         "Shortcuts" => crate::shortcuts_page::view(&mut view),
+        "Screenshots" => crate::shots_page::view(&mut view),
         "About Golem" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));
@@ -3311,6 +3313,9 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             }
         }
         k if k.starts_with("printers-") => crate::printers_page::apply(k, value),
+        k if k.starts_with("shots-") => {
+            crate::shots_page::apply(k, value);
+        }
         "clock" => GolemSettings::change(|s| {
             s.clock_12h = Some(value == "12");
             s.store();

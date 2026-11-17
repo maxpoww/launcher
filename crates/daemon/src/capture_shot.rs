@@ -81,7 +81,7 @@ use tracing::{info, warn};
 
 use crate::capture::{Area, Screen, Stacked};
 use crate::content::{IconInst, Label, Rect, RectInst, Scene};
-use crate::i18n::tr;
+use crate::i18n::{fill, tr};
 use crate::options::{PillId, FONT_PX, LINE_PX, NERD, PILL_PAD_X};
 use crate::record::Aim;
 use crate::App;
@@ -205,6 +205,39 @@ pub(crate) fn crop_px(a: Area, logical: (i32, i32), px: (u32, u32)) -> (u32, u32
     )
 }
 
+/// THE BANNER LEFT OUT (Controls → Screenshots → Banner off): how many of
+/// a picture's rows the banner's strip is — `strip` logical pixels at the
+/// top of a screen `logical_h` tall, shot at `px_h` rows (the output's
+/// scale: 0.75, 1.6…). Rounded UP: a row the banner's edge passes through is
+/// the banner's. Never the whole picture.
+pub(crate) fn strip_px(strip: i32, logical_h: i32, px_h: u32) -> u32 {
+    if strip <= 0 || logical_h <= 0 || px_h == 0 {
+        return 0;
+    }
+    let rows = (f64::from(strip) * f64::from(px_h) / f64::from(logical_h) - 1e-6)
+        .ceil()
+        .max(0.0) as u32;
+    rows.min(px_h - 1)
+}
+
+/// `picture` (a PNG of a screen `logical_h` tall) without the banner's
+/// `strip` at its top; as it was when there is none to cut, or it does not
+/// read.
+pub(crate) fn without_strip(picture: Vec<u8>, strip: i32, logical_h: i32) -> Vec<u8> {
+    if strip <= 0 {
+        return picture;
+    }
+    let Ok(whole) = image::load_from_memory_with_format(&picture, image::ImageFormat::Png) else {
+        return picture;
+    };
+    let (w, h) = (whole.width(), whole.height());
+    let rows = strip_px(strip, logical_h, h);
+    if rows == 0 {
+        return picture;
+    }
+    cut(&picture, (0, rows, w, h - rows)).unwrap_or(picture)
+}
+
 /// Where a picture is written before it takes `file`'s place: beside it
 /// (the same folder: the rename is then one step), hidden, under its name.
 pub(crate) fn part_beside(file: &Path) -> PathBuf {
@@ -238,6 +271,9 @@ fn replace(file: &Path, bytes: &[u8]) -> bool {
 pub(crate) struct Frame {
     /// The PNG as `grim` made it.
     png: Vec<u8>,
+    /// The banner's strip to leave out of its top, in logical pixels (0:
+    /// the banner stays — Controls → Screenshots → Banner).
+    strip: i32,
     /// The screen it is of (its corner in the layout, its logical size), and
     /// the windows that were on it then, topmost first, on that screen.
     screen: Screen,
@@ -247,7 +283,13 @@ pub(crate) struct Frame {
 /// A screenshot that was kept: its file, and what the editor needs of it.
 pub(crate) struct Kept {
     pub file: PathBuf,
+    /// The WHOLE screen as it was (the editor's still, and what it cuts
+    /// from); the file has `cut_top` rows fewer when the banner is left out.
     pub png: Vec<u8>,
+    pub cut_top: u32,
+    /// It went onto the clipboard; and a cut of it in the editor goes there.
+    pub copied: bool,
+    pub clipboard: bool,
     /// Its pixels, for the editor's still (RGBA), and how many there are.
     pub rgba: Vec<u8>,
     pub px: (u32, u32),
@@ -261,6 +303,9 @@ pub(crate) struct Kept {
 /// A shot whose key has not said yet what it is.
 struct Pending {
     n: u64,
+    /// Controls → Screenshots → Print takes "Let me choose first": no shot;
+    /// the release opens the live tool (a hold still records).
+    choose: bool,
     /// The release came: it is the screenshot (as soon as it is here).
     keep: bool,
     /// What `grim` gave (`None` inside: nothing).
@@ -319,10 +364,10 @@ pub(crate) fn hang_size(px: (u32, u32), bar_w: f32, s: f32) -> (f32, f32) {
     (w, (w * px.1 as f32 / px.0.max(1) as f32).round().max(1.0))
 }
 
-/// The screen `name` as a PNG, off the loop.
-fn grab_screen(name: &str) -> Option<Vec<u8>> {
+/// The screen `name` as a PNG, off the loop (the pointer in it or not).
+fn grab_screen(name: &str, pointer: bool) -> Option<Vec<u8>> {
     let tmp = crate::capture::scratch_png();
-    let taken = crate::capture::grab(&Aim::Screen(name.to_owned()), false, &tmp);
+    let taken = crate::capture::grab(&Aim::Screen(name.to_owned()), pointer, &tmp);
     let png = if taken {
         std::fs::read(&tmp).ok()
     } else {
@@ -332,29 +377,41 @@ fn grab_screen(name: &str) -> Option<Vec<u8>> {
     png
 }
 
-/// A frame made a screenshot, off the loop: the clipboard first, then its
-/// file, then its pixels for the editor. `None`: there is no file.
-fn settle(frame: Frame, small_w: u32) -> Option<Kept> {
-    let copied = crate::capture::copy("image/png", &frame.png);
-    let dir = crate::record::shots_folder();
-    let file = crate::capture::keep(&frame.png, &dir, SystemTime::now());
-    info!(
-        "capture: the screen {} → {file:?} (clipboard: {copied})",
-        frame.screen.name
-    );
-    let file = file?;
+/// A frame made a screenshot, off the loop: the clipboard first (unless the
+/// owner keeps shots out of it), then its file — without the banner's strip
+/// when Banner is off —, then its pixels for the editor. `None`: there is
+/// no file.
+fn settle(frame: Frame, small_w: u32, clipboard: bool) -> Option<Kept> {
     let pixels = image::load_from_memory_with_format(&frame.png, image::ImageFormat::Png)
         .ok()?
         .to_rgba8();
     let px = (pixels.width(), pixels.height());
+    let cut_top = strip_px(frame.strip, frame.screen.h, px.1);
+    let shot = if cut_top > 0 {
+        cut(&frame.png, (0, cut_top, px.0, px.1 - cut_top))?
+    } else {
+        frame.png.clone()
+    };
+    let copied = clipboard && crate::capture::copy("image/png", &shot);
+    let dir = crate::record::shots_folder();
+    let file = crate::capture::keep(&shot, &dir, SystemTime::now());
+    info!(
+        "capture: the screen {} → {file:?} (clipboard: {copied}, banner rows left out: {cut_top})",
+        frame.screen.name
+    );
+    let file = file?;
     // (The picture that hangs under the preview: made once, here, at the
-    // size it is shown at.)
+    // size it is shown at, of what the file holds.)
+    let seen = image::imageops::crop_imm(&pixels, 0, cut_top, px.0, px.1 - cut_top).to_image();
     let sw = small_w.clamp(1, px.0.max(1));
-    let sh = ((u64::from(sw) * u64::from(px.1)) / u64::from(px.0.max(1))).max(1) as u32;
-    let small = image::imageops::resize(&pixels, sw, sh, image::imageops::FilterType::CatmullRom);
+    let sh = ((u64::from(sw) * u64::from(seen.height())) / u64::from(px.0.max(1))).max(1) as u32;
+    let small = image::imageops::resize(&seen, sw, sh, image::imageops::FilterType::CatmullRom);
     Some(Kept {
         small: (sw, sh, small.into_raw()),
         file,
+        cut_top,
+        copied,
+        clipboard,
         png: frame.png,
         rgba: pixels.into_raw(),
         px,
@@ -380,12 +437,18 @@ impl App {
             }
             Some(OnPress::Shoot) => {
                 let n = self.capture_tool.shots.press.n;
+                // ("Let me choose first": nothing is taken now; the release
+                // opens the tool.)
+                let choose = crate::shots_page::ShotChoice::now().choose_first;
                 self.capture_tool.shots.pending = Some(Pending {
                     n,
+                    choose,
                     keep: false,
                     frame: None,
                 });
-                self.capture_shoot(n);
+                if !choose {
+                    self.capture_shoot(n);
+                }
                 // (While the key is down, and only then: its sign, and the
                 // moment it becomes a recording.)
                 self.after_ms(SIGN_FROM.as_millis() as u64, move |app| {
@@ -401,6 +464,17 @@ impl App {
         let keep = self.capture_tool.shots.press.release(Instant::now());
         self.capture_sign_off();
         if !keep {
+            return;
+        }
+        if self
+            .capture_tool
+            .shots
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.choose)
+        {
+            self.capture_tool.shots.pending = None;
+            self.capture_open();
             return;
         }
         if let Some(p) = self.capture_tool.shots.pending.as_mut() {
@@ -441,6 +515,10 @@ impl App {
             ours = true;
         } else {
             self.capture_tool.shots.shut = false;
+        }
+        // (Dock off: drawn empty first, and back once the picture is in.)
+        if self.capture_dock_away() {
+            ours = true;
         }
         if ours {
             self.after_ms(HIDE_FIRST, move |app| app.capture_grab(n));
@@ -493,13 +571,18 @@ impl App {
                 .collect(),
         );
         let name = screen.name.clone();
+        let strip = self.capture_banner_cut(&name);
+        let pointer = crate::shots_page::ShotChoice::now().pointer;
         let mut rest = Some((screen, wins));
         self.desktop_off_loop(
-            move || grab_screen(&name),
+            move || grab_screen(&name, pointer),
             move |app, png| {
-                let frame =
-                    png.zip(rest.take())
-                        .map(|(png, (screen, wins))| Frame { png, screen, wins });
+                let frame = png.zip(rest.take()).map(|(png, (screen, wins))| Frame {
+                    png,
+                    strip,
+                    screen,
+                    wins,
+                });
                 app.capture_grabbed(n, frame);
             },
         );
@@ -507,10 +590,12 @@ impl App {
 
     /// `grim` answered for press `n`.
     fn capture_grabbed(&mut self, n: u64, frame: Option<Frame>) {
-        // (The picture is in: the long pill is the pointer's again.)
+        // (The picture is in: the long pill is the pointer's again, and the
+        // dock is back.)
         if std::mem::take(&mut self.capture_tool.shots.shut) {
             self.update_clip_reveal();
         }
+        self.capture_dock_back();
         match self
             .capture_tool
             .shots
@@ -553,10 +638,26 @@ impl App {
             * self.surface_scale(crate::fractional::SurfaceKind::Options))
         .round()
         .max(1.0) as u32;
+        let choice = crate::shots_page::ShotChoice::now();
         self.desktop_off_loop(
-            move || frame.take().and_then(|f| settle(f, small_w)),
-            |app, kept| match kept {
-                Some(kept) => app.capture_preview_show(Arc::new(kept)),
+            move || {
+                frame
+                    .take()
+                    .and_then(|f| settle(f, small_w, choice.clipboard))
+            },
+            move |app, kept| match kept {
+                Some(kept) if choice.preview => app.capture_preview_show(Arc::new(kept)),
+                // (No preview: the shot says itself, as the tool's do — a
+                // shot is never silent.)
+                Some(kept) => {
+                    let place = crate::capture::shown(&crate::record::shots_folder());
+                    let body = if kept.copied {
+                        fill(tr("It is in {0} and on the clipboard."), &[("0", &place)])
+                    } else {
+                        fill(tr("It is in {0}."), &[("0", &place)])
+                    };
+                    crate::capture::notify(tr("Screenshot saved"), &body, Some(&kept.file));
+                }
                 None => crate::capture::notify(tr("The screenshot could not be taken"), "", None),
             },
         );
@@ -846,12 +947,23 @@ impl App {
     /// shot's file and put on the clipboard in the whole one's place — off
     /// the loop. (The whole screen: nothing to do, the shot stays.)
     pub(crate) fn capture_still_save(&mut self, kept: Arc<Kept>, area: Area) {
-        let at = crop_px(area, (kept.screen.w, kept.screen.h), kept.px);
+        let (x, y, w, h) = crop_px(area, (kept.screen.w, kept.screen.h), kept.px);
+        // (Banner off: nothing of its strip, wherever the region reached.)
+        let top = y.max(kept.cut_top);
+        let at = (
+            x,
+            top,
+            w,
+            (y + h)
+                .saturating_sub(top)
+                .max(1)
+                .min(kept.px.1.saturating_sub(top).max(1)),
+        );
         let spawned = std::thread::Builder::new()
             .name("capture-cut".into())
             .spawn(move || {
                 let done = cut(&kept.png, at).is_some_and(|part| {
-                    let copied = crate::capture::copy("image/png", &part);
+                    let copied = kept.clipboard && crate::capture::copy("image/png", &part);
                     let written = replace(&kept.file, &part);
                     info!(
                         "capture: {:?} cut to {at:?} (file: {written}, clipboard: {copied})",
@@ -1277,5 +1389,44 @@ mod tests {
             "nothing left beside it"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_banners_strip_is_cut_in_the_pictures_own_rows_at_any_scale() {
+        // A 28-pixel banner on a screen 900 tall, shot at its own size.
+        assert_eq!(strip_px(28, 900, 900), 28);
+        // The MacBook at 0.75: 1200 logical rows are 900 of the picture.
+        assert_eq!(strip_px(28, 1200, 900), 21);
+        // 1.6: 44.8 rows — the row the banner's edge passes through is its.
+        assert_eq!(strip_px(28, 1200, 1920), 45);
+        assert_eq!(strip_px(28, 1080, 2160), 56, "scale 2");
+        // Nothing to cut, or nothing it could be cut from.
+        assert_eq!(strip_px(0, 900, 900), 0);
+        assert_eq!(strip_px(28, 0, 900), 0);
+        assert_eq!(strip_px(28, 900, 0), 0);
+        // Never the whole picture.
+        assert_eq!(strip_px(5000, 900, 900), 899);
+    }
+
+    #[test]
+    fn a_picture_without_the_banner_begins_under_it() {
+        let whole =
+            image::RgbaImage::from_fn(40, 30, |x, y| image::Rgba([x as u8, y as u8, 7, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        whole.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        // A strip of 4 logical rows on a screen 20 tall shot at 30 rows: 6.
+        let cut = without_strip(png.clone(), 4, 20);
+        let after = image::load_from_memory(&cut).unwrap().to_rgba8();
+        assert_eq!((after.width(), after.height()), (40, 24));
+        assert_eq!(
+            after.get_pixel(3, 0).0,
+            [3, 6, 7, 255],
+            "its first row is the screen's under the strip"
+        );
+        // No strip: the picture as it came, byte for byte.
+        assert_eq!(without_strip(png.clone(), 0, 20), png);
+        // Not a picture: as it came.
+        assert_eq!(without_strip(b"nope".to_vec(), 4, 20), b"nope".to_vec());
     }
 }
