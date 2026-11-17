@@ -192,13 +192,22 @@ fn capture_id(path: &std::path::Path) -> u64 {
     CAPTURE_IDS + (h.finish() & ((1 << 48) - 1))
 }
 
-/// The Captures page's rows: each capture as its file (a screenshot shows
-/// its picture, a recording its name and size).
+/// Whether a capture is a recording (by its ending, as the folders hold them).
+pub(super) fn is_film(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    [".mp4", ".mkv", ".webm"].iter().any(|e| lower.ends_with(e))
+}
+
+/// The Captures page's rows: each capture as its file, a screenshot and a
+/// recording alike shown by their picture (a recording's first frame, from
+/// the thumbnailer; `view` says VIDEO over it). A recording's shape is not
+/// in its file's first bytes: it is read from its thumbnail when that comes
+/// (`card_on_thumb`), and kept from one listing to the next.
 fn capture_rows(files: &[(std::path::PathBuf, u64)]) -> Vec<Item> {
     files
         .iter()
         .map(|(path, made)| {
-            let kind = kind_of(path);
+            let kind = if is_film(&path.to_string_lossy()) { Kind::Image } else { kind_of(path) };
             Item {
                 id: capture_id(path),
                 kind,
@@ -2088,6 +2097,14 @@ impl App {
         if let Some(renderer) = self.card_renderer.as_mut() {
             renderer.update_icon_layer(layer, pixels);
         }
+        // A recording on the Captures page learns its shape from its picture.
+        if self.card.page == Page::Captures && is_film(path) {
+            if let Some(shape) = crate::thumbs::shape_on_square(pixels) {
+                for it in self.card.items.iter_mut().filter(|it| it.path.as_deref() == Some(path) && it.aspect == 0.0) {
+                    it.aspect = shape;
+                }
+            }
+        }
         self.request_card_draw();
     }
 
@@ -2668,7 +2685,15 @@ impl App {
     fn card_captures_list(&mut self) {
         let files = capture_files();
         self.card.capture_sig = capture_sig(&files);
-        self.card.items = capture_rows(&files);
+        // (A recording's shape, read from its thumbnail, stays.)
+        let shapes: HashMap<u64, f32> = self.card.items.iter().filter(|it| it.aspect > 0.0).map(|it| (it.id, it.aspect)).collect();
+        let mut rows = capture_rows(&files);
+        for row in &mut rows {
+            if row.aspect == 0.0 {
+                row.aspect = shapes.get(&row.id).copied().unwrap_or(0.0);
+            }
+        }
+        self.card.items = rows;
         for path in self.card_pictures() {
             self.card_ask_picture(&path);
         }

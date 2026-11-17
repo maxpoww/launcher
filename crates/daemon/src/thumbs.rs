@@ -263,6 +263,29 @@ fn rounded(chain: Vec<u8>) -> Vec<u8> {
     crate::apps::with_mips(base)
 }
 
+/// The shape (width over height) of what stands on the clear square `base`
+/// (premultiplied, `ICON_SIZE`²): a thumbnail is its picture fitted and
+/// centred there, so the part that is not clear is the picture. `None` when
+/// nothing is on it.
+pub(crate) fn shape_on_square(base: &[u8]) -> Option<f32> {
+    let n = ICON_SIZE as usize;
+    if base.len() < n * n * 4 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (n, n, 0, 0);
+    for y in 0..n {
+        for x in 0..n {
+            if base[(y * n + x) * 4 + 3] > 8 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    (x1 > x0 + 8 && y1 > y0 + 8).then(|| (x1 - x0) as f32 / (y1 - y0) as f32)
+}
+
 /// Round the corners of what stands on the square `base` (premultiplied,
 /// `ICON_SIZE`²) in place — also each frame of a tile that plays, so it
 /// keeps its still's shape. False when nothing is on it.
@@ -535,4 +558,26 @@ fn cache_base() -> PathBuf {
     std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_thumbnail_says_its_shape() {
+        let n = ICON_SIZE as usize;
+        // A 16:10 picture fitted and centred on the clear square.
+        let h = n * 10 / 16;
+        let mut sq = vec![0u8; n * n * 4];
+        for y in (n - h) / 2..(n - h) / 2 + h {
+            for x in 0..n {
+                sq[(y * n + x) * 4 + 3] = 255;
+            }
+        }
+        let shape = shape_on_square(&sq).unwrap();
+        assert!((shape - 1.6).abs() < 0.02, "{shape}");
+        assert_eq!(shape_on_square(&vec![0u8; n * n * 4]), None, "nothing on it");
+        assert_eq!(shape_on_square(&[0u8; 16]), None, "not a tile");
+    }
 }

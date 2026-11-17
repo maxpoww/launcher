@@ -515,6 +515,15 @@ pub(crate) fn list_rect(rect: Rect, page: Option<Page>, bottom: f32) -> Rect {
     )
 }
 
+/// The word over an item: its kind's, but VIDEO for a recording shown by its
+/// picture (the Captures page).
+fn shown_word(item: &Item) -> Option<&'static str> {
+    if item.kind == Kind::Image && item.path.as_deref().is_some_and(super::is_film) {
+        return Some("VIDEO");
+    }
+    item.kind.word()
+}
+
 /// Where the head's buttons are: the two named ones share what the three
 /// round ones, at the right, leave.
 pub(crate) fn foot_buttons(rect: Rect) -> [(Foot, Rect); FEET] {
@@ -1782,7 +1791,7 @@ pub(crate) fn scene(view: &View) -> (Scene, Vec<Tile>, f32) {
                 view.foot.as_ref().and_then(|f| f.playing),
             );
         }
-        if let Some(word) = item.kind.word() {
+        if let Some(word) = shown_word(item) {
             list.labels.push(Label {
                 text: word.to_owned(),
                 pos: (x, line_y),
@@ -2876,7 +2885,7 @@ pub(crate) fn tile_picture(
     let x = TILE_PAD_X;
     let text_w = width - 2.0 * TILE_PAD_X;
     let mut y = TILE_PAD_Y;
-    if let Some(word) = item.kind.word() {
+    if let Some(word) = shown_word(item) {
         text(
             &mut canvas,
             word,
