@@ -140,15 +140,15 @@ impl App {
     /// `EmojiState::shown`; call it on open and after any query edit.
     pub(crate) fn refilter_emoji(&mut self) {
         let needle = self.clip_search_needle();
-        // (In Spanish its Spanish words too: "fuego" finds 🔥.)
-        let spanish = crate::i18n::lang().is_some_and(|l| l.starts_with("es"));
+        // (In the shell's language its words too: "fuego" finds 🔥.)
+        let words = local_words();
         self.emoji.shown = if needle.is_empty() {
             (0..EMOJI.len() as u32).collect()
         } else {
             EMOJI
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| emoji_matches(e, &needle, spanish))
+                .filter(|(_, e)| emoji_matches(e, &needle, words))
                 .map(|(i, _)| i as u32)
                 .collect()
         };
@@ -409,17 +409,40 @@ impl App {
 /// "cat" for substrings drags in edu**cat**ion 🎓, notifi**cat**ion 🔔 and
 /// appli**cat**ion 🈸 ahead of half the cats (seen live, 2026-09-13).
 ///
-/// `spanish`: CLDR's Spanish name and keywords as well ([`crate::emoji_words`];
-/// the English ones still answer — "ok", "love" are typed in Spanish too). Not
-/// in English: "car" would find every "cara".
-pub(crate) fn emoji_matches(def: &crate::emoji_table::EmojiDef, needle: &str, spanish: bool) -> bool {
-    word_prefix(def.name, needle) || word_prefix(def.keys, needle) || spanish && spanish_words(def.ch).is_some_and(|w| word_prefix(w, needle))
+/// `words`: the table of the shell's language ([`local_words`]): CLDR's name and
+/// keywords in it as well (the English ones still answer — "ok", "love" are
+/// typed in every language). Only the shell's own: in English, Spanish words
+/// would make "car" find every "cara".
+pub(crate) fn emoji_matches(def: &crate::emoji_table::EmojiDef, needle: &str, words: Option<Words>) -> bool {
+    word_prefix(def.name, needle) || word_prefix(def.keys, needle) || words.and_then(|t| words_of(t, def.ch)).is_some_and(|w| word_prefix(w, needle))
 }
 
-/// An emoji's Spanish words, by the emoji without U+FE0F (how CLDR keys them).
-fn spanish_words(ch: &str) -> Option<&'static str> {
+/// One language's table of emoji words ([`crate::emoji_words`]).
+pub(crate) type Words = &'static [(&'static str, &'static str)];
+
+/// The table of the shell's language, if it has one (Spain's Spanish shares
+/// Latin America's: one table holds both).
+pub(crate) fn local_words() -> Option<Words> {
+    words_for(crate::i18n::lang().as_deref()?)
+}
+
+fn words_for(lang: &str) -> Option<Words> {
+    use crate::emoji_words as w;
+    let base = lang.split(['.', '@']).next().unwrap_or(lang);
+    Some(match base {
+        "pt_PT" | "pt-PT" => w::PT_PT,
+        l if l.starts_with("es") => w::ES,
+        l if l.starts_with("de") => w::DE,
+        l if l.starts_with("fr") => w::FR,
+        l if l.starts_with("it") => w::IT,
+        l if l.starts_with("pt") => w::PT,
+        _ => return None,
+    })
+}
+
+/// An emoji's words in `table`, by the emoji without U+FE0F (how CLDR keys them).
+fn words_of(table: Words, ch: &str) -> Option<&'static str> {
     let key: std::borrow::Cow<str> = if ch.contains('\u{FE0F}') { ch.replace('\u{FE0F}', "").into() } else { ch.into() };
-    let table = crate::emoji_words::ES;
     table.binary_search_by(|(k, _)| (*k).cmp(&key)).ok().map(|i| table[i].1)
 }
 
@@ -458,7 +481,7 @@ mod tests {
     fn find(needle: &str) -> Vec<&'static str> {
         EMOJI
             .iter()
-            .filter(|e| emoji_matches(e, needle, false))
+            .filter(|e| emoji_matches(e, needle, None))
             .map(|e| e.ch)
             .collect()
     }
@@ -500,14 +523,40 @@ mod tests {
     }
 
     fn buscar(needle: &str) -> Vec<&'static str> {
-        EMOJI.iter().filter(|e| emoji_matches(e, needle, true)).map(|e| e.ch).collect()
+        in_lang("es", needle)
+    }
+
+    fn in_lang(lang: &str, needle: &str) -> Vec<&'static str> {
+        EMOJI.iter().filter(|e| emoji_matches(e, needle, words_for(lang))).map(|e| e.ch).collect()
+    }
+
+    /// German, French, Italian and Portuguese have their words too (CLDR's),
+    /// each only in its own language.
+    #[test]
+    fn every_language_of_the_shell_has_its_emoji_words() {
+        use crate::emoji_words as w;
+        for (name, table) in [("es", w::ES), ("de", w::DE), ("fr", w::FR), ("it", w::IT), ("pt", w::PT), ("pt_PT", w::PT_PT)] {
+            assert!(table.windows(2).all(|p| p[0].0 < p[1].0), "{name}: sorted, to be found by halves");
+            let missing = EMOJI.iter().filter(|e| words_of(table, e.ch).is_none()).count();
+            assert!(missing * 100 <= EMOJI.len(), "{name}: {missing} emoji without words");
+        }
+        assert!(in_lang("de", "katze").contains(&"🐱"));
+        assert!(in_lang("de_DE.UTF-8", "feuer").contains(&"🔥"));
+        assert!(in_lang("fr", "chat").contains(&"🐱"));
+        assert!(in_lang("fr", "gateau").contains(&"🎂"), "accents may be left out");
+        assert!(in_lang("it", "gatto").contains(&"🐱"));
+        assert!(in_lang("pt", "onibus").contains(&"🚌"));
+        assert!(in_lang("pt_PT", "autocarro").contains(&"🚌"), "Portugal's own word");
+        // Each language only its own: German words do not answer in French.
+        assert!(!in_lang("fr", "katze").contains(&"🐱"));
+        assert!(words_for("en_US").is_none() && words_for("C").is_none());
     }
 
     #[test]
     fn in_spanish_an_emoji_answers_to_its_spanish_words_too() {
         // Every emoji of the table has its Spanish words, sorted to be found by halves.
         assert!(crate::emoji_words::ES.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(EMOJI.iter().all(|e| spanish_words(e.ch).is_some()), "{:?}", EMOJI.iter().find(|e| spanish_words(e.ch).is_none()).map(|e| e.ch));
+        assert!(EMOJI.iter().all(|e| words_of(crate::emoji_words::ES, e.ch).is_some()), "{:?}", EMOJI.iter().find(|e| words_of(crate::emoji_words::ES, e.ch).is_none()).map(|e| e.ch));
         assert!(buscar("fuego").contains(&"🔥"));
         assert!(buscar("mate").contains(&"🧉"));
         assert!(buscar("pulgar").contains(&"👍"));
