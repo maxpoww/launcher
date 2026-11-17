@@ -80,8 +80,8 @@ const OPEN_PAD: f32 = 12.0;
 const DOT_D: f32 = 6.0;
 /// Between the gear and the first reading, and between readings: wider than
 /// the power pills' bond (Max, 2026-11-17: "separá un poco las pills, están muy
-/// juntas, se ve muy cargado todo").
-const READING_GAP: f32 = 7.0;
+/// juntas, se ve muy cargado todo"; then "un poco más").
+const READING_GAP: f32 = 10.0;
 const DOT_OFF: f32 = 6.5;
 const DOT_RING: f32 = 1.5;
 /// How long the pointer rests on a symbol before its pill opens (Max's pick).
@@ -613,7 +613,17 @@ pub(crate) struct StatsState {
     /// The dot each reading shows, kept so a better one waits
     /// [`SETTLE_POINTS`] (`measure_stats` decides them).
     signals: Vec<(PageKind, Option<Signal>)>,
+    /// What the network pill names when it opens (`net::pill_facts`): the
+    /// Wi-Fi network in use, and whether the radio is on — asked off the loop
+    /// while the readout is out, again when the link changes or after
+    /// `NET_ASK_AGAIN`.
+    net_facts: Option<(Option<String>, Option<bool>)>,
+    net_asked: Option<(String, Instant)>,
+    net_busy: bool,
 }
+
+/// How long a network's name is taken as still true without the link changing.
+const NET_ASK_AGAIN: Duration = Duration::from_secs(30);
 
 impl App {
     /// The readout's rect: at rest exactly the gear's circle (hidden behind it),
@@ -961,6 +971,7 @@ impl App {
     /// scale can have changed: when the readout is raised, on every Brain
     /// snapshot while it is out, and from the bar's own measuring pass.
     pub(crate) fn measure_stats(&mut self) {
+        self.stats_net_ask();
         let readings = self.stats_readings();
         // The dots, decided here (every snapshot while the readout is out, and
         // as it comes out): worse at once, better only past the limit.
@@ -1002,6 +1013,29 @@ impl App {
             .iter()
             .map(|h| if h.is_empty() { 0.0 } else { rd.measure_text(h, value_px, Some(NERD)) })
             .collect();
+    }
+
+    /// Ask NetworkManager what the network pill should name, off the loop:
+    /// while the readout is out, when the link changed or the answer is old.
+    fn stats_net_ask(&mut self) {
+        if !self.stats.reveal || self.stats.net_busy {
+            return;
+        }
+        let Some(ctx) = self.brain.as_ref() else { return };
+        let key = format!("{:?} {}", ctx.network.link, ctx.network.interface);
+        if self.stats.net_asked.as_ref().is_some_and(|(k, at)| *k == key && at.elapsed() < NET_ASK_AGAIN) {
+            return;
+        }
+        self.stats.net_asked = Some((key, Instant::now()));
+        self.stats.net_busy = true;
+        self.desktop_off_loop(crate::net::pill_facts, |app, facts| {
+            app.stats.net_busy = false;
+            if app.stats.net_facts.as_ref() != Some(&facts) {
+                app.stats.net_facts = Some(facts);
+                app.measure_stats();
+                app.schedule_stats_frame();
+            }
+        });
     }
 
     /// Recompute whether the readout should show. Hovering the gear OR the
@@ -1244,7 +1278,12 @@ impl App {
                 icon: net.signal_pct.map_or(ICON_WIFI_NONE, wifi_glyph),
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
-                hover: rate_text(net.throughput_bps),
+                // The network's name (Max, 2026-11-17: "quiero que wifi muestre
+                // el nombre de la red"); its speed until the name is in.
+                hover: match &self.stats.net_facts {
+                    Some((Some(name), _)) if !name.is_empty() => name.clone(),
+                    _ => rate_text(net.throughput_bps),
+                },
                 measure: net.signal_pct.map_or(Measure::Is(Signal::Blue), |p| Measure::Scale {
                     value: f32::from(p),
                     limits: &[40.0],
@@ -1257,7 +1296,7 @@ impl App {
                 icon: ICON_WIRED,
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
-                hover: rate_text(net.throughput_bps),
+                hover: tr("Wired").to_owned(),
                 measure: Measure::Is(Signal::Blue),
             },
             NetworkLink::Down => Reading {
@@ -1265,7 +1304,11 @@ impl App {
                 icon: ICON_NO_LINK,
                 value: String::new(),
                 reserve: "",
-                hover: tr("Not connected").to_owned(),
+                // Off when the Wi-Fi radio is off; else disconnected.
+                hover: match &self.stats.net_facts {
+                    Some((_, Some(false))) => tr("Off").to_owned(),
+                    _ => tr("Disconnected").to_owned(),
+                },
                 measure: Measure::Is(Signal::Red),
             },
         });

@@ -2457,5 +2457,6 @@
  "screenshot screenshots screen shot capture print prtsc snip snipping record recording video film screencast clipboard preview pointer cursor banner dock sound": "schermata schermate cattura schermo stampa stamp ritaglio registrare registrazione video film appunti anteprima puntatore cursore barra dock audio",
  "Silent": "Senza audio",
  "With sound": "Con audio",
- "No reading": "Nessuna lettura"
+ "No reading": "Nessuna lettura",
+ "Disconnected": "Disconnesso"
 }

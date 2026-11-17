@@ -556,6 +556,20 @@ fn send_detail(
     let _ = events.send(NetEvent::Detail(d));
 }
 
+/// What the gear's network pill says when it opens: the Wi-Fi network in use
+/// (its connection's name) and whether the Wi-Fi radio is on. Two quick
+/// questions; a `None` where NetworkManager does not answer.
+pub(crate) fn pill_facts() -> (Option<String>, Option<bool>) {
+    let name = nmcli(&["-t", "-f", "NAME,TYPE", "con", "show", "--active"]).ok().and_then(|out| {
+        out.lines()
+            .map(split_terse)
+            .find(|f| f.len() >= 2 && f[1] == "802-11-wireless")
+            .map(|f| f[0].clone())
+    });
+    let radio = nmcli(&["-t", "-f", "WIFI", "radio"]).ok().map(|o| o.trim() == "enabled");
+    (name, radio)
+}
+
 /// Run `nmcli`; `Ok(stdout)` on success, `Err(stderr)` otherwise.
 fn nmcli(args: &[&str]) -> Result<String, String> {
     let out = Command::new("nmcli")
