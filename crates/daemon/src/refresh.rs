@@ -14,7 +14,8 @@
 //!   2026-09-10, 10-20 and 11-15 on Max's own).
 //! - **On battery**: the rate the screen goes to when the computer is
 //!   unplugged, back to the other when it is plugged in. Nothing chosen: the
-//!   lowest rate that is still 60 or more.
+//!   lowest rate that is still 60 or more. On the charger a screen whose rate
+//!   nobody chose runs at its top rate.
 //!
 //! The rate on the battery is only ever PUT ON the screen (a rule evaluated,
 //! never saved): the saved rule is the charger's. So the dock puts the right
@@ -102,12 +103,19 @@ pub(crate) fn battery_default(rates: &[f64]) -> Option<f64> {
 }
 
 /// The rate the screen should be at, or `None` to leave it as it is.
-/// `rates`: the panel's at the size in use; `now`: the one on.
-pub(crate) fn target(on_charger: bool, choice: &RefreshChoice, rates: &[f64], now: f64) -> Option<f64> {
+/// `chosen`: its owner chose its rate (a saved rule, the Refresh rate row);
+/// `rates`: the panel's at the size in use, ascending; `now`: the one on.
+///
+/// On the charger a screen nobody chose a rate for runs at its TOP rate
+/// (Max, 2026-11-15: "if a user have a 240hz monitor … they want their 240"),
+/// as the battery's is the lowest of 60 or more: the rate kept when the cable
+/// was pulled counts only for a chosen one. (Kept for every screen, it held
+/// one at 60 — the compositor's old default, never anybody's choice.)
+pub(crate) fn target(on_charger: bool, choice: &RefreshChoice, chosen: bool, rates: &[f64], now: f64) -> Option<f64> {
     if rates.len() < 2 {
         return None;
     }
-    let plugged = choice.plugged.and_then(|hz| nearest(rates, hz));
+    let plugged = if chosen { choice.plugged.and_then(|hz| nearest(rates, hz)) } else { rates.last().copied() };
     let want = if on_charger {
         plugged
     } else {
@@ -196,34 +204,52 @@ mod tests {
     fn unplugged_the_screen_goes_to_sixty_and_back_when_plugged_in() {
         let rates = [60.0, 165.0];
         let nothing = RefreshChoice::default();
-        assert_eq!(target(false, &nothing, &rates, 165.0), Some(60.0));
+        assert_eq!(target(false, &nothing, true, &rates, 165.0), Some(60.0));
         // (Back to what it was at, kept as the battery's went on.)
         let kept = choice(None, None, Some(165.0));
-        assert_eq!(target(true, &kept, &rates, 60.0), Some(165.0));
+        assert_eq!(target(true, &kept, true, &rates, 60.0), Some(165.0));
         // Already there: left alone.
-        assert_eq!(target(false, &nothing, &rates, 60.0), None);
-        assert_eq!(target(true, &kept, &rates, 165.0), None);
-        // On the charger with nothing kept: nothing to go back to.
-        assert_eq!(target(true, &nothing, &rates, 60.0), None);
+        assert_eq!(target(false, &nothing, true, &rates, 60.0), None);
+        assert_eq!(target(true, &kept, true, &rates, 165.0), None);
+        // A chosen screen with nothing kept: nothing to go back to.
+        assert_eq!(target(true, &nothing, true, &rates, 60.0), None);
+        // An owner's 120 on a 165 screen is what the charger brings back.
+        let owners = choice(Some(false), None, Some(120.0));
+        assert_eq!(target(true, &owners, true, &[60.0, 120.0, 165.0], 60.0), Some(120.0));
+    }
+
+    #[test]
+    fn a_screen_nobody_chose_a_rate_for_runs_at_its_top_on_the_charger() {
+        let rates = [60.0, 165.0];
+        assert_eq!(target(true, &RefreshChoice::default(), false, &rates, 60.0), Some(165.0));
+        assert_eq!(target(true, &RefreshChoice::default(), false, &rates, 165.0), None);
+        // A 60 kept when the cable was pulled under the compositor's old
+        // default is nobody's choice: the top all the same.
+        let stale = choice(None, None, Some(60.0));
+        assert_eq!(target(true, &stale, false, &rates, 60.0), Some(165.0));
+        // The battery's is unchanged by it, and "Same" is the top too.
+        assert_eq!(target(false, &stale, false, &rates, 165.0), Some(60.0));
+        assert_eq!(target(false, &choice(None, Some(0.0), None), false, &rates, 60.0), Some(165.0));
     }
 
     #[test]
     fn the_battery_rate_is_the_owners_when_chosen() {
         let rates = [60.0, 120.0, 165.0];
-        assert_eq!(target(false, &choice(None, Some(120.0), None), &rates, 165.0), Some(120.0));
+        assert_eq!(target(false, &choice(None, Some(120.0), None), true, &rates, 165.0), Some(120.0));
         // "Same": the charger's, on the battery too.
-        assert_eq!(target(false, &choice(None, Some(0.0), Some(165.0)), &rates, 165.0), None);
-        assert_eq!(target(false, &choice(None, Some(0.0), Some(165.0)), &rates, 60.0), Some(165.0));
+        assert_eq!(target(false, &choice(None, Some(0.0), Some(165.0)), true, &rates, 165.0), None);
+        assert_eq!(target(false, &choice(None, Some(0.0), Some(165.0)), true, &rates, 60.0), Some(165.0));
     }
 
     #[test]
     fn nothing_chosen_never_goes_under_sixty_nor_up() {
         assert_eq!(battery_default(&[48.0, 60.0]), Some(60.0));
         // 48 and 60: at 60 it stays; at 48 (the owner's) it is not raised.
-        assert_eq!(target(false, &RefreshChoice::default(), &[48.0, 60.0], 60.0), None);
-        assert_eq!(target(false, &RefreshChoice::default(), &[48.0, 60.0], 48.0), None);
+        assert_eq!(target(false, &RefreshChoice::default(), true, &[48.0, 60.0], 60.0), None);
+        assert_eq!(target(false, &RefreshChoice::default(), true, &[48.0, 60.0], 48.0), None);
         // One rate: nothing to choose.
-        assert_eq!(target(false, &RefreshChoice::default(), &[60.0], 60.0), None);
+        assert_eq!(target(false, &RefreshChoice::default(), false, &[60.0], 60.0), None);
+        assert_eq!(target(true, &RefreshChoice::default(), false, &[60.0], 60.0), None);
         assert_eq!(battery_default(&[30.0, 50.0]), None);
     }
 

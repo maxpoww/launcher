@@ -827,7 +827,8 @@ pub(crate) fn view(view: &mut ControlView) {
     view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Resolution"), "monitors-mode", sizes) });
     // THE REFRESH RATE (`refresh.rs`): the panel's rates and Dynamic; under
     // it the rate on the battery.
-    if p.rates.len() > 1 {
+    // (Not on a mirror, as its scale is not: a rule put on it ends the mirror.)
+    if p.rates.len() > 1 && !p.mirror {
         let chosen = saved.refresh.get(&p.sel).cloned().unwrap_or_default();
         let on_battery = crate::refresh::source() == Some(false);
         let dynamic = chosen.dynamic == Some(true);
