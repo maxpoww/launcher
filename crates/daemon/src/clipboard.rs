@@ -3659,6 +3659,21 @@ impl App {
                 }
                 return;
             }
+            // Delete: the clip the arrows are on goes, as its × does (the
+            // keyboard audit, F13.6: it was pointer-only). The selection moves
+            // on to the next one, so Delete can be pressed again.
+            Keysym::Delete | Keysym::KP_Delete if !self.emoji_open() => {
+                if let Some(idx) = self.clip.search_sel.and_then(|id| self.clip_index_of(id)) {
+                    let next = self.clip.shown.iter().position(|&i| i == idx).and_then(|p| {
+                        self.clip.shown.get(p + 1).or_else(|| p.checked_sub(1).and_then(|q| self.clip.shown.get(q))).copied()
+                    });
+                    let next_id = next.and_then(|i| self.clip.history.get(i)).map(|c| c.id);
+                    self.delete_clip(idx);
+                    self.clip.search_sel = next_id;
+                    self.schedule_clip_frame();
+                }
+                return;
+            }
             _ => {}
         }
         // A printable key starts (or extends) the search. A modifier combo is

@@ -4815,6 +4815,27 @@ impl App {
                     .collect();
                 self.request_desktop_draw();
             }
+            // Shift+F10 or the Menu key: the right-click's menu without a
+            // pointer, as in Files (`filer_menu_from_keys`): on the first
+            // thing selected, at its cell; on the wallpaper where the
+            // pointer stands when nothing is (F13.6, the keyboard audit).
+            Keysym::Menu | Keysym::F10 if keysym == Keysym::Menu || self.modifiers.shift => {
+                let picked = self
+                    .desktop
+                    .items
+                    .iter()
+                    .zip(&self.desktop.slots)
+                    .find(|(it, _)| self.desktop.selected.contains(&it.path))
+                    .and_then(|(_, slot)| *slot);
+                let point = match picked {
+                    Some(slot) => {
+                        let r = self.desktop.grid.rect(slot);
+                        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+                    }
+                    None => at,
+                };
+                self.desktop_open_menu(point);
+            }
             Keysym::Delete | Keysym::KP_Delete if !self.desktop.selected.is_empty() => {
                 self.desktop_menu_act(Action::MoveToBin, None, at);
                 self.request_desktop_draw();
@@ -6506,6 +6527,8 @@ impl App {
                 "backspace" => Keysym::BackSpace,
                 "enter" => Keysym::Return,
                 "f2" => Keysym::F2,
+                "menu" => Keysym::Menu,
+                "f10" => Keysym::F10,
                 other => return format!("no key {other}"),
             };
             // (A name being typed takes the keys first, as `handle_key_event` does.)
