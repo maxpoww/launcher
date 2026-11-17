@@ -486,10 +486,11 @@ pub(crate) struct PageScreen {
     pub mm: (f64, f64),
     pub sizes: Vec<(u32, u32)>,
     pub stops: Vec<f64>,
-    /// Its connector, its rate, and the rates of the size in use, ascending.
-    pub name: String,
+    /// Its rate, and the rates of the size in use, ascending.
     pub hz: f64,
     pub rates: Vec<f64>,
+    /// It can do adaptive sync (Dynamic is offered).
+    pub dynamic: bool,
     /// The one in use (the compositor's focus).
     pub focused: bool,
     /// It shows another screen (Mirror).
@@ -553,7 +554,7 @@ pub(crate) fn page_screens(screens: &[Monitor], choice: &MonitorsChoice) -> Vec<
             rates.sort_by(f64::total_cmp);
             rates.dedup_by(|a, b| (*a - *b).abs() < 0.5);
             PageScreen {
-                name: m.name.clone(),
+                dynamic: crate::refresh::can_dynamic(&m.name, m.vrr_capable),
                 hz: m.mode.hz,
                 rates,
                 short: if builtin { tr("Built-in").to_owned() } else { m.title() },
@@ -834,7 +835,8 @@ pub(crate) fn view(view: &mut ControlView) {
         let plugged = if on_battery { chosen.plugged.unwrap_or(p.hz) } else { p.hz };
         let mut rates: Vec<Choice> =
             p.rates.iter().map(|&hz| choice(crate::refresh::hz_text(hz), !dynamic && (hz - plugged).abs() < 0.5, format!("{hz}"))).collect();
-        if crate::refresh::can_dynamic(&p.name) {
+        // (A choice made is never hidden: Dynamic picked before stays there.)
+        if p.dynamic || dynamic {
             rates.push(choice(tr("Dynamic"), dynamic, "dynamic"));
         }
         view.groups.push(Group { labelled: true, ..crate::controls::group_of(Some("Refresh rate"), "monitors-rate", rates) });
@@ -1618,9 +1620,9 @@ mod tests {
             mm,
             sizes: Vec::new(),
             stops: Vec::new(),
-            name: String::new(),
             hz: 60.0,
             rates: Vec::new(),
+            dynamic: false,
             focused: false,
             mirror: false,
         }
@@ -1824,6 +1826,7 @@ mod tests {
             mm: (530, 300),
             twin: false,
             mirror: false,
+            vrr_capable: None,
         };
         assert_eq!(real_mm(&m, (1920.0, 1080.0)), (530.0, 300.0), "a 24-inch says so");
         let guess = (1920.0 * 25.4 / 96.0, 1080.0 * 25.4 / 96.0);
@@ -1848,6 +1851,7 @@ mod tests {
             mm: (0, 0),
             twin: false,
             mirror,
+            vrr_capable: None,
         };
         // Two monitors, no built-in: the mirror stands at the main one's corner.
         let s = [screen("DP-2", "Dell U2720Q", (0.0, 0.0), true), screen("DP-1", "LG 27UL850", (0.0, 0.0), false)];

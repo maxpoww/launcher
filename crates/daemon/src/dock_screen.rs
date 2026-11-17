@@ -1138,6 +1138,7 @@ mod tests {
             mm: (0, 0),
             twin: false,
             mirror: false,
+            vrr_capable: None,
         }
     }
 
