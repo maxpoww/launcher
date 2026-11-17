@@ -3,7 +3,7 @@
 //! Hovering the gear at the bar's left end slides a readout out from behind it —
 //! **the clipboard's peek, mirrored** (Max, 2026-09-13: *"on hover, a child opens
 //! and show CPU/RAM/DISK/BATTERY, same animation of clipboard"*). Same geometry
-//! (`left + (ph + BOND_GAP) * t`, width easing `ph → STATS_W`), the same
+//! (`left + (ph + READING_GAP) * t`, width easing `ph → STATS_W`), the same
 //! `MORPH_RATE` and `settle_t` the whole surface shares (`UXRules.md` §3),
 //! and the same leave-hold before it retracts, so the two edges of the bar
 //! behave identically.
@@ -11,7 +11,7 @@
 //! EACH READING IS ITS OWN PILL (Max, 2026-11-05: "quiero que las secciones de
 //! la píldora 'gear' estén todas en píldoras separadas en lugar de en una sola
 //! gran píldora"): its symbol and number with `READING_PAD` at both ends, the
-//! pills `BOND_GAP` apart — the power pills' bond — fanning out from behind
+//! pills `READING_GAP` apart, fanning out from behind
 //! the first as the readout slides out (`stats_pills`). Opening the box, the
 //! pills give way to the box's one ground, which grows down from that row as
 //! before (`push_stats_grounds`).
@@ -29,7 +29,7 @@ use crate::animation::{ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SETT
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::gear::PageKind;
 use crate::i18n::tr;
-use crate::options::{hover_grow, push_neumorph, PillId, BOND_GAP, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
+use crate::options::{hover_grow, push_neumorph, PillId, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
 use crate::App;
 use options_engine::NetworkLink;
 
@@ -78,6 +78,10 @@ const OPEN_PAD: f32 = 12.0;
 /// ringed this wide in the pill's own ground (so it reads apart from the
 /// symbol it sits against).
 const DOT_D: f32 = 6.0;
+/// Between the gear and the first reading, and between readings: wider than
+/// the power pills' bond (Max, 2026-11-17: "separá un poco las pills, están muy
+/// juntas, se ve muy cargado todo").
+const READING_GAP: f32 = 7.0;
 const DOT_OFF: f32 = 6.5;
 const DOT_RING: f32 = 1.5;
 /// How long the pointer rests on a symbol before its pill opens (Max's pick).
@@ -618,7 +622,7 @@ impl App {
     pub(crate) fn stats_geom(&self) -> Rect {
         let ph = self.options_pill_h();
         let t = self.stats.t;
-        let left = EDGE_PAD + (ph + BOND_GAP) * t;
+        let left = EDGE_PAD + (ph + READING_GAP * self.options_scale()) * t;
         // (Opened, it narrows to the readings' tight band: `stats_open_w`.)
         let w = lerp(lerp(ph, self.stats_full_w(), t), self.stats_open_w(), self.stats.e).max(ph);
         // Opening grows the row DOWNWARD and does nothing else: same width, same
@@ -634,7 +638,7 @@ impl App {
     /// not, or the colour every left box wears would jump when it opens.
     pub(crate) fn stats_span_full_right(&self) -> f32 {
         let ph = self.options_pill_h();
-        EDGE_PAD + (ph + BOND_GAP) + self.stats_full_w_max()
+        EDGE_PAD + (ph + READING_GAP * self.options_scale()) + self.stats_full_w_max()
     }
 
     /// The panel's full height: the bar's one drawer height. Empty for now —
@@ -887,7 +891,7 @@ impl App {
         // arithmetic `stats_pills` lays them out with.
         let n = self.stats.widths.len();
         let pills: f32 = (0..n).map(|i| self.stats_pill_w(i)).sum();
-        pills + BOND_GAP * (n - 1) as f32
+        pills + READING_GAP * s * (n - 1) as f32
     }
 
     /// The widest the row ever gets: every pill round but the widest one open.
@@ -898,7 +902,7 @@ impl App {
         }
         let ph = self.options_pill_h();
         let extra = (0..n).map(|i| self.stats_open_pill_w(i) - ph).fold(0.0, f32::max);
-        ph * n as f32 + BOND_GAP * (n - 1) as f32 + extra
+        ph * n as f32 + READING_GAP * self.options_scale() * (n - 1) as f32 + extra
     }
 
     /// The open box's width: every couple (symbol, dot and number), `OPEN_GAP`
@@ -1608,7 +1612,7 @@ impl App {
     }
 
     /// Where each reading's own pill stands now: fanned out from behind the
-    /// first as the readout slides out (`t`), `BOND_GAP` apart once it is out
+    /// first as the readout slides out (`t`), `READING_GAP` apart once it is out
     /// — the power pills' way of coming out from behind one another. Round
     /// shut; the one open is as long as its words, pushing the rest along.
     pub(crate) fn stats_pills(&self, rect: Rect) -> Vec<Rect> {
@@ -1617,10 +1621,11 @@ impl App {
         let n = self.stats_readings().len();
         let mut out = Vec::with_capacity(n);
         let mut offset = 0.0;
+        let gap = READING_GAP * self.options_scale();
         for i in 0..n {
             let w = if self.stats.widths.is_empty() { band_h } else { self.stats_pill_w(i) };
             out.push(Rect::new(rect.x + offset * t, rect.y, w, band_h));
-            offset += w + BOND_GAP;
+            offset += w + gap;
         }
         out
     }
