@@ -733,6 +733,12 @@ The big daemon files are cohesive but long — go straight to the function:
   pill's row), `capture_hang_sync`/`tick_capture_hang` ease it (no clock at rest). A Print, or the live tool
   opening, takes pill and picture off AT ONCE (`capture_preview_off_now`) and the long pill is held SHUT until the
   picture is in (`Shots::shut`: the pointer resting there brought the card's own hover pill out into the shot).
+  QUICK (2026-11-17, Max: "two secs between I press the key and the pill shows up"): grim's PNG of a 3200 × 2000
+  screen took 1.3–6.7 s; the screen is taken RAW now (`grim_args` always `-t ppm`, `read_ppm`) and the preview comes
+  out of the pixels at once (`prepare`: the small picture, a tiny PNG for the pill's thumbnail — `Kept::thumb`), the
+  PNG (`png_rgb`: `CompressionType::Fast`, RGB) + clipboard + file after it (`keep_shot`; `Kept::file` is a OnceLock,
+  `dropped` covers a × before it lands, the editor's Save waits `FILE_WITHIN`). The log prints each step's ms after
+  the key ("pixels are in", "preview is out", "shot is kept"). The live tool's pictures and Copy text read the PPM too.
   Rig: `capture preview hover|unhover`; the state line says `picture hangs|folding|folded`. THE PAGE'S CHOICES here:
   "Let me choose first" makes the press take nothing and its release open the live tool (`Pending::choose`; a
   hold still records); the file and the clipboard without the banner's strip when Banner is off (`Frame::strip`,

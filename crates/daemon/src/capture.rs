@@ -565,9 +565,14 @@ fn can_read_text() -> bool {
     crate::launch::on_path(&tesseract().to_string_lossy())
 }
 
-/// `grim`'s arguments for `aim` into `file`, the pointer in it or not.
+/// `grim`'s arguments for `aim` into `file`, the pointer in it or not. RAW:
+/// a PPM, the pixels as they are (2026-11-17, Max: "two secs between I press
+/// the key and the pill shows up"): a 3200 × 2000 screen's PNG took `grim`
+/// 1.3 s at its lightest compression and up to 6.7 s at its default, its PPM
+/// 0.3 s (measured on the dev box). The PNG is made here, quickly
+/// (`capture_shot::png_rgb`), after what the hand waits for is out.
 pub(crate) fn grim_args(aim: &Aim, pointer: bool, file: &Path) -> Vec<OsString> {
-    let mut args: Vec<OsString> = Vec::new();
+    let mut args: Vec<OsString> = vec!["-t".into(), "ppm".into()];
     if pointer {
         args.push("-c".into());
     }
@@ -724,15 +729,19 @@ fn run_within(mut cmd: Command, limit: Duration) -> bool {
     }
 }
 
-/// A place for a picture on its way (the session's own folder, in memory).
-pub(crate) fn scratch_png() -> PathBuf {
+/// A place for a picture on its way (the session's own folder, in memory),
+/// `ext` its kind.
+pub(crate) fn scratch(ext: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    dir.join(format!("waverunner-capture-{}-{n}.png", std::process::id()))
+    dir.join(format!(
+        "waverunner-capture-{}-{n}.{ext}",
+        std::process::id()
+    ))
 }
 
-/// `aim` as a PNG in `file`. Whether there is one.
+/// `aim` as a PPM in `file` (`grim_args`). Whether there is one.
 pub(crate) fn grab(aim: &Aim, pointer: bool, file: &Path) -> bool {
     let mut cmd = Command::new(grim());
     cmd.args(grim_args(aim, pointer, file));
@@ -802,20 +811,28 @@ pub(crate) fn shown(dir: &Path) -> String {
 /// carries it. `(strip, logical_h)`: the banner's strip to leave out of the
 /// top of a screen `logical_h` tall (0: nothing).
 fn shoot(aim: &Aim, pointer: bool, clipboard: bool, (strip, logical_h): (i32, i32)) {
-    let tmp = scratch_png();
+    let tmp = scratch("ppm");
     let grabbed = grab(aim, pointer, &tmp);
-    let picture = if grabbed {
-        std::fs::read(&tmp).ok()
+    let pixels = if grabbed {
+        std::fs::read(&tmp)
+            .ok()
+            .and_then(|raw| crate::capture_shot::read_ppm(&raw))
     } else {
         None
     };
     let _ = std::fs::remove_file(&tmp);
+    // (Without the banner's rows when they are left out; the PNG made
+    // quickly.)
+    let picture = pixels.and_then(|pixels| {
+        let (w, h) = pixels.dimensions();
+        let rows = crate::capture_shot::strip_px(strip, logical_h, h);
+        crate::capture_shot::png_part(pixels.as_raw(), (w, h), (0, rows, w, h - rows))
+    });
     let Some(picture) = picture else {
         warn!("capture: no picture of {aim:?}");
         notify(tr("The screenshot could not be taken"), "", None);
         return;
     };
-    let picture = crate::capture_shot::without_strip(picture, strip, logical_h);
     let copied = clipboard && copy("image/png", &picture);
     let dir = crate::record::shots_folder();
     let file = keep(&picture, &dir, SystemTime::now());
@@ -844,7 +861,8 @@ fn shoot(aim: &Aim, pointer: bool, clipboard: bool, (strip, logical_h): (i32, i3
 /// THE PLUS (on a thread): the words in `aim`, read and put on the
 /// clipboard.
 fn read_text(aim: &Aim) {
-    let tmp = scratch_png();
+    // (tesseract reads the PPM as it is.)
+    let tmp = scratch("ppm");
     if !grab(aim, false, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         warn!("capture: no picture of {aim:?} to read");
@@ -2248,15 +2266,15 @@ mod tests {
         };
         assert_eq!(
             args(&Aim::Area("1930,20 640x480".into()), false),
-            ["-g", "1930,20 640x480", "/tmp/x.png"]
+            ["-t", "ppm", "-g", "1930,20 640x480", "/tmp/x.png"]
         );
         assert_eq!(
             args(&Aim::Area("0,0 10x10".into()), true),
-            ["-c", "-g", "0,0 10x10", "/tmp/x.png"]
+            ["-t", "ppm", "-c", "-g", "0,0 10x10", "/tmp/x.png"]
         );
         assert_eq!(
             args(&Aim::Screen("HDMI-A-1".into()), true),
-            ["-c", "-o", "HDMI-A-1", "/tmp/x.png"]
+            ["-t", "ppm", "-c", "-o", "HDMI-A-1", "/tmp/x.png"]
         );
     }
 

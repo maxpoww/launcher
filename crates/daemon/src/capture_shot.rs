@@ -40,6 +40,19 @@
 //! deleted). A second Print meanwhile settles the first as it is and takes
 //! its place.
 //!
+//! QUICK (2026-11-17, Max: "two secs between I press the key and the pill
+//! shows up… that is damn slow"). On the dev box's 3200 × 2000 screen
+//! `grim`'s PNG took 1.3 s at its lightest compression and up to 6.7 s at
+//! its default (low-power mode), and the preview waited for it, a decode, a
+//! resize, the clipboard and the file. Now the screen is taken RAW (`grim -t
+//! ppm`, 0.3 s there; `read_ppm`) and the preview comes out of those pixels
+//! at once (`prepare`: the small picture by a box filter, a little PNG of it
+//! for the pill's thumbnail); the PNG — the fastest compression, `png_rgb` —,
+//! the clipboard and the file follow off the loop (`keep_shot`). The file is
+//! therefore a moment behind the preview: `Kept::file` is set when it lands,
+//! a × before that drops it as it lands (`dropped`), the editor's Save waits
+//! for it (`file_within`). The log says each step's time after the key.
+//!
 //! THE SHOT, BIGGER, ON HOVER (the fourth round, the same night: the pill's
 //! thumbnail is too small to judge a shot by). With the pointer on the
 //! preview the long pill GROWS DOWN into a box holding the shot at about
@@ -74,7 +87,8 @@
 //! `capture edit` (the editor on the shot whose preview is out).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{info, warn};
@@ -220,22 +234,90 @@ pub(crate) fn strip_px(strip: i32, logical_h: i32, px_h: u32) -> u32 {
     rows.min(px_h - 1)
 }
 
-/// `picture` (a PNG of a screen `logical_h` tall) without the banner's
-/// `strip` at its top; as it was when there is none to cut, or it does not
-/// read.
-pub(crate) fn without_strip(picture: Vec<u8>, strip: i32, logical_h: i32) -> Vec<u8> {
-    if strip <= 0 {
-        return picture;
+/// THE PICTURE, RAW (2026-11-17, Max: "two secs between I press the key
+/// and the pill shows up… that is damn slow"): what `grim -t ppm` writes —
+/// `P6`, its size, 255, then the pixels as they are — read as RGBA, with no
+/// decoding to speak of. `None`: not a binary PPM of 8 bits a channel.
+pub(crate) fn read_ppm(bytes: &[u8]) -> Option<image::RgbaImage> {
+    if bytes.get(..2)? != b"P6" {
+        return None;
     }
-    let Ok(whole) = image::load_from_memory_with_format(&picture, image::ImageFormat::Png) else {
-        return picture;
-    };
-    let (w, h) = (whole.width(), whole.height());
-    let rows = strip_px(strip, logical_h, h);
-    if rows == 0 {
-        return picture;
+    let mut at = 2;
+    let mut fields = [0u32; 3];
+    for field in &mut fields {
+        // (Space between them, and a comment from `#` to the line's end.)
+        loop {
+            while bytes.get(at)?.is_ascii_whitespace() {
+                at += 1;
+            }
+            if *bytes.get(at)? != b'#' {
+                break;
+            }
+            while *bytes.get(at)? != b'\n' {
+                at += 1;
+            }
+        }
+        let start = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        *field = std::str::from_utf8(bytes.get(start..at)?)
+            .ok()?
+            .parse()
+            .ok()?;
     }
-    cut(&picture, (0, rows, w, h - rows)).unwrap_or(picture)
+    // (One space after the largest value, then the pixels.)
+    if !bytes.get(at)?.is_ascii_whitespace() {
+        return None;
+    }
+    at += 1;
+    let [w, h, max] = fields;
+    if max != 255 || w == 0 || h == 0 {
+        return None;
+    }
+    let n = (w as usize).checked_mul(h as usize)?;
+    let rgb = bytes.get(at..at.checked_add(n.checked_mul(3)?)?)?;
+    let mut rgba = Vec::with_capacity(n * 4);
+    for p in rgb.chunks_exact(3) {
+        rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
+    }
+    image::RgbaImage::from_raw(w, h, rgba)
+}
+
+/// `(x, y, w, h)` of an RGBA picture `px` big, as RGB rows: what its PNG is
+/// made from (a screen has no alpha to keep). `None`: not inside it.
+fn rgb_part(rgba: &[u8], px: (u32, u32), (x, y, w, h): (u32, u32, u32, u32)) -> Option<Vec<u8>> {
+    let (pw, ph) = (px.0 as usize, px.1 as usize);
+    let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+    if w == 0 || h == 0 || x + w > pw || y + h > ph || rgba.len() < pw * ph * 4 {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for row in y..y + h {
+        let start = (row * pw + x) * 4;
+        for p in rgba[start..start + w * 4].chunks_exact(4) {
+            rgb.extend_from_slice(&p[..3]);
+        }
+    }
+    Some(rgb)
+}
+
+/// RGB rows `w` × `h` as a PNG, QUICKLY: the fastest compression there is
+/// (`fdeflate`) — a screen in a fraction of what the default takes, the
+/// file somewhat bigger.
+pub(crate) fn png_rgb(rgb: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Sub)
+        .write_image(rgb, w, h, image::ExtendedColorType::Rgb8)
+        .ok()?;
+    Some(out)
+}
+
+/// `(x, y, w, h)` of an RGBA picture `px` big, as a PNG (quickly).
+pub(crate) fn png_part(rgba: &[u8], px: (u32, u32), at: (u32, u32, u32, u32)) -> Option<Vec<u8>> {
+    png_rgb(&rgb_part(rgba, px, at)?, at.2, at.3)
 }
 
 /// Where a picture is written before it takes `file`'s place: beside it
@@ -246,15 +328,6 @@ pub(crate) fn part_beside(file: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     file.with_file_name(format!(".{name}.part"))
-}
-
-/// `picture` (a PNG) cut to `(x, y, w, h)` of its pixels, as a PNG.
-pub(crate) fn cut(picture: &[u8], (x, y, w, h): (u32, u32, u32, u32)) -> Option<Vec<u8>> {
-    let whole = image::load_from_memory_with_format(picture, image::ImageFormat::Png).ok()?;
-    let part = whole.crop_imm(x, y, w, h);
-    let mut out = std::io::Cursor::new(Vec::new());
-    part.write_to(&mut out, image::ImageFormat::Png).ok()?;
-    Some(out.into_inner())
 }
 
 /// `bytes` in `file`'s place, whole or not at all.
@@ -269,8 +342,8 @@ fn replace(file: &Path, bytes: &[u8]) -> bool {
 
 /// The screen as it was when the key went down.
 pub(crate) struct Frame {
-    /// The PNG as `grim` made it.
-    png: Vec<u8>,
+    /// Its pixels, as `grim` gave them raw.
+    pixels: image::RgbaImage,
     /// The banner's strip to leave out of its top, in logical pixels (0:
     /// the banner stays — Controls → Screenshots → Banner).
     strip: i32,
@@ -280,29 +353,72 @@ pub(crate) struct Frame {
     wins: Vec<Area>,
 }
 
-/// A screenshot that was kept: its file, and what the editor needs of it.
+/// A screenshot: what its preview, its file and the editor need of it. The
+/// preview comes out as soon as the pixels are in (`prepare`); the PNG, the
+/// clipboard and the file come right after, off the loop (`keep_shot`).
 pub(crate) struct Kept {
-    pub file: PathBuf,
-    /// The WHOLE screen as it was (the editor's still, and what it cuts
-    /// from); the file has `cut_top` rows fewer when the banner is left out.
-    pub png: Vec<u8>,
-    pub cut_top: u32,
-    /// It went onto the clipboard; and a cut of it in the editor goes there.
-    pub copied: bool,
+    /// Its file, once it is written.
+    file: OnceLock<PathBuf>,
+    /// Thrown away (its ×) — before its file was there, perhaps: then the
+    /// file is not kept either.
+    dropped: AtomicBool,
+    /// It went onto the clipboard.
+    copied: AtomicBool,
+    /// The owner keeps shots on the clipboard (Controls → Screenshots): a
+    /// cut of it in the editor goes there too.
     pub clipboard: bool,
-    /// Its pixels, for the editor's still (RGBA), and how many there are.
+    /// The WHOLE screen as it was, RGBA (the editor's still, and what it
+    /// cuts from), and its size; the file has `cut_top` rows fewer when the
+    /// banner is left out.
     pub rgba: Vec<u8>,
     pub px: (u32, u32),
+    pub cut_top: u32,
     pub screen: Screen,
     pub wins: Vec<Area>,
     /// The shot made small for the picture that hangs under its preview:
-    /// its size and its pixels (RGBA).
+    /// its size and its pixels (RGBA)…
     small: (u32, u32, Vec<u8>),
+    /// …and as a little file of its own, for the pill's thumbnail (the
+    /// clipboard's thumbnailer reads files).
+    thumb: PathBuf,
+}
+
+/// How long a cut saved in the editor waits for its shot's file (written
+/// right after the preview came out).
+const FILE_WITHIN: Duration = Duration::from_secs(15);
+
+impl Kept {
+    /// Its file, once it is written.
+    pub(crate) fn file(&self) -> Option<&PathBuf> {
+        self.file.get()
+    }
+
+    /// Its file, waited for up to `limit` (on a thread of its own).
+    fn file_within(&self, limit: Duration) -> Option<PathBuf> {
+        let until = Instant::now() + limit;
+        loop {
+            if let Some(file) = self.file.get() {
+                return Some(file.clone());
+            }
+            if self.dropped.load(Ordering::Relaxed) || Instant::now() >= until {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.thumb);
+    }
 }
 
 /// A shot whose key has not said yet what it is.
 struct Pending {
     n: u64,
+    /// When the key went down (the log says how long each step took).
+    since: Instant,
     /// Controls → Screenshots → Print takes "Let me choose first": no shot;
     /// the release opens the live tool (a hold still records).
     choose: bool,
@@ -364,60 +480,81 @@ pub(crate) fn hang_size(px: (u32, u32), bar_w: f32, s: f32) -> (f32, f32) {
     (w, (w * px.1 as f32 / px.0.max(1) as f32).round().max(1.0))
 }
 
-/// The screen `name` as a PNG, off the loop (the pointer in it or not).
-fn grab_screen(name: &str, pointer: bool) -> Option<Vec<u8>> {
-    let tmp = crate::capture::scratch_png();
+/// The screen `name` as `grim` gives it raw (a PPM in the session's own
+/// folder, which is in memory), off the loop; the pointer in it or not.
+fn grab_screen(name: &str, pointer: bool) -> Option<image::RgbaImage> {
+    let tmp = crate::capture::scratch("ppm");
     let taken = crate::capture::grab(&Aim::Screen(name.to_owned()), pointer, &tmp);
-    let png = if taken {
-        std::fs::read(&tmp).ok()
+    let pixels = if taken {
+        std::fs::read(&tmp).ok().and_then(|raw| read_ppm(&raw))
     } else {
         None
     };
     let _ = std::fs::remove_file(&tmp);
-    png
+    pixels
 }
 
-/// A frame made a screenshot, off the loop: the clipboard first (unless the
-/// owner keeps shots out of it), then its file — without the banner's strip
-/// when Banner is off —, then its pixels for the editor. `None`: there is
-/// no file.
-fn settle(frame: Frame, small_w: u32, clipboard: bool) -> Option<Kept> {
-    let pixels = image::load_from_memory_with_format(&frame.png, image::ImageFormat::Png)
-        .ok()?
-        .to_rgba8();
-    let px = (pixels.width(), pixels.height());
+/// A screenshot, FIRST STEP (off the loop): what its preview needs and
+/// nothing more — the banner's rows counted out, the shot made small (a box
+/// filter: quick) for the picture that hangs under the pill, and that small
+/// picture as a little file for the pill's own thumbnail.
+fn prepare(frame: Frame, small_w: u32, clipboard: bool) -> Kept {
+    let px = frame.pixels.dimensions();
     let cut_top = strip_px(frame.strip, frame.screen.h, px.1);
-    let shot = if cut_top > 0 {
-        cut(&frame.png, (0, cut_top, px.0, px.1 - cut_top))?
-    } else {
-        frame.png.clone()
-    };
-    let copied = clipboard && crate::capture::copy("image/png", &shot);
-    let dir = crate::record::shots_folder();
-    let file = crate::capture::keep(&shot, &dir, SystemTime::now());
-    info!(
-        "capture: the screen {} → {file:?} (clipboard: {copied}, banner rows left out: {cut_top})",
-        frame.screen.name
-    );
-    let file = file?;
-    // (The picture that hangs under the preview: made once, here, at the
-    // size it is shown at, of what the file holds.)
-    let seen = image::imageops::crop_imm(&pixels, 0, cut_top, px.0, px.1 - cut_top).to_image();
+    let seen =
+        image::imageops::crop_imm(&frame.pixels, 0, cut_top, px.0, px.1 - cut_top).to_image();
     let sw = small_w.clamp(1, px.0.max(1));
     let sh = ((u64::from(sw) * u64::from(seen.height())) / u64::from(px.0.max(1))).max(1) as u32;
-    let small = image::imageops::resize(&seen, sw, sh, image::imageops::FilterType::CatmullRom);
-    Some(Kept {
-        small: (sw, sh, small.into_raw()),
-        file,
-        cut_top,
-        copied,
+    let small = image::imageops::thumbnail(&seen, sw, sh);
+    let thumb = crate::capture::scratch("png");
+    let written = png_part(small.as_raw(), (sw, sh), (0, 0, sw, sh))
+        .is_some_and(|png| std::fs::write(&thumb, png).is_ok());
+    if !written {
+        warn!("capture: the preview's small picture was not written ({thumb:?})");
+    }
+    Kept {
+        file: OnceLock::new(),
+        dropped: AtomicBool::new(false),
+        copied: AtomicBool::new(false),
         clipboard,
-        png: frame.png,
-        rgba: pixels.into_raw(),
+        rgba: frame.pixels.into_raw(),
         px,
+        cut_top,
         screen: frame.screen,
         wins: frame.wins,
-    })
+        small: (sw, sh, small.into_raw()),
+        thumb,
+    }
+}
+
+/// A screenshot, SECOND STEP (off the loop, the preview already out): the
+/// shot — without the banner's strip when that is chosen — as a PNG, onto
+/// the clipboard unless the owner keeps shots out of it, then its file in
+/// Pictures → Screenshots. `None`: no file (it could not be written, or the
+/// shot was thrown away meanwhile).
+fn keep_shot(kept: &Kept) -> Option<PathBuf> {
+    if kept.dropped.load(Ordering::Relaxed) {
+        return None;
+    }
+    let (w, h) = kept.px;
+    let png = png_part(&kept.rgba, kept.px, (0, kept.cut_top, w, h - kept.cut_top))?;
+    let copied = kept.clipboard
+        && !kept.dropped.load(Ordering::Relaxed)
+        && crate::capture::copy("image/png", &png);
+    kept.copied.store(copied, Ordering::Relaxed);
+    let file = crate::capture::keep(&png, &crate::record::shots_folder(), SystemTime::now());
+    info!(
+        "capture: the screen {} → {file:?} (clipboard: {copied}, banner rows left out: {})",
+        kept.screen.name, kept.cut_top
+    );
+    let file = file?;
+    let _ = kept.file.set(file.clone());
+    // (Thrown away while it was being written: it goes now.)
+    if kept.dropped.load(Ordering::Relaxed) {
+        let _ = std::fs::remove_file(&file);
+        return None;
+    }
+    Some(file)
 }
 
 impl App {
@@ -442,6 +579,7 @@ impl App {
                 let choose = crate::shots_page::ShotChoice::now().choose_first;
                 self.capture_tool.shots.pending = Some(Pending {
                     n,
+                    since: now,
                     choose,
                     keep: false,
                     frame: None,
@@ -576,13 +714,15 @@ impl App {
         let mut rest = Some((screen, wins));
         self.desktop_off_loop(
             move || grab_screen(&name, pointer),
-            move |app, png| {
-                let frame = png.zip(rest.take()).map(|(png, (screen, wins))| Frame {
-                    png,
-                    strip,
-                    screen,
-                    wins,
-                });
+            move |app, pixels| {
+                let frame = pixels
+                    .zip(rest.take())
+                    .map(|(pixels, (screen, wins))| Frame {
+                        pixels,
+                        strip,
+                        screen,
+                        wins,
+                    });
                 app.capture_grabbed(n, frame);
             },
         );
@@ -622,11 +762,17 @@ impl App {
             return;
         }
         let Some(Pending {
-            frame: Some(frame), ..
+            frame: Some(frame),
+            since,
+            ..
         }) = shots.pending.take()
         else {
             return;
         };
+        info!(
+            "capture: the screen's pixels are in {} ms after the key",
+            since.elapsed().as_millis()
+        );
         let Some(frame) = frame else {
             crate::capture::notify(tr("The screenshot could not be taken"), "", None);
             return;
@@ -639,26 +785,52 @@ impl App {
         .round()
         .max(1.0) as u32;
         let choice = crate::shots_page::ShotChoice::now();
+        // FIRST what the hand waits for — the preview —, THEN the PNG, the
+        // clipboard and the file (the slow part), each off the loop.
         self.desktop_off_loop(
-            move || {
-                frame
-                    .take()
-                    .and_then(|f| settle(f, small_w, choice.clipboard))
-            },
-            move |app, kept| match kept {
-                Some(kept) if choice.preview => app.capture_preview_show(Arc::new(kept)),
-                // (No preview: the shot says itself, as the tool's do — a
-                // shot is never silent.)
-                Some(kept) => {
-                    let place = crate::capture::shown(&crate::record::shots_folder());
-                    let body = if kept.copied {
-                        fill(tr("It is in {0} and on the clipboard."), &[("0", &place)])
-                    } else {
-                        fill(tr("It is in {0}."), &[("0", &place)])
-                    };
-                    crate::capture::notify(tr("Screenshot saved"), &body, Some(&kept.file));
+            move || frame.take().map(|f| prepare(f, small_w, choice.clipboard)),
+            move |app, kept| {
+                let Some(kept) = kept else {
+                    return;
+                };
+                let kept = Arc::new(kept);
+                if choice.preview {
+                    app.capture_preview_show(kept.clone());
+                    info!(
+                        "capture: the preview is out {} ms after the key",
+                        since.elapsed().as_millis()
+                    );
                 }
-                None => crate::capture::notify(tr("The screenshot could not be taken"), "", None),
+                let mut job = Some(kept.clone());
+                app.desktop_off_loop(
+                    move || job.take().and_then(|k| keep_shot(&k)),
+                    move |_app, file| {
+                        info!(
+                            "capture: the shot is kept {} ms after the key",
+                            since.elapsed().as_millis()
+                        );
+                        match file {
+                            // (No preview: the shot says itself, as the
+                            // tool's do — a shot is never silent.)
+                            Some(file) if !choice.preview => {
+                                let place = crate::capture::shown(&crate::record::shots_folder());
+                                let body = if kept.copied.load(Ordering::Relaxed) {
+                                    fill(tr("It is in {0} and on the clipboard."), &[("0", &place)])
+                                } else {
+                                    fill(tr("It is in {0}."), &[("0", &place)])
+                                };
+                                crate::capture::notify(tr("Screenshot saved"), &body, Some(&file));
+                            }
+                            Some(_) => {}
+                            None if kept.dropped.load(Ordering::Relaxed) => {}
+                            None => crate::capture::notify(
+                                tr("The screenshot could not be saved"),
+                                "",
+                                None,
+                            ),
+                        }
+                    },
+                );
             },
         );
     }
@@ -668,7 +840,7 @@ impl App {
         let shots = &mut self.capture_tool.shots;
         shots.previews += 1;
         let n = shots.previews;
-        self.clip_thumb_ask(&kept.file.to_string_lossy());
+        self.clip_thumb_ask(&kept.thumb.to_string_lossy());
         // (Its bigger picture into the bar's one big picture, for the hover.)
         if let Some(renderer) = self.options_renderer.as_mut() {
             renderer.set_video_frame(kept.small.0, kept.small.1, &kept.small.2);
@@ -727,10 +899,15 @@ impl App {
         let Some(p) = self.capture_tool.shots.preview.take() else {
             return false;
         };
-        let gone = std::fs::remove_file(&p.kept.file).is_ok();
+        // (Its file may not be there yet: then it goes as it lands.)
+        p.kept.dropped.store(true, Ordering::Relaxed);
+        let gone = p
+            .kept
+            .file()
+            .is_some_and(|f| std::fs::remove_file(f).is_ok());
         info!(
             "capture: the screenshot {:?} thrown away ({gone})",
-            p.kept.file
+            p.kept.file()
         );
         self.capture_hang_sync();
         self.clip_long_show(false, false);
@@ -924,7 +1101,10 @@ impl App {
             |p| {
                 format!(
                     "out {:?} {}x{}",
-                    p.kept.file.file_name().unwrap_or_default(),
+                    p.kept.file().and_then(|f| f.file_name()).map_or_else(
+                        || "(being written)".to_owned(),
+                        |n| n.to_string_lossy().into_owned()
+                    ),
                     p.kept.px.0,
                     p.kept.px.1
                 )
@@ -962,13 +1142,15 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("capture-cut".into())
             .spawn(move || {
-                let done = cut(&kept.png, at).is_some_and(|part| {
+                let done = png_part(&kept.rgba, kept.px, at).is_some_and(|part| {
+                    // (The shot's own file is written right after its
+                    // preview came out: a quick hand can be here first.)
+                    let Some(file) = kept.file_within(FILE_WITHIN) else {
+                        return false;
+                    };
                     let copied = kept.clipboard && crate::capture::copy("image/png", &part);
-                    let written = replace(&kept.file, &part);
-                    info!(
-                        "capture: {:?} cut to {at:?} (file: {written}, clipboard: {copied})",
-                        kept.file
-                    );
+                    let written = replace(&file, &part);
+                    info!("capture: {file:?} cut to {at:?} (file: {written}, clipboard: {copied})");
                     written
                 });
                 if !done {
@@ -986,11 +1168,11 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("capture-read".into())
             .spawn(move || {
-                let tmp = crate::capture::scratch_png();
-                let written =
-                    cut(&kept.png, at).is_some_and(|part| std::fs::write(&tmp, part).is_ok());
+                let tmp = crate::capture::scratch("png");
+                let written = png_part(&kept.rgba, kept.px, at)
+                    .is_some_and(|part| std::fs::write(&tmp, part).is_ok());
                 if written {
-                    crate::capture::read_picture(&tmp, &format!("{at:?} of {:?}", kept.file));
+                    crate::capture::read_picture(&tmp, &format!("{at:?} of {:?}", kept.file()));
                 } else {
                     crate::capture::notify(tr("The text could not be read"), "", None);
                 }
@@ -1108,7 +1290,7 @@ impl App {
         };
         // THE PREVIEW: the shot small (the camera until its picture is in),
         // its word, and a × at the pill's end.
-        match self.clip_thumb_of(&p.kept.file.to_string_lossy()) {
+        match self.clip_thumb_of(&p.kept.thumb.to_string_lossy()) {
             Some(layer) => {
                 let side = ph - 4.0 * s;
                 let tile = Rect::new(
@@ -1374,7 +1556,7 @@ mod tests {
         whole.write_to(&mut png, image::ImageFormat::Png).unwrap();
         let file = dir.join("Screenshot.png");
         std::fs::write(&file, png.get_ref()).unwrap();
-        let part = cut(png.get_ref(), (10, 5, 20, 12)).expect("cut");
+        let part = png_part(whole.as_raw(), (40, 30), (10, 5, 20, 12)).expect("cut");
         assert!(replace(&file, &part));
         let after = image::open(&file).unwrap().to_rgba8();
         assert_eq!((after.width(), after.height()), (20, 12));
@@ -1412,21 +1594,83 @@ mod tests {
     fn a_picture_without_the_banner_begins_under_it() {
         let whole =
             image::RgbaImage::from_fn(40, 30, |x, y| image::Rgba([x as u8, y as u8, 7, 255]));
-        let mut png = std::io::Cursor::new(Vec::new());
-        whole.write_to(&mut png, image::ImageFormat::Png).unwrap();
-        let png = png.into_inner();
         // A strip of 4 logical rows on a screen 20 tall shot at 30 rows: 6.
-        let cut = without_strip(png.clone(), 4, 20);
-        let after = image::load_from_memory(&cut).unwrap().to_rgba8();
+        let rows = strip_px(4, 20, 30);
+        assert_eq!(rows, 6);
+        let png = png_part(whole.as_raw(), (40, 30), (0, rows, 40, 30 - rows)).unwrap();
+        let after = image::load_from_memory(&png).unwrap().to_rgba8();
         assert_eq!((after.width(), after.height()), (40, 24));
         assert_eq!(
             after.get_pixel(3, 0).0,
             [3, 6, 7, 255],
             "its first row is the screen's under the strip"
         );
-        // No strip: the picture as it came, byte for byte.
-        assert_eq!(without_strip(png.clone(), 0, 20), png);
-        // Not a picture: as it came.
-        assert_eq!(without_strip(b"nope".to_vec(), 4, 20), b"nope".to_vec());
+        // The whole of it, every pixel as it was (no alpha is lost: a
+        // screen has none).
+        let all =
+            image::load_from_memory(&png_part(whole.as_raw(), (40, 30), (0, 0, 40, 30)).unwrap())
+                .unwrap()
+                .to_rgba8();
+        assert_eq!(all, whole);
+        // Outside the picture: nothing.
+        assert_eq!(png_part(whole.as_raw(), (40, 30), (30, 0, 20, 5)), None);
+        assert_eq!(png_part(whole.as_raw(), (40, 30), (0, 0, 0, 5)), None);
+    }
+
+    #[test]
+    fn grims_raw_picture_is_read_as_it_is() {
+        // A 3 × 2 PPM with a comment where its header allows one.
+        let mut raw = b"P6\n# grim\n3 2\n255\n".to_vec();
+        raw.extend((0..18u8).map(|v| v * 10));
+        let pic = read_ppm(&raw).expect("a PPM");
+        assert_eq!(pic.dimensions(), (3, 2));
+        assert_eq!(pic.get_pixel(0, 0).0, [0, 10, 20, 255]);
+        assert_eq!(pic.get_pixel(2, 1).0, [150, 160, 170, 255]);
+        // What is not one: another kind, 16 bits a channel, too short, no size.
+        let mut grey = raw.clone();
+        grey[1] = b'5';
+        assert!(read_ppm(&grey).is_none());
+        assert!(read_ppm(b"P6\n3 2\n65535\n\0\0").is_none());
+        assert!(read_ppm(&raw[..raw.len() - 1]).is_none());
+        assert!(read_ppm(b"P6\n\n").is_none());
+        assert!(read_ppm(b"").is_none());
+    }
+
+    #[test]
+    fn a_shot_thrown_away_before_its_file_landed_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("wr-capture-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = Kept {
+            file: OnceLock::new(),
+            dropped: AtomicBool::new(false),
+            copied: AtomicBool::new(false),
+            clipboard: false,
+            rgba: vec![9; 4 * 4 * 4],
+            px: (4, 4),
+            cut_top: 0,
+            screen: Screen {
+                name: "T".into(),
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            wins: Vec::new(),
+            small: (1, 1, vec![0; 4]),
+            thumb: dir.join("thumb.png"),
+        };
+        assert!(kept.file().is_none() && kept.file_within(Duration::ZERO).is_none());
+        // The × came first: its file is not kept, and waiting for it ends.
+        kept.dropped.store(true, Ordering::Relaxed);
+        assert!(kept.file_within(Duration::from_secs(5)).is_none());
+        std::fs::write(&kept.thumb, b"x").unwrap();
+        drop(kept);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "its little picture goes with it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
