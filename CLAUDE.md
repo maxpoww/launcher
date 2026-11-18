@@ -487,17 +487,19 @@ The big daemon files are cohesive but long — go straight to the function:
   WirePlumber (no ALSA monitor, a file-backed `api.alsa.pcm.sink` named `…HiFi__Speaker__sink` with the 9i's
   `alsa.components`) and the rig dock started with `PIPEWIRE_RUNTIME_DIR` at it and `XDG_STATE_HOME` beside it:
   every pick is then MEASURED on the file (a sink's monitor is tapped BEFORE the in-node graph — useless here).
-- `stats.rs` — THE GEAR'S READINGS (Max, 2026-11-17; mockup https://claude.ai/artifact/XvJdXRqyVk4t1Goe6DtuGg): the
-  readings fan out of the gear as ROUND pills, the symbol alone, how each stands as a DOT at the round part's bottom
-  right (`Signal`: blue connected/plugged, green on and fine, yellow worth a look, red off or at the limit — fixed
-  "pure traffic light" colours, a dark and a light set; `Measure` + `decide`: worse at once, better only
-  `SETTLE_POINTS` past the limit; limits in `stats_readings`), ringed in the pill's ground. The pointer on a SYMBOL
-  lights its pill (`stats_lit_wash`, lighter on any ground); resting there `OPEN_AFTER` (0.3 s) opens it to the right
-  (`stats.opened`, `g`: its words after the dot — the number, or "Not connected" / "Off" / "On" / the device's name /
-  "No reading" — the pills after it pushed along), at `OPEN_RATE`/`CLOSE_RATE` (120/80 ms); leaving the symbol,
-  either way, closes it (`update_stats_symbol`, re-checked as the pills move under a still pointer). The symbol and
-  the dot never move as the pill opens. The open box's band keeps today's figures with the dots (`band_w`,
-  `stats_centres`). Rig: a nested compositor + `vptr.py` (real pointer moves), see scratchpad `gprig/`.
+- `stats.rs` — THE GEAR'S READINGS (Max, 2026-11-17/18; mockup https://claude.ai/artifact/WcfLMZ9odYsXr8Pkfk6Sgn, "C"):
+  the readings fan out of the gear as ONE STRIP, `READING_GAP` after it, a SLOT a reading (`stats_pills`, the pitch
+  `stats_slot_w` = the pill's height + `SLOT_AIR`, `STRIP_PAD` at its ends), the symbol alone, TINTED in how its
+  reading stands (`Signal`: blue connected/plugged, green on and fine, yellow worth a look, red off or at the limit —
+  fixed "pure traffic light" colours, a dark and a light set; `Measure` + `decide`: worse at once, better only
+  `SETTLE_POINTS` past the limit; limits in `stats_readings`). The pointer on a SYMBOL (a pill's height square round
+  it, `stats_symbol_at`) lights its slot (`stats_lit_wash`, lighter on any ground); resting there `OPEN_AFTER` (0.3 s)
+  opens it to the right (`stats.opened`, `g`: its words `WORDS_GAP` past the symbol — the number, the Wi-Fi's name and
+  signal ("HOLA · 78%", `net::pill_facts` asked off the loop), "Disconnected" / "Off" / "On" / the device's name / "No
+  reading" — the slots after it pushed along), at `OPEN_RATE`/`CLOSE_RATE` (120/80 ms); leaving the symbol, either
+  way, closes it (`update_stats_symbol`, re-checked as the slots move under a still pointer). The symbol never moves
+  as its slot opens. The open box's band keeps today's figures beside the tinted symbols (`band_w`, `stats_centres`).
+  Rig: a nested compositor + `vptr.py` (real pointer moves), see scratchpad `gprig/`.
 - `quick.rs` — THE QUICK SETTINGS on the gear box's first page: Sound and screen (the volume — its symbol
   mutes, `Item::Level` — with its output › its page, the brightness with Auto, the microphone) and the
   Modes (night light, dark mode — `palette::colors_dark_all`: every surface's look, the sun stops

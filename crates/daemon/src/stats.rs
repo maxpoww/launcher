@@ -8,13 +8,15 @@
 //! and the same leave-hold before it retracts, so the two edges of the bar
 //! behave identically.
 //!
-//! EACH READING IS ITS OWN PILL (Max, 2026-11-05: "quiero que las secciones de
-//! la píldora 'gear' estén todas en píldoras separadas en lugar de en una sola
-//! gran píldora"): its symbol and number with `READING_PAD` at both ends, the
-//! pills `READING_GAP` apart, fanning out from behind
-//! the first as the readout slides out (`stats_pills`). Opening the box, the
-//! pills give way to the box's one ground, which grows down from that row as
-//! before (`push_stats_grounds`).
+//! ONE STRIP OF SYMBOLS (Max, 2026-11-18, "C" of the mockup
+//! https://claude.ai/artifact/WcfLMZ9odYsXr8Pkfk6Sgn: "c pero con los colores
+//! reales"). The readings were each a pill of their own from 2026-11-05, then a
+//! round pill with a state dot (2026-11-17); seven bubbles and seven dots read
+//! as a load, so they share ONE pill again, `READING_GAP` after the gear: a slot
+//! a reading (`stats_pills`), each SYMBOL tinted in how its reading stands
+//! (`Signal`). The slots fan out from behind the first as the readout slides
+//! out. Opening the box, the strip gives way to the box's one ground, which
+//! grows down from that row as before (`push_stats_grounds`).
 //!
 //! The numbers come from the Brain's own `ContextState.metrics` — the daemon
 //! reads no `/proc` of its own (method.md §1, "the Brain is the only sense").
@@ -29,7 +31,7 @@ use crate::animation::{ease_toward, lerp, settle_t, LEAVE_HOLD, MORPH_RATE, SETT
 use crate::content::{Label, Rect, RectInst, Scene};
 use crate::gear::PageKind;
 use crate::i18n::tr;
-use crate::options::{hover_grow, push_neumorph, PillId, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
+use crate::options::{push_neumorph, PillId, EDGE_PAD, LINE_PX, NERD, PILL_MARGIN_Y, SCROLL_DEADZONE};
 use crate::App;
 use options_engine::NetworkLink;
 
@@ -66,24 +68,25 @@ const READING_PAD: f32 = 10.0;
 const OPEN_GAP: f32 = 10.0;
 const OPEN_PAD: f32 = 12.0;
 
-// --- THE SYMBOL AND ITS DOT (Max, 2026-11-17: "quiero que tengan colores
+// --- THE SYMBOL AND ITS COLOUR (Max, 2026-11-17: "quiero que tengan colores
 // (semáforo + azul)… y que en las píldoras se vea solo símbolo, la información
-// solo en hover"; the mockup https://claude.ai/artifact/XvJdXRqyVk4t1Goe6DtuGg).
-// Shut, a reading is a ROUND pill with its symbol; how it stands is a DOT at the
-// round part's bottom right. Resting on the SYMBOL opens the pill to the right
-// (its words after the dot, the pills after it pushed along); leaving the
-// symbol, either way, closes it.
+// solo en hover"; 2026-11-18: the colour on the symbol itself, the readings in
+// one strip). Shut, a reading is a SLOT of the strip with its symbol, tinted in
+// how it stands. Resting on the SYMBOL opens its slot to the right (its words
+// after the symbol, the slots after it pushed along); leaving the symbol,
+// either way, closes it.
 
-/// The dot across, its centre this far right of and below the symbol's centre,
-/// ringed this wide in the pill's own ground (so it reads apart from the
-/// symbol it sits against).
-const DOT_D: f32 = 6.0;
-/// Between the gear and the first reading, and between readings: wider than
-/// the power pills' bond (Max, 2026-11-17: "separá un poco las pills, están muy
-/// juntas, se ve muy cargado todo"; then "un poco más").
+/// Between the gear and the strip: wider than the power pills' bond (Max,
+/// 2026-11-17: "separá un poco las pills, están muy juntas, se ve muy cargado
+/// todo"; then "un poco más").
 const READING_GAP: f32 = 10.0;
-const DOT_OFF: f32 = 6.5;
-const DOT_RING: f32 = 1.5;
+/// A slot shut is the pill's height and this much more (the mockup's 28 at a
+/// 23 px pill): the symbols' pitch along the strip.
+const SLOT_AIR: f32 = 5.0;
+/// The strip's own air before its first slot and after its last.
+const STRIP_PAD: f32 = 2.0;
+/// An open slot's words begin this far past its symbol's ink.
+const WORDS_GAP: f32 = 6.0;
 /// How long the pointer rests on a symbol before its pill opens (Max's pick).
 const OPEN_AFTER: Duration = Duration::from_millis(300);
 /// Opening and closing tempos, 95 % of the way in 120 ms and in 80 ms (Max's
@@ -95,7 +98,7 @@ const CLOSE_RATE: f32 = 3.0 / 0.080;
 /// past the limit, so a reading that hovers round a limit does not blink.
 const SETTLE_POINTS: f32 = 3.0;
 
-/// How a reading stands, as its dot says it.
+/// How a reading stands, as its symbol's colour says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Signal {
     /// Connected or plugged in.
@@ -127,12 +130,12 @@ impl Signal {
     }
 }
 
-/// What a reading's dot is decided from.
+/// What a reading's colour is decided from.
 #[derive(Debug, Clone, Copy)]
 enum Measure {
     /// A state with no number: its colour as it is.
     Is(Signal),
-    /// Nothing to say (a graphics card that does not tell): no dot.
+    /// Nothing to say (a graphics card that does not tell): the bar's ink.
     Unknown,
     /// A number against its limits: `colors[n]` where `n` limits are passed —
     /// reached going up when `worse_up` (a use), gone under going down when
@@ -147,7 +150,7 @@ enum Measure {
 
 const USE: [Signal; 3] = [Signal::Green, Signal::Yellow, Signal::Red];
 
-/// The dot for `m`, given the one shown `before`: worse at once, better only
+/// The colour for `m`, given the one shown `before`: worse at once, better only
 /// [`SETTLE_POINTS`] past the limit.
 fn decide(m: Measure, before: Option<Signal>) -> Option<Signal> {
     match m {
@@ -169,27 +172,27 @@ fn decide(m: Measure, before: Option<Signal>) -> Option<Signal> {
     }
 }
 
-/// Where a reading's words begin, from its symbol's centre: past the symbol's
-/// ink by the couple's bond, and never on the dot.
+/// Where a figure begins in the open box's band, from its symbol's centre:
+/// past the symbol's ink by the couple's bond.
 fn val_off(ink: f32, s: f32) -> f32 {
-    (ink / 2.0 + PAIR_GAP * s).max((DOT_OFF + DOT_D / 2.0 + 1.0) * s)
+    ink / 2.0 + PAIR_GAP * s
 }
 
-/// The wash of a pill whose symbol is under the pointer: LIGHTER on any
+/// Where an open slot's words begin, from its symbol's centre.
+fn words_off(ink: f32, s: f32) -> f32 {
+    ink / 2.0 + WORDS_GAP * s
+}
+
+/// The wash of a slot whose symbol is under the pointer: LIGHTER on any
 /// ground, a dark bar's or a light one's.
 fn stats_lit_wash(bright: bool) -> [f32; 4] {
     crate::options::wash(true, if bright { 0.66 } else { 0.32 })
 }
 
 /// A couple in the open box's band, from its symbol's left ink to the end of
-/// its words (or of its dot, when it has none).
+/// its figure (or of its symbol, when it has none).
 fn band_w(ink: f32, value_w: f32, s: f32) -> f32 {
-    ink / 2.0
-        + if value_w > 0.0 {
-            val_off(ink, s) + value_w
-        } else {
-            (ink / 2.0).max((DOT_OFF + DOT_D / 2.0) * s)
-        }
+    ink / 2.0 + if value_w > 0.0 { val_off(ink, s) + value_w } else { ink / 2.0 }
 }
 
 // --- The box (Max, 2026-09-13: "scroll down or click the gear opens a box") --
@@ -522,17 +525,17 @@ mod tests {
         assert_eq!(decide(Measure::Is(Signal::Red), Some(Signal::Blue)), Some(Signal::Red));
     }
 
-    /// The words never start on the dot, and a couple in the band is at least
-    /// its symbol and its dot wide.
+    /// The words never start on the symbol, and a couple in the band is at
+    /// least its symbol wide.
     #[test]
-    fn the_words_start_after_the_dot() {
+    fn the_words_start_after_the_symbol() {
         for s in [0.82, 1.0, 1.5] {
             for ink in [8.0, 11.0, 16.0] {
                 let ink = ink * s;
-                let words = val_off(ink, s);
-                assert!(words >= (DOT_OFF + DOT_D / 2.0) * s, "on the dot at ink {ink}");
-                assert!(words >= ink / 2.0 + PAIR_GAP * s);
-                assert!(band_w(ink, 0.0, s) >= ink / 2.0 + (DOT_OFF + DOT_D / 2.0) * s - 0.01);
+                assert!(words_off(ink, s) >= ink / 2.0 + WORDS_GAP * s - 0.01, "on the symbol at ink {ink}");
+                assert!(val_off(ink, s) >= ink / 2.0 + PAIR_GAP * s - 0.01);
+                assert!(band_w(ink, 0.0, s) >= ink - 0.01);
+                assert!(band_w(ink, 20.0, s) >= ink / 2.0 + val_off(ink, s) + 20.0 - 0.01);
             }
         }
         // Each colour reads apart from the others on both grounds.
@@ -897,25 +900,30 @@ impl App {
         if self.stats.widths.is_empty() {
             return STATS_W * s; // nothing measured yet (first frame)
         }
-        // Every reading's own pill, and the bond between them: the SAME
+        // Every reading's slot and the strip's air at its ends: the SAME
         // arithmetic `stats_pills` lays them out with.
         let n = self.stats.widths.len();
-        let pills: f32 = (0..n).map(|i| self.stats_pill_w(i)).sum();
-        pills + READING_GAP * s * (n - 1) as f32
+        let slots: f32 = (0..n).map(|i| self.stats_pill_w(i)).sum();
+        slots + 2.0 * STRIP_PAD * s
     }
 
-    /// The widest the row ever gets: every pill round but the widest one open.
+    /// The widest the row ever gets: every slot shut but the widest one open.
     fn stats_full_w_max(&self) -> f32 {
         let n = self.stats.widths.len();
         if n == 0 {
             return STATS_W * self.options_scale();
         }
-        let ph = self.options_pill_h();
-        let extra = (0..n).map(|i| self.stats_open_pill_w(i) - ph).fold(0.0, f32::max);
-        ph * n as f32 + READING_GAP * self.options_scale() * (n - 1) as f32 + extra
+        let slot = self.stats_slot_w();
+        let extra = (0..n).map(|i| self.stats_open_pill_w(i) - slot).fold(0.0, f32::max);
+        slot * n as f32 + 2.0 * STRIP_PAD * self.options_scale() + extra
     }
 
-    /// The open box's width: every couple (symbol, dot and number), `OPEN_GAP`
+    /// A slot of the strip shut: its symbol's pitch.
+    fn stats_slot_w(&self) -> f32 {
+        self.options_pill_h() + SLOT_AIR * self.options_scale()
+    }
+
+    /// The open box's width: every couple (symbol and number), `OPEN_GAP`
     /// apart, `OPEN_PAD` in from both sides.
     pub(crate) fn stats_open_w(&self) -> f32 {
         let s = self.options_scale();
@@ -927,24 +935,23 @@ impl App {
         couples + (n - 1.0) * OPEN_GAP * s + 2.0 * OPEN_PAD * s
     }
 
-    /// A reading's pill now: round with its symbol shut, its words after the
-    /// dot as it opens (`g`).
+    /// A reading's slot now: its symbol's pitch shut, its words after the
+    /// symbol as it opens (`g`).
     fn stats_pill_w(&self, i: usize) -> f32 {
-        let ph = self.options_pill_h();
-        lerp(ph, self.stats_open_pill_w(i), self.stats.g.get(i).copied().unwrap_or(0.0))
+        lerp(self.stats_slot_w(), self.stats_open_pill_w(i), self.stats.g.get(i).copied().unwrap_or(0.0))
     }
 
-    /// A reading's pill wide open: its symbol's round half, the words after the
-    /// dot, `READING_PAD` after them.
+    /// A reading's slot wide open: its symbol's half, the words after the
+    /// symbol, `READING_PAD` after them.
     fn stats_open_pill_w(&self, i: usize) -> f32 {
         let s = self.options_scale();
-        let ph = self.options_pill_h();
+        let slot = self.stats_slot_w();
         let ink = self.stats.widths.get(i).map_or(0.0, |w| w.0);
         let words = self.stats.hover_w.get(i).copied().unwrap_or(0.0);
         if words <= 0.0 {
-            return ph;
+            return slot;
         }
-        (ph / 2.0 + val_off(ink, s) + words + READING_PAD * s).max(ph)
+        (slot / 2.0 + words_off(ink, s) + words + READING_PAD * s).max(slot)
     }
 
     /// Whether the readout is out far enough to be worth drawing or touching.
@@ -973,7 +980,7 @@ impl App {
     pub(crate) fn measure_stats(&mut self) {
         self.stats_net_ask();
         let readings = self.stats_readings();
-        // The dots, decided here (every snapshot while the readout is out, and
+        // The colours, decided here (every snapshot while the readout is out, and
         // as it comes out): worse at once, better only past the limit.
         let signals: Vec<(PageKind, Option<Signal>)> = readings
             .iter()
@@ -1062,17 +1069,18 @@ impl App {
         self.update_stats_symbol();
     }
 
-    /// The reading whose SYMBOL — its round part — is at `(x, y)`, while the
-    /// row is out and the box shut. Its number, the gaps and the rest are not
-    /// a symbol.
+    /// The reading whose SYMBOL — a pill's height square round it — is at
+    /// `(x, y)`, while the row is out and the box shut. Its words, the air
+    /// between symbols and the rest are not a symbol.
     fn stats_symbol_at(&self, x: f32, y: f32) -> Option<usize> {
         if self.stats.e > 0.01 || self.stats.t < 0.99 {
             return None;
         }
         let ph = self.options_pill_h();
+        let half = self.stats_slot_w() / 2.0;
         self.stats_pills(self.stats_geom())
             .iter()
-            .position(|p| x >= p.x && x < p.x + ph && y >= p.y && y < p.y + ph)
+            .position(|p| (x - (p.x + half)).abs() < ph / 2.0 && y >= p.y && y < p.y + ph)
     }
 
     /// Follow the pointer over the symbols (Max, 2026-11-17: "que la píldora se
@@ -1278,10 +1286,14 @@ impl App {
                 icon: net.signal_pct.map_or(ICON_WIFI_NONE, wifi_glyph),
                 value: rate_text(net.throughput_bps),
                 reserve: RESERVE_RATE,
-                // The network's name (Max, 2026-11-17: "quiero que wifi muestre
-                // el nombre de la red"); its speed until the name is in.
-                hover: match &self.stats.net_facts {
-                    Some((Some(name), _)) if !name.is_empty() => name.clone(),
+                // The network's name and its signal (Max, 2026-11-17: "quiero
+                // que wifi muestre el nombre de la red"; 2026-11-18: "agrega el
+                // porcentaje de signal al wifi"); the signal alone until the name
+                // is in, the speed with neither.
+                hover: match (&self.stats.net_facts, net.signal_pct) {
+                    (Some((Some(name), _)), Some(p)) if !name.is_empty() => format!("{name} · {p}%"),
+                    (Some((Some(name), _)), None) if !name.is_empty() => name.clone(),
+                    (_, Some(p)) => format!("{p}%"),
                     _ => rate_text(net.throughput_bps),
                 },
                 measure: net.signal_pct.map_or(Measure::Is(Signal::Blue), |p| Measure::Scale {
@@ -1475,21 +1487,22 @@ impl App {
         let open_e = self.stats.e.clamp(0.0, 1.0);
         let page = self.stats_page();
         let bright = self.options_bar_is_bright();
-        // The dot's ring: the ground it stands on — the pill's (lit under the
-        // pointer), the box's as it opens.
-        let (box_fill, box_ink) = self.box_surface_at(rect);
-        // Which of the dot's two sets reads on its ground: the bar's, or the
+        // Which of the two colour sets reads on the ground: the bar's, or the
         // box's once it is more than half open (a light box has dark ink).
+        let (_, box_ink) = self.box_surface_at(rect);
         let light_ground = if open_e < 0.5 { bright } else { box_ink[0] < 0.5 };
-        let ring_on = |lit: bool| -> Option<[f32; 4]> {
-            let pill = self.options_pill_ground(if lit { stats_lit_wash(bright) } else { self.options_rest_wash() })?;
-            Some(crate::animation::lerp4(pill, [box_fill[0], box_fill[1], box_fill[2], 1.0], open_e))
-        };
         for (i, r) in readings.iter().enumerate() {
             let (Some(&c), Some(pill)) = (centres.get(i), pills.get(i)) else { break };
             let a = if page == i + 2 { a } else { a * lerp(1.0, 0.6, open_e) };
             let ink_w = self.stats_ink(i, r, s);
             let icon_px = ICON_PX * r.icon.scale * s;
+            // The symbol in how its reading stands; the bar's ink when there
+            // is nothing to say.
+            let signal = self.stats.signals.get(i).and_then(|(k, sig)| (*k == r.kind).then_some(*sig)).flatten();
+            let tint = signal.map_or(ink, |sig| {
+                let c = crate::kit::linear(sig.srgb(light_ground));
+                [c[0], c[1], c[2], ink[3]]
+            });
             scene.labels.push(Label {
                 text: r.icon.glyph.to_owned(),
                 pos: (c, rect.y + (band_h - icon_px * 1.2) / 2.0),
@@ -1503,41 +1516,15 @@ impl App {
                 dim: false,
                 cache: false,
                 family: Some(NERD),
-                color: Some([ink[0], ink[1], ink[2], ink[3] * a]),
+                color: Some([tint[0], tint[1], tint[2], tint[3] * a]),
                 clip: Some(rect),
             });
-            // THE DOT, ringed in what it stands on.
-            let signal = self.stats.signals.get(i).and_then(|(k, sig)| (*k == r.kind).then_some(*sig)).flatten();
-            if let Some(sig) = signal {
-                let (dx, dy) = (c + DOT_OFF * s, rect.y + band_h / 2.0 + DOT_OFF * s);
-                let lit = open_e < 0.01 && self.stats.sym.is_some_and(|(k, _)| k == i);
-                if let Some(ring) = ring_on(lit) {
-                    let rr = (DOT_D / 2.0 + DOT_RING) * s;
-                    scene.rects.push(RectInst {
-                        rect: Rect::new(dx - rr, dy - rr, 2.0 * rr, 2.0 * rr),
-                        radius: rr,
-                        color: [ring[0], ring[1], ring[2], a],
-                        glass: 0.0,
-                        border: 0.0,
-                    });
-                }
-                let dot = crate::kit::linear(sig.srgb(light_ground));
-                let dr = DOT_D / 2.0 * s;
-                scene.rects.push(RectInst {
-                    rect: Rect::new(dx - dr, dy - dr, 2.0 * dr, 2.0 * dr),
-                    radius: dr,
-                    color: [dot[0], dot[1], dot[2], a],
-                    glass: 0.0,
-                    border: 0.0,
-                });
-            }
-            let words_x = c + val_off(ink_w, s);
-            // Open, in its pill: what it says, uncovered as the pill grows.
+            // Open, in its slot: what it says, uncovered as the slot grows.
             let g = self.stats.g.get(i).copied().unwrap_or(0.0);
             if g > 0.001 && open_e < 0.99 && !r.hover.is_empty() {
                 scene.labels.push(Label {
                     text: r.hover.clone(),
-                    pos: (words_x, ty),
+                    pos: (c + words_off(ink_w, s), ty),
                     max_w: self.stats.hover_w.get(i).copied().unwrap_or(0.0) + 1.0,
                     font_px: font,
                     line_px: line,
@@ -1555,7 +1542,7 @@ impl App {
             if !r.value.is_empty() && open_e > 0.001 {
                 scene.labels.push(Label {
                     text: r.value.clone(),
-                    pos: (words_x, ty),
+                    pos: (c + val_off(ink_w, s), ty),
                     max_w: self.stats.widths.get(i).map_or(0.0, |w| w.1) + 1.0,
                     font_px: font,
                     line_px: line,
@@ -1612,12 +1599,12 @@ impl App {
         self.stats.widths.get(i).map_or(ICON_PX * r.icon.scale * r.icon.ink * s, |w| w.0)
     }
 
-    /// Where each reading's SYMBOL is centred now: in its round pill shut, at
-    /// its place in the box's tight band as the box opens.
+    /// Where each reading's SYMBOL is centred now: in its slot's first pitch
+    /// shut, at its place in the box's tight band as the box opens.
     fn stats_centres(&self, rect: Rect) -> Vec<f32> {
         let s = self.options_scale();
         let e = self.stats.e.clamp(0.0, 1.0);
-        let ph = self.options_pill_h();
+        let half = self.stats_slot_w() / 2.0;
         let readings = self.stats_readings();
         let mut open_x = rect.x + OPEN_PAD * s;
         self.stats_pills(rect)
@@ -1628,7 +1615,7 @@ impl App {
                 let value_w = self.stats.widths.get(i).map_or(0.0, |w| w.1);
                 let open = open_x + ink / 2.0;
                 open_x += band_w(ink, value_w, s) + OPEN_GAP * s;
-                lerp(p.x + ph / 2.0, open, e)
+                lerp(p.x + half, open, e)
             })
             .collect()
     }
@@ -1654,29 +1641,29 @@ impl App {
             .collect()
     }
 
-    /// Where each reading's own pill stands now: fanned out from behind the
-    /// first as the readout slides out (`t`), `READING_GAP` apart once it is out
-    /// — the power pills' way of coming out from behind one another. Round
-    /// shut; the one open is as long as its words, pushing the rest along.
+    /// Where each reading's SLOT of the strip stands now: side by side after
+    /// the strip's air, fanned out from behind the first as the readout slides
+    /// out (`t`). A symbol's pitch shut; the one open is as long as its words,
+    /// pushing the rest along.
     pub(crate) fn stats_pills(&self, rect: Rect) -> Vec<Rect> {
         let band_h = self.options_pill_h();
         let t = self.stats.t.clamp(0.0, 1.0);
         let n = self.stats_readings().len();
         let mut out = Vec::with_capacity(n);
         let mut offset = 0.0;
-        let gap = READING_GAP * self.options_scale();
+        let x0 = rect.x + STRIP_PAD * self.options_scale();
+        let slot = self.stats_slot_w();
         for i in 0..n {
-            let w = if self.stats.widths.is_empty() { band_h } else { self.stats_pill_w(i) };
-            out.push(Rect::new(rect.x + offset * t, rect.y, w, band_h));
-            offset += w + gap;
+            let w = if self.stats.widths.is_empty() { slot } else { self.stats_pill_w(i) };
+            out.push(Rect::new(x0 + offset * t, rect.y, w, band_h));
+            offset += w;
         }
         out
     }
 
-    /// The readout's grounds: each reading's own pill while the box is shut
-    /// (the one under the pointer lifted and washed, as a pill's hover), and
-    /// as the box opens the box's one ground growing in under them while the
-    /// pills give way to it.
+    /// The readout's grounds: the strip while the box is shut (the slot whose
+    /// symbol is under the pointer lighter), and as the box opens the box's one
+    /// ground growing in under them while the strip gives way to it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_stats_grounds(
         &self,
@@ -1689,29 +1676,33 @@ impl App {
         rest_wash: [f32; 4],
     ) {
         let e = self.stats_open_t().clamp(0.0, 1.0);
-        // The pills, while the box is shut — gone a third of the way open.
+        // The strip, while the box is shut — gone a third of the way open.
         let own = (1.0 - e * 3.0).clamp(0.0, 1.0);
         if own > 0.001 {
-            let pills = self.stats_pills(rect);
-            // Lit is the pill whose SYMBOL the pointer is on, at once, lighter
+            let band = Rect::new(rect.x, rect.y, rect.w, self.options_pill_h());
+            let radius = band.h / 2.0;
+            push_neumorph(scene, band, radius, bright, shadow_a * own);
+            scene.rects.push(RectInst {
+                rect: band,
+                radius,
+                color: [rest_wash[0], rest_wash[1], rest_wash[2], rest_wash[3] * a * own],
+                glass: 0.0,
+                border: 0.0,
+            });
+            // Lit is the slot whose SYMBOL the pointer is on, at once, lighter
             // on any ground (Max, 2026-11-17: "un efecto hover en cada hover,
             // la píldora más clara").
-            let lit = self.stats.sym.map(|(i, _)| i);
-            // (The later ones first: each comes out from behind the one
-            // before it.)
-            for (k, p) in pills.iter().enumerate().rev() {
-                let over = e < 0.01 && lit == Some(k);
-                let r = if over { hover_grow(*p) } else { *p };
-                let radius = r.h / 2.0;
-                push_neumorph(scene, r, radius, bright, shadow_a * own);
-                let wash = if over { stats_lit_wash(bright) } else { rest_wash };
-                scene.rects.push(RectInst {
-                    rect: r,
-                    radius,
-                    color: [wash[0], wash[1], wash[2], wash[3] * a * own],
-                    glass: 0.0,
-                    border: 0.0,
-                });
+            if let Some(p) = self.stats.sym.and_then(|(i, _)| self.stats_pills(rect).get(i).copied()) {
+                if e < 0.01 {
+                    let wash = stats_lit_wash(bright);
+                    scene.rects.push(RectInst {
+                        rect: p,
+                        radius: p.h / 2.0,
+                        color: [wash[0], wash[1], wash[2], wash[3] * a * own],
+                        glass: 0.0,
+                        border: 0.0,
+                    });
+                }
             }
         }
         // The box's ground, as it opens: the frosted surface every box wears,
