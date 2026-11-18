@@ -80,13 +80,26 @@ const OPEN_PAD: f32 = 12.0;
 /// 2026-11-17: "separá un poco las pills, están muy juntas, se ve muy cargado
 /// todo"; then "un poco más").
 const READING_GAP: f32 = 10.0;
-/// A slot shut is the pill's height and this much more (the mockup's 28 at a
-/// 23 px pill): the symbols' pitch along the strip.
-const SLOT_AIR: f32 = 5.0;
+/// A slot shut is the pill's height and this much more: the symbols' pitch
+/// along the strip (the mockup's 5; Max, 2026-11-18: "separalos más").
+const SLOT_AIR: f32 = 11.0;
 /// The strip's own air before its first slot and after its last.
 const STRIP_PAD: f32 = 2.0;
 /// An open slot's words begin this far past its symbol's ink.
 const WORDS_GAP: f32 = 6.0;
+/// How much of its state's colour a symbol wears over the ink: PASTEL, nearly
+/// the ink itself (Max, 2026-11-18: "hacé los colores pastel, casi blanco").
+/// On a light ground the ink is dark and the same share would hardly show, so
+/// it takes a little more there.
+const PASTEL: f32 = 0.3;
+const PASTEL_LIGHT: f32 = 0.5;
+
+/// A symbol's colour: the ink with `PASTEL` of its state's colour, both sRGB
+/// (the bar's words are sRGB: `Renderer::labels_linear` is off there).
+fn pastel(ink: [f32; 4], state: [f32; 4], light_ground: bool) -> [f32; 4] {
+    let k = if light_ground { PASTEL_LIGHT } else { PASTEL };
+    [lerp(ink[0], state[0], k), lerp(ink[1], state[1], k), lerp(ink[2], state[2], k), ink[3]]
+}
 /// How long the pointer rests on a symbol before its pill opens (Max's pick).
 const OPEN_AFTER: Duration = Duration::from_millis(300);
 /// Opening and closing tempos, 95 % of the way in 120 ms and in 80 ms (Max's
@@ -546,6 +559,14 @@ mod tests {
                     assert!(a != b);
                 }
             }
+        }
+        // Pastel: on a dark bar's white ink every state stays nearly white.
+        let white = [1.0, 1.0, 1.0, 0.94];
+        for g in [Signal::Blue, Signal::Green, Signal::Yellow, Signal::Red] {
+            let c = pastel(white, g.srgb(false), false);
+            assert!(c[..3].iter().all(|&v| v >= 0.7), "{g:?} {c:?}");
+            assert_eq!(c[3], 0.94, "the ink's alpha");
+            assert!(c != white, "{g:?} still a colour");
         }
     }
 
@@ -1496,13 +1517,10 @@ impl App {
             let a = if page == i + 2 { a } else { a * lerp(1.0, 0.6, open_e) };
             let ink_w = self.stats_ink(i, r, s);
             let icon_px = ICON_PX * r.icon.scale * s;
-            // The symbol in how its reading stands; the bar's ink when there
-            // is nothing to say.
+            // The symbol in how its reading stands, pastel; the bar's ink
+            // when there is nothing to say.
             let signal = self.stats.signals.get(i).and_then(|(k, sig)| (*k == r.kind).then_some(*sig)).flatten();
-            let tint = signal.map_or(ink, |sig| {
-                let c = crate::kit::linear(sig.srgb(light_ground));
-                [c[0], c[1], c[2], ink[3]]
-            });
+            let tint = signal.map_or(ink, |sig| pastel(ink, sig.srgb(light_ground), light_ground));
             scene.labels.push(Label {
                 text: r.icon.glyph.to_owned(),
                 pos: (c, rect.y + (band_h - icon_px * 1.2) / 2.0),
