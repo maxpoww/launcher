@@ -2857,6 +2857,15 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // come here as they are made (Max, 2026-10-14).
         "Tiles" => {
             view.subtitle = tr("How windows sit, stick and line up.").to_owned();
+            // THE SPACE BETWEEN WINDOWS (F4.16, 2026-11-18). (The corner
+            // stays the system's: the card's frame and the title bars are
+            // drawn with the same curve.)
+            let way = GolemSettings::load().window_gaps.unwrap_or_else(|| "small".to_owned());
+            let ways = [("None", "none"), ("Small", "small"), ("Large", "large")]
+                .iter()
+                .map(|(word, value)| choice(tr(word), way == *value, *value))
+                .collect();
+            view.groups.push(Group { labelled: true, ..group(Some("Space between windows"), "tiles-gaps", 0.0, ways) });
         }
         // THE DOCK AND ITS BOX (Max, 2026-10-20; `launcher_prefs.rs`): the
         // dock's own choices, made on the UI thread (`launcher-*`).
@@ -3177,6 +3186,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         "natural" => {
             GolemSettings::change(|s| s.set_natural_scroll(on));
         }
+        "tiles-gaps" => GolemSettings::change(|s| s.set_gaps(value)),
         "update" => {
             // (A system that has the "now" unit skips the machine's wave;
             // an older one runs the nightly service, which waits its turn.)

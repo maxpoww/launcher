@@ -2458,5 +2458,8 @@
  "Silent": "Senza audio",
  "With sound": "Con audio",
  "No reading": "Nessuna lettura",
- "Disconnected": "Disconnesso"
+ "Disconnected": "Disconnesso",
+ "None": "Nessuno",
+ "Small": "Piccolo",
+ "Space between windows": "Spazio tra le finestre"
 }

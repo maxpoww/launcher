@@ -501,6 +501,10 @@ pub(crate) struct GolemSettings {
     /// apps (dconf) and the shell's own zooms share.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_size: Option<u32>,
+    /// The space between tiled windows (Controls → Tiles): `none` or
+    /// `large`; absent = Golem's own (`small`, hyprland.lua's values).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_gaps: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magnifier: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -558,6 +562,25 @@ pub(crate) struct GolemSettings {
     pub screenshots: crate::shots_page::ShotChoice,
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
+}
+
+/// The gaps a way of spacing windows gives, as the compositor's config:
+/// between windows, then round the screen's edge (top, right, bottom, left).
+/// `small` is Golem's own (hyprland.lua): 5 between, 10 at the edges and 3
+/// under the bar, which already stands apart.
+pub(crate) fn gaps_of(way: &str) -> (u32, [u32; 4]) {
+    match way {
+        "none" => (0, [0, 0, 0, 0]),
+        "large" => (12, [6, 20, 20, 20]),
+        _ => (5, [3, 10, 10, 10]),
+    }
+}
+
+fn gaps_line(way: &str) -> String {
+    let (inner, [top, right, bottom, left]) = gaps_of(way);
+    format!(
+        "hl.config({{ [\"general.gaps_in\"] = {inner}, [\"general.gaps_out\"] = {{ top = {top}, right = {right}, bottom = {bottom}, left = {left} }} }})"
+    )
 }
 
 /// A file in Golem's own config directory (`$XDG_CONFIG_HOME/golem/`).
@@ -631,7 +654,7 @@ impl GolemSettings {
         }
         out.push_str(&self.colours_lua());
         out.push('\n');
-        for line in self.input_lua().into_iter().chain(self.start_lua()) {
+        for line in self.input_lua().into_iter().chain(self.gaps_lua()).chain(self.start_lua()) {
             out.push_str(&line);
             out.push('\n');
         }
@@ -739,6 +762,30 @@ impl GolemSettings {
     /// THE COMPOSITOR STARTS (its own `hyprland.start` handlers run first,
     /// so these win): the pointer's size, the lock screen asked for at
     /// start. Not evaluated live (a start handler fires once).
+    /// THE SPACE BETWEEN WINDOWS (F4.16, 2026-11-18): the chosen one as the
+    /// compositor's gaps. Nothing when it is Golem's own (`small`): the
+    /// system's values stand.
+    fn gaps_lua(&self) -> Vec<String> {
+        match self.window_gaps.as_deref() {
+            Some(way @ ("none" | "large")) => vec![gaps_line(way)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Choose the space between windows (`none` | `small` | `large`): saved,
+    /// and on the compositor at once. Golem's own (`small`) is not written.
+    pub(crate) fn set_gaps(&mut self, way: &str) {
+        if !matches!(way, "none" | "small" | "large") {
+            return;
+        }
+        self.window_gaps = (way != "small").then(|| way.to_owned());
+        self.save();
+        let line = gaps_line(way);
+        if !hypr::eval_ok(&line) {
+            warn!("golem settings: the compositor refused {line}");
+        }
+    }
+
     fn start_lua(&self) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(size) = self.cursor_size.filter(|s| (16..=96).contains(s)) {
@@ -1745,6 +1792,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_space_between_windows_is_written_only_when_it_is_not_golems_own() {
+        let mut s = GolemSettings::default();
+        assert!(s.gaps_lua().is_empty(), "Golem's own: the system's values stand");
+        assert_eq!(gaps_of("small"), (5, [3, 10, 10, 10]), "as hyprland.lua has it");
+        s.window_gaps = Some("large".into());
+        let lines = s.gaps_lua();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("[\"general.gaps_in\"] = 12") && lines[0].contains("top = 6, right = 20"));
+        assert!(s.lua().contains("general.gaps_out"), "kept for the next start");
+        s.window_gaps = Some("none".into());
+        assert!(s.gaps_lua()[0].contains("gaps_in\"] = 0"));
+        s.window_gaps = Some("bogus".into());
+        assert!(s.gaps_lua().is_empty(), "an unknown way is left out");
+        assert!(!serde_json::to_string(&GolemSettings::default()).unwrap().contains("window_gaps"));
+    }
 
     #[test]
     fn two_screens_that_say_they_are_the_same_are_known_by_their_connectors() {
