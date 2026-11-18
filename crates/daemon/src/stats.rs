@@ -90,11 +90,11 @@ const STRIP_PAD: f32 = 2.0;
 const WORDS_GAP: f32 = 6.0;
 /// How much of its state's colour a symbol wears over the ink: PASTEL, nearly
 /// the ink itself (Max, 2026-11-18: "hacé los colores pastel, casi blanco",
-/// then "más blanco", then "subile un poco a el color").
+/// then "más blanco", then "subile un poco a el color" twice).
 /// On a light ground the ink is dark and the same share would hardly show, so
 /// it takes a little more there.
-const PASTEL: f32 = 0.25;
-const PASTEL_LIGHT: f32 = 0.42;
+const PASTEL: f32 = 0.28;
+const PASTEL_LIGHT: f32 = 0.46;
 
 /// A symbol's colour: the ink with `PASTEL` of its state's colour, both sRGB
 /// (the bar's words are sRGB: `Renderer::labels_linear` is off there).
