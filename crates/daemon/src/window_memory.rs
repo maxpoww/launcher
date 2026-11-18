@@ -46,6 +46,15 @@ use crate::{hypr, App};
 /// A window smaller than this is a dialog or a popup, not the app's window.
 const MIN_W: f64 = 240.0;
 const MIN_H: f64 = 160.0;
+/// How much of a window must be on its own screen for where it stands to be
+/// a place (a share of its area). Off its screen it was never PUT there: the
+/// overview's plugin parks a window it carries at -20000,-20000, and a
+/// drag-end reported meanwhile (a key Hyprland handled ended that drag behind
+/// the plugin's back) was remembered as the app's place (2026-11-18).
+const ON_SCREEN: f64 = 0.25;
+/// Past this (logical px, either way) a remembered place is nobody's: read
+/// from a file written before the guard, it is dropped.
+const FAR: f64 = 10_000.0;
 /// The cascade step: how far down-right a window opens from a corner that is
 /// taken (logical px), and how near a corner counts as taken.
 const CASCADE: f64 = 30.0;
@@ -97,14 +106,49 @@ pub(crate) struct WindowMemory {
     ticking: bool,
 }
 
+/// Whether a window at `place` (relative to its screen's top-left) stands on
+/// that screen enough for it to be a place: at least `ON_SCREEN` of it inside
+/// the screen. With the screen's size unknown, only a place nowhere near any
+/// screen is refused.
+fn on_its_screen(place: Place, screen: Option<(f64, f64)>) -> bool {
+    if !(place.x.is_finite() && place.y.is_finite() && place.w > 0.0 && place.h > 0.0) {
+        return false;
+    }
+    let Some((sw, sh)) = screen else {
+        return place.x.abs() < FAR && place.y.abs() < FAR;
+    };
+    let across = (place.x + place.w).min(sw) - place.x.max(0.0);
+    let down = (place.y + place.h).min(sh) - place.y.max(0.0);
+    across > 0.0 && down > 0.0 && across * down >= ON_SCREEN * place.w * place.h
+}
+
+/// Whether a remembered place can be one at all (a file from before the
+/// guard may hold a parked window's).
+fn sane(place: &Place) -> bool {
+    on_its_screen(*place, None)
+}
+
 impl WindowMemory {
     pub(crate) fn load() -> Self {
         let path = crate::persist::data_path("window-places.json");
-        Self {
-            places: crate::persist::read_json(&path).unwrap_or_default(),
+        let mut places: HashMap<String, Place> = crate::persist::read_json(&path).unwrap_or_default();
+        let before = places.len();
+        places.retain(|class, place| {
+            let keep = sane(place);
+            if !keep {
+                info!("window memory: {class}'s place {place:?} is off every screen — forgotten");
+            }
+            keep
+        });
+        let me = Self {
+            places,
             path: Some(path),
             ..Self::default()
+        };
+        if me.places.len() != before {
+            me.save();
         }
+        me
     }
 
     fn save(&self) {
@@ -121,6 +165,10 @@ impl WindowMemory {
     /// `place` is `class`'s place from now on, if that is news.
     fn adopt(&mut self, class: &str, place: Place, how: &str) {
         if self.places.get(class) == Some(&place) {
+            return;
+        }
+        if !sane(&place) {
+            info!("window memory: {class} not remembered at {place:?} ({how}): off every screen");
             return;
         }
         debug!("window memory: {class} remembered at {place:?} ({how})");
@@ -250,16 +298,20 @@ impl App {
             // where it was before it was parked — or, out again and closed
             // before the next look, still that, never the column's spot (a
             // window let out and closed at once was remembered parked).
+            // (On its OWN screen: a window on the second one is kept
+            // where it is there, not against the focused one.)
+            let here = Place { x: c.x - c.screen.0, y: c.y - c.screen.1, w: c.w, h: c.h };
+            // …and only where it is mostly ON that screen: a window the
+            // overview carries is parked far off it (`on_its_screen`); what
+            // is kept for it is where it stood before.
             let fit_to_keep = on_desk
                 && !c.fullscreen
                 && !c.staged
                 && c.w >= MIN_W
                 && c.h >= MIN_H
-                && !self.side.in_column(&c.address);
+                && !self.side.in_column(&c.address)
+                && on_its_screen(here, c.screen_size);
             let prev = self.window_memory.seen.remove(&c.address);
-            // (On its OWN screen: a window on the second one is kept
-            // where it is there, not against the focused one.)
-            let here = Place { x: c.x - c.screen.0, y: c.y - c.screen.1, w: c.w, h: c.h };
             let place = if fit_to_keep { Some(here) } else { prev.and_then(|p| p.place) };
             open.insert(
                 c.address,
@@ -452,6 +504,37 @@ mod tests {
         // A window that fills the width can only walk down.
         let wide = Place { x: 0.0, y: 28.0, w: 2000.0, h: 600.0 };
         assert_eq!(fit(wide, &[(0.0, 28.0)], &mon()), (0.0, 58.0, 2000.0, 600.0));
+    }
+
+    #[test]
+    fn a_window_off_its_screen_is_no_place() {
+        let screen = Some((2000.0, 1250.0));
+        let at = |x: f64, y: f64| Place { x, y, w: 800.0, h: 500.0 };
+        // where windows are put
+        assert!(on_its_screen(at(300.0, 200.0), screen));
+        assert!(on_its_screen(at(1700.0, 900.0), screen)); // a corner hanging off: ~ a quarter in
+        // the overview's park, and windows nearly gone off an edge
+        assert!(!on_its_screen(at(-20000.0, -20000.0), screen));
+        assert!(!on_its_screen(at(1900.0, 200.0), screen));
+        assert!(!on_its_screen(at(-750.0, 200.0), screen));
+        assert!(!on_its_screen(at(300.0, 1240.0), screen));
+        // nonsense
+        assert!(!on_its_screen(Place { x: f64::NAN, y: 0.0, w: 800.0, h: 500.0 }, screen));
+        assert!(!on_its_screen(Place { x: 0.0, y: 0.0, w: 0.0, h: 500.0 }, screen));
+        // its screen unknown: only the far-off is refused
+        assert!(on_its_screen(at(1900.0, 200.0), None));
+        assert!(!on_its_screen(at(-20000.0, -20000.0), None));
+    }
+
+    #[test]
+    fn a_parked_place_is_never_adopted() {
+        let mut memory = WindowMemory::default();
+        memory.adopt("foot", Place { x: -20000.0, y: -20000.0, w: 800.0, h: 500.0 }, "placed");
+        assert_eq!(memory.place_of("foot"), None);
+        let good = Place { x: 300.0, y: 200.0, w: 800.0, h: 500.0 };
+        memory.adopt("foot", good, "placed");
+        memory.adopt("foot", Place { x: -20000.0, y: -20000.0, w: 800.0, h: 500.0 }, "placed");
+        assert_eq!(memory.place_of("foot"), Some(good));
     }
 
     #[test]

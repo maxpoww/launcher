@@ -1046,6 +1046,8 @@ pub struct ClientGeometry {
     pub focus_rank: i64,
     /// The top-left corner of the screen it is on (global logical px).
     pub screen: (f64, f64),
+    /// That screen's size (logical px), when Hyprland told which it is.
+    pub screen_size: Option<(f64, f64)>,
     /// An X11 client's window, through XWayland.
     pub xwayland: bool,
 }
@@ -1061,7 +1063,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
             .as_ref()
             .and_then(|m| m.as_array())
             .and_then(|m| m.iter().find(|m| m["id"].as_i64() == id))
-            .map_or((0.0, 0.0), |m| (m["x"].as_f64().unwrap_or(0.0), m["y"].as_f64().unwrap_or(0.0)))
+            .map(parse_monitor)
     };
     let pair = |v: &serde_json::Value| {
         let a = v.as_array();
@@ -1083,6 +1085,7 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
             let (x, y) = pair(&c["at"]);
             let (w, h) = pair(&c["size"]);
             let workspace = c["workspace"]["id"].as_i64().unwrap_or(1);
+            let mon = screen_of(c["monitor"].as_i64());
             Some(ClientGeometry {
                 address: c["address"].as_str()?.to_owned(),
                 class,
@@ -1096,7 +1099,8 @@ pub fn client_geometries() -> Vec<ClientGeometry> {
                 special: workspace < 0,
                 workspace,
                 focus_rank: c["focusHistoryID"].as_i64().unwrap_or(i64::MAX),
-                screen: screen_of(c["monitor"].as_i64()),
+                screen: mon.as_ref().map_or((0.0, 0.0), |m| (m.x, m.y)),
+                screen_size: mon.as_ref().map(|m| (m.w, m.h)),
                 xwayland: c["xwayland"].as_bool().unwrap_or(false),
                 staged: c["tags"]
                     .as_array()
