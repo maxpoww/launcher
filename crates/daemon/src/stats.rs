@@ -81,18 +81,20 @@ const OPEN_PAD: f32 = 12.0;
 /// todo"; then "un poco más").
 const READING_GAP: f32 = 10.0;
 /// A slot shut is the pill's height and this much more: the symbols' pitch
-/// along the strip (the mockup's 5; Max, 2026-11-18: "separalos más").
-const SLOT_AIR: f32 = 11.0;
+/// along the strip (the mockup's 5; Max, 2026-11-18: "separalos más", then
+/// "un poco más separado").
+const SLOT_AIR: f32 = 15.0;
 /// The strip's own air before its first slot and after its last.
 const STRIP_PAD: f32 = 2.0;
 /// An open slot's words begin this far past its symbol's ink.
 const WORDS_GAP: f32 = 6.0;
 /// How much of its state's colour a symbol wears over the ink: PASTEL, nearly
-/// the ink itself (Max, 2026-11-18: "hacé los colores pastel, casi blanco").
+/// the ink itself (Max, 2026-11-18: "hacé los colores pastel, casi blanco",
+/// then "más blanco").
 /// On a light ground the ink is dark and the same share would hardly show, so
 /// it takes a little more there.
-const PASTEL: f32 = 0.3;
-const PASTEL_LIGHT: f32 = 0.5;
+const PASTEL: f32 = 0.2;
+const PASTEL_LIGHT: f32 = 0.35;
 
 /// A symbol's colour: the ink with `PASTEL` of its state's colour, both sRGB
 /// (the bar's words are sRGB: `Renderer::labels_linear` is off there).
@@ -564,7 +566,7 @@ mod tests {
         let white = [1.0, 1.0, 1.0, 0.94];
         for g in [Signal::Blue, Signal::Green, Signal::Yellow, Signal::Red] {
             let c = pastel(white, g.srgb(false), false);
-            assert!(c[..3].iter().all(|&v| v >= 0.7), "{g:?} {c:?}");
+            assert!(c[..3].iter().all(|&v| v >= 0.8), "{g:?} {c:?}");
             assert_eq!(c[3], 0.94, "the ink's alpha");
             assert!(c != white, "{g:?} still a colour");
         }

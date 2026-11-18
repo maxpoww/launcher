@@ -490,7 +490,7 @@ The big daemon files are cohesive but long — go straight to the function:
 - `stats.rs` — THE GEAR'S READINGS (Max, 2026-11-17/18; mockup https://claude.ai/artifact/WcfLMZ9odYsXr8Pkfk6Sgn, "C"):
   the readings fan out of the gear as ONE STRIP, `READING_GAP` after it, a SLOT a reading (`stats_pills`, the pitch
   `stats_slot_w` = the pill's height + `SLOT_AIR`, `STRIP_PAD` at its ends), the symbol alone, TINTED PASTEL in how its
-  reading stands (`pastel`: the ink with `PASTEL` 0.3 of the state's colour, 0.5 on a light ground; sRGB, the bar's words are; `Signal`: blue connected/plugged, green on and fine, yellow worth a look, red off or at the limit —
+  reading stands (`pastel`: the ink with `PASTEL` 0.2 of the state's colour, 0.35 on a light ground; sRGB, the bar's words are; `Signal`: blue connected/plugged, green on and fine, yellow worth a look, red off or at the limit —
   fixed "pure traffic light" colours, a dark and a light set; `Measure` + `decide`: worse at once, better only
   `SETTLE_POINTS` past the limit; limits in `stats_readings`). The pointer on a SYMBOL (a pill's height square round
   it, `stats_symbol_at`) lights its slot (`stats_lit_wash`, lighter on any ground); resting there `OPEN_AFTER` (0.3 s)
