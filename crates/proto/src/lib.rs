@@ -259,6 +259,9 @@ pub enum Command {
     /// Super+H: the quick controls — fast launch for the control panel's
     /// settings; Enter opens the one in front in a box mid-screen.
     FastControls,
+    /// From the waveview plugin, as its title bars start: tell it the
+    /// owner's choice of bars (Controls → Tiles, `title_bars.rs`).
+    TitleBars,
     /// The power key's short press (Golem binds it to this): the pills by the
     /// banner's gear — hibernate, and sleep and restart behind it — come, or go.
     /// `open`, `shut`, `away`, `state` show them without a pointer.
@@ -340,6 +343,7 @@ impl fmt::Display for Command {
             Command::WindowPlaced(a) => write!(f, "window-placed {a}"),
             Command::FastLaunch => f.write_str("fast-launch"),
             Command::FastControls => f.write_str("fast-controls"),
+            Command::TitleBars => f.write_str("title-bars"),
             Command::Power(w) if w.is_empty() => f.write_str("power"),
             Command::Power(w) => write!(f, "power {w}"),
             Command::Record(w) if w.is_empty() => f.write_str("record"),
@@ -443,6 +447,7 @@ impl FromStr for Command {
             "control-panel" | "settings" => Ok(Command::ControlPanel),
             "fast-launch" => Ok(Command::FastLaunch),
             "fast-controls" => Ok(Command::FastControls),
+            "title-bars" => Ok(Command::TitleBars),
             "overview-on" => Ok(Command::OverviewOn),
             "overview-off" => Ok(Command::OverviewOff),
             "resize-drag-on" => Ok(Command::ResizeDragOn),
@@ -526,6 +531,7 @@ pub const USAGE_VERBS: &[&str] = &[
     "min-del <addr>",
     "window-placed <addr>",
     "fast-launch",
+    "title-bars",
 ];
 
 /// A response sent from the daemon back to the client.
@@ -647,6 +653,7 @@ mod tests {
                 | Command::WindowPlaced(_)
                 | Command::FastLaunch
                 | Command::FastControls
+                | Command::TitleBars
                 | Command::Power(_)
                 | Command::Record(_)
                 | Command::Capture(_)
@@ -715,6 +722,7 @@ mod tests {
             Command::MinDel("0x5c351e2e7660".into()),
             Command::WindowPlaced("0x5c351e2e7660".into()),
             Command::FastLaunch,
+            Command::TitleBars,
             Command::Power(String::new()),
             Command::Record(String::new()),
             Command::Record("stop".into()),

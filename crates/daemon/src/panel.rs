@@ -68,7 +68,7 @@ const SETTINGS: [Item; 41] = [
     // How the windows sit: where they open, how they stick, the side column…
     // (Max, 2026-10-14: "a control called Tiles… we will start dumping
     // controls in there").
-    ("Tiles", 0, "windows tiling tile floating snap magnets magnetism layout arrange side column"),
+    ("Tiles", 0, "windows tiling tile floating snap magnets magnetism layout arrange side column title bars buttons close minimize maximize"),
     // The dock and its box (Max, 2026-10-20: "we will call it Launcher").
     ("Launcher", 0, "dock launcher apps box hide hidden stay away position left right bottom side monitors screens displays animated icons motion arrange sort order"),
     // The screen and the sound.
@@ -2735,7 +2735,10 @@ impl Panel {
         let gap = SLIDER_COL_GAP * s;
         let room = fw - 4.0 * MARGIN * s;
         let n = sliders.len().max(1);
-        let cols = n.max(3);
+        // (A slider ALONE in its row takes half the room, not a third: Tiles'
+        // "Space between windows" ran into its "5 px" — rig, 2026-11-18. The
+        // Colours rows, two or three, stand as they were.)
+        let cols = if n == 1 { 2 } else { n.max(3) };
         let col_w = (room - (cols - 1) as f32 * gap) / cols as f32;
         let x0 = (fw - (n as f32 * col_w + (n - 1) as f32 * gap)) / 2.0;
         for (k, (group, g, beside)) in sliders.iter().enumerate() {

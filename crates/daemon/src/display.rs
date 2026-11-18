@@ -509,6 +509,11 @@ pub(crate) struct GolemSettings {
     /// [`crate::corners`]); as made = all of them, not written.
     #[serde(default, skip_serializing_if = "crate::corners::Corners::is_default")]
     pub corners: crate::corners::Corners,
+    /// Which windows wear a title bar, the side its buttons are on and
+    /// their colours (Controls → Tiles, [`crate::title_bars`]); as made =
+    /// the floating windows, at the left, in colour — not written.
+    #[serde(default, skip_serializing_if = "crate::title_bars::TitleBars::is_default")]
+    pub title_bars: crate::title_bars::TitleBars,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magnifier: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

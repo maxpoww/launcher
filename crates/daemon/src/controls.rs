@@ -2871,6 +2871,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 mark: Some(crate::display::GOLEM_GAP as f32 / crate::display::GAP_MAX as f32),
                 ..slider("tiles-gap", (gap * 100 / crate::display::GAP_MAX) as u8)
             });
+            // THE TITLE BARS (Max, 2026-11-18): which windows wear one, the
+            // side of their buttons and their colours (`title_bars.rs`).
+            crate::title_bars::view(&mut view);
         }
         // THE DOCK AND ITS BOX (Max, 2026-10-20; `launcher_prefs.rs`): the
         // dock's own choices, made on the UI thread (`launcher-*`).
@@ -3333,6 +3336,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             }
         }
         k if k.starts_with("printers-") => crate::printers_page::apply(k, value),
+        k if crate::title_bars::is_key(k) => crate::title_bars::pick(k, value),
         k if k.starts_with("shots-") => {
             crate::shots_page::apply(k, value);
         }

@@ -777,6 +777,16 @@ The big daemon files are cohesive but long — go straight to the function:
   `corners_apply`: every surface drawn again). Rig: `display show roundedcorners`, `display pick <g> <n>` (0 all, 1
   the line, 2… the parts in order; a switch's 0 is on). THE SPACE BETWEEN WINDOWS is Tiles' slider (`window_gap` px,
   0–20, Golem's own 5 not written; `display::gaps_of`: the edges twice it, under the bar 3/5 of it).
+- `title_bars.rs` — Controls → Tiles' TITLE BARS (Max, 2026-11-18: "barra de titulo = dos togles: on/off en flotante
+  y en auto arrange (tiling) | botones: izquierda/derecha … colores (semáforo) = on/off"): `title_bars` in
+  `settings.json` (`TitleBars { floating, tiled, right, colors }`, as made = floats only, left, colour — not written).
+  The bars are waveview's (`src/hyprbars/`): told with `hl.plugin.waveview.bars(floating, tiled, right, colors)` at a
+  pick (`apply`, keys `tiles-bars-*`), at start (if not as made) and when the plugin asks — `title-bars` on the socket,
+  sent as its bars start, so a plugin loaded after the dock (or reloaded) wears the choice. An older plugin refuses the
+  call and keeps its bars as made. Right = the plugin's mirror image (– □ × at the right, pin + card at the left); grey
+  = the discs in the bar's ink. On a tile the green disc floats the window; a tile's bar has no pin (floats only).
+  Rig: `display show tiles`, `display pick <g> <n>` (0 the gap slider, 1 the line, 2 floating, 3 tiled, 4 the side,
+  5 colours; the last two only while a bar is on).
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

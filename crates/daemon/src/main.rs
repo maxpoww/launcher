@@ -46,6 +46,7 @@ mod printers_page;
 mod shortcuts_page;
 mod shots_page;
 mod corners;
+mod title_bars;
 mod input_page;
 mod access_page;
 mod idle_page;
@@ -1537,6 +1538,7 @@ fn main() -> anyhow::Result<()> {
     controls::reassert();
     // Controls → Rounded corners: which surfaces are drawn square.
     app.corners_apply();
+    crate::title_bars::assert_at_start();
     // (Two screens plugged in that say they are the same: each by its own
     // connector.)
     app.monitors_part_twins();
@@ -3844,6 +3846,12 @@ impl App {
             }
             Command::FastControls => {
                 self.toggle_fast_controls();
+                return;
+            }
+            // The plugin's title bars just started (a load, a reload):
+            // they wear the owner's choice from now on.
+            Command::TitleBars => {
+                crate::title_bars::tell();
                 return;
             }
             Command::WindowPlaced(addr) => {
