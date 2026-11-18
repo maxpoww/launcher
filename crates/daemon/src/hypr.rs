@@ -2368,9 +2368,11 @@ const SMART_GAP_SELECTORS: [&str; 2] = ["w[tv1]", "f[1]"];
 /// rule's `dim_around = true` ever engages it — nothing else in the config
 /// does — so setting it without restoring is safe.
 pub fn assert_stage_frame() {
+    // (Square while Controls → Rounded corners makes the windows square.)
+    let rounding = crate::corners::stage_rounding();
     eval(&format!(
         "hl.window_rule({{ name = \"golem-stage-frame\", match = {{ tag = \"golem-stage\" }}, \
-         border_size = 0, rounding = 12, no_shadow = false, dim_around = true }}) \
+         border_size = 0, rounding = {rounding}, no_shadow = false, dim_around = true }}) \
          hl.config({{ [\"decoration.dim_around\"] = {STAGE_DIM} }})"
     ));
 }

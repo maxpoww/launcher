@@ -2345,6 +2345,7 @@ impl App {
             };
             match built {
                 Ok(mut renderer) => {
+                    renderer.set_part(crate::corners::Part::Options);
                     // The bar's one icon array, grown as pictures are placed
                     // (`options_icons`).
                     renderer.alloc_icon_array_upto(crate::options_icons::OPTIONS_ICON_CAP as u32);

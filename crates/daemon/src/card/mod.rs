@@ -1932,6 +1932,7 @@ impl App {
         };
         match built {
             Ok(mut renderer) => {
+                renderer.set_part(crate::corners::Part::Options);
                 renderer.alloc_icon_array(PIC_LAYERS);
                 for (path, &layer) in &self.card.slots {
                     if let Some(chain) = self.card.chains.get(path) {

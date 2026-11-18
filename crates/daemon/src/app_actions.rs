@@ -105,6 +105,8 @@ const PACKAGE: &str = r#"<path d="M8 1.9l5.6 2.9v6.4L8 14.1l-5.6-2.9V4.8z"/><pat
 // several of them the menu's own strokes by name. Drawn on the panel's
 // tiles in the card's ink (`panel.rs`, `PanelDraw::symbols`).
 const CTL_MONITOR: &str = r#"<rect x="1.8" y="3" width="12.4" height="8.2" rx="1.3"/><path d="M5.8 13.6h4.4M8 11.2v2.4"/>"#;
+// Rounded corners (2026-11-18): a frame square at one corner, round at the other.
+const CTL_CORNERS: &str = r#"<path d="M2.4 13.6V2.4h5.4a5.8 5.8 0 0 1 5.8 5.8v5.4"/>"#;
 const CTL_SCALE: &str = r#"<path d="M2.2 9.8v4h4M13.8 6.2v-4h-4M2.2 13.8l4.4-4.4M13.8 2.2 9.4 6.6"/>"#;
 const CTL_WIFI: &str = r##"<path d="M1.8 6.3a9.3 9.3 0 0 1 12.4 0M4.1 8.7a5.9 5.9 0 0 1 7.8 0M6.3 11.1a2.6 2.6 0 0 1 3.4 0"/><circle cx="8" cy="13.3" r=".7" fill="#fff" stroke="none"/>"##;
 const CTL_SOUND: &str = r#"<path d="M2.4 6.2v3.6h2.6l3.4 3V3.2L5 6.2z"/><path d="M11 6.2a2.6 2.6 0 0 1 0 3.6"/>"#;
@@ -185,6 +187,7 @@ const SYMBOLS: &[(&str, Symbol)] = &[
     ("ctl-wallpaper", Symbol::Glyph("pic")),
     ("ctl-night", Symbol::Lines(CTL_NIGHT)),
     ("ctl-tiles", Symbol::Glyph("grid")),
+    ("ctl-corners", Symbol::Lines(CTL_CORNERS)),
     ("ctl-launcher", Symbol::Lines(CTL_LAUNCHER)),
     ("ctl-monitors", Symbol::Lines(CTL_MONITORS)),
     ("ctl-printers", Symbol::Glyph("print")),

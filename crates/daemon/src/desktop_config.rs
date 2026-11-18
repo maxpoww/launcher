@@ -427,7 +427,7 @@ impl Config {
         let ink = [paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * t];
         let built = self.build(ink, [paint.wash[0], paint.wash[1], paint.wash[2], paint.wash[3] * t]);
         let panel = Rect::new(self.rect.x, self.rect.y + (1.0 - t) * -4.0, self.rect.w, self.rect.h);
-        let mut grid = GridContent { clip: panel, ..Default::default() };
+        let mut grid = GridContent { clip: panel, part: Some(crate::corners::Part::Menus), ..Default::default() };
         grid.rects.push(RectInst {
             rect: panel,
             radius: paint.radius,

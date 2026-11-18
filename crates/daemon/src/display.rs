@@ -501,10 +501,14 @@ pub(crate) struct GolemSettings {
     /// apps (dconf) and the shell's own zooms share.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_size: Option<u32>,
-    /// The space between tiled windows (Controls → Tiles): `none` or
-    /// `large`; absent = Golem's own (`small`, hyprland.lua's values).
+    /// The space between tiled windows, in px (Controls → Tiles, a
+    /// slider); absent = Golem's own ([`GOLEM_GAP`], hyprland.lua's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window_gaps: Option<String>,
+    pub window_gap: Option<u32>,
+    /// Which parts of Golem have round corners (Controls → Rounded corners,
+    /// [`crate::corners`]); as made = all of them, not written.
+    #[serde(default, skip_serializing_if = "crate::corners::Corners::is_default")]
+    pub corners: crate::corners::Corners,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magnifier: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -564,20 +568,25 @@ pub(crate) struct GolemSettings {
     pub other: BTreeMap<String, serde_json::Value>,
 }
 
-/// The gaps a way of spacing windows gives, as the compositor's config:
-/// between windows, then round the screen's edge (top, right, bottom, left).
-/// `small` is Golem's own (hyprland.lua): 5 between, 10 at the edges and 3
-/// under the bar, which already stands apart.
-pub(crate) fn gaps_of(way: &str) -> (u32, [u32; 4]) {
-    match way {
-        "none" => (0, [0, 0, 0, 0]),
-        "large" => (12, [6, 20, 20, 20]),
-        _ => (5, [3, 10, 10, 10]),
-    }
+/// Golem's own space between windows (hyprland.lua: 5 between, 10 at the
+/// edges, 3 under the bar).
+pub(crate) const GOLEM_GAP: u32 = 5;
+/// The most the slider gives (Controls → Tiles: 0 to 20 px, one a stop).
+pub(crate) const GAP_MAX: u32 = 20;
+
+/// The gaps a space between windows gives, as the compositor's config:
+/// between windows, then round the screen's edge (top, right, bottom,
+/// left) — twice as much at the sides and the bottom, a little more than
+/// half under the bar, which already stands apart. At Golem's own 5 that
+/// is hyprland.lua's 5 / 3, 10, 10, 10.
+pub(crate) fn gaps_of(gap: u32) -> (u32, [u32; 4]) {
+    let gap = gap.min(GAP_MAX);
+    let edge = gap * 2;
+    (gap, [(gap * 3).div_ceil(5), edge, edge, edge])
 }
 
-fn gaps_line(way: &str) -> String {
-    let (inner, [top, right, bottom, left]) = gaps_of(way);
+fn gaps_line(gap: u32) -> String {
+    let (inner, [top, right, bottom, left]) = gaps_of(gap);
     format!(
         "hl.config({{ [\"general.gaps_in\"] = {inner}, [\"general.gaps_out\"] = {{ top = {top}, right = {right}, bottom = {bottom}, left = {left} }} }})"
     )
@@ -758,34 +767,42 @@ impl GolemSettings {
         lines
     }
 
-    /// What `settings.lua` holds beyond the config calls: things done AS
-    /// THE COMPOSITOR STARTS (its own `hyprland.start` handlers run first,
-    /// so these win): the pointer's size, the lock screen asked for at
-    /// start. Not evaluated live (a start handler fires once).
-    /// THE SPACE BETWEEN WINDOWS (F4.16, 2026-11-18): the chosen one as the
-    /// compositor's gaps. Nothing when it is Golem's own (`small`): the
-    /// system's values stand.
+    /// THE SPACE BETWEEN WINDOWS (F4.16, 2026-11-18; a slider since Max's
+    /// "quiero espacio entre ventanas con un slider"): the chosen one as the
+    /// compositor's gaps, and the square windows' rule (Controls → Rounded
+    /// corners). Nothing for Golem's own: the system's values stand.
     fn gaps_lua(&self) -> Vec<String> {
-        match self.window_gaps.as_deref() {
-            Some(way @ ("none" | "large")) => vec![gaps_line(way)],
-            _ => Vec::new(),
+        let mut lines = Vec::new();
+        if let Some(gap) = self.window_gap.filter(|g| *g != GOLEM_GAP) {
+            lines.push(gaps_line(gap));
         }
+        if self.corners.square(crate::corners::Part::Windows) {
+            lines.push(crate::corners::windows_lua(true));
+        }
+        lines
     }
 
-    /// Choose the space between windows (`none` | `small` | `large`): saved,
-    /// and on the compositor at once. Golem's own (`small`) is not written.
-    pub(crate) fn set_gaps(&mut self, way: &str) {
-        if !matches!(way, "none" | "small" | "large") {
-            return;
-        }
-        self.window_gaps = (way != "small").then(|| way.to_owned());
+    /// The space between windows now, in px.
+    pub(crate) fn gap(&self) -> u32 {
+        self.window_gap.unwrap_or(GOLEM_GAP).min(GAP_MAX)
+    }
+
+    /// Choose the space between windows, in px: saved, and on the
+    /// compositor at once. Golem's own is not written.
+    pub(crate) fn set_gap(&mut self, gap: u32) {
+        let gap = gap.min(GAP_MAX);
+        self.window_gap = (gap != GOLEM_GAP).then_some(gap);
         self.save();
-        let line = gaps_line(way);
+        let line = gaps_line(gap);
         if !hypr::eval_ok(&line) {
             warn!("golem settings: the compositor refused {line}");
         }
     }
 
+    /// What `settings.lua` holds beyond the config calls: things done AS
+    /// THE COMPOSITOR STARTS (its own `hyprland.start` handlers run first,
+    /// so these win): the pointer's size, the lock screen asked for at
+    /// start. Not evaluated live (a start handler fires once).
     fn start_lua(&self) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(size) = self.cursor_size.filter(|s| (16..=96).contains(s)) {
@@ -1797,17 +1814,19 @@ mod tests {
     fn the_space_between_windows_is_written_only_when_it_is_not_golems_own() {
         let mut s = GolemSettings::default();
         assert!(s.gaps_lua().is_empty(), "Golem's own: the system's values stand");
-        assert_eq!(gaps_of("small"), (5, [3, 10, 10, 10]), "as hyprland.lua has it");
-        s.window_gaps = Some("large".into());
+        assert_eq!(gaps_of(GOLEM_GAP), (5, [3, 10, 10, 10]), "as hyprland.lua has it");
+        assert_eq!(gaps_of(0), (0, [0, 0, 0, 0]));
+        assert_eq!(gaps_of(99), gaps_of(GAP_MAX), "no more than the slider gives");
+        s.window_gap = Some(12);
         let lines = s.gaps_lua();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("[\"general.gaps_in\"] = 12") && lines[0].contains("top = 6, right = 20"));
+        assert!(lines[0].contains("[\"general.gaps_in\"] = 12") && lines[0].contains("top = 8, right = 24"), "{}", lines[0]);
         assert!(s.lua().contains("general.gaps_out"), "kept for the next start");
-        s.window_gaps = Some("none".into());
+        s.window_gap = Some(0);
         assert!(s.gaps_lua()[0].contains("gaps_in\"] = 0"));
-        s.window_gaps = Some("bogus".into());
-        assert!(s.gaps_lua().is_empty(), "an unknown way is left out");
-        assert!(!serde_json::to_string(&GolemSettings::default()).unwrap().contains("window_gaps"));
+        s.window_gap = Some(GOLEM_GAP);
+        assert!(s.gaps_lua().is_empty());
+        assert!(!serde_json::to_string(&GolemSettings::default()).unwrap().contains("window_gap"));
     }
 
     #[test]

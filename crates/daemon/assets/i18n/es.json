@@ -2460,7 +2460,14 @@
  "With sound": "Con sonido",
  "No reading": "Sin lectura",
  "Disconnected": "Desconectado",
- "None": "Ninguno",
- "Small": "Pequeño",
- "Space between windows": "Espacio entre ventanas"
+ "Space between windows": "Espacio entre ventanas",
+ "Rounded corners": "Bordes redondeados",
+ "Which parts of Golem have round corners.": "Qué partes de Golem tienen las esquinas redondeadas.",
+ "Every corner is square.": "Todas las esquinas son rectas.",
+ "Part by part": "Parte por parte",
+ "App windows": "Ventanas",
+ "Menus": "Menús",
+ "OPTIONS": "OPTIONS",
+ "Files and desktop": "Archivos y escritorio",
+ "corners round rounded square sharp radius curve shape edges borders appearance windows menus dock icons options": "esquinas bordes redondeados redondo rectas cuadradas radio curva forma aspecto ventanas menús dock íconos options"
 }

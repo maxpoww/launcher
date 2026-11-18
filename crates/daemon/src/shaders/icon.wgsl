@@ -14,7 +14,7 @@ struct Globals {
                          // at/above it skip the squircle (file thumbnails
                          // keep their true square corners)
     neck: vec4<f32>,     // (the rect pipeline's; same buffer)
-    light: vec4<f32>,    // x = the night light, 1 in the dark look
+    light: vec4<f32>,    // x = the night light, 1 in the dark look; y = the plates square
     filt: array<vec4<f32>, 7>, // THE ICON FILTER: [0] = (strength, dark icons, targets, _), [1..] = OKLCH targets
     wall: array<vec4<f32>, 7>, // THE WALLPAPERS' GRADE (wall_tint::Grade::uniform): [0] = (t, _, stops, _), [1..] = (L, a, b) darkest first
 };
@@ -210,7 +210,7 @@ fn stroke_cov(d: f32, half: f32, aa: f32) -> f32 {
 fn plate_px(uv: vec2<f32>, plate: vec4<f32>, px: f32) -> vec4<f32> {
     let q = uv - vec2<f32>(0.5);
     let inset = 0.0234375;
-    let rad = 0.21875;
+    let rad = 0.21875 * (1.0 - globals.light.y);
     let dpl = sd_box(q, vec2<f32>(0.5 - inset - rad)) - rad;
     let fillc = fill_cov(dpl, px);
     let edgec = stroke_cov(dpl, 0.0098, px);
@@ -436,7 +436,8 @@ fn fs_icon(in: VsOut) -> vec4<f32> {
     if (in.plate.a > 0.0) {
         let q = in.uv - vec2<f32>(0.5);
         let inset = 0.0234375;   // 6 / 256
-        let rad = 0.21875;       // 56 / 256
+        // (Square when Controls → Rounded corners says so: `light.y`.)
+        let rad = 0.21875 * (1.0 - globals.light.y);   // 56 / 256
         let dpl = sd_box(q, vec2<f32>(0.5 - inset - rad)) - rad;
         let fillc = fill_cov(dpl, px);
         let edgec = stroke_cov(dpl, 0.0098, px);

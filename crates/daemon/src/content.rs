@@ -195,6 +195,9 @@ pub struct GridContent {
     /// Opacity of `icons`; none = whole (the dock's edge pins and Apps
     /// button wear the Icons section's "Dock icons").
     pub fade: Option<f32>,
+    /// The part of Golem these rects are (Controls → Rounded corners), when
+    /// it is not the surface's: THE ONE MENU's, wherever it is drawn.
+    pub part: Option<crate::corners::Part>,
 }
 
 /// Everything the renderer draws for one frame, in draw order.

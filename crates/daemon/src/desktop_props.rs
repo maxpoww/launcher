@@ -413,6 +413,7 @@ impl Props {
         let ink_at = |a: f32| fade([paint.ink[0], paint.ink[1], paint.ink[2], paint.ink[3] * a]);
         let mut grid = GridContent {
             clip: panel,
+            part: Some(crate::corners::Part::Menus),
             ..Default::default()
         };
         grid.rects.push(RectInst {

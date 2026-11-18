@@ -45,6 +45,7 @@ mod scanners;
 mod printers_page;
 mod shortcuts_page;
 mod shots_page;
+mod corners;
 mod input_page;
 mod access_page;
 mod idle_page;
@@ -1534,6 +1535,8 @@ fn main() -> anyhow::Result<()> {
     app.reassert_floating_mode();
     // The control panel's choices that live outside the compositor.
     controls::reassert();
+    // Controls → Rounded corners: which surfaces are drawn square.
+    app.corners_apply();
     // (Two screens plugged in that say they are the same: each by its own
     // connector.)
     app.monitors_part_twins();
@@ -4361,6 +4364,7 @@ impl App {
                 perf::mark("dock renderer again");
                 match Renderer::new(&app.conn, app.layer.wl_surface(), pw, ph, scale) {
                     Ok(mut renderer) => {
+                        renderer.set_part(crate::corners::Part::Dock);
                         if let Some(icons) = app.pending_icons.take() {
                             let tail_used = app.icon_tail_used();
                             let first = app.icon_priority(false);
@@ -8250,6 +8254,7 @@ impl App {
             }
             None => match Renderer::new_with(&self.conn, self.layer.wl_surface(), pw, ph, scale, warm) {
                 Ok(mut renderer) => {
+                    renderer.set_part(crate::corners::Part::Dock);
                     if let Some(icons) = self.pending_icons.take() {
                         let tail_used = self.icon_tail_used();
                         let first = self.icon_priority(false);

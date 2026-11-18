@@ -2441,6 +2441,7 @@ impl App {
             };
             match built {
                 Ok(mut renderer) => {
+                    renderer.set_part(crate::corners::Part::Files);
                     // A renderer built after the pictures came (a failed
                     // first build): start it with an empty array of the
                     // right size, and the uploads below refill it.

@@ -5357,6 +5357,7 @@ impl App {
             match crate::renderer::Renderer::new(&self.conn, win.window.wl_surface(), pw, ph, drawn) {
                 Ok(mut renderer) => {
                     renderer.labels_linear = true;
+                    renderer.set_part(crate::corners::Part::Files);
                     if win.capacity > 0 {
                         renderer.alloc_icon_array(win.capacity);
                         win.uploaded.iter_mut().for_each(|u| *u = None);

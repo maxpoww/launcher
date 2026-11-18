@@ -1726,6 +1726,7 @@ impl Menu {
         };
         let mut grid = GridContent {
             clip: panel,
+            part: Some(crate::corners::Part::Menus),
             ..Default::default()
         };
         if own_panel {
@@ -1743,6 +1744,7 @@ impl Menu {
         let view = Rect::new(view.x, view.y + lift, view.w, view.h);
         let mut mid = GridContent {
             clip: view,
+            part: Some(crate::corners::Part::Menus),
             ..Default::default()
         };
         let label = |text: &str,

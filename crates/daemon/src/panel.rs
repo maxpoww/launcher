@@ -56,12 +56,15 @@ type Item = (&'static str, u8, &'static str);
 /// The settings in the order they stand on the grid — kin beside kin: how
 /// Golem looks, the screen and the sound, the connections, power, the
 /// owner's security, the keys and the system. Fixed: use moves nothing.
-const SETTINGS: [Item; 40] = [
+const SETTINGS: [Item; 41] = [
     // (name, kin, search keywords: what else people call it or look for
     // it by).
     // How Golem looks.
     ("Colours", 0, "dark mode light theme appearance night colors colour color accent palette highlight dynamic websites web apps"),
     ("Wallpaper", 0, "background desktop picture image appearance"),
+    // Which parts have round corners (Max, 2026-11-18: "quiero control bordes
+    // redondeados… para poder elegir entre que tiene borde redondo y que no").
+    ("Rounded corners", 0, "corners round rounded square sharp radius curve shape edges borders appearance windows menus dock icons options"),
     // How the windows sit: where they open, how they stick, the side column…
     // (Max, 2026-10-14: "a control called Tiles… we will start dumping
     // controls in there").
@@ -437,6 +440,7 @@ fn symbol_of(label: &str) -> &'static str {
         "Wallpaper" => "ctl-wallpaper",
         "Night light" => "ctl-night",
         "Tiles" => "ctl-tiles",
+        "Rounded corners" => "ctl-corners",
         "Launcher" => "ctl-launcher",
         "Monitors" => "ctl-monitors",
         "Printers" => "ctl-printers",
@@ -5510,6 +5514,7 @@ impl App {
             return;
         }
         match key {
+            k if crate::corners::is_key(k) => self.corners_pick(k, &value),
             "night" => {
                 if let Ok(k) = value.parse::<u32>() {
                     let k = k.clamp(1000, crate::screen::NEUTRAL_K);
@@ -6244,14 +6249,16 @@ mod tests {
         assert_eq!((g.cell_w, g.cell_h, g.icon), (content::GRID_CELL_W, content::GRID_CELL_H, content::GRID_ICON));
         assert_eq!(g.cols, ((960.0 - 2.0 * content::GRID_PAD_X) / content::GRID_CELL_W) as usize);
         assert_eq!(g.rows, ((560.0 - GRID_TOP - content::DOT_ROOM - GRID_BOTTOM) / content::GRID_CELL_H) as usize);
-        assert_eq!(g.n_pages, 1);
+        // (40 tiles filled this card's eight by five; the 41st, Rounded
+        // corners, turns a page.)
+        assert_eq!(g.n_pages, SETTINGS.len().div_ceil(g.cols * g.rows));
         // Up under the dock: the first row where the apps grid's stands.
         let top = p.pills.iter().map(|q| cell(&p, q).y).fold(f32::MAX, f32::min);
         assert!((top - GRID_TOP).abs() < 0.5, "first row at {top}");
         assert!((g.vp.x + g.vp.w / 2.0 - 480.0).abs() < 0.5, "the page is centred");
         assert_eq!(p.pills.iter().filter(|q| q.slot < g.cols).count(), g.cols, "a full first row");
         // The fixed order: how Golem looks first, then the screen's.
-        assert_eq!(&shown_order(&p)[..5], &["Colours", "Wallpaper", "Tiles", "Launcher", "Resolution"]);
+        assert_eq!(&shown_order(&p)[..5], &["Colours", "Wallpaper", "Rounded corners", "Tiles", "Launcher"]);
         // A wider card: more columns, the same order.
         let wide = panel_in(1400.0, 560.0, 1.0);
         assert!(wide.grid.cols > g.cols);
@@ -6347,8 +6354,10 @@ mod tests {
     #[test]
     fn the_card_is_cut_to_the_rows_the_grid_stands_in() {
         let mut p = panel();
-        // 34 tiles at eight across: five rows; a search leaves fewer.
-        assert_eq!(p.rows_wanted(), Some(SETTINGS.len().div_ceil(p.grid.cols)));
+        // The tiles at eight across: their rows — or, more than a page, the
+        // card left whole for the pages to turn; a search leaves fewer.
+        let rows = (SETTINGS.len() <= p.grid.cols * p.grid.rows).then(|| SETTINGS.len().div_ceil(p.grid.cols));
+        assert_eq!(p.rows_wanted(), rows);
         p.set_query("sound");
         assert_eq!(p.rows_wanted(), Some(1));
         p.set_query("");
@@ -6361,7 +6370,7 @@ mod tests {
         // Folding back, the grid's rows again.
         assert!(p.escape());
         assert_eq!(p.open_wanted_h(), None);
-        assert_eq!(p.rows_wanted(), Some(SETTINGS.len().div_ceil(p.grid.cols)));
+        assert_eq!(p.rows_wanted(), rows);
         // More pages than one: every page keeps the full page's rows.
         let big = panel_in(960.0, 400.0, 1.65);
         assert!(big.grid.n_pages > 1);

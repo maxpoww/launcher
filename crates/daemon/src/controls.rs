@@ -773,6 +773,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Printers"
             | "Shortcuts"
             | "Screenshots"
+            | "Rounded corners"
             | "Your account"
             | "Mouse and touchpad"
             | "Accessibility"
@@ -787,6 +788,7 @@ pub(crate) fn is_control(label: &str) -> bool {
 pub(crate) fn ui_key(key: &str) -> bool {
     // (Every key of the Colours box is the UI thread's: the palette is applied there.)
     key.starts_with("colors-")
+        || crate::corners::is_key(key)
         || key.starts_with("launcher-")
         || key.starts_with("monitors-")
         || key.starts_with("idle-")
@@ -2857,15 +2859,18 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         // come here as they are made (Max, 2026-10-14).
         "Tiles" => {
             view.subtitle = tr("How windows sit, stick and line up.").to_owned();
-            // THE SPACE BETWEEN WINDOWS (F4.16, 2026-11-18). (The corner
-            // stays the system's: the card's frame and the title bars are
-            // drawn with the same curve.)
-            let way = GolemSettings::load().window_gaps.unwrap_or_else(|| "small".to_owned());
-            let ways = [("None", "none"), ("Small", "small"), ("Large", "large")]
-                .iter()
-                .map(|(word, value)| choice(tr(word), way == *value, *value))
-                .collect();
-            view.groups.push(Group { labelled: true, ..group(Some("Space between windows"), "tiles-gaps", 0.0, ways) });
+            // THE SPACE BETWEEN WINDOWS (F4.16, 2026-11-18): a slider, 0 to
+            // 20 px a stop each (Max: "quiero espacio entre ventanas con un
+            // slider"); the edges follow (`display::gaps_of`).
+            let gap = GolemSettings::load().gap();
+            // (Its name and value over the whole track, as the Colours
+            // sliders stand: a long name beside the track ran under it.)
+            view.groups.push(Group {
+                row: true,
+                caption: Some(format!("{} · {gap} px", tr("Space between windows"))),
+                mark: Some(crate::display::GOLEM_GAP as f32 / crate::display::GAP_MAX as f32),
+                ..slider("tiles-gap", (gap * 100 / crate::display::GAP_MAX) as u8)
+            });
         }
         // THE DOCK AND ITS BOX (Max, 2026-10-20; `launcher_prefs.rs`): the
         // dock's own choices, made on the UI thread (`launcher-*`).
@@ -2929,6 +2934,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Printers" => crate::printers_page::view(&mut view),
         "Shortcuts" => crate::shortcuts_page::view(&mut view),
         "Screenshots" => crate::shots_page::view(&mut view),
+        "Rounded corners" => crate::corners::view(&mut view),
         "About Golem" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));
@@ -3186,7 +3192,11 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
         "natural" => {
             GolemSettings::change(|s| s.set_natural_scroll(on));
         }
-        "tiles-gaps" => GolemSettings::change(|s| s.set_gaps(value)),
+        "tiles-gap" => {
+            if let Ok(level) = value.parse::<u32>() {
+                GolemSettings::change(|s| s.set_gap(level * crate::display::GAP_MAX / 100));
+            }
+        }
         "update" => {
             // (A system that has the "now" unit skips the machine's wave;
             // an older one runs the nightly service, which waits its turn.)

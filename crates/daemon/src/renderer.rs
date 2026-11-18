@@ -370,6 +370,9 @@ pub struct Renderer {
     /// The glass's own light (its iridescent edges) stands still this
     /// frame: `hold_lights`.
     lights_held: bool,
+    /// What this surface is to Controls → Rounded corners (`corners.rs`):
+    /// its corners are drawn times that part's roundness. None: as made.
+    part: Option<crate::corners::Part>,
     last_render: Option<std::time::Instant>,
 
     /// Work out what each frame changed (see [`crate::damage`]): a frame
@@ -1100,6 +1103,7 @@ impl Renderer {
             frame_no: 0,
             anim_time: 0.0,
             lights_held: false,
+            part: None,
             last_render: None,
             track_damage,
             present_damage,
@@ -1616,6 +1620,12 @@ impl Renderer {
         self.lights_held = held;
     }
 
+    /// The part of Golem this surface draws (Controls → Rounded corners):
+    /// a part made square draws every corner here square.
+    pub fn set_part(&mut self, part: crate::corners::Part) {
+        self.part = Some(part);
+    }
+
     /// Render one frame of the given scene.
     ///
     /// `cursor` is the pointer position in surface pixels, used for the
@@ -1665,13 +1675,17 @@ impl Renderer {
         // range per section grid.
         // The first rect is always the card background (per Scene layout);
         // give it the glass material flag so the shader applies all 9 layers.
-        let mut shadows: Vec<ShadowInstance> = scene.shadows.iter().map(shadow_instance).collect();
+        // ROUNDED CORNERS (`corners.rs`): this surface's part, or a grid's own.
+        let round = self.part.map_or(1.0, crate::corners::k);
+        let plates_square = 1.0 - crate::corners::k(crate::corners::Part::Icons);
+        let box_rect = scene.box_rect.map(|(r, radius)| (r, radius * round));
+        let mut shadows: Vec<ShadowInstance> = scene.shadows.iter().map(|s| shadow_instance(s, round)).collect();
         let n_shadows = shadows.len() as u32;
         // Overlay shadows (neumorphic button depth) ride the same buffer but are
         // drawn after the unclipped fills, not behind them.
-        shadows.extend(scene.overlay_shadows.iter().map(shadow_instance));
+        shadows.extend(scene.overlay_shadows.iter().map(|s| shadow_instance(s, round)));
         let n_overlay_shadows = shadows.len() as u32 - n_shadows;
-        let mut rects: Vec<RectInstance> = scene.rects.iter().map(rect_instance).collect();
+        let mut rects: Vec<RectInstance> = scene.rects.iter().map(|r| rect_instance(r, round)).collect();
         let n_rects_unclipped = rects.len() as u32;
         let mut icons: Vec<IconInstance> = scene
             .icons
@@ -1694,7 +1708,8 @@ impl Renderer {
             .iter()
             .map(|grid| {
                 let r0 = rects.len() as u32;
-                rects.extend(grid.rects.iter().map(rect_instance));
+                let k = grid.part.map_or(round, crate::corners::k);
+                rects.extend(grid.rects.iter().map(|r| rect_instance(r, k)));
                 let i0 = icons.len() as u32;
                 icons.extend(grid.icons.iter().map(|i| IconInstance { fade: grid.fade.unwrap_or(1.0), ..icon_instance(i) }));
                 (grid.clip, r0..rects.len() as u32, i0..icons.len() as u32)
@@ -1987,7 +2002,7 @@ impl Renderer {
                 icons: mix(
                     mix(
                         mix(
-                            hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32])),
+                            hash_bytes(fade, bytemuck::bytes_of(&[squircle, thumb_base as f32, plates_square])),
                             hash_bytes(fade, bytemuck::bytes_of(&crate::palette::icon_filter())),
                         ),
                         wall_hash,
@@ -2031,7 +2046,7 @@ impl Renderer {
             }
             // The frosted box shows a blur of everything under it: it
             // depends on the whole base scene.
-            if let Some((r, radius)) = scene.box_rect {
+            if let Some((r, radius)) = box_rect {
                 let base = tiles.digest();
                 tiles.mark(
                     [
@@ -2139,7 +2154,8 @@ impl Renderer {
                 squircle,
                 thumb_base: thumb_base as f32,
                 neck: scene.neck.unwrap_or([-9999.0, 0.0, 0.0, 0.0]),
-                light: [if crate::look::dark() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                // (y: the icons' plates drawn square — Controls → Rounded corners.)
+                light: [if crate::look::dark() { 1.0 } else { 0.0 }, plates_square, 0.0, 0.0],
                 filt: crate::palette::icon_filter(),
                 wall: wall_uniform,
             }),
@@ -2171,7 +2187,7 @@ impl Renderer {
             });
         // One-instance buffer for the box's frosted backdrop (only when a
         // box is open).
-        let backdrop_buf = scene.box_rect.map(|(r, radius)| {
+        let backdrop_buf = box_rect.map(|(r, radius)| {
             let inst = BoxBackdropInstance {
                 rect_min: [r.x, r.y],
                 rect_max: [r.x + r.w, r.y + r.h],
@@ -2817,23 +2833,24 @@ fn write_icon_chain_from(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u3
     }
 }
 
-fn shadow_instance(s: &crate::content::ShadowInst) -> ShadowInstance {
+/// (`round`: how round the corners are drawn — Controls → Rounded corners.)
+fn shadow_instance(s: &crate::content::ShadowInst, round: f32) -> ShadowInstance {
     ShadowInstance {
         rect_min: [s.rect.x, s.rect.y],
         rect_max: [s.rect.x + s.rect.w, s.rect.y + s.rect.h],
         color: s.color,
-        radius: s.radius,
+        radius: s.radius * round,
         blur: s.blur,
         edges: s.edges,
     }
 }
 
-fn rect_instance(r: &crate::content::RectInst) -> RectInstance {
+fn rect_instance(r: &crate::content::RectInst, round: f32) -> RectInstance {
     RectInstance {
         rect_min: [r.rect.x, r.rect.y],
         rect_max: [r.rect.x + r.rect.w, r.rect.y + r.rect.h],
         color: r.color,
-        radius: r.radius,
+        radius: r.radius * round,
         glass: r.glass,
         border: r.border,
         _pad: 0.0,

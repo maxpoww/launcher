@@ -762,6 +762,21 @@ The big daemon files are cohesive but long — go straight to the function:
   (symbol `camera`). Rig: `display show screenshots`, `display pick <g> <n>` (groups from 0: Print takes, the
   caption, Banner, Dock, Pointer, caption, clipboard, preview, Screen recording; a switch's 0 is on, Screen
   recording's 0 is Silent).
+- `corners.rs` — Controls → ROUNDED CORNERS (Max, 2026-11-18: "quiero control bordes redondeados… adentro quiero
+  opciones (ventanas, menus, dock, iconos, OPTIONS, etc)"): one switch for all, then one a `Part` (App windows · Menus ·
+  Dock · Icons · OPTIONS · Files and desktop); `corners` in `settings.json` (`Corners { round, square }`, as made = not
+  written; a part's choice kept while all are off). A part drawn square = its corners times `corners::k` (0): every
+  renderer knows its surface's part (`Renderer::set_part`: the dock, the bar and the card, the desktop and Files'
+  windows, the top surface and the deck in the windows' curve) and scales its rects', shadows' and frosted box's radii;
+  a GRID may say its own (`GridContent::part`: THE ONE MENU, Properties, a phone's Configure); the icons' plates square
+  through `Globals::light.y` (`icon.wgsl`). The APP WINDOWS: the rule `golem-square-windows` (every window, `rounding =
+  0`) — live at a pick, in `settings.lua` for the next start (Golem's hyprland.lua runs it last, so it outranks
+  floating-rounding, golem-pseudo-frame, golem-stage-frame; `assert_stage_frame` asks `stage_rounding`); the title
+  bars follow the window's own corner. Not reached: waveview's overview cards (their grid corner is the plugin's own),
+  GTK/Qt apps' insides, the lock screen. A pick is the UI thread's (`corners::is_key` → `App::corners_pick` →
+  `corners_apply`: every surface drawn again). Rig: `display show roundedcorners`, `display pick <g> <n>` (0 all, 1
+  the line, 2… the parts in order; a switch's 0 is on). THE SPACE BETWEEN WINDOWS is Tiles' slider (`window_gap` px,
+  0–20, Golem's own 5 not written; `display::gaps_of`: the edges twice it, under the bar 3/5 of it).
 - `tasks.rs` + `task_pill.rs` — TASKS: the long things being done, as ONE pill on the OPTIONS bar
   (what on the left, the pill filling like the player's track, the percentage on the right in a
   slot reserved at "100%"; left of the bell, growing out of its right end so it moves no other

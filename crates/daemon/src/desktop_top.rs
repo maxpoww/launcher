@@ -114,6 +114,10 @@ impl App {
                     // (Menus, Properties and the phone's box hand their words
                     // over linear, as their grounds: `Renderer::labels_linear`.)
                     renderer.labels_linear = true;
+                    // (Quick Look and the capture tool are drawn in the
+                    // windows' curve; the menus and the Properties box say
+                    // their own part in their grids.)
+                    renderer.set_part(crate::corners::Part::Windows);
                     self.desktop_top.renderer = Some(renderer);
                 }
                 Err(e) => {

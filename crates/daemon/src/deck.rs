@@ -521,6 +521,7 @@ impl App {
             };
             match built {
                 Ok(mut renderer) => {
+                    renderer.set_part(crate::corners::Part::Windows);
                     // Replay any thumbnails captured before this renderer
                     // existed. A failed first build returns early with the
                     // captures already filed, and without this they would
