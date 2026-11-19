@@ -777,9 +777,16 @@ The big daemon files are cohesive but long — go straight to the function:
   overview's and the spread's cards, the minimize's flight; told with the rule at a change, and with the bars' choice
   when the plugin asks — `title_bars::tell`). Also squared with their part: Quick Look's clipped pictures, video and
   editor still (`renderer::clip_corner`, the `plate.x` corner) and the banner's bulge round an open module
-  (`options::module_neck_k`, the shader's fillet). Not reached yet: GTK/Qt apps' insides (the dock writes their
-  theme — gtk4.css/gtk3.css could carry it), Seam's own chrome (it reads colors.json) and the lock screen
-  (hyprlock.conf's variables) — each needs its own rules on the Golem side. A pick is the UI thread's (`corners::is_key` → `App::corners_pick` →
+  (`options::module_neck_k`, the shader's fillet). THE APPS (2026-11-19, `corners::apps_corners`: `windows` = the app
+  windows square, `all` = the switch for all off), through the theme the dock publishes (`palette.rs`; a change
+  rewrites it at once — `corners::corners_apply` → `palette::corners_changed`, no icons): GTK 4's user stylesheet
+  (`corners_gtk4`: libadwaita's `--window-radius` 0 + the frames and window buttons; `* { border-radius: 0 }` for
+  all — GTK 4 apps take it at their next start), GTK 3's theme (`corners_gtk3`: adw-gtk3's OWN rounded selectors
+  said again square after its import — same weight, later; `rounded_selectors` walks its stylesheet — the open
+  windows follow, the theme turns name), Seam (colors.json `corners`; Golem's `seam/golem-chrome.js`
+  `gsCornersSet`: an agent sheet on chrome://browser/ — its traffic lights square with the windows, all its chrome
+  with all; live, read every 0.5 s) and the lock screen (hyprlock.conf `$golem_rounding` 0 with all, Golem's
+  `idle.nix` field + dots). Not reached: Qt apps (their style has no corner setting). A pick is the UI thread's (`corners::is_key` → `App::corners_pick` →
   `corners_apply`: every surface drawn again). Rig: `display show roundedcorners`, `display pick <g> <n>` (0 all, 1
   the line, 2… the parts in order; a switch's 0 is on). THE SPACE BETWEEN WINDOWS is Tiles' slider (`window_gap` px,
   0–20, Golem's own 5 not written; `display::gaps_of`: the edges twice it, under the bar 3/5 of it).

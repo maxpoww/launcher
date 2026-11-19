@@ -2617,6 +2617,10 @@ fn colors_json(t: &Theme, shell: &Theme, picked: &ColorChoice, webapp_hosts: &[S
     m.insert("palette".into(), t.id.clone().into());
     m.insert("dark".into(), t.dark.into());
     m.insert("dynamic".into(), t.dynamic.into());
+    // THE CORNERS for Seam's own chrome (golem-chrome.js): its window buttons
+    // square with the app windows, everything square with the switch for all.
+    let corners = crate::corners::apps_corners();
+    m.insert("corners".into(), serde_json::json!({ "windows": corners.windows, "all": corners.all }));
     // OFF IS NOT LIGHT (Max, 2026-10-16: "the mode off on the sliders
     // should off the colours but not the dark mode … i want dark mode on my
     // apps but not colour"): a slider at Off whose Dark was CLICKED still
@@ -2766,7 +2770,7 @@ fn hyprlock_conf(t: &Theme) -> String {
     format!(
         "# Golem's palette ({}), written by the dock.\n\
          $golem_bg = {}\n$golem_surface = {}\n$golem_ink = {}\n$golem_accent = {}\n$golem_danger = {}\n\
-         $golem_password = {}\n",
+         $golem_password = {}\n$golem_rounding = {}\n",
         t.name,
         rgb(t.bg()),
         rgb(t.raised()),
@@ -2774,7 +2778,30 @@ fn hyprlock_conf(t: &Theme) -> String {
         rgb(t.accent()),
         rgb(t.c[0x08]),
         word,
+        // The field and its dots: hyprlock's own pill (-1), square with the
+        // switch for all corners off (Controls → Rounded corners).
+        if crate::corners::apps_corners().all { 0 } else { -1 },
     )
+}
+
+/// THE APPS' CORNERS changed (Controls → Rounded corners: the app windows, or
+/// the switch for all): their theme written again — GTK 4's and 3's corners,
+/// Seam's (colors.json, read every 2 s), the lock screen's field — and GTK 3's
+/// open windows told (its theme turns name). Not the icons, not the terminals:
+/// nothing of theirs has a corner.
+pub(crate) fn corners_changed() {
+    let spawned = std::thread::Builder::new().name("palette-corners".into()).spawn(|| {
+        let _one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = current();
+        let apps = for_apps(&shell);
+        write_all(&theme_dir(), &shell);
+        gtk3_live(&apps);
+        crate::app_themes::write(&apps);
+        info!("palette: the apps' corners {:?}", crate::corners::apps_corners());
+    });
+    if let Err(e) = spawned {
+        warn!("palette: no thread for the apps' corners: {e}");
+    }
 }
 
 /// The lock screen's word in the language just picked (its colours stay).
@@ -2842,11 +2869,132 @@ fn gtk4_css(t: &Theme) -> String {
     };
     format!(
         "/* Golem's palette ({}), written by the dock. Do not edit: it is rewritten on every change. */\n\
-         :root {{\n{}}}\n\n@media (prefers-color-scheme: dark) {{\n  :root {{\n{}  }}\n}}\n",
+         :root {{\n{}}}\n\n@media (prefers-color-scheme: dark) {{\n  :root {{\n{}  }}\n}}\n{}",
         t.name,
         block(&light, la),
         block(&dark, da).lines().map(|l| format!("  {l}\n")).collect::<String>(),
+        corners_gtk4(crate::corners::apps_corners()),
     )
+}
+
+/// GTK 4's corners (Controls → Rounded corners): the user stylesheet outranks
+/// every theme, so plain rules do — libadwaita's own window corner
+/// (`--window-radius`, 1.6+) and the frames and window buttons of an app
+/// without it; with the switch for all off, every corner.
+fn corners_gtk4(c: crate::corners::AppsCorners) -> String {
+    let mut s = String::new();
+    if c.windows || c.all {
+        s.push_str(
+            "\n/* Controls → Rounded corners: the app windows square. */\n\
+             :root { --window-radius: 0px; }\n\
+             window.csd, window.csd > .titlebar, window.csd headerbar.titlebar, window.csd decoration, window.dialog, dialog,\n\
+             windowcontrols button, windowcontrols button > image, .titlebar button.titlebutton { border-radius: 0; }\n",
+        );
+    }
+    if c.all {
+        s.push_str("/* …and every corner inside them. */\n* { border-radius: 0; }\n");
+    }
+    s
+}
+
+/// GTK 3's corners: our theme is adw-gtk3 imported and then redefined, ONE
+/// stylesheet, where the weightier selector wins — a plain `*` loses to
+/// adw-gtk3's own rules. So its rounded selectors are said again, square,
+/// after it (the same weight, later): the window's (its frame, title bar,
+/// header bar, window buttons) for square app windows, every one of them
+/// with the switch for all off.
+fn corners_gtk3(c: crate::corners::AppsCorners, base: &Path) -> String {
+    if !c.windows && !c.all {
+        return String::new();
+    }
+    let css = std::fs::read_to_string(base).unwrap_or_default();
+    let mut s = String::from("\n/* Controls → Rounded corners: adw-gtk3's rounded selectors, square. */\n");
+    for sel in rounded_selectors(&css, c.all) {
+        s.push_str(&format!("{sel} {{ border-radius: 0; }}\n"));
+    }
+    if c.all {
+        s.push_str("* { border-radius: 0; }\n");
+    }
+    s
+}
+
+/// The selectors of a stylesheet whose rules round a corner, one each, in
+/// order, without repeats — all of them, or only the window's (`all` false:
+/// the selector's subject is the window, its decoration, its title bar or
+/// header bar, a dialog, or a window button). @-rules are skipped whole.
+fn rounded_selectors(css: &str, all: bool) -> Vec<String> {
+    // (Comments out first: a brace or a comma in one would mislead the walk.)
+    let mut text = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(i) = rest.find("/*") {
+        text.push_str(&rest[..i]);
+        rest = rest[i + 2..].find("*/").map_or("", |j| &rest[i + 2 + j + 2..]);
+    }
+    text.push_str(rest);
+    let windowish = |sel: &str| {
+        let subject = sel.rsplit([' ', '>', '+', '~']).find(|p| !p.is_empty()).unwrap_or("");
+        subject.starts_with("window")
+            || subject.starts_with("decoration")
+            || subject.starts_with("headerbar")
+            || subject.starts_with(".titlebar")
+            || subject.starts_with("messagedialog")
+            || subject.starts_with("dialog")
+            || subject.contains("titlebutton")
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut at = 0;
+    let bytes = text.as_bytes();
+    while let Some(open) = text[at..].find('{').map(|i| at + i) {
+        let head = text[at..open].trim();
+        // The block's end, counting nested braces (an @media's rules).
+        let mut depth = 0;
+        let mut close = open;
+        for (k, b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if close == open {
+            break;
+        }
+        // (A line before the selector — `@import …;` — is not part of it.)
+        let head = head.rsplit(';').next().unwrap_or("").trim();
+        let body = &text[open + 1..close];
+        if !head.starts_with('@') && body.contains("radius") {
+            // Its selectors, split at the commas outside parentheses.
+            let mut level = 0;
+            let mut start = 0;
+            let mut parts = Vec::new();
+            for (k, ch) in head.char_indices() {
+                match ch {
+                    '(' => level += 1,
+                    ')' => level -= 1,
+                    ',' if level == 0 => {
+                        parts.push(&head[start..k]);
+                        start = k + 1;
+                    }
+                    _ => {}
+                }
+            }
+            parts.push(&head[start..]);
+            for p in parts {
+                let p = p.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !p.is_empty() && (all || windowish(&p)) && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        at = close + 1;
+    }
+    out
 }
 
 /// GTK 3, all of it and LIVE (Max, 2026-10-15: "que te sigo diciendo que
@@ -2912,6 +3060,7 @@ fn gtk3_theme_css(t: &Theme, base: &Path) -> String {
     ] {
         out.push_str(&format!("@define-color {name} {col};\n"));
     }
+    out.push_str(&corners_gtk3(crate::corners::apps_corners(), base));
     out
 }
 
@@ -4827,5 +4976,41 @@ mod tests {
         assert_eq!(json["web_bg"], "#1d2026");
         let nvim = nvim_lua(&t);
         assert!(nvim.contains("base09 = '#ffbe98',") && nvim.contains("vim.o.background = 'dark'"));
+    }
+}
+
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+
+    const SAMPLE: &str = "@import url(\"x.css\");\n/* a, b { radius } */\n\
+        decoration { border-radius: 15px 15px 0 0; }\n\
+        .csd menu, .csd .menu { border-radius: 9px; }\n\
+        window headerbar:last-child, .titlebar:not(headerbar) button.titlebutton { border-top-right-radius: 15px; }\n\
+        headerbar entry.flat { border-radius: 0; }\n\
+        button { color: red; }\n\
+        @media (x) { window { border-radius: 3px; } }\n\
+        messagedialog.csd decoration, decoration { border-radius: 15px; }\n";
+
+    #[test]
+    fn the_window_selectors_or_every_rounded_one_once_each() {
+        assert_eq!(
+            rounded_selectors(SAMPLE, false),
+            vec!["decoration", "window headerbar:last-child", ".titlebar:not(headerbar) button.titlebutton", "messagedialog.csd decoration"]
+        );
+        let all = rounded_selectors(SAMPLE, true);
+        assert!(all.contains(&".csd menu".to_owned()) && all.contains(&"headerbar entry.flat".to_owned()));
+        assert!(!all.iter().any(|s| s.contains("button {") || s == "button" || s.starts_with('@')));
+        assert_eq!(all.iter().filter(|s| *s == "decoration").count(), 1);
+    }
+
+    #[test]
+    fn gtk4_square_windows_then_everything() {
+        let none = corners_gtk4(crate::corners::AppsCorners::default());
+        assert!(none.is_empty());
+        let w = corners_gtk4(crate::corners::AppsCorners { windows: true, all: false });
+        assert!(w.contains("--window-radius: 0px") && !w.contains("* {"));
+        let a = corners_gtk4(crate::corners::AppsCorners { windows: true, all: true });
+        assert!(a.contains("* { border-radius: 0; }"));
     }
 }

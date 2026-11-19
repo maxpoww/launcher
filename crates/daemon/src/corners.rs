@@ -205,6 +205,27 @@ pub(crate) fn windows_square() -> bool {
         .square(Part::Windows)
 }
 
+/// What the APPS wear of the choice (Max, 2026-11-19: "hacé los casos de
+/// golem" — what stayed round with every corner off: GTK apps, Seam, the
+/// lock screen): `windows` — the app windows square, their frames and their
+/// own window buttons (GTK's, Seam's traffic lights); `all` — the switch for
+/// all is off, every corner of their insides square too (and the lock
+/// screen's field). Written into the theme the dock publishes for them
+/// (`palette.rs`: gtk4.css, the GTK 3 theme, colors.json, hyprlock.conf).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AppsCorners {
+    pub windows: bool,
+    pub all: bool,
+}
+
+pub(crate) fn apps_corners() -> AppsCorners {
+    let c = crate::display::GolemSettings::load().corners;
+    AppsCorners {
+        windows: c.square(Part::Windows),
+        all: !c.round,
+    }
+}
+
 /// The corner Golem's staged window gets (`hypr::assert_stage_frame`): its
 /// own, or none while the windows are square.
 pub(crate) fn stage_rounding() -> u32 {
@@ -275,6 +296,15 @@ impl crate::App {
                 }
             }
             TOLD.store(told, Ordering::Relaxed);
+        }
+        // The apps' theme again when what they wear of it changed (not at
+        // start: the dock's first publish writes it whole).
+        static APPS: AtomicU32 = AtomicU32::new(0);
+        let a = apps_corners();
+        let apps = 1 + u32::from(a.windows) + 2 * u32::from(a.all);
+        let was = APPS.swap(apps, Ordering::Relaxed);
+        if was != 0 && was != apps {
+            crate::palette::corners_changed();
         }
         if adopt(&c) {
             tracing::info!(
