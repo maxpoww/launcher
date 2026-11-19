@@ -4483,7 +4483,7 @@ impl App {
                 let (banner, _) = self.options_bar_fill();
                 let banner = [banner[0], banner[1], banner[2], banner[3] / shell_content()];
                 let rim = MODULE_BANNER_RIM * s;
-                let nk = MODULE_NECK_K * s;
+                let nk = self.module_neck_k();
                 let brect = Rect::new(
                     rect.x - rim - nk,
                     rect.y - rim - nk,
@@ -6872,11 +6872,18 @@ impl App {
     /// module is on the bar, else `None` — set into `Scene::neck`.
     /// Returned only while the blister rect is actually drawn (module
     /// shown/morphing), so the flag and the params can't disagree.
+    /// The blister's fillet, scaled — and next to nothing while OPTIONS is
+    /// drawn square (Controls → Rounded corners): the banner meets its box at
+    /// a corner, not a curve. Never 0: the shader divides by it.
+    fn module_neck_k(&self) -> f32 {
+        (MODULE_NECK_K * crate::corners::k(crate::corners::Part::Options)).max(0.05) * self.options_scale()
+    }
+
     pub(crate) fn module_neck(&self) -> Option<[f32; 4]> {
         self.module_drawn().map(|_| {
             [
                 self.options_bar_h(),
-                MODULE_NECK_K * self.options_scale(),
+                self.module_neck_k(),
                 0.0,
                 0.0,
             ]

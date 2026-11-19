@@ -73,10 +73,16 @@ pub(crate) fn lua(b: &TitleBars) -> String {
     )
 }
 
-/// The choice in `settings.json`, told to the plugin now.
+/// The choice in `settings.json`, told to the plugin now — with the windows'
+/// corners (`corners::plugin_lua`): a plugin loaded or reloaded asks once
+/// for both.
 pub(crate) fn tell() {
     let b = crate::display::GolemSettings::load().title_bars;
-    let lua = lua(&b);
+    let lua = format!(
+        "{} {}",
+        lua(&b),
+        crate::corners::plugin_lua(crate::corners::windows_square())
+    );
     if crate::hypr::eval_ok(&lua) {
         tracing::info!("title bars: {lua}");
     } else {

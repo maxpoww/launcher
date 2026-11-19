@@ -188,6 +188,23 @@ pub(crate) fn windows_lua(square: bool) -> String {
     )
 }
 
+/// The waveview plugin's corners (its title bars' discs, the overview's and
+/// the spread's cards, the minimize's flight) square with the windows, or
+/// round again (Max, 2026-11-18: "cuando untoggle round corners, los botones
+/// de la barra de titulo siguen siendo redondos"). In a pcall of its own: a
+/// plugin from before it has no `corners`, and it must not take what goes
+/// with it along.
+pub(crate) fn plugin_lua(square: bool) -> String {
+    format!("pcall(function() hl.plugin.waveview.corners({square}) end)")
+}
+
+/// The windows square now (the rule, the plugin), as `settings.json` says.
+pub(crate) fn windows_square() -> bool {
+    crate::display::GolemSettings::load()
+        .corners
+        .square(Part::Windows)
+}
+
 /// The corner Golem's staged window gets (`hypr::assert_stage_frame`): its
 /// own, or none while the windows are square.
 pub(crate) fn stage_rounding() -> u32 {
@@ -251,7 +268,8 @@ impl crate::App {
         if TOLD.load(Ordering::Relaxed) != told {
             let first = TOLD.load(Ordering::Relaxed) == 0;
             if windows || !first {
-                let lua = windows_lua(windows);
+                // The compositor's rule and the plugin's own corners together.
+                let lua = format!("{} {}", windows_lua(windows), plugin_lua(windows));
                 if !crate::hypr::eval_ok(&lua) {
                     tracing::warn!("rounded corners: the compositor refused {lua}");
                 }
@@ -343,5 +361,9 @@ mod tests {
             "all square: the windows too"
         );
         assert!(windows_lua(false).contains("enabled = false"));
+        assert_eq!(
+            plugin_lua(true),
+            "pcall(function() hl.plugin.waveview.corners(true) end)"
+        );
     }
 }

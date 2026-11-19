@@ -772,8 +772,14 @@ The big daemon files are cohesive but long — go straight to the function:
   through `Globals::light.y` (`icon.wgsl`). The APP WINDOWS: the rule `golem-square-windows` (every window, `rounding =
   0`) — live at a pick, in `settings.lua` for the next start (Golem's hyprland.lua runs it last, so it outranks
   floating-rounding, golem-pseudo-frame, golem-stage-frame; `assert_stage_frame` asks `stage_rounding`); the title
-  bars follow the window's own corner. Not reached: waveview's overview cards (their grid corner is the plugin's own),
-  GTK/Qt apps' insides, the lock screen. A pick is the UI thread's (`corners::is_key` → `App::corners_pick` →
+  bars follow the window's own corner, and THE PLUGIN'S OWN CORNERS follow the windows (`corners::plugin_lua` →
+  `hl.plugin.waveview.corners(square)`, waveview ≥ 2.41: the bar's discs, the □, the arrows' hover square, the
+  overview's and the spread's cards, the minimize's flight; told with the rule at a change, and with the bars' choice
+  when the plugin asks — `title_bars::tell`). Also squared with their part: Quick Look's clipped pictures, video and
+  editor still (`renderer::clip_corner`, the `plate.x` corner) and the banner's bulge round an open module
+  (`options::module_neck_k`, the shader's fillet). Not reached yet: GTK/Qt apps' insides (the dock writes their
+  theme — gtk4.css/gtk3.css could carry it), Seam's own chrome (it reads colors.json) and the lock screen
+  (hyprlock.conf's variables) — each needs its own rules on the Golem side. A pick is the UI thread's (`corners::is_key` → `App::corners_pick` →
   `corners_apply`: every surface drawn again). Rig: `display show roundedcorners`, `display pick <g> <n>` (0 all, 1
   the line, 2… the parts in order; a switch's 0 is on). THE SPACE BETWEEN WINDOWS is Tiles' slider (`window_gap` px,
   0–20, Golem's own 5 not written; `display::gaps_of`: the edges twice it, under the bar 3/5 of it).

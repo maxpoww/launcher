@@ -1694,7 +1694,7 @@ impl Renderer {
             .map(|(n, i)| IconInstance {
                 rot: scene.icon_rot.get(n).copied().unwrap_or(0.0),
                 fade: scene.icon_fade.get(n).copied().unwrap_or(1.0),
-                ..icon_instance(i)
+                ..clip_corner(icon_instance(i), round)
             })
             .collect();
         let n_icons_unclipped = icons.len() as u32;
@@ -1711,17 +1711,17 @@ impl Renderer {
                 let k = grid.part.map_or(round, crate::corners::k);
                 rects.extend(grid.rects.iter().map(|r| rect_instance(r, k)));
                 let i0 = icons.len() as u32;
-                icons.extend(grid.icons.iter().map(|i| IconInstance { fade: grid.fade.unwrap_or(1.0), ..icon_instance(i) }));
+                icons.extend(grid.icons.iter().map(|i| IconInstance { fade: grid.fade.unwrap_or(1.0), ..clip_corner(icon_instance(i), k) }));
                 (grid.clip, r0..rects.len() as u32, i0..icons.len() as u32)
             })
             .collect();
         // Overlay icons (drag ghost) ride the same buffer, drawn last.
         let o0 = icons.len() as u32;
-        icons.extend(scene.overlay.iter().map(icon_instance));
+        icons.extend(scene.overlay.iter().map(|i| clip_corner(icon_instance(i), round)));
         let overlay_range = o0..icons.len() as u32;
         // The moving picture rides the same buffer, drawn after its grid.
         let video_at: Option<(usize, u32)> = scene.video.as_ref().filter(|_| self.video_bind.is_some()).map(|(after, v)| {
-            icons.push(icon_instance(v));
+            icons.push(clip_corner(icon_instance(v), round));
             (*after, icons.len() as u32 - 1)
         });
 
@@ -2855,6 +2855,17 @@ fn rect_instance(r: &crate::content::RectInst, round: f32) -> RectInstance {
         border: r.border,
         _pad: 0.0,
     }
+}
+
+/// A CLIPPED PICTURE's corner (Quick Look's tiles, its video, the editor's
+/// still: `icon.wgsl`'s ring in (-1.65, -1.55), the corner in `plate.x`) times
+/// the part's — square with its surface (Controls → Rounded corners), as the
+/// rects' radii are. Any other icon as it is.
+fn clip_corner(mut i: IconInstance, k: f32) -> IconInstance {
+    if i.ring < -1.55 && i.ring > -1.65 {
+        i.plate[0] *= k;
+    }
+    i
 }
 
 fn icon_instance(i: &crate::content::IconInst) -> IconInstance {
