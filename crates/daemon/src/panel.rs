@@ -116,7 +116,7 @@ const SETTINGS: [Item; 41] = [
     ("Notifications", 5, "alerts do not disturb dnd messages mute silence app quiet"),
     ("Default apps", 5, "applications browser open with"),
     ("Startup apps", 5, "autostart startup login start boot open at start apps run automatically"),
-    ("About Golem", 5, "system version info hardware computer name this computer model serial"),
+    ("About StandardOS", 5, "system version info hardware computer name this computer model serial"),
     // THE MACHINE'S PAGES, the gear box's until 2026-11-07 (Max: "the banner
     // box should be the quick settings, the more should be on controls"):
     // hosted here on the gear's own engine (`hosted_kind`).
@@ -136,7 +136,7 @@ pub(crate) fn hosted_kind(label: &str) -> Option<PageKind> {
         "Wi-Fi" => PageKind::Net,
         "Bluetooth" => PageKind::Bt,
         "Battery" => PageKind::Battery,
-        "About Golem" => PageKind::About,
+        "About StandardOS" => PageKind::About,
         "Storage" => PageKind::Disk,
         "Processor" => PageKind::Cpu,
         "Memory" => PageKind::Ram,
@@ -460,7 +460,7 @@ fn symbol_of(label: &str) -> &'static str {
         "Time zone" => "clock",
         "Natural scrolling" => "ctl-scroll",
         "Updates" => "ctl-updates",
-        "About Golem" => "ctl-about",
+        "About StandardOS" => "ctl-about",
         "Microphone" => "ctl-mic",
         "Battery" => "ctl-battery",
         "Default apps" => "ctl-apps",

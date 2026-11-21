@@ -18,7 +18,7 @@
   "No paired phone or computer": "No hay teléfono ni computador emparejados",
   "On your computer": "En tu computador",
   "Plays this computer's sound through it": "Reproduce el sonido de este computador por él",
-  "The language Golem speaks. Apps keep theirs: this computer does not have this one for them.": "El idioma que habla Golem. Las apps mantienen el suyo: este computador no tiene este idioma para ellas.",
+  "The language StandardOS speaks. Apps keep theirs: this computer does not have this one for them.": "El idioma que habla StandardOS. Las apps mantienen el suyo: este computador no tiene este idioma para ellas.",
   "This computer": "Este computador",
   "This computer cannot change its wallpaper yet.": "Este computador aún no puede cambiar su fondo.",
   "This computer cannot use OpenVPN yet: NetworkManager's OpenVPN plugin is not installed.": "Este computador aún no puede usar OpenVPN: no tiene instalado el complemento de OpenVPN de NetworkManager.",
@@ -52,7 +52,7 @@
   "The computer restarts. Your files stay as they are.": "El computador se reinicia. Tus archivos quedan como están.",
   "The screen could not be recorded": "No se ha podido grabar la pantalla",
   "Added {apps}": "Se añadió {apps}",
-  "Changes to Golem itself": "Cambios en el propio Golem",
+  "Changes to StandardOS itself": "Cambios en el propio StandardOS",
   "Click to paste · drag it out": "Clic para pegar · arrástralo fuera",
  "Keep holding to record the screen": "Sigue pulsando para grabar la pantalla"
 }

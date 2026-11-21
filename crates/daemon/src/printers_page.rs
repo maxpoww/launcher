@@ -646,7 +646,7 @@ pub(crate) fn apply(key: &str, value: &str) {
             "default" => cups::set_default(&name),
             "pause" => cups::pause_printer(&name),
             "resume" => cups::resume_printer(&name),
-            "test" => cups::print_bytes(&name, test_page(&name).into_bytes(), tr("Golem test page")).map(|_| ()),
+            "test" => cups::print_bytes(&name, test_page(&name).into_bytes(), tr("StandardOS test page")).map(|_| ()),
             _ => Ok(()),
         },
         "printers-remove" => {
@@ -713,7 +713,7 @@ fn test_page(printer: &str) -> String {
          72 600 moveto ({works}) show\n{lines}{greys}0 setgray\n\
          /G findfont 9 scalefont setfont\n72 340 moveto (ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789) show\n\
          showpage\n%%EOF\n",
-        title = ps(tr("Golem test page")),
+        title = ps(tr("StandardOS test page")),
         printer = ps(printer),
         when = ps(&when),
         works = ps(tr("If you can read this, printing works.")),

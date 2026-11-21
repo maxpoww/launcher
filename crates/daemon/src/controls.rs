@@ -759,7 +759,7 @@ pub(crate) fn is_control(label: &str) -> bool {
             | "Touchpad speed"
             | "Natural scrolling"
             | "Updates"
-            | "About Golem"
+            | "About StandardOS"
             | "Battery"
             | "Privacy"
             | "Time zone"
@@ -1466,7 +1466,7 @@ fn what_changed(before: &MadeOf, after: &MadeOf) -> String {
     }
     if parts.is_empty() {
         // (Another system, and nothing above differs: its settings did.)
-        return tr("Changes to Golem itself").to_owned();
+        return tr("Changes to StandardOS itself").to_owned();
     }
     parts.join(" · ")
 }
@@ -2938,7 +2938,7 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
         "Shortcuts" => crate::shortcuts_page::view(&mut view),
         "Screenshots" => crate::shots_page::view(&mut view),
         "Rounded corners" => crate::corners::view(&mut view),
-        "About Golem" => {
+        "About StandardOS" => {
             view.subtitle = os_name();
             view.groups.extend(machine_lines().into_iter().map(line));
         }
@@ -3000,9 +3000,9 @@ pub(crate) fn read(label: &'static str, ui: &UiFacts, zone: &mut ZonePick) -> Co
                 full.split('_').next().unwrap_or("en").to_owned()
             };
             view.subtitle = if shell_only(&now).is_some_and(|t| t != "en") {
-                tr("The language Golem speaks. Apps keep theirs: this computer does not have this one for them.")
+                tr("The language StandardOS speaks. Apps keep theirs: this computer does not have this one for them.")
             } else {
-                tr("The language Golem speaks. Apps follow the next time they open.")
+                tr("The language StandardOS speaks. Apps follow the next time they open.")
             }
             .to_owned();
             view.groups.push(group(
@@ -3609,7 +3609,7 @@ mod tests {
         assert_eq!(made.programs.as_deref(), Some("26.05.140.bbb"));
         assert_eq!(made.apps.keys().collect::<Vec<_>>(), ["files", "krita", "seam"], "what is not shown as an app is not one");
         let changes = versions_changes(&profiles);
-        assert_eq!(changes.get(&9).map(String::as_str), Some("Changes to Golem itself"));
+        assert_eq!(changes.get(&9).map(String::as_str), Some("Changes to StandardOS itself"));
         assert_eq!(changes.get(&8).map(String::as_str), Some("Added Krita · Removed Brave · System programs updated · Linux 6.18.63"));
         assert_eq!(changes.get(&6).map(String::as_str), Some("Added Brave"), "the rebuild that changed nothing counts under its newest number");
         assert_eq!(changes.get(&5), None);
@@ -3631,7 +3631,7 @@ mod tests {
         assert_eq!(what_changed(&old, &new), "Third thing · Removed Krita", "the first written system tells its newest entry only");
         let earlier = MadeOf { notes: Some(vec![("n1".to_owned(), "First thing".to_owned())]), ..old.clone() };
         assert_eq!(what_changed(&earlier, &new), "Third thing · Screenshots have a tool · Removed Krita");
-        assert_eq!(what_changed(&new, &new), "Changes to Golem itself", "nothing new written, nothing else differs");
+        assert_eq!(what_changed(&new, &new), "Changes to StandardOS itself", "nothing new written, nothing else differs");
         // The words come in the shell's language, its parent's, else English.
         let es = notes_of(r#"[{"id":"a","en":"Tool","es":"Herramienta"},{"id":"b","en":"Only English"}]"#, Some("es_ES")).unwrap();
         assert_eq!(es, [("a".to_owned(), "Herramienta".to_owned()), ("b".to_owned(), "Only English".to_owned())]);
@@ -3799,7 +3799,7 @@ mod tests {
         // No assertion on the content (it is this machine's): each read must
         // come back, with its own label.
         let mut zone = ZonePick { zones: Some(vec![("Europe/Madrid".into(), 120), ("America/La_Paz".into(), -240)]), ..Default::default() };
-        for label in ["Night light", "Notifications", "Time zone", "About Golem"] {
+        for label in ["Night light", "Notifications", "Time zone", "About StandardOS"] {
             let view = read(label, &UiFacts::default(), &mut zone);
             assert_eq!(view.label, label);
         }

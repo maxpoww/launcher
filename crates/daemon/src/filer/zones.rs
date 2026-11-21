@@ -66,7 +66,7 @@ impl Why {
             Why::Browser => tr("It holds your browser: tabs, passwords and history."),
             Why::Main => tr("It's one of your main folders. Apps save here by default."),
             Why::Phones => tr("Your phones sync with it. A phone may copy things back or lose them."),
-            Why::Other => tr("It's part of how Golem works."),
+            Why::Other => tr("It's part of how StandardOS works."),
         }
     }
 }

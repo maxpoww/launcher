@@ -242,7 +242,7 @@ pub(crate) fn view(view: &mut crate::controls::ControlView) {
     use crate::controls::{line_of, on_off_of};
     use crate::i18n::tr;
     let c = crate::display::GolemSettings::load().corners;
-    view.subtitle = tr("Which parts of Golem have round corners.").to_owned();
+    view.subtitle = tr("Which parts of StandardOS have round corners.").to_owned();
     view.groups
         .push(on_off_of(Some("Rounded corners"), "corners", c.round));
     if !c.round {

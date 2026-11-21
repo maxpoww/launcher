@@ -2666,7 +2666,7 @@ fn format_words(fstype: &str) -> &'static str {
 fn target_words(t: Target) -> (&'static str, &'static str) {
     match t {
         Target::Any => (tr("Anywhere"), tr("exFAT. Windows, Mac, phones, TVs and this one")),
-        Target::Golem => (tr("Golem"), tr("ext4. Linux only. It can be locked")),
+        Target::Golem => (tr("StandardOS"), tr("ext4. Linux only. It can be locked")),
         Target::Windows => (tr("Windows"), tr("NTFS. For a drive that lives on Windows")),
         Target::Camera => (tr("Cameras"), tr("FAT32. Cameras, car radios, old devices")),
     }

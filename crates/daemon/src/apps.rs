@@ -691,7 +691,7 @@ fn control_panel_tile() -> AppEntry {
     AppEntry {
         id: CONTROL_PANEL_ID.to_owned(),
         name: crate::i18n::tr("Control panel").to_owned(),
-        description: Some(crate::i18n::tr("Configure Golem").to_owned()),
+        description: Some(crate::i18n::tr("Configure StandardOS").to_owned()),
         exec: String::new(),
         icon: Some("org.gnome.Settings".to_owned()),
         startup_wm_class: None,

@@ -2637,7 +2637,7 @@ pub(crate) fn places(
     // never changed — `zones`).
     let first = out.len();
     out.push(Place {
-        name: tr("Golem Disk").to_owned(),
+        name: tr("StandardOS Disk").to_owned(),
         path: PathBuf::from("/"),
         icon: "asset:drive-harddisk".to_owned(),
         gap: false,

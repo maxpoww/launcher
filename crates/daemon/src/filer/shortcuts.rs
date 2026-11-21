@@ -25,7 +25,7 @@ const LINES: &[Line] = &[
     Line::Keys("E", "Open"),
     Line::Keys("Q", "Back"),
     Line::Keys("U", "Up"),
-    Line::Keys("/", "Golem Disk"),
+    Line::Keys("/", "StandardOS Disk"),
     Line::Keys(".", "Home"),
     Line::Keys("1–9", "A step of the path"),
     Line::Keys("← →", "Previous or next tab"),

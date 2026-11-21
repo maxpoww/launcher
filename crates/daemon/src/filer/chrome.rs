@@ -75,7 +75,7 @@ pub(super) const KEYS: [(&str, &str); 28] = [
     ("L", "Grid or list"),
     ("T", "New tab"),
     ("Shift+T", "Close tab"),
-    ("/", "Golem Disk"),
+    ("/", "StandardOS Disk"),
     (".", "Home"),
     ("1–9", "A step of the path"),
     ("← →", "Previous or next tab"),
