@@ -819,6 +819,12 @@ impl App {
             let Some(&(asked, _)) = crate::panel::Panel::real_settings().get(idx) else {
                 return;
             };
+            // (Documentation is the manual, in the browser: the card goes.)
+            if asked == "Documentation" {
+                self.close_fast_launch();
+                self.open_manual();
+                return;
+            }
             // (Wallpaper opens in the Colours box, on its Wallpaper tab.)
             crate::controls::start_tab_for(asked);
             let label = crate::controls::box_of(asked);

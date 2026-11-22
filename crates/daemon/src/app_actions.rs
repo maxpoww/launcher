@@ -124,6 +124,8 @@ const CTL_SHORTCUTS: &str = r#"<rect x="1.8" y="4.4" width="12.4" height="7.4" r
 const CTL_ACCESS: &str = r##"<circle cx="8" cy="8" r="6.2"/><circle cx="8" cy="4.9" r=".9" fill="#fff" stroke="none"/><path d="M4.9 6.8l3.1.7 3.1-.7M8 7.5v2.5l-1.5 2.7M8 10l1.5 2.7"/>"##;
 const CTL_SLEEP: &str = r#"<path d="M1.8 13.6h4.4l-4.4-4.8h4.4"/><path d="M8 7h6l-6-5h6"/>"#;
 const CTL_SCROLL: &str = r#"<path d="M5.2 2.2v11.6M2.5 4.9l2.7-2.7 2.7 2.7M10.8 13.8V2.2M8.1 11.1l2.7 2.7 2.7-2.7"/>"#;
+// The manual (Controls → Documentation): an open book, its spine down the middle.
+const CTL_MANUAL: &str = r#"<path d="M8 4.3C6.6 3.1 4.4 2.7 1.9 2.9v9.4c2.5-.2 4.7.2 6.1 1.4 1.4-1.2 3.6-1.6 6.1-1.4V2.9c-2.5-.2-4.7.2-6.1 1.4z"/><path d="M8 4.3v9.4"/>"#;
 const CTL_UPDATES: &str = r#"<path d="M13.7 8a5.7 5.7 0 0 1-10 3.8M2.3 8a5.7 5.7 0 0 1 10-3.8"/><path d="M12.4 1.6v2.8H9.6M3.6 14.4v-2.8h2.8"/>"#;
 const CTL_MIC: &str = r#"<rect x="5.8" y="1.8" width="4.4" height="7.6" rx="2.2"/><path d="M3.5 7.4a4.5 4.5 0 0 0 9 0M8 11.9v2.3M5.9 14.2h4.2"/>"#;
 const CTL_BATTERY: &str = r#"<rect x="1.6" y="5" width="10.8" height="6" rx="1.4"/><path d="M12.4 7h1.1a.7.7 0 0 1 .7.7v.6a.7.7 0 0 1-.7.7h-1.1M3.8 7v2h4.4V7z"/>"#;
@@ -203,6 +205,7 @@ const SYMBOLS: &[(&str, Symbol)] = &[
     ("ctl-scroll", Symbol::Lines(CTL_SCROLL)),
     ("ctl-updates", Symbol::Lines(CTL_UPDATES)),
     ("ctl-about", Symbol::Glyph("info")),
+    ("ctl-manual", Symbol::Lines(CTL_MANUAL)),
     ("ctl-mic", Symbol::Lines(CTL_MIC)),
     ("ctl-battery", Symbol::Lines(CTL_BATTERY)),
     ("ctl-apps", Symbol::Lines(CTL_APPS)),

@@ -56,7 +56,7 @@ type Item = (&'static str, u8, &'static str);
 /// The settings in the order they stand on the grid — kin beside kin: how
 /// Golem looks, the screen and the sound, the connections, power, the
 /// owner's security, the keys and the system. Fixed: use moves nothing.
-const SETTINGS: [Item; 41] = [
+const SETTINGS: [Item; 42] = [
     // (name, kin, search keywords: what else people call it or look for
     // it by).
     // How Golem looks.
@@ -117,6 +117,10 @@ const SETTINGS: [Item; 41] = [
     ("Default apps", 5, "applications browser open with"),
     ("Startup apps", 5, "autostart startup login start boot open at start apps run automatically"),
     ("About StandardOS", 5, "system version info hardware computer name this computer model serial"),
+    // THE MANUAL (Max, 2026-11-22: "one button on controls" for the offline
+    // documentation): not a page of its own — it opens the manual in the
+    // browser (the system's `manual`) and the box folds away.
+    ("Documentation", 5, "help manual guide documentation docs how to learn problem troubleshooting questions support"),
     // THE MACHINE'S PAGES, the gear box's until 2026-11-07 (Max: "the banner
     // box should be the quick settings, the more should be on controls"):
     // hosted here on the gear's own engine (`hosted_kind`).
@@ -461,6 +465,7 @@ fn symbol_of(label: &str) -> &'static str {
         "Natural scrolling" => "ctl-scroll",
         "Updates" => "ctl-updates",
         "About StandardOS" => "ctl-about",
+        "Documentation" => "ctl-manual",
         "Microphone" => "ctl-mic",
         "Battery" => "ctl-battery",
         "Default apps" => "ctl-apps",
@@ -720,6 +725,8 @@ pub(crate) enum PanelAction {
     /// Colours (or Wallpaper, its tab) asked for on the card: it opens in its
     /// box mid-screen, as Super+H opens it (`Panel::boxed`).
     Boxed(&'static str),
+    /// Documentation: the manual opens in the browser (`App::open_manual`).
+    Manual,
 }
 
 /// One choice of an open setting: a floating pill, lit when it is the one
@@ -1362,8 +1369,8 @@ impl Panel {
     pub(crate) fn key_pick(&mut self) -> bool {
         if self.open.is_none() && !self.solo {
             if let Some(i) = self.sel.filter(|&i| self.pills.get(i).is_some_and(|p| p.shown)) {
-                match self.boxed(i) {
-                    Some(label) => self.action = Some(PanelAction::Boxed(label)),
+                match self.elsewhere(i) {
+                    Some(action) => self.action = Some(action),
                     None => self.open_pill(i),
                 }
                 return true;
@@ -1741,12 +1748,30 @@ impl Panel {
         let Some(i) = self.pill_at(pos) else {
             return false;
         };
-        if let Some(label) = self.boxed(i) {
-            self.action = Some(PanelAction::Boxed(label));
+        if let Some(action) = self.elsewhere(i) {
+            self.action = Some(action);
             return true;
         }
         self.open_pill(i);
         true
+    }
+
+    /// What pill `i` does instead of opening on the card, if anything: its
+    /// own box (Colours, Wallpaper) or the manual (Documentation).
+    fn elsewhere(&self, i: usize) -> Option<PanelAction> {
+        if let Some(label) = self.boxed(i) {
+            return Some(PanelAction::Boxed(label));
+        }
+        (!self.modules && self.pills.get(i)?.label == "Documentation").then_some(PanelAction::Manual)
+    }
+
+    /// The manual asked for (`PanelAction::Manual`), taken.
+    pub(crate) fn take_manual(&mut self) -> bool {
+        let asked = matches!(self.action, Some(PanelAction::Manual));
+        if asked {
+            self.action = None;
+        }
+        asked
     }
 
     /// The setting of pill `i` when it opens in its own box, not on the card:
@@ -3375,8 +3400,8 @@ impl Panel {
         }
         match self.best_match() {
             Some(i) => {
-                match self.boxed(i) {
-                    Some(label) => self.action = Some(PanelAction::Boxed(label)),
+                match self.elsewhere(i) {
+                    Some(action) => self.action = Some(action),
                     None => self.open_pill(i),
                 }
                 true
@@ -5278,10 +5303,25 @@ impl App {
                 Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, false),
                 Some(PanelAction::Target(i)) => self.display_pick_screen(usize::from(i)),
                 Some(PanelAction::Boxed(label)) => self.settings_box(label),
+                Some(PanelAction::Manual) => self.open_manual(),
                 None => {}
             }
             self.schedule_frame();
         }
+    }
+
+    /// Controls → Documentation: the manual opens in the browser — the
+    /// system's `manual` (StandardOS's base/manual.nix: the documentation,
+    /// offline) — and the box folds away so it is in sight.
+    pub(crate) fn open_manual(&mut self) {
+        if crate::launch::on_path("manual") {
+            if let Err(e) = crate::launch::launch("manual", false, "") {
+                tracing::warn!("control panel: the manual did not open ({e})");
+            }
+        } else {
+            tracing::warn!("control panel: no `manual` on this system");
+        }
+        self.handle_command(Command::Collapse);
     }
 
     /// A press on the equalizer's curve ended (`Panel::eq_release`): a band
@@ -6041,6 +6081,7 @@ impl App {
                 Some(PanelAction::Pick { group, index }) => self.control_pick(group, index, quick),
                 Some(PanelAction::Target(i)) => self.display_pick_screen(usize::from(i)),
                 Some(PanelAction::Boxed(label)) => self.settings_box(label),
+                Some(PanelAction::Manual) => self.open_manual(),
                 None => {}
             }
             self.schedule_frame();
@@ -6068,6 +6109,7 @@ impl App {
                 PanelAction::Pick { group, index } => self.control_pick(group, index, true),
                 PanelAction::Target(i) => self.display_pick_screen(usize::from(i)),
                 PanelAction::Boxed(label) => self.settings_box(label),
+                PanelAction::Manual => self.open_manual(),
             },
             // On no choice: the box's own empty space closes it, as its
             // last line says (Max, 2026-10-14: "the box says click empty
@@ -6121,6 +6163,9 @@ impl App {
         let opened = self.panel.open_best();
         if let Some(label) = self.panel.take_boxed() {
             self.settings_box(label);
+        }
+        if self.panel.take_manual() {
+            self.open_manual();
         }
         if opened {
             self.schedule_frame();
@@ -6305,7 +6350,7 @@ mod tests {
         assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(0));
         assert!(p.keyed && p.grid_keyed());
         assert_eq!(p.pages.page(g.page_w()), 0);
-        for _ in 0..40 {
+        for _ in 0..SETTINGS.len() {
             p.key_move(1, 0);
         }
         assert_eq!(p.sel.map(|i| p.pills[i].slot), Some(SETTINGS.len() - 1));
