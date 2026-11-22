@@ -88,7 +88,7 @@ type InkReading = (String, Instant, Option<Vec<(u32, u8)>>);
 static INK: Mutex<Vec<InkReading>> = Mutex::new(Vec::new());
 static INK_ASKING: AtomicBool = AtomicBool::new(false);
 /// The system's program that reads it (`desktop/printing.nix`):
-/// `standard-printer-ink`, `golem-printer-ink` on a system from before.
+/// `printer-ink`, `golem-printer-ink` on a system from before.
 fn ink_program() -> String {
     crate::launch::system_tool("printer-ink")
 }
@@ -453,7 +453,7 @@ fn hp_ink(p: &Printer, printing: bool) -> Option<Vec<(u32, u8)>> {
     levels
 }
 
-/// Run `standard-printer-ink` on a printer's address, `INK_PATIENCE` at most.
+/// Run `printer-ink` on a printer's address, `INK_PATIENCE` at most.
 fn read_ink(uri: &str) -> Option<Vec<(u32, u8)>> {
     let out = run_for(Command::new(ink_program()).arg(uri), INK_PATIENCE)?;
     let levels = parse_ink(&out);

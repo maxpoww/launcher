@@ -247,13 +247,13 @@ pub(crate) fn on_path(bin: &str) -> bool {
 }
 
 /// One of the system's own commands, by what it does: `system_tool("brightness")`
-/// is `standard-brightness`. StandardOS names its tools `standard-…` since
-/// 2026-11-22 (and keeps their `golem-…` names as links to them); a system
-/// from before has only the `golem-…` name, and then that is the answer.
+/// is `brightness`. StandardOS's commands carry no brand since 2026-11-22
+/// (they ARE the standard ones; their `golem-…` names stay as links); a
+/// system from before has only the `golem-…` name, and then that is the
+/// answer.
 pub(crate) fn system_tool(what: &str) -> String {
-    let new = format!("standard-{what}");
-    if on_path(&new) {
-        new
+    if on_path(what) {
+        what.to_owned()
     } else {
         format!("golem-{what}")
     }

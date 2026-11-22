@@ -1091,7 +1091,7 @@ fn bt_powered() -> Option<bool> {
 const BRIGHT: [f64; 5] = [0.1, 0.25, 0.5, 0.75, 1.0];
 
 /// The screen's backlight as 0..1 (`None`: no backlight to set — a desktop
-/// monitor, or a machine without `standard-brightness`). Read from the
+/// monitor, or a machine without `brightness`). Read from the
 /// helper's machine line (`device,class,current,NN%,max`), whose percentage
 /// is on the same curve its `set NN%` uses.
 fn brightness() -> Option<f64> {

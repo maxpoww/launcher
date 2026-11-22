@@ -105,7 +105,7 @@ pub(crate) fn shots_folder() -> PathBuf {
 }
 
 /// A REGION OF THE SCREEN as a picture, asked from the card: the owner drags
-/// it. The system's own command where there is one (`standard-screenshot region`: the
+/// it. The system's own command where there is one (`screenshot region`: the
 /// file, the clipboard, its notification); elsewhere the same by hand — the
 /// region picked with `slurp`, taken with `grim` into Pictures → Screenshots
 /// and put on the clipboard. Blocks until it is taken or given up: never on

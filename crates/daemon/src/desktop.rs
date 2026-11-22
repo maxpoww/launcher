@@ -1107,9 +1107,8 @@ fn camera_device() -> Option<std::path::PathBuf> {
     found.first().map(|(_, node)| std::path::Path::new("/dev").join(node))
 }
 
-/// The program that hands the loopback camera's frames on to the apps
-/// (`standard-camera-relay`; `golem-camera-relay` on a system from before).
-const CAMERA_RELAY: &str = "camera-relay";
+/// The program that hands the loopback camera's frames on to the apps.
+const CAMERA_RELAY: &str = "golem-camera-relay";
 
 /// Start the relay: it reads the loopback device and offers the frames, in
 /// buffers of its OWN, as a camera under the phone's name. The device has
@@ -1123,7 +1122,7 @@ fn camera_relay(name: &str, device: &std::path::Path) -> Option<std::process::Ch
     camera_withdraw(); // one left by a dock that went away mid-camera
     let name: String = name.chars().filter(|c| !"\"\\{},".contains(*c)).collect();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-    let programs = [std::path::PathBuf::from(crate::launch::system_tool(CAMERA_RELAY)), home.join(".local/bin").join(format!("golem-{CAMERA_RELAY}"))];
+    let programs = [std::path::PathBuf::from(CAMERA_RELAY), home.join(".local/bin").join(CAMERA_RELAY)];
     for program in programs {
         let mut cmd = std::process::Command::new(&program);
         cmd.arg(device).arg(&name).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());

@@ -644,10 +644,10 @@ fn has_light_sensor() -> bool {
 }
 
 /// Whether the brightness can follow the room here: the system has
-/// `golem-autobrightness` and the machine a light sensor (asked once a run).
+/// `autobrightness` and the machine a light sensor (asked once a run).
 pub(crate) fn autobright_can() -> bool {
     static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CAN.get_or_init(|| crate::launch::on_path("golem-autobrightness") && has_light_sensor())
+    *CAN.get_or_init(|| crate::launch::on_path(&crate::launch::system_tool("autobrightness")) && has_light_sensor())
 }
 
 /// Whether it follows the room now.
@@ -2084,10 +2084,7 @@ impl App {
             SysHit::AutoBright => {
                 let path = Self::autobright_off_path();
                 let on = !path.exists();
-                run_detached(
-                    "golem-autobrightness",
-                    vec![if on { "off" } else { "on" }.into()],
-                );
+                run_detached(crate::launch::system_tool("autobrightness"), vec![if on { "off" } else { "on" }.into()]);
                 // The command's own file is the truth; reflect it at once.
                 if on {
                     if let Some(dir) = path.parent() {
