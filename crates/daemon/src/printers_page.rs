@@ -87,8 +87,11 @@ fn kept<T: Clone>(slot: &Kept<T>, fits: impl Fn(&T) -> bool, ask: impl FnOnce() 
 type InkReading = (String, Instant, Option<Vec<(u32, u8)>>);
 static INK: Mutex<Vec<InkReading>> = Mutex::new(Vec::new());
 static INK_ASKING: AtomicBool = AtomicBool::new(false);
-/// Golem's program that reads it (`desktop/printing.nix`).
-const INK_PROGRAM: &str = "golem-printer-ink";
+/// The system's program that reads it (`desktop/printing.nix`):
+/// `standard-printer-ink`, `golem-printer-ink` on a system from before.
+fn ink_program() -> String {
+    crate::launch::system_tool("printer-ink")
+}
 /// How long a reading stands; one that failed is tried again sooner.
 const INK_FRESH: Duration = Duration::from_secs(600);
 const INK_AGAIN: Duration = Duration::from_secs(60);
@@ -431,7 +434,7 @@ fn hp_ink(p: &Printer, printing: bool) -> Option<Vec<(u32, u8)>> {
             })
         })
         .unwrap_or((false, None));
-    if !fresh && !printing && crate::launch::on_path(INK_PROGRAM) && !INK_ASKING.swap(true, Ordering::AcqRel) {
+    if !fresh && !printing && crate::launch::on_path(&ink_program()) && !INK_ASKING.swap(true, Ordering::AcqRel) {
         let uri = p.uri.clone();
         let spawned = std::thread::Builder::new().name("printer-ink".into()).spawn(move || {
             let read = read_ink(&uri);
@@ -450,9 +453,9 @@ fn hp_ink(p: &Printer, printing: bool) -> Option<Vec<(u32, u8)>> {
     levels
 }
 
-/// Run `golem-printer-ink` on a printer's address, `INK_PATIENCE` at most.
+/// Run `standard-printer-ink` on a printer's address, `INK_PATIENCE` at most.
 fn read_ink(uri: &str) -> Option<Vec<(u32, u8)>> {
-    let out = run_for(Command::new(INK_PROGRAM).arg(uri), INK_PATIENCE)?;
+    let out = run_for(Command::new(ink_program()).arg(uri), INK_PATIENCE)?;
     let levels = parse_ink(&out);
     (!levels.is_empty()).then_some(levels)
 }

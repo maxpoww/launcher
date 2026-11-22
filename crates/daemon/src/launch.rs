@@ -246,6 +246,19 @@ pub(crate) fn on_path(bin: &str) -> bool {
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
 }
 
+/// One of the system's own commands, by what it does: `system_tool("brightness")`
+/// is `standard-brightness`. StandardOS names its tools `standard-…` since
+/// 2026-11-22 (and keeps their `golem-…` names as links to them); a system
+/// from before has only the `golem-…` name, and then that is the answer.
+pub(crate) fn system_tool(what: &str) -> String {
+    let new = format!("standard-{what}");
+    if on_path(&new) {
+        new
+    } else {
+        format!("golem-{what}")
+    }
+}
+
 /// Best-effort visibility for a detached launch: the grandchild's exit is
 /// swallowed by design (double-fork, fds on /dev/null), so a missing binary
 /// means "nothing happens" with no trace anywhere. If the command's first

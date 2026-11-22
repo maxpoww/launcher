@@ -1689,16 +1689,34 @@ fn remove_later(dir: PathBuf, name: &'static str) {
 /// plain theme and its shader: nothing is tinted twice.)
 static ICONS_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The system's own icon theme in a tone: `Standard` (silver) or
+/// `Standard-Dark` (graphite) — `Golem` / `Golem-Dark` on a system from
+/// before 2026-11-22 (a newer one keeps those names as links).
+fn icon_base(dark: bool) -> &'static str {
+    let (new, old) = if dark { ("Standard-Dark", "Golem-Dark") } else { ("Standard", "Golem") };
+    if crate::look::installed(new) {
+        new
+    } else {
+        old
+    }
+}
+
 fn publish_icons(mine: u64) {
     let f = icon_filter();
     let (k, dim) = (f[0][0], f[0][1] > 0.5);
     // (The icons' tone is the Icons row's look: graphite in the dark, silver in the light.)
     // (The look in force: Auto's and Ambient's included, not only the row's own.)
-    let base = if dim || current().icons_dark { "Golem-Dark" } else { "Golem" };
+    let base = icon_base(dim || current().icons_dark);
     let home = std::env::var("HOME").unwrap_or_default();
     let data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
     let icons = std::path::Path::new(&data).join("icons");
-    let names = ["Golem-Tinted-a", "Golem-Tinted-b"];
+    let names = ["Standard-Tinted-a", "Standard-Tinted-b"];
+    // (The copies' names until 2026-11-22: gone once they are not in use.)
+    for old in ["Golem-Tinted-a", "Golem-Tinted-b"] {
+        if icons.join(old).is_dir() {
+            remove_later(icons.join(old), old);
+        }
+    }
     let dconf = |name: &str| {
         if let Ok(mut u) = ICONS_IN_USE.lock() {
             name.clone_into(&mut u);
@@ -1736,7 +1754,7 @@ fn publish_icons(mine: u64) {
         return;
     }
     let Some(src) = icon_theme_dir(base) else { return };
-    let small = if base == "Golem-Dark" { "Papirus-Dark" } else { "Papirus" };
+    let small = if base.ends_with("-Dark") { "Papirus-Dark" } else { "Papirus" };
     // (Written already for these very colours — a dock start: kept. The
     // drawings are named by their packages — where each theme's index really
     // lives — not by the profile around them, which every update renews: on
@@ -2099,7 +2117,7 @@ static LOOKED: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec
 /// The two GTK themes a program pinned to a look starts with: the palette in
 /// that look, always there under fixed names (`gtk3_live` keeps them with
 /// the one in use).
-const GTK3_PINNED: [&str; 2] = ["Golem-Dark", "Golem-Light"];
+const GTK3_PINNED: [&str; 2] = ["Standard-Dark", "Standard-Light"];
 
 fn program_of(exec: &str) -> String {
     let first = exec.split_whitespace().find(|w| !w.contains('=') && *w != "env").unwrap_or("");
@@ -3083,7 +3101,31 @@ pub(crate) fn adw_gtk3(dark: bool) -> Option<PathBuf> {
 }
 
 /// The two names the GTK 3 theme takes in turn.
-const GTK3_NAMES: [&str; 2] = ["Golem-A", "Golem-B"];
+const GTK3_NAMES: [&str; 2] = ["Standard-A", "Standard-B"];
+
+/// The GTK themes' names until 2026-11-22 (the live pair, then the pinned
+/// pair): the dock's own are taken away once the new ones are written.
+const GTK3_OLD: [&str; 4] = ["Golem-A", "Golem-B", "Golem-Dark", "Golem-Light"];
+
+/// Take the dock's GTK themes of the old names away, a moment after the
+/// new ones are in use (an app switching over reads the new one). Only a
+/// theme the dock wrote (its index says so) is touched.
+fn gtk3_old_away(data_home: &str) {
+    let dirs: Vec<PathBuf> = GTK3_OLD
+        .iter()
+        .map(|n| PathBuf::from(data_home).join("themes").join(n))
+        .filter(|d| std::fs::read_to_string(d.join("index.theme")).is_ok_and(|t| t.contains("written by the dock")))
+        .collect();
+    if dirs.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("gtk3-old".into()).spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    });
+}
 
 /// Write the GTK 3 theme under the name NOT in use and switch to it.
 fn gtk3_live(t: &Theme) {
@@ -3109,9 +3151,10 @@ fn gtk3_live(t: &Theme) {
     crate::persist::write_text(
         "theme",
         &dir.join("index.theme"),
-        &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={next}\nComment=Golem's palette over adw-gtk3, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={next}\n"),
+        &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={next}\nComment=Standard's palette over adw-gtk3, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={next}\n"),
     );
     run("dconf", &["write", "/org/gnome/desktop/interface/gtk-theme", &format!("'{next}'")]);
+    gtk3_old_away(&data_home);
     // THE PINNED ONES (an app's own Dark or Light): the palette in each look
     // under a fixed name, written with the one in use, read at an app's start.
     if let Some((dc, da, lc, la)) = t.looks.or(t.pair) {
@@ -3123,7 +3166,7 @@ fn gtk3_live(t: &Theme) {
             let dir = PathBuf::from(&data_home).join("themes").join(name);
             crate::persist::write_text("theme", &dir.join("gtk-3.0").join("gtk.css"), &gtk3_theme_css(&v, &base));
             crate::persist::write_text("theme", &dir.join("gtk-4.0").join("gtk.css"), &gtk4_css(&v));
-            crate::persist::write_text("theme", &dir.join("index.theme"), &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={name}\nComment=Golem's palette, pinned to a look, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={name}\n"));
+            crate::persist::write_text("theme", &dir.join("index.theme"), &format!("[Desktop Entry]\nType=X-GNOME-Metatheme\nName={name}\nComment=Standard's palette, pinned to a look, written by the dock\n\n[X-GNOME-Metatheme]\nGtkTheme={name}\n"));
         }
     }
 }
@@ -3255,7 +3298,7 @@ fn qtct_conf(scheme: &Path, t: &Theme) -> String {
 }
 
 /// The icon theme Qt apps are told: the apps' tinted one while it is in use
-/// (the one dconf names), else Golem's own in the look.
+/// (the one dconf names), else the system's own in the look.
 fn qt_icon_theme(dark: bool) -> String {
     let named = std::process::Command::new("dconf")
         .args(["read", "/org/gnome/desktop/interface/icon-theme"])
@@ -3263,10 +3306,10 @@ fn qt_icon_theme(dark: bool) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
         .unwrap_or_default();
-    if named.starts_with("Golem-Tinted-") {
+    if named.starts_with("Standard-Tinted-") {
         return named;
     }
-    if dark { "Golem-Dark" } else { "Golem" }.to_owned()
+    icon_base(dark).to_owned()
 }
 
 /// btop (Omarchy themes it too): a `golem` theme in btop's own themes folder,
@@ -4704,8 +4747,8 @@ mod tests {
         assert_eq!(skip_vars("/usr/bin/foot -e x"), Vec::new(), "an app that follows: nothing");
         let vlc = skip_vars("vlc %U");
         assert!(vlc.contains(&("GTK_THEME", "Adwaita".to_owned())) && vlc.iter().any(|(k, _)| *k == "QT_QPA_PLATFORMTHEME"), "own colours, in its own Light: {vlc:?}");
-        assert_eq!(skip_vars("env FOO=1 gimp"), vec![("GTK_THEME", "Golem-Dark:dark".to_owned())], "the palette, pinned Dark");
-        assert_eq!(skip_vars("blender"), vec![("GTK_THEME", "Golem-Light".to_owned())], "the palette, pinned Light");
+        assert_eq!(skip_vars("env FOO=1 gimp"), vec![("GTK_THEME", "Standard-Dark:dark".to_owned())], "the palette, pinned Dark");
+        assert_eq!(skip_vars("blender"), vec![("GTK_THEME", "Standard-Light".to_owned())], "the palette, pinned Light");
         SKIPPED.lock().unwrap().clear();
         LOOKED.lock().unwrap().clear();
     }
@@ -4863,7 +4906,7 @@ mod tests {
     #[test]
     fn golems_palette_reads_and_resolves() {
         let p = parse(GOLEM, BUILT_IN[0].1).expect("parses");
-        assert_eq!(p.name, "Golem");
+        assert_eq!(p.name, "Standard");
         assert_eq!(p.accent, 0x09);
         assert_eq!(p.dark[0x09], [0xff, 0xbe, 0x98], "the desktop's peach");
         let dark = resolve(&golem_choice(), true);

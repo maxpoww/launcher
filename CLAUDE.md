@@ -539,8 +539,8 @@ The big daemon files are cohesive but long — go straight to the function:
   window → `hypr::focus_window`, or `restore_minimized`).
 - `look.rs` — THE LOOK, light or dark (Max, 2026-10-14): one flag (`look::dark()`), set at start
   from `controls::dark_now` and by the control panel's Dark mode (`App::look_set`). It picks the
-  ICON THEME's tone — Golem's own icons come as `Golem` (silver) and `Golem-Dark` (graphite),
-  made by Golem's `tools/icons`; `look::icon_theme` maps the configured name and every
+  ICON THEME's tone — the system's own icons come as `Standard` (silver) and `Standard-Dark`
+  (graphite; `Golem`/`Golem-Dark` before 2026-11-22, still there as links), made by Golem's `tools/icons`; `look::icon_theme` maps the configured name and every
   `IconLoader` rebuilds itself when `look::generation()` moves (`IconLoader::sync`) — the dock's
   three figures (`look::figure`: the cast silver recoloured graphite), and Golem Files' colours
   (`filer::Palette`). A change rescans the dock and drops the desktop's and the file windows'

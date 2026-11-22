@@ -412,7 +412,7 @@ fn run(events: &Sender<SysEvent>, rx: &mpsc::Receiver<SysCommand>) {
                     live.mic_muted = out_of("wpctl", &["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
                         .and_then(|t| crate::controls::parse_volume(&t))
                         .map(|(_, muted)| muted);
-                    live.bright = out_of("golem-brightness", &["-m"])
+                    live.bright = out_of(&crate::launch::system_tool("brightness"), &["-m"])
                         .and_then(|t| crate::controls::parse_brightness(&t))
                         .map(|b| b as f32);
                 }
@@ -488,7 +488,7 @@ fn read_machine() -> Machine {
         .lines()
         .find_map(|l| l.strip_prefix("PRETTY_NAME="))
         .map(|v| v.trim_matches('"').to_owned())
-        .unwrap_or_else(|| "Golem".into());
+        .unwrap_or_else(|| "StandardOS".into());
     Machine {
         host: read("/proc/sys/kernel/hostname").unwrap_or_default(),
         model,

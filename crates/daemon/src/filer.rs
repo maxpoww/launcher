@@ -335,7 +335,7 @@ pub(crate) fn materialize_entry() {
         .filter(|p| p.exists())
         .map_or_else(|| "waverunner-ctl".to_owned(), |p| p.to_string_lossy().into_owned());
     let contents = format!(
-        "[Desktop Entry]\nType=Application\nName=Golem Files\nName[es]=Archivos de Golem\n\
+        "[Desktop Entry]\nType=Application\nName=Standard Files\nName[es]=Archivos de Standard\n\
          Comment=Your folders, in a window\nComment[es]=Tus carpetas, en una ventana\n\
          Exec={ctl} files %f\nIcon=golem-files\nStartupWMClass={APP_ID}\n\
          MimeType=inode/directory;\nCategories=System;FileManager;\nTerminal=false\n"
@@ -358,7 +358,7 @@ pub(crate) fn materialize_entry() {
             .status()
             .is_ok_and(|s| s.success());
         if set {
-            info!("files: Golem Files is the system's file manager from now on");
+            info!("files: Standard Files is the system's file manager from now on");
             crate::persist::write_text("files-default", &marker, "1\n");
         } else {
             warn!("files: could not be made the default for folders (xdg-mime)");

@@ -212,11 +212,11 @@ fn turn_trouble(name: &str, was_up: bool, answer: &Answer) -> String {
     if err.contains("networkmanager is not running") {
         return tr("The network service is not running.").to_owned();
     }
-    // nmcli has no terminal to ask on and Golem no VPN password prompt yet:
+    // nmcli has no terminal to ask on and Standard no VPN password prompt yet:
     // say so, and the way that works today. (Two lines: they do not wrap.)
     if !was_up && needs_secret(&err) {
         return [
-            fill(tr("{name} needs a password, and Golem cannot ask for one yet."), &[("name", &name)]),
+            fill(tr("{name} needs a password, and Standard cannot ask for one yet."), &[("name", &name)]),
             fill(tr("Until it can, connect it from a terminal: nmcli --ask connection up \"{name}\""), &[("name", &name)]),
         ]
         .join("\n");

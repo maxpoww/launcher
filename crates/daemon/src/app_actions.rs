@@ -371,11 +371,12 @@ fn hyphenated(word: &str, room: f32, measure: &mut dyn FnMut(&str) -> f32) -> (S
 
 // ---- the exact name ------------------------------------------------------------
 
-/// A name as typed to find it: lower case, and Golem's own also without
-/// "Golem" ("Golem Files" is found as "files").
+/// A name as typed to find it: lower case, and the system's own also without
+/// "Standard" ("Standard Files" is found as "files"; "Golem Files", its name
+/// until 2026-11-22, too).
 fn spoken(name: &str) -> [String; 2] {
     let n = name.trim().to_lowercase();
-    let bare = n.strip_prefix("golem ").unwrap_or(&n).to_owned();
+    let bare = n.strip_prefix("standard ").or_else(|| n.strip_prefix("golem ")).unwrap_or(&n).to_owned();
     [n, bare]
 }
 
@@ -384,7 +385,7 @@ fn spoken(name: &str) -> [String; 2] {
 /// which of the apps named `names` (used `used` much) what was typed leaves —
 /// `None`: all of them, as ranked.
 /// - The query IS an app's name: that app alone (the most used of several
-///   of that name: Golem Files over Nautilus's "Files").
+///   of that name: Standard Files over Nautilus's "Files").
 /// - The query ends in a SPACE after a name: the apps whose names go on past
 ///   it ("google " → Keep, Docs, Calendar…; "youtube " → YouTube Music),
 ///   without the one of that very name.
@@ -2654,7 +2655,7 @@ mod tests {
 
     #[test]
     fn the_exact_name_stands_alone_and_a_space_shows_the_ones_past_it() {
-        let names = ["YouTube", "YouTube Music", "Google", "Google Keep", "Google Docs", "Files", "Golem Files", "Foot"];
+        let names = ["YouTube", "YouTube Music", "Google", "Google Keep", "Google Docs", "Files", "Standard Files", "Foot"];
         let used = [9, 6, 3, 1, 2, 1, 39, 1];
         let keep = |q: &str| narrow(q, &names, &used).map(|v| v.into_iter().map(|i| names[i]).collect::<Vec<_>>());
         assert_eq!(keep("youtub"), None);
@@ -2662,7 +2663,7 @@ mod tests {
         assert_eq!(keep("YouTube "), Some(vec!["YouTube Music"]));
         assert_eq!(keep("google"), Some(vec!["Google"]));
         assert_eq!(keep("google "), Some(vec!["Google Keep", "Google Docs"]));
-        assert_eq!(keep("files"), Some(vec!["Golem Files"]));
+        assert_eq!(keep("files"), Some(vec!["Standard Files"]));
         assert_eq!(keep("foot "), None);
         assert_eq!(keep("googl"), None);
         assert_eq!(keep(""), None);

@@ -7,14 +7,15 @@
 //! its Dark/Light):
 //!
 //! * KDE / Kirigami (Easy Effects, KDE Connect, every KDE app): a KDE colour
-//!   scheme in `kdeglobals` (+ `color-schemes/Golem.colors`), and the D-Bus
+//!   scheme in `kdeglobals` (+ `color-schemes/Standard.colors`), and the D-Bus
 //!   signal KDE apps reload on.
 //! * VS Code and its kin (Code, VSCodium, Code - OSS): `workbench.color
 //!   Customizations` in their `settings.json` (they reload it live).
 //! * Inkscape: it pins a GTK theme of its own in `preferences.xml` — set to
 //!   the system's (Golem's) and its dark flag (on its next start).
 //! * JetBrains IDEs and Android Studio (Swing): a theme plugin of our own
-//!   (`golem-theme.jar`: plugin.xml + a `.theme.json` + an editor scheme),
+//!   (`golem-theme.jar`: plugin.xml + a `.theme.json` + an editor scheme —
+//!   named "Standard" where the IDE shows it; its ids stay as they were),
 //!   chosen in `laf.xml` — on the IDE's next start.
 //!
 //!
@@ -181,11 +182,14 @@ fn kde(t: &Theme) {
     }
     let mut sections = kde_scheme(t);
     // The scheme on its own, by name (what KDE's settings would list).
-    let mut file = vec![("General".to_owned(), vec![("Name".to_owned(), "Golem".to_owned()), ("ColorScheme".to_owned(), "Golem".to_owned())])];
+    let mut file = vec![("General".to_owned(), vec![("Name".to_owned(), "Standard".to_owned()), ("ColorScheme".to_owned(), "Standard".to_owned())])];
     file.extend(sections.iter().cloned());
-    put(&data().join("color-schemes/Golem.colors"), &ini_with("", &file));
+    put(&data().join("color-schemes/Standard.colors"), &ini_with("", &file));
+    // (Its name until 2026-11-22: the dock's own file, gone. A pick of it
+    // below turns to Standard.)
+    let _ = std::fs::remove_file(data().join("color-schemes/Golem.colors"));
     // …and in use: kdeglobals (its other settings kept).
-    sections.push(("General".into(), vec![("ColorScheme".to_owned(), "Golem".to_owned())]));
+    sections.push(("General".into(), vec![("ColorScheme".to_owned(), "Standard".to_owned())]));
     let path = kdeglobals;
     // (One that is there but cannot be read whole is never replaced.)
     let old = match std::fs::read_to_string(&path) {
@@ -240,10 +244,10 @@ fn kde(t: &Theme) {
                         in_ui = l == "[UiSettings]";
                     } else if in_ui {
                         if let Some(v) = l.strip_prefix("ColorScheme=") {
-                            if !v.is_empty() && v != "Golem" {
+                            if !v.is_empty() && v != "Standard" {
                                 changed = true;
                                 let end = &line[line.trim_end().len()..];
-                                return format!("ColorScheme=Golem{end}");
+                                return format!("ColorScheme=Standard{end}");
                             }
                         }
                     }
@@ -360,8 +364,8 @@ fn inkscape(t: &Theme) {
     if !path.is_file() {
         return;
     }
-    // A theme name that never changes: `Golem`, a link to whichever of
-    // Golem-A|B is the system's now (the system's own flips name so GTK apps
+    // A theme name that never changes: `Standard`, a link to whichever of
+    // Standard-A|B is the system's now (the system's own flips name so GTK apps
     // reload; Inkscape keeps the name it read, and would be left on old
     // colours).
     let gtk = std::process::Command::new("dconf")
@@ -369,11 +373,13 @@ fn inkscape(t: &Theme) {
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_owned())
-        .filter(|s| s.starts_with("Golem-") && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        .filter(|s| s.starts_with("Standard-") && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     if let Some(gtk) = gtk {
         // A REAL folder (Inkscape lists the themes folders and passes over a
         // link — it fell back to Adwaita): its sheet imports the one in use.
-        let dir = data().join("themes/Golem");
+        let dir = data().join("themes/Standard");
+        // (Its name until 2026-11-22: the dock's own, gone.)
+        let _ = std::fs::remove_dir_all(data().join("themes/Golem"));
         if dir.is_symlink() {
             let _ = std::fs::remove_file(&dir);
         }
@@ -383,17 +389,17 @@ fn inkscape(t: &Theme) {
             return;
         }
         put(&dir.join("gtk-3.0/gtk.css"), &format!("@import url(\"file://{}\");\n", now.display()));
-        put(&dir.join("index.theme"), "[Desktop Entry]\nType=X-GNOME-Metatheme\nName=Golem\n\n[X-GNOME-Metatheme]\nGtkTheme=Golem\n");
+        put(&dir.join("index.theme"), "[Desktop Entry]\nType=X-GNOME-Metatheme\nName=Standard\n\n[X-GNOME-Metatheme]\nGtkTheme=Standard\n");
     }
     let dark = t.dark;
     // Inkscape writes its preferences back as it quits: written while it is
     // open, ours would be undone — so it is written once it has quit.
     when_closed("=(\\.inkscape-wrapp|inkscape)", move || {
         let Ok(old) = std::fs::read_to_string(&path) else { return };
-        let text = set_attr(&set_attr(&old, "gtkTheme", "Golem"), "darkTheme", if dark { "1" } else { "0" });
+        let text = set_attr(&set_attr(&old, "gtkTheme", "Standard"), "darkTheme", if dark { "1" } else { "0" });
         if text != old {
             put(&path, &text);
-            info!("apps: Inkscape on Golem's theme");
+            info!("apps: Inkscape on Standard's theme");
         }
     });
 }
@@ -561,7 +567,8 @@ fn set_attr(xml: &str, name: &str, value: &str) -> String {
 /// steps through the day: only for a palette or a look (a restart is a window
 /// gone and back — Max, 2026-10-21: "no jumps at all").
 fn easyeffects(t: &Theme) {
-    let picked = std::fs::read_to_string(config().join("easyeffectsrc")).is_ok_and(|s| s.contains("ColorScheme=Golem"));
+    // (Golem: the scheme's name until 2026-11-22, before the pick is turned.)
+    let picked = std::fs::read_to_string(config().join("easyeffectsrc")).is_ok_and(|s| s.contains("ColorScheme=Standard") || s.contains("ColorScheme=Golem"));
     if !picked {
         return;
     }
@@ -664,9 +671,9 @@ fn jetbrains(t: &Theme) {
             );
             put(
                 &conf.join("options/colors.scheme.xml"),
-                "<application>\n  <component name=\"EditorColorsManagerImpl\">\n    <global_color_scheme name=\"Golem\" />\n  </component>\n</application>\n",
+                "<application>\n  <component name=\"EditorColorsManagerImpl\">\n    <global_color_scheme name=\"Standard\" />\n  </component>\n</application>\n",
             );
-            info!("apps: Golem's theme for {}", conf.display());
+            info!("apps: Standard's theme for {}", conf.display());
         }
     });
 }
@@ -702,10 +709,10 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
     let h = |x: Rgb| format!("#{}", hex(x));
     let plugin = r#"<idea-plugin>
   <id>org.golem.theme</id>
-  <name>Golem</name>
+  <name>Standard</name>
   <version>1</version>
-  <vendor>Golem</vendor>
-  <description>Golem's palette, written by the dock.</description>
+  <vendor>StandardOS</vendor>
+  <description>Standard's palette, written by the dock.</description>
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">
     <themeProvider id="golem-theme" path="/golem.theme.json"/>
@@ -714,9 +721,9 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
 </idea-plugin>
 "#;
     let theme = serde_json::json!({
-        "name": "Golem",
+        "name": "Standard",
         "dark": t.dark,
-        "author": "Golem",
+        "author": "StandardOS",
         "parentTheme": if t.dark { "Darcula" } else { "IntelliJ" },
         "editorScheme": "/golem.xml",
         "ui": {
@@ -746,7 +753,7 @@ fn theme_jar(t: &Theme) -> Vec<u8> {
     });
     let hx = |x: Rgb| hex(x);
     let icls = format!(
-        r#"<scheme name="Golem" version="142" parent_scheme="{parent}">
+        r#"<scheme name="Standard" version="142" parent_scheme="{parent}">
   <colors>
     <option name="CARET_COLOR" value="{acc}"/>
     <option name="CARET_ROW_COLOR" value="{row}"/>

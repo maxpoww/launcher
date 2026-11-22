@@ -1091,11 +1091,11 @@ fn bt_powered() -> Option<bool> {
 const BRIGHT: [f64; 5] = [0.1, 0.25, 0.5, 0.75, 1.0];
 
 /// The screen's backlight as 0..1 (`None`: no backlight to set — a desktop
-/// monitor, or a machine without `golem-brightness`). Read from the
+/// monitor, or a machine without `standard-brightness`). Read from the
 /// helper's machine line (`device,class,current,NN%,max`), whose percentage
 /// is on the same curve its `set NN%` uses.
 fn brightness() -> Option<f64> {
-    parse_brightness(&out("golem-brightness", &["-m"])?)
+    parse_brightness(&out(&crate::launch::system_tool("brightness"), &["-m"])?)
 }
 
 pub(crate) fn parse_brightness(line: &str) -> Option<f64> {
@@ -1514,7 +1514,7 @@ fn os_name() -> String {
         .and_then(|t| {
             t.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| v.trim_matches('"').to_owned())
         })
-        .unwrap_or_else(|| "Golem".into())
+        .unwrap_or_else(|| "StandardOS".into())
 }
 
 fn machine_lines() -> Vec<String> {
@@ -3172,7 +3172,7 @@ pub(crate) fn apply(key: &str, value: &str, zone: &mut ZonePick) -> Applied {
             assert_dark(on);
         }
         "brightness" => {
-            run("golem-brightness", &["set", &format!("{value}%")]);
+            run(&crate::launch::system_tool("brightness"), &["set", &format!("{value}%")]);
         }
         "keyboard" => {
             let (layout, variant) = value.split_once(':').unwrap_or((value, ""));

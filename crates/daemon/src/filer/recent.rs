@@ -108,7 +108,7 @@ fn now() -> String {
 /// entry for it, as GTK writes one (its kind, Golem Files as the app).
 #[cfg(test)]
 fn noted(text: &str, href: &str, mime: &str, when: &str) -> String {
-    noted_by(text, href, mime, when, ("Golem Files", "xdg-open %u"))
+    noted_by(text, href, mime, when, ("Standard Files", "xdg-open %u"))
 }
 
 /// [`noted`], a new entry's app being `app` (its name and command).
@@ -173,7 +173,7 @@ pub(crate) fn note_as(path: &Path, app: Option<&(String, String)>) {
     let lower = file_name(path).to_ascii_lowercase();
     let mime = crate::thumb_more::mime_of(&lower).unwrap_or("application/octet-stream");
     let href = format!("file://{}", crate::trash::encode_path(path));
-    let by = app.map_or(("Golem Files", "xdg-open %u"), |(name, exec)| (name.as_str(), exec.as_str()));
+    let by = app.map_or(("Standard Files", "xdg-open %u"), |(name, exec)| (name.as_str(), exec.as_str()));
     crate::persist::write_text("recently-used", &file, &noted_by(&text, &href, mime, &now(), by));
 }
 
@@ -258,10 +258,10 @@ mod tests {
         // (Used again by another app: its entry's time, and that app named
         // beside the first — once.)
         let again = noted(&by, href, "text/plain", "2026-10-28T00:00:00.000000Z");
-        assert!(again.contains("Neovim") && again.contains(r#"name="Golem Files""#), "{again}");
+        assert!(again.contains("Neovim") && again.contains(r#"name="Standard Files""#), "{again}");
         assert_eq!(entries(&again)[0].1, "2026-10-28T00:00:00.000000Z");
         let thrice = noted(&again, href, "text/plain", "2026-10-29T00:00:00.000000Z");
-        assert_eq!(thrice.matches(r#"name="Golem Files""#).count(), 1);
+        assert_eq!(thrice.matches(r#"name="Standard Files""#).count(), 1);
         assert_eq!(thrice.matches("<bookmark ").count(), 1);
     }
 }

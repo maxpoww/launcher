@@ -668,10 +668,11 @@ pub(crate) fn idle_base_text() -> Option<String> {
 
 /// Run a command to its end on a thread of its own (so it is reaped and the
 /// event loop never waits for it).
-fn run_detached(bin: &'static str, args: Vec<String>) {
+fn run_detached(bin: impl Into<String>, args: Vec<String>) {
+    let bin: String = bin.into();
     let _ = std::thread::Builder::new()
         .name("gear-cmd".into())
-        .spawn(move || match Command::new(bin).args(&args).output() {
+        .spawn(move || match Command::new(&bin).args(&args).output() {
             Ok(o) if o.status.success() => {}
             Ok(o) => warn!(
                 "gear: {bin} {args:?}: {}",
@@ -1013,7 +1014,7 @@ impl App {
         Item::Toggle {
             hit: sys(SysHit::SystemTasks),
             label: tr("Show system tasks").into(),
-            hint: tr("What Golem itself is running").into(),
+            hint: tr("What the system itself is running").into(),
             on: self.gear.pages.show_system,
         }
     }
@@ -1393,13 +1394,13 @@ impl App {
             self.settings.airplane,
             Hit::Airplane,
         ));
-        if crate::launch::on_path("golem-caffeine") {
+        if crate::launch::on_path(&crate::launch::system_tool("caffeine")) {
             items.push(switch_row(G_COFFEE, tr("Keep awake"), tr("No dimming, no sleep"), Self::caffeine_on(), sys(SysHit::Awake)));
         }
         items.push(switch_row(
             G_FLOAT,
             tr("Floating windows"),
-            if self.floating_mode() { tr("Every window floats") } else { tr("Windows tile. Golem places them") },
+            if self.floating_mode() { tr("Every window floats") } else { tr("Windows tile side by side") },
             self.floating_mode(),
             sys(SysHit::Float),
         ));
@@ -2070,7 +2071,7 @@ impl App {
             SysHit::Float => self.toggle_floating_mode(),
             SysHit::Awake => {
                 let on = Self::caffeine_path().exists();
-                run_detached("golem-caffeine", vec![if on { "off" } else { "on" }.into()]);
+                run_detached(crate::launch::system_tool("caffeine"), vec![if on { "off" } else { "on" }.into()]);
                 // The command's own file is the truth; reflect it at once.
                 let path = Self::caffeine_path();
                 if on {

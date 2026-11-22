@@ -17,7 +17,7 @@ use crate::i18n::tr;
 /// The keys are written as they are read aloud, Super first. The essentials
 /// only: the panel does not scroll, and a line a shortcut is what fits.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("Golem", ""),
+    ("StandardOS", ""),
     ("Open the dock's box", "Super (tap)"),
     ("Quick controls", "Super + H"),
     ("Terminal", "Super + E"),

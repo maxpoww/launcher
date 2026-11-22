@@ -105,15 +105,16 @@ pub(crate) fn shots_folder() -> PathBuf {
 }
 
 /// A REGION OF THE SCREEN as a picture, asked from the card: the owner drags
-/// it. Golem's own command where there is one (`golem-screenshot region`: the
+/// it. The system's own command where there is one (`standard-screenshot region`: the
 /// file, the clipboard, its notification); elsewhere the same by hand — the
 /// region picked with `slurp`, taken with `grim` into Pictures → Screenshots
 /// and put on the clipboard. Blocks until it is taken or given up: never on
 /// the loop. Whether a picture was taken.
 pub(crate) fn screenshot_region() -> bool {
     let on_path = |name: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()));
-    if on_path("golem-screenshot") {
-        return Command::new("golem-screenshot").arg("region").stdin(Stdio::null()).status().is_ok_and(|s| s.success());
+    let tool = crate::launch::system_tool("screenshot");
+    if on_path(&tool) {
+        return Command::new(&tool).arg("region").stdin(Stdio::null()).status().is_ok_and(|s| s.success());
     }
     let Ok(picked) = Command::new("slurp").stdin(Stdio::null()).stderr(Stdio::null()).output() else {
         warn!("record: no slurp to pick a region with");
