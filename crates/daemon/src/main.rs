@@ -1185,9 +1185,10 @@ fn main() -> anyhow::Result<()> {
         battery_beat_pending: false,
         battery_suspend_armed: true,
         battery_aware_until: None,
+        battery_hibernate_asked: None,
         battery_last_snapshot: None,
         battery_started: Instant::now(),
-        battery_critical_streak: 0,
+        battery_sleep_streak: 0,
         hover: None,
         pointer_pos: None,
         pointer_inside_card: false,
@@ -2826,12 +2827,16 @@ pub struct App {
     battery_beat_pending: bool,
     battery_suspend_armed: bool,
     battery_aware_until: Option<Instant>,
-    battery_last_snapshot: Option<Instant>,
+    /// When (awake) the 5 % hibernate was asked for in this run down.
+    battery_hibernate_asked: Option<Instant>,
+    /// The last snapshot's (monotonic, boot) clocks — their difference is
+    /// time asleep (`battery::slept_between`).
+    battery_last_snapshot: Option<(Instant, Duration)>,
     /// When the daemon started — the auto-sleep boot grace runs from here.
     battery_started: Instant,
-    /// Consecutive snapshots at Critical — one flaky ACPI read must not
-    /// sleep the machine (see `battery::CRITICAL_STREAK`).
-    battery_critical_streak: u8,
+    /// Consecutive snapshots in the sleep band — one flaky ACPI read must
+    /// not sleep the machine (see `battery::SLEEP_STREAK`).
+    battery_sleep_streak: u8,
     /// Item currently under the pointer.
     hover: Option<Hit>,
     /// Pointer position in surface coordinates, while inside.
